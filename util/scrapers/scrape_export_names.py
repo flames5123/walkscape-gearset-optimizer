@@ -1,0 +1,320 @@
+#!/usr/bin/env python3
+"""
+Scrape export names from equipment, consumables, and materials URLs.
+Generates export_names.py with URL slug to Item/Consumable/Material mappings.
+"""
+
+from bs4 import BeautifulSoup
+from scraper_utils import *
+import sys
+
+# Add parent to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+EQUIPMENT_CACHE = get_cache_dir('equipment') / 'equipment.html'
+CONSUMABLES_CACHE = get_cache_file('consumables_cache.html')
+MATERIALS_CACHE = get_cache_file('materials_cache.html')
+
+def extract_export_names_from_page(cache_file, item_type):
+    """Extract export names from a wiki page's URLs."""
+    print(f"Reading {cache_file}...")
+    if not cache_file.exists():
+        print(f"WARNING: {item_type} cache not found. Skipping.")
+        return []
+    
+    html = cache_file.read_text(encoding='utf-8')
+    soup = BeautifulSoup(html, 'html.parser')
+    
+    export_names = []
+    seen_urls = set()
+    
+    # Find all links in tables
+    tables = soup.find_all('table', class_='wikitable')
+    
+    for table in tables:
+        rows = table.find_all('tr')[1:]  # Skip header
+        
+        for row in rows:
+            # Find item link
+            link = row.find('a', href=lambda x: x and '/wiki/' in x and 'File:' not in x)
+            if not link:
+                continue
+            
+            href = link.get('href', '')
+            if not href.startswith('/wiki/'):
+                continue
+            
+            # Extract URL slug (last part after /wiki/)
+            url_slug = href.split('/wiki/')[-1]
+            
+            # Skip special pages (except Special:MyLanguage which is used for consumables/materials)
+            if 'Special:' in url_slug and not url_slug.startswith('Special:MyLanguage/'):
+                continue
+            
+            # For Special:MyLanguage links, extract the actual item name
+            if url_slug.startswith('Special:MyLanguage/'):
+                url_slug = url_slug.replace('Special:MyLanguage/', '')
+            
+            # Skip file/category/template pages
+            if any(skip in url_slug for skip in ['File:', 'Category:', 'Template:']):
+                continue
+            
+            # Skip non-item pages
+            skip_pages = ['Equipment', 'Activity_Equipment', 'Shop_Equipment', 'Upgraded_Equipment',
+                         'Consumables', 'Materials']
+            if url_slug in skip_pages:
+                continue
+            
+            if url_slug in seen_urls:
+                continue
+            
+            seen_urls.add(url_slug)
+            
+            # Convert URL slug to export name (lowercase with underscores)
+            # Decode URL encoding (%27 = apostrophe, etc.)
+            import urllib.parse
+            url_slug = urllib.parse.unquote(url_slug)
+            # Remove apostrophes and replace hyphens/spaces with underscores
+            export_name = url_slug.lower().replace("'", "").replace("-", "_").replace(" ", "_")
+            item_name = link.get_text().strip()
+            
+            export_names.append({
+                'export_name': export_name,
+                'url_slug': url_slug,
+                'item_name': item_name,
+                'item_type': item_type
+            })
+    
+    return export_names
+
+def extract_all_export_names():
+    """Extract export names from equipment, consumables, and materials."""
+    all_names = []
+    
+    # Extract from equipment
+    equipment_names = extract_export_names_from_page(EQUIPMENT_CACHE, 'equipment')
+    print(f"  Found {len(equipment_names)} equipment items")
+    all_names.extend(equipment_names)
+    
+    # Extract from consumables
+    consumables_names = extract_export_names_from_page(CONSUMABLES_CACHE, 'consumable')
+    print(f"  Found {len(consumables_names)} consumables")
+    all_names.extend(consumables_names)
+    
+    # Extract from materials
+    materials_names = extract_export_names_from_page(MATERIALS_CACHE, 'material')
+    print(f"  Found {len(materials_names)} materials")
+    all_names.extend(materials_names)
+    
+    return all_names
+
+def generate_export_names_module(export_names):
+    """Generate the export_names.py module."""
+    output_file = get_output_file('export_names.py')
+    
+    print(f"\nGenerating {output_file}...")
+    
+    # Separate by type
+    equipment = [e for e in export_names if e['item_type'] == 'equipment']
+    consumables = [e for e in export_names if e['item_type'] == 'consumable']
+    materials = [e for e in export_names if e['item_type'] == 'material']
+    
+    with open(output_file, 'w', encoding='utf-8') as f:
+        write_module_header(f, 'Export name to item/consumable/material mapping', 'scrape_export_names.py')
+        write_imports(f, ['from typing import Optional, Union, TYPE_CHECKING'])
+        
+        lines = [
+        'if TYPE_CHECKING:',
+        '    from util.autogenerated.equipment import Item',
+        '    from util.autogenerated.consumables import Consumable',
+        '    from util.autogenerated.materials import Material',
+        '',
+        '',
+        # ExportNames class with constants
+        'class ExportNames:',
+        '    """Mapping from export names to items/consumables/materials"""',
+        '    ',
+        ]
+
+        # Add all export name constants
+        for entry in sorted(export_names, key=lambda x: x['export_name']):
+            export_const = entry['export_name'].upper().replace("'", "").replace("-", "_").replace(" ", "_")
+            export_value = entry['export_name']
+            lines.append(f'    {export_const} = "{export_value}"')
+        
+        lines.extend([
+        '',
+        '',
+        # Mapping dictionaries - built lazily to avoid circular import
+        '# Export name mappings (built on first access)',
+        '_EXPORT_NAME_TO_ITEM = None',
+        '_EXPORT_NAME_TO_CONSUMABLE = None',
+        '_EXPORT_NAME_TO_MATERIAL = None',
+        '_EXPORT_NAME_TO_ANY = None',
+        '',
+        'def _build_item_mapping():',
+        '    """Build the export name to Item mapping."""',
+        '    from util.autogenerated.equipment import Item',
+        '    return {',
+        ])
+
+        # Equipment mapping
+        for entry in sorted(equipment, key=lambda x: x['export_name']):
+            export_name = entry['export_name']
+            url_slug = entry['url_slug']
+            item_enum = url_slug.upper().replace("'", "").replace("-", "_").replace(" ", "_")
+            lines.append(f'        "{export_name}": Item.{item_enum},')
+        
+        lines.extend([
+        '    }',
+        '',
+        'def _build_consumable_mapping():',
+        '    """Build the export name to Consumable mapping."""',
+        '    from util.autogenerated.consumables import Consumable',
+        '    return {',
+        ])
+
+        # Consumables mapping
+        for entry in sorted(consumables, key=lambda x: x['export_name']):
+            export_name = entry['export_name']
+            url_slug = entry['url_slug']
+            item_enum = url_slug.upper().replace("'", "").replace("-", "_").replace(" ", "_")
+            lines.append(f'        "{export_name}": Consumable.{item_enum},')
+        
+        lines.extend([
+        '    }',
+        '',
+        'def _build_material_mapping():',
+        '    """Build the export name to Material mapping."""',
+        '    from util.autogenerated.materials import Material',
+        '    return {',
+        ])
+
+        # Materials mapping
+        for entry in sorted(materials, key=lambda x: x['export_name']):
+            export_name = entry['export_name']
+            url_slug = entry['url_slug']
+            item_enum = url_slug.upper().replace("'", "").replace("-", "_").replace(" ", "_")
+            lines.append(f'        "{export_name}": Material.{item_enum},')
+        
+        lines.extend([
+        '    }',
+        '',
+        '',
+        # Getter functions
+        'def get_item_mapping():',
+        '    """Get the export name to Item mapping (lazy loaded)."""',
+        '    global _EXPORT_NAME_TO_ITEM',
+        '    if _EXPORT_NAME_TO_ITEM is None:',
+        '        _EXPORT_NAME_TO_ITEM = _build_item_mapping()',
+        '    return _EXPORT_NAME_TO_ITEM',
+        '',
+        'def get_consumable_mapping():',
+        '    """Get the export name to Consumable mapping (lazy loaded)."""',
+        '    global _EXPORT_NAME_TO_CONSUMABLE',
+        '    if _EXPORT_NAME_TO_CONSUMABLE is None:',
+        '        _EXPORT_NAME_TO_CONSUMABLE = _build_consumable_mapping()',
+        '    return _EXPORT_NAME_TO_CONSUMABLE',
+        '',
+        'def get_material_mapping():',
+        '    """Get the export name to Material mapping (lazy loaded)."""',
+        '    global _EXPORT_NAME_TO_MATERIAL',
+        '    if _EXPORT_NAME_TO_MATERIAL is None:',
+        '        _EXPORT_NAME_TO_MATERIAL = _build_material_mapping()',
+        '    return _EXPORT_NAME_TO_MATERIAL',
+        '',
+        'def get_export_name_mapping():',
+        '    """Get combined mapping of all export names (lazy loaded)."""',
+        '    global _EXPORT_NAME_TO_ANY',
+        '    if _EXPORT_NAME_TO_ANY is None:',
+        '        # Build combined mapping by merging all three',
+        '        _EXPORT_NAME_TO_ANY = {}',
+        '        _EXPORT_NAME_TO_ANY.update(get_item_mapping())',
+        '        _EXPORT_NAME_TO_ANY.update(get_consumable_mapping())',
+        '        _EXPORT_NAME_TO_ANY.update(get_material_mapping())',
+        '    return _EXPORT_NAME_TO_ANY',
+        '',
+        '',
+        # Helper functions
+        'def get_item_from_export_name(export_name: str, item_type: str = None) -> Optional[Union[object, object, object]]:',
+        '    """',
+        '    Get Item/Consumable/Material from export name string, handling quality/fine suffixes.',
+        '    ',
+        '    WARNING: Due to circular imports between equipment.py and walkscape_constants.py,',
+        '    this function should only be called AFTER those modules are fully loaded.',
+        '    If you get ImportError, specify item_type parameter to avoid loading all mappings.',
+        '    ',
+        '    Args:',
+        '        export_name: The export name to look up (e.g., "iron_sword", "beer", "bronze_bar")',
+        '        item_type: Optional type hint to avoid circular imports:',
+        '                   "equipment", "consumable", or "material"',
+        '    ',
+        '    Returns:',
+        '        The Item/Consumable/Material object, or None if not found',
+        '    """',
+        '    export_lower = export_name.lower()',
+        '    ',
+        '    # If type is specified, only search that mapping to reduce circular import risk',
+        '    if item_type == "equipment":',
+        '        mapping = get_item_mapping()',
+        '    elif item_type == "consumable":',
+        '        mapping = get_consumable_mapping()',
+        '    elif item_type == "material":',
+        '        mapping = get_material_mapping()',
+        '    else:',
+        '        # Search all mappings (may cause circular import during module initialization)',
+        '        mapping = get_export_name_mapping()',
+        '    ',
+        '    # Try exact match first',
+        '    item = mapping.get(export_lower)',
+        '    if item:',
+        '        return item',
+        '    ',
+        '    # Try removing quality suffix for equipment (e.g., "iron_sword_uncommon" -> "iron_sword")',
+        '    quality_map = {',
+        '        "_common": "NORMAL",',
+        '        "_uncommon": "GOOD",',
+        '        "_rare": "GREAT",',
+        '        "_epic": "EXCELLENT",',
+        '        "_legendary": "PERFECT",',
+        '        "_ethereal": "ETERNAL"',
+        '    }',
+        '    ',
+        '    for suffix, quality_name in quality_map.items():',
+        '        if export_lower.endswith(suffix):',
+        '            base_name = export_lower[:-len(suffix)]',
+        '            base_item = mapping.get(base_name)',
+        '            if base_item and hasattr(base_item, quality_name):',
+        '                return getattr(base_item, quality_name)',
+        '    ',
+        '    # Try removing "_fine" suffix for consumables/materials',
+        '    if export_lower.endswith("_fine"):',
+        '        # Already has _fine, try exact match',
+        '        pass',
+        '    else:',
+        '        # Try adding _fine',
+        '        fine_name = export_lower + "_fine"',
+        '        fine_item = mapping.get(fine_name)',
+        '        if fine_item:',
+        '            return fine_item',
+        '    ',
+        '    return None',
+        '',
+        '',
+        '# Backward compatibility aliases',
+        'EXPORT_NAME_TO_ITEM = get_item_mapping',
+        ])
+        
+        write_lines(f, lines)
+    
+    print(f"✓ Generated {output_file}")
+    print(f"  - {len(equipment)} equipment items")
+    print(f"  - {len(consumables)} consumables")
+    print(f"  - {len(materials)} materials")
+    print(f"  - {len(export_names)} total export names")
+
+if __name__ == '__main__':
+    export_names = extract_all_export_names()
+    print(f"\nTotal: {len(export_names)} export names")
+    
+    generate_export_names_module(export_names)
