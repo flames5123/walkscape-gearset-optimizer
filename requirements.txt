@@ -1,0 +1,6 @@
+# Walkscape Optimizer Toolkit Requirements
+
+# Web scraping (only needed for regenerating data from wiki)
+beautifulsoup4>=4.12.0
+
+# All other functionality uses Python standard library only
