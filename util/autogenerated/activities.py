@@ -279,8 +279,8 @@ class ActivityInfo:
                         # Check if item is a Container (chest) - exclude bird nests
                         elif drop.item_ref and "Container." in drop.item_ref and "BIRD_NEST" not in drop.item_ref:
                             find_bonus = chest_finding
-                        # Check if item name contains gem keywords
-                        elif any(gem in drop.item_name.lower() for gem in ["gem", "opal", "pearl", "jade", "topaz", "ruby", "sapphire", "emerald", "diamond", "wrentmarine"]):
+                        # Check if item has gem or rough gem keyword
+                        elif hasattr(drop.item_object, "keywords") and any(kw.lower() in ["gem", "rough gem"] for kw in drop.item_object.keywords):
                             find_bonus = find_gems
                         # Check if item is a bird nest
                         elif "bird nest" in drop.item_name.lower() or "nest" in drop.item_name.lower():
@@ -291,8 +291,6 @@ class ActivityInfo:
                         find_bonus = find_collectibles
                     elif drop.item_ref and "Container." in drop.item_ref and "BIRD_NEST" not in drop.item_ref:
                         find_bonus = chest_finding
-                    elif any(gem in drop.item_name.lower() for gem in ["gem", "opal", "pearl", "jade", "topaz", "ruby", "sapphire", "emerald", "diamond", "wrentmarine"]):
-                        find_bonus = find_gems
                     elif "bird nest" in drop.item_name.lower() or "nest" in drop.item_name.lower():
                         find_bonus = find_bird_nests
                 
