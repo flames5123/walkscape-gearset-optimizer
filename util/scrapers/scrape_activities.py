@@ -721,6 +721,20 @@ def parse_drop_tables(soup, activity_data, activity_name):
         
         is_secondary = 'secondary' in caption_text.lower() or 'rare' in caption_text.lower()
         
+        # Detect if this is a level-based table by checking headers
+        header_row = table.find('tr')
+        is_level_based = False
+        if header_row:
+            header_texts = [th.get_text().replace('\n', ' ').strip().lower() for th in header_row.find_all('th')]
+            # Check for level-based columns
+            has_initial = any('initial' in h and 'appearance' in h for h in header_texts)
+            has_max_level = any('max' in h and 'level' in h for h in header_texts)
+            has_final = any('final' in h and 'chance' in h for h in header_texts)
+            is_level_based = has_initial and has_max_level and has_final
+            
+            if is_level_based:
+                print(f"  Found level-based drop table")
+        
         # Parse table rows
         rows = table.find_all('tr')[1:]  # Skip header
         
@@ -740,33 +754,90 @@ def parse_drop_tables(soup, activity_data, activity_name):
             if not item_name or item_name == '':
                 continue
             
-            # Skip skill/XP rows (first row in drop tables)
-            # These have skill names like "Agility", "Crafting", etc.
+            # Skip skill/XP rows
             skill_names = ['Agility', 'Carpentry', 'Cooking', 'Crafting', 'Fishing', 
                           'Foraging', 'Mining', 'Smithing', 'Trinketry', 'Woodcutting']
             if item_name in skill_names:
                 continue
             
-            # Skip faction reputation entries (they should be in faction_reputation_reward field)
+            # Skip faction reputation entries
             if item_name in faction_names:
                 continue
             
-            # For secondary drops: Item Name, Item Type, Quantity, Chance...
-            # For main drops: Item Name, Quantity, Chance...
-            if is_secondary and len(cols) >= 4:
-                # Secondary: col 1=name, col 2=type, col 3=quantity, col 4=chance
-                quantity_text = clean_text(cols[3].get_text())
-                chance_text = clean_text(cols[4].get_text()) if len(cols) > 4 else None
-            else:
-                # Main: col 1=name, col 2=quantity, col 3=chance
-                quantity_text = clean_text(cols[2].get_text())
-                chance_text = clean_text(cols[3].get_text()) if len(cols) > 3 else None
+            drop_entry = {'item': item_name}
             
-            drop_entry = {
-                'item': item_name,
-                'quantity': parse_quantity(quantity_text),
-                'chance': parse_chance(chance_text)
-            }
+            if is_level_based:
+                # Level-based table columns (based on 13-col structure):
+                # Col 0=icon, 1=name, 2=quantity, 3=initial_appearance, 4=max_chance_level, 6=initial_chance, 8=final_chance
+                quantity_text = clean_text(cols[2].get_text()) if len(cols) > 2 else 'N/A'
+                drop_entry['quantity'] = parse_quantity(quantity_text)
+                
+                # Parse initial level (col 3) - format: "lvl. X" or "N/A"
+                initial_level = None
+                if len(cols) > 3:
+                    initial_text = clean_text(cols[3].get_text())
+                    if initial_text and initial_text.upper() != 'N/A':
+                        level_match = re.search(r'(\d+)', initial_text)
+                        if level_match:
+                            initial_level = int(level_match.group(1))
+                
+                # Parse max chance level (col 4) - format: "lvl. X-Y" or "lvl. X" or "N/A"
+                max_chance_level = None
+                if len(cols) > 4:
+                    max_text = clean_text(cols[4].get_text())
+                    if max_text and max_text.upper() != 'N/A':
+                        # Extract the STARTING number from "lvl. X-Y" format (item is at max for entire range)
+                        range_match = re.search(r'(\d+)-(\d+)', max_text)
+                        if range_match:
+                            max_chance_level = int(range_match.group(1))  # Use the starting level
+                        else:
+                            # Try single number
+                            level_match = re.search(r'(\d+)', max_text)
+                            if level_match:
+                                max_chance_level = int(level_match.group(1))
+                
+                # Parse final chance (col 8)
+                final_chance = None
+                if len(cols) > 8:
+                    final_text = clean_text(cols[8].get_text())
+                    final_chance = parse_chance(final_text)
+                
+                # Parse bonus XP (col 5)
+                bonus_xp = None
+                if len(cols) > 5:
+                    bonus_xp_text = clean_text(cols[5].get_text())
+                    if bonus_xp_text and bonus_xp_text.upper() != 'N/A':
+                        try:
+                            bonus_xp = int(bonus_xp_text)
+                        except:
+                            bonus_xp = None
+                
+                # Store bonus XP if present
+                if bonus_xp is not None:
+                    drop_entry['bonus_xp'] = bonus_xp
+                
+                # Only add level-based parameters if all three are present
+                if initial_level is not None and max_chance_level is not None and final_chance is not None:
+                    drop_entry['initial_level'] = initial_level
+                    drop_entry['max_chance_level'] = max_chance_level
+                    drop_entry['final_chance'] = final_chance
+                    drop_entry['chance'] = None  # Calculated dynamically
+                else:
+                    # Static drop (like "Nothing") - use final_chance as static value
+                    drop_entry['chance'] = final_chance if final_chance is not None else 10.0
+            else:
+                # Regular table parsing
+                if is_secondary and len(cols) >= 4:
+                    # Secondary: col 1=name, col 2=type, col 3=quantity, col 4=chance
+                    quantity_text = clean_text(cols[3].get_text())
+                    chance_text = clean_text(cols[4].get_text()) if len(cols) > 4 else None
+                else:
+                    # Main: col 1=name, col 2=quantity, col 3=chance
+                    quantity_text = clean_text(cols[2].get_text())
+                    chance_text = clean_text(cols[3].get_text()) if len(cols) > 3 else None
+                
+                drop_entry['quantity'] = parse_quantity(quantity_text)
+                drop_entry['chance'] = parse_chance(chance_text)
             
             if is_secondary:
                 activity_data['secondary_drop_table'].append(drop_entry)
@@ -1046,6 +1117,20 @@ def generate_module(activities):
         '        for stat_name, stat_value in collectible_stats.items():',
         '            details[f"collectible_{stat_name}_pct"] = stat_value * 100',
         '        ',
+        '        # For level-based drops, calculate total weight at current level',
+        '        has_level_based = any(drop.is_level_based for drop in all_drops)',
+        '        total_weight = 0.0',
+        '        non_level_weighted_percent = 10.0',
+        '        if has_level_based:',
+        '            # Calculate total weight from level-based drops in main table only',
+        '            for drop in self.drop_table:',
+        '                if drop.is_level_based:',
+        '                    total_weight += drop.calculate_weight(skill_level)',
+        '            ',
+        '            # Calculate non_level_weighted_percent: 100% - sum of all final_chance values',
+        '            total_final_chance = sum(drop.final_chance for drop in self.drop_table if drop.final_chance)',
+        '            non_level_weighted_percent = 100.0 - total_final_chance',
+        '        ',
         '        for drop in all_drops:',
         '            if drop.item_name == "Nothing":',
         '                continue  # Skip Nothing, but include Coins',
@@ -1078,19 +1163,29 @@ def generate_module(activities):
         '            # So effective DR = DR * (1 + DA)',
         '            effective_qty = avg_qty * rewards_per_completion',
         '            ',
+        '            # Get drop chance (static or level-based)',
+        '            if drop.is_level_based:',
+        '                drop_chance_percent = drop.get_chance_at_level(skill_level, total_weight, non_level_weighted_percent)',
+        '            else:',
+        '                drop_chance_percent = drop.chance_percent',
+        '            ',
         '            # Calculate steps per item',
-        '            if drop.chance_percent and drop.chance_percent > 0:',
+        '            if drop_chance_percent and drop_chance_percent > 0:',
         '                # Apply find bonuses based on item type',
-        '                base_chance = drop.chance_percent / 100.0',
+        '                base_chance = drop_chance_percent / 100.0',
         '                find_bonus = 0.0',
         '                ',
         '                # Check actual item type if item_object is available',
         '                try:',
         '                    if drop.item_object:',
         '                        from util.autogenerated.collectibles import CollectibleInstance',
+        '                        from util.autogenerated.containers import Container',
         '                        # Check if item is a Collectible',
         '                        if isinstance(drop.item_object, CollectibleInstance):',
         '                            find_bonus = find_collectibles',
+        '                        # Check if item is a Container (chest) - exclude bird nests',
+        '                        elif drop.item_ref and "Container." in drop.item_ref and "BIRD_NEST" not in drop.item_ref:',
+        '                            find_bonus = chest_finding',
         '                        # Check if item name contains gem keywords',
         '                        elif any(gem in drop.item_name.lower() for gem in ["gem", "opal", "pearl", "jade", "topaz", "ruby", "sapphire", "emerald", "diamond", "wrentmarine"]):',
         '                            find_bonus = find_gems',
@@ -1101,6 +1196,8 @@ def generate_module(activities):
         '                    # Fallback to string-based detection if item_object check fails',
         '                    if drop.item_ref and "Collectible." in drop.item_ref:',
         '                        find_bonus = find_collectibles',
+        '                    elif drop.item_ref and "Container." in drop.item_ref and "BIRD_NEST" not in drop.item_ref:',
+        '                        find_bonus = chest_finding',
         '                    elif any(gem in drop.item_name.lower() for gem in ["gem", "opal", "pearl", "jade", "topaz", "ruby", "sapphire", "emerald", "diamond", "wrentmarine"]):',
         '                        find_bonus = find_gems',
         '                    elif "bird nest" in drop.item_name.lower() or "nest" in drop.item_name.lower():',
@@ -1110,6 +1207,11 @@ def generate_module(activities):
         '                # steps_per_item = (1/drop_rate) * steps_per_single_action / ((1 + find_bonus) * rewards_per_completion * avg_qty)',
         '                drop_rate_inverse = 1.0 / base_chance',
         '                steps_per_item = drop_rate_inverse * steps_per_single_action / ((1 + find_bonus) * rewards_per_completion * avg_qty)',
+        '                ',
+        '                # Add bonus XP from this drop to primary XP per step',
+        '                if drop.bonus_xp and drop.bonus_xp > 0:',
+        '                    bonus_xp_from_drop = (((drop.bonus_xp * (1.0 + bonus_xp_pct)) + bonus_xp_add) / expected_steps_per_action) * (drop_chance_percent / 100.0)',
+        '                    primary_xp_per_step += bonus_xp_from_drop',
         '                ',
         '                # Add regular material to results',
         '                results[drop.item_name] = steps_per_item',
@@ -1135,6 +1237,9 @@ def generate_module(activities):
         '                    ',
         '                    # Add fine material with " (Fine)" suffix',
         '                    results[f"{drop.item_name} (Fine)"] = steps_per_fine',
+        '        ',
+        '        # Update details with final primary_xp_per_step (after bonus XP additions)',
+        '        details["primary_xp_per_step"] = primary_xp_per_step',
         '        ',
         '        if verbose:',
         '            return results, details',
@@ -1326,11 +1431,17 @@ def generate_module(activities):
                     else:
                         qty_str = f"Quantity(min_qty={qty['min_qty']}, max_qty={qty['max_qty']})"
                     
-                    # Format chance
-                    chance = drop['chance']
-                    chance_str = f", chance_percent={chance}" if chance is not None else ""
-                    
-                    lines.append(f"            DropEntry(item_name='{item_name}', item_ref={item_ref_str}, quantity={qty_str}{chance_str}),")
+                    # Check if this drop has level-based parameters
+                    if 'initial_level' in drop and 'max_chance_level' in drop and 'final_chance' in drop:
+                        # Level-based drop
+                        bonus_xp_str = f", bonus_xp={drop['bonus_xp']}" if 'bonus_xp' in drop else ""
+                        lines.append(f"            DropEntry(item_name='{item_name}', item_ref={item_ref_str}, quantity={qty_str}{bonus_xp_str}, initial_level={drop['initial_level']}, max_chance_level={drop['max_chance_level']}, final_chance={drop['final_chance']}),")
+                    else:
+                        # Static drop
+                        chance = drop['chance']
+                        chance_str = f", chance_percent={chance}" if chance is not None else ""
+                        bonus_xp_str = f", bonus_xp={drop['bonus_xp']}" if 'bonus_xp' in drop else ""
+                        lines.append(f"            DropEntry(item_name='{item_name}', item_ref={item_ref_str}, quantity={qty_str}{bonus_xp_str}{chance_str}),")
                 lines.append(f"        ],")
             else:
                 lines.append(f"        drop_table=[],")
@@ -1351,11 +1462,17 @@ def generate_module(activities):
                     else:
                         qty_str = f"Quantity(min_qty={qty['min_qty']}, max_qty={qty['max_qty']})"
                     
-                    # Format chance
-                    chance = drop['chance']
-                    chance_str = f", chance_percent={chance}" if chance is not None else ""
-                    
-                    lines.append(f"            DropEntry(item_name='{item_name}', item_ref={item_ref_str}, quantity={qty_str}{chance_str}),")
+                    # Check if this drop has level-based parameters
+                    if 'initial_level' in drop and 'max_chance_level' in drop and 'final_chance' in drop:
+                        # Level-based drop
+                        bonus_xp_str = f", bonus_xp={drop['bonus_xp']}" if 'bonus_xp' in drop else ""
+                        lines.append(f"            DropEntry(item_name='{item_name}', item_ref={item_ref_str}, quantity={qty_str}{bonus_xp_str}, initial_level={drop['initial_level']}, max_chance_level={drop['max_chance_level']}, final_chance={drop['final_chance']}),")
+                    else:
+                        # Static drop
+                        chance = drop['chance']
+                        chance_str = f", chance_percent={chance}" if chance is not None else ""
+                        bonus_xp_str = f", bonus_xp={drop['bonus_xp']}" if 'bonus_xp' in drop else ""
+                        lines.append(f"            DropEntry(item_name='{item_name}', item_ref={item_ref_str}, quantity={qty_str}{bonus_xp_str}{chance_str}),")
                 lines.append(f"        ],")
             else:
                 lines.append(f"        secondary_drop_table=[],")

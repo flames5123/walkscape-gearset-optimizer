@@ -51,7 +51,42 @@ class DropEntry:
     item_ref: Optional[str] = None  # String like "Material.RAW_SALMON"
     quantity: Optional[Quantity] = None
     chance_percent: Optional[float] = None
+    bonus_xp: Optional[int] = None  # Bonus XP for this drop (level-based activities)
+    # Level-based drop parameters (optional, only for activities with level-scaling drops)
+    initial_level: Optional[int] = None
+    max_chance_level: Optional[int] = None
+    final_chance: Optional[float] = None
     _cached_item: Optional[Any] = None
+    
+    @property
+    def is_level_based(self) -> bool:
+        """Check if this is a level-based drop."""
+        return (self.initial_level is not None and 
+                self.max_chance_level is not None and 
+                self.final_chance is not None)
+    
+    def calculate_weight(self, level: int) -> float:
+        """Calculate weight at given level (for level-based drops only)."""
+        if not self.is_level_based:
+            return 0.0
+        
+        if level < self.initial_level:
+            return 0.0
+        elif level >= self.max_chance_level:
+            return self.final_chance
+        else:
+            # Linear interpolation
+            return self.final_chance * (level - self.initial_level + 1) / (self.max_chance_level - self.initial_level + 1)
+    
+    def get_chance_at_level(self, level: int, total_weight: float, non_level_weighted_percent: float = 10.0) -> float:
+        """Get drop chance at given level."""
+        if self.is_level_based:
+            weight = self.calculate_weight(level)
+            if total_weight == 0:
+                return 0.0
+            return (weight / total_weight) * (100.0 - non_level_weighted_percent)
+        else:
+            return self.chance_percent or 0.0
     
     @property
     def item_object(self) -> Optional[Any]:
