@@ -872,12 +872,13 @@ def generate_equipment_py(items):
         '',
         'class AchievementItem(StatsMixin):',
         '    """Item with stats that unlock at achievement point thresholds"""',
-        '    def __init__(self, name: str, uuid: str, slot: str, keywords: list, value: int, achievement_stats: Dict[int, Dict[str, float]], requirements: list = None):',
+        '    def __init__(self, name: str, uuid: str, slot: str, keywords: list, value: int, achievement_stats: Dict[int, Dict[str, float]], requirements: list = None, rarity: str = None):',
         '        self.name = name',
         '        self.uuid = uuid',
         '        self.slot = slot',
         '        self.keywords = keywords',
         '        self.value = value',
+        '        self.rarity = rarity',
         '        self._achievement_stats = achievement_stats  # {ap_threshold: stats}',
         '        self.requirements = requirements or []  # Unlock requirements',
         '        self.has_instance = True',
@@ -1025,6 +1026,7 @@ def generate_equipment_py(items):
                 achievement_stats = {}
                 for ap, data in item['achievement_stats'].items():
                     achievement_stats[ap] = data.get('skill_stats', {})
+                rarity = item.get('rarity')
                 lines.extend([
                     f'    {item_const} = AchievementItem(',
                     f'        name="{item["name"]}",',
@@ -1032,7 +1034,8 @@ def generate_equipment_py(items):
                     f'        slot="{slot}",',
                     f'        keywords={keywords},',
                     f'        value={item.get("value", 0)},',
-                    f'        achievement_stats={achievement_stats}',
+                    f'        achievement_stats={achievement_stats},',
+                    f'        rarity={repr(rarity)}',
                     '    )',
                 ])
             else:

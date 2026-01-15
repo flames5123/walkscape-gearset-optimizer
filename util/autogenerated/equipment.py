@@ -54,12 +54,13 @@ class ItemInstance(StatsMixin):
 
 class AchievementItem(StatsMixin):
     """Item with stats that unlock at achievement point thresholds"""
-    def __init__(self, name: str, uuid: str, slot: str, keywords: list, value: int, achievement_stats: Dict[int, Dict[str, float]], requirements: list = None):
+    def __init__(self, name: str, uuid: str, slot: str, keywords: list, value: int, achievement_stats: Dict[int, Dict[str, float]], requirements: list = None, rarity: str = None):
         self.name = name
         self.uuid = uuid
         self.slot = slot
         self.keywords = keywords
         self.value = value
+        self.rarity = rarity
         self._achievement_stats = achievement_stats  # {ap_threshold: stats}
         self.requirements = requirements or []  # Unlock requirements
         self.has_instance = True
@@ -4222,7 +4223,8 @@ class Item:
         slot="tools",
         keywords=['Achievement reward'],
         value=0,
-        achievement_stats={0: {'global': {'global': {'chest_finding': 8.0}}}, 60: {'global': {'global': {'chest_finding': 8.0}}}, 80: {'global': {'global': {'fine_material_finding': 14.0}}}, 100: {'global': {'global': {'find_collectibles': 8.0}}}, 120: {'global': {'global': {'double_rewards': 2.0}}}, 140: {'global': {'global': {'work_efficiency': 2.0}}}, 160: {'global': {'global': {'quality_outcome': 5.0}}}, 180: {'global': {'global': {'bonus_xp_percent': 2.0}}}, 200: {'global': {'global': {'double_action': 1.0}}}}
+        achievement_stats={0: {'global': {'global': {'chest_finding': 8.0}}}, 60: {'global': {'global': {'chest_finding': 8.0}}}, 80: {'global': {'global': {'fine_material_finding': 14.0}}}, 100: {'global': {'global': {'find_collectibles': 8.0}}}, 120: {'global': {'global': {'double_rewards': 2.0}}}, 140: {'global': {'global': {'work_efficiency': 2.0}}}, 160: {'global': {'global': {'quality_outcome': 5.0}}}, 180: {'global': {'global': {'bonus_xp_percent': 2.0}}}, 200: {'global': {'global': {'double_action': 1.0}}}},
+        rarity='epic'
     )
 
     PERFECT_SNOWBALLS = ItemInstance(
