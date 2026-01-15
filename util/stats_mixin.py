@@ -52,6 +52,12 @@ class StatsMixin:
         Returns:
             True if unlocked, False otherwise
         """
+        if hasattr(self, 'has_instance'):
+            self = self.get_instance(
+                character=character, 
+                ignore_gear_requirements=ignore_gear_requirements
+            )
+
         if not hasattr(self, 'requirements') or not self.requirements:
             return True  # No requirements means always unlocked
         
@@ -178,6 +184,7 @@ class StatsMixin:
         activity: Union[Activity, str, None] = None,
         set_piece_counts: dict = None,
         character=None,
+        achievement_points=None,
     ) -> Dict[str, float]:
         """
         Get stats for a specific skill and location.
@@ -192,6 +199,16 @@ class StatsMixin:
         Returns:
             Dict of stat names to values (percentages already converted to decimals)
         """
+        if hasattr(self, 'has_instance'):
+            self = self.get_instance(
+                skill=skill,
+                location=location,
+                activity=activity,
+                set_piece_counts=set_piece_counts,
+                character=character,
+                achievement_points=achievement_points
+            )
+        
         # Create cache key (exclude character to keep key simple)
         skill_key = skill.value if hasattr(skill, 'value') else (skill if skill else None)
         location_key = location.name if hasattr(location, 'name') else (location if location else None)

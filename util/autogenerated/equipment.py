@@ -12,12 +12,13 @@ from util.stats_mixin import StatsMixin
 
 class ItemInstance(StatsMixin):
     """Base class for item instances"""
-    def __init__(self, name: str, uuid: str, stats: Dict, slot: str = None, keywords: list = None, value: int = 0, location_reqs: list = None, gated_stats: Dict = None, requirements: list = None):
+    def __init__(self, name: str, uuid: str, stats: Dict, slot: str = None, keywords: list = None, value: int = 0, rarity: str = None, location_reqs: list = None, gated_stats: Dict = None, requirements: list = None):
         self.name = name
         self.uuid = uuid
         self.slot = slot
         self.keywords = keywords or []
         self.value = value  # Coin value
+        self.rarity = rarity  # Item rarity (common, uncommon, rare, epic, legendary, ethereal)
         self.location_requirements = location_reqs or []  # Regions/locations where item works
         self._stats = stats  # Nested dict: {skill: {location: {stat: value}}}
         self.gated_stats = gated_stats or {}  # Stats with requirements (skill level, activity completion, etc.)
@@ -51,7 +52,7 @@ class ItemInstance(StatsMixin):
         return f"ItemInstance({self.name}, {self._stats})"
 
 
-class AchievementItem:
+class AchievementItem(StatsMixin):
     """Item with stats that unlock at achievement point thresholds"""
     def __init__(self, name: str, uuid: str, slot: str, keywords: list, value: int, achievement_stats: Dict[int, Dict[str, float]], requirements: list = None):
         self.name = name
@@ -61,6 +62,7 @@ class AchievementItem:
         self.value = value
         self._achievement_stats = achievement_stats  # {ap_threshold: stats}
         self.requirements = requirements or []  # Unlock requirements
+        self.has_instance = True
     
     def __getitem__(self, achievement_points: int):
         """Allow accessing by achievement points like OMNI_TOOL[140]"""
@@ -82,7 +84,7 @@ class AchievementItem:
                         for stat, value in location_data.items():
                             accumulated_stats[skill][location][stat] = accumulated_stats[skill][location].get(stat, 0.0) + value
         
-        return ItemInstance(f"{self.name} ({achievement_points})", self.uuid, accumulated_stats, self.slot, self.keywords, self.value, requirements=self.requirements)
+        return ItemInstance(f"{self.name} ({achievement_points})", self.uuid, accumulated_stats, self.slot, self.keywords, self.value, rarity=None, requirements=self.requirements)
     
     @property
     def display_name(self):
@@ -91,28 +93,11 @@ class AchievementItem:
         ap = util.walkscape_globals.ACHIEVEMENT_POINTS
         return f"{self.name} ({ap} AP)"
     
-    def is_unlocked(self, character=None, ignore_gear_requirements=False):
-        """Check if achievement item is unlocked - delegates to current AP instance"""
-        import util.walkscape_globals
-        ap = util.walkscape_globals.ACHIEVEMENT_POINTS
-        instance = self._get_stats_for_ap(ap)
-        return instance.is_unlocked(character, ignore_gear_requirements)
-    
-    def get_stats_for_skill(self, skill=None, location=None, activity=None, achievement_points=None):
+    def get_instance(self, **kwargs):
         """Get stats for achievement item at given AP level"""
-        if achievement_points is None:
-            import util.walkscape_globals
-            achievement_points = util.walkscape_globals.ACHIEVEMENT_POINTS
-        instance = self._get_stats_for_ap(achievement_points)
-        return instance.get_stats_for_skill(skill, location, activity)
-    
-    def attr(self, skill=None, location=None, activity=None, achievement_points: int = None):
-        """Get attributes for achievement item at given AP level"""
-        if achievement_points is None:
-            import util.walkscape_globals
-            achievement_points = util.walkscape_globals.ACHIEVEMENT_POINTS
-        instance = self._get_stats_for_ap(achievement_points)
-        return instance.attr(skill, location=location, activity=activity)
+        import util.walkscape_globals
+        achievement_points = util.walkscape_globals.ACHIEVEMENT_POINTS
+        return self._get_stats_for_ap(achievement_points)
     
     def __repr__(self):
         import util.walkscape_globals
@@ -138,7 +123,7 @@ class CraftedItem:
         stats = self._base_stats.copy()
         stats.update(self._quality_stats.get("Normal", {}))
         value = self._quality_values.get("Normal", self.value)
-        return ItemInstance(f"{self.name} (Normal)", self.uuid, stats, self.slot, self.keywords, value)
+        return ItemInstance(f"{self.name} (Normal)", self.uuid, stats, self.slot, self.keywords, value, rarity=None)
     
     @property
     def GOOD(self) -> ItemInstance:
@@ -146,7 +131,7 @@ class CraftedItem:
         stats = self._base_stats.copy()
         stats.update(self._quality_stats.get("Good", {}))
         value = self._quality_values.get("Good", self.value)
-        return ItemInstance(f"{self.name} (Good)", self.uuid, stats, self.slot, self.keywords, value)
+        return ItemInstance(f"{self.name} (Good)", self.uuid, stats, self.slot, self.keywords, value, rarity=None)
     
     @property
     def GREAT(self) -> ItemInstance:
@@ -154,7 +139,7 @@ class CraftedItem:
         stats = self._base_stats.copy()
         stats.update(self._quality_stats.get("Great", {}))
         value = self._quality_values.get("Great", self.value)
-        return ItemInstance(f"{self.name} (Great)", self.uuid, stats, self.slot, self.keywords, value)
+        return ItemInstance(f"{self.name} (Great)", self.uuid, stats, self.slot, self.keywords, value, rarity=None)
     
     @property
     def EXCELLENT(self) -> ItemInstance:
@@ -162,7 +147,7 @@ class CraftedItem:
         stats = self._base_stats.copy()
         stats.update(self._quality_stats.get("Excellent", {}))
         value = self._quality_values.get("Excellent", self.value)
-        return ItemInstance(f"{self.name} (Excellent)", self.uuid, stats, self.slot, self.keywords, value)
+        return ItemInstance(f"{self.name} (Excellent)", self.uuid, stats, self.slot, self.keywords, value, rarity=None)
     
     @property
     def PERFECT(self) -> ItemInstance:
@@ -170,7 +155,7 @@ class CraftedItem:
         stats = self._base_stats.copy()
         stats.update(self._quality_stats.get("Perfect", {}))
         value = self._quality_values.get("Perfect", self.value)
-        return ItemInstance(f"{self.name} (Perfect)", self.uuid, stats, self.slot, self.keywords, value)
+        return ItemInstance(f"{self.name} (Perfect)", self.uuid, stats, self.slot, self.keywords, value, rarity=None)
     
     @property
     def ETERNAL(self) -> ItemInstance:
@@ -178,7 +163,7 @@ class CraftedItem:
         stats = self._base_stats.copy()
         stats.update(self._quality_stats.get("Eternal", {}))
         value = self._quality_values.get("Eternal", self.value)
-        return ItemInstance(f"{self.name} (Eternal)", self.uuid, stats, self.slot, self.keywords, value)
+        return ItemInstance(f"{self.name} (Eternal)", self.uuid, stats, self.slot, self.keywords, value, rarity=None)
     
     def __repr__(self):
         return f"CraftedItem({self.name})"
@@ -227,6 +212,7 @@ class Item:
         slot="neck",
         keywords=['Achievement reward', 'Amulet'],
         value=40,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -239,6 +225,7 @@ class Item:
         slot="neck",
         keywords=['Amulet'],
         value=52,
+        rarity='epic',
         location_reqs=[],
         gated_stats={'set_pieces': {'adventuring tool set': {1: {'global': {'global': {'work_efficiency': 4.0}}}, 2: {'global': {'global': {'chest_finding': 4.0}}}, 3: {'global': {'global': {'fine_material_finding': 6.0}}}, 4: {'global': {'global': {'double_rewards': 4.0}}}, 5: {'global': {'global': {'steps_add': -1.0}}}}}},
         requirements=[{'type': 'character_level', 'level': 20}]
@@ -251,6 +238,7 @@ class Item:
         slot="ring",
         keywords=['Ring'],
         value=52,
+        rarity='epic',
         location_reqs=[],
         gated_stats={'set_pieces': {'adventuring tool set': {1: {'global': {'global': {'work_efficiency': 2.0}}}, 2: {'global': {'global': {'chest_finding': 2.0}}}, 3: {'global': {'global': {'fine_material_finding': 3.0}}}, 4: {'global': {'global': {'double_rewards': 2.0}}}, 5: {'global': {'global': {'steps_add': -1.0}}}}}},
         requirements=[{'type': 'character_level', 'level': 20}]
@@ -263,6 +251,7 @@ class Item:
         slot="ring",
         keywords=['Ring'],
         value=7,
+        rarity='ethereal',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'reputation', 'faction': 'syrenthia', 'amount': 150}]
@@ -275,6 +264,7 @@ class Item:
         slot="hands",
         keywords=['Light source'],
         value=100,
+        rarity='legendary',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Fishing', 'level': 35}]
@@ -287,6 +277,7 @@ class Item:
         slot="back",
         keywords=[],
         value=270,
+        rarity='legendary',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -299,6 +290,7 @@ class Item:
         slot="feet",
         keywords=['Regional', 'Skis'],
         value=0,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Agility', 'level': 45}]
@@ -311,6 +303,7 @@ class Item:
         slot="feet",
         keywords=['Regional', 'Skis'],
         value=9,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Agility', 'level': 5}]
@@ -323,6 +316,7 @@ class Item:
         slot="head",
         keywords=['Regional'],
         value=120,
+        rarity='legendary',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Carpentry', 'level': 50}]
@@ -335,6 +329,7 @@ class Item:
         slot="feet",
         keywords=['Regional'],
         value=25,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Carpentry', 'level': 10}]
@@ -347,6 +342,7 @@ class Item:
         slot="hands",
         keywords=['Regional'],
         value=28,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Carpentry', 'level': 25}]
@@ -359,6 +355,7 @@ class Item:
         slot="legs",
         keywords=['Regional'],
         value=28,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Carpentry', 'level': 25}]
@@ -371,6 +368,7 @@ class Item:
         slot="chest",
         keywords=['Regional'],
         value=84,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Carpentry', 'level': 40}]
@@ -383,6 +381,7 @@ class Item:
         slot="feet",
         keywords=['Achievement reward'],
         value=21,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -395,6 +394,7 @@ class Item:
         slot="chest",
         keywords=[],
         value=30,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Fishing', 'level': 9}]
@@ -407,6 +407,7 @@ class Item:
         slot="cape",
         keywords=[],
         value=7,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Foraging', 'level': 15}]
@@ -419,6 +420,7 @@ class Item:
         slot="head",
         keywords=['Light source'],
         value=100,
+        rarity='legendary',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Crafting', 'level': 50}]
@@ -431,6 +433,7 @@ class Item:
         slot="cape",
         keywords=['Achievement reward'],
         value=0,
+        rarity='ethereal',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -443,6 +446,7 @@ class Item:
         slot="cape",
         keywords=['Achievement reward'],
         value=0,
+        rarity='legendary',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -455,6 +459,7 @@ class Item:
         slot="cape",
         keywords=[],
         value=0,
+        rarity='legendary',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -467,6 +472,7 @@ class Item:
         slot="feet",
         keywords=[],
         value=44,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Carpentry', 'level': 25}]
@@ -479,6 +485,7 @@ class Item:
         slot="chest",
         keywords=[],
         value=25,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Cooking', 'level': 25}]
@@ -491,6 +498,7 @@ class Item:
         slot="head",
         keywords=[],
         value=25,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Cooking', 'level': 22}]
@@ -503,6 +511,7 @@ class Item:
         slot="legs",
         keywords=[],
         value=25,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Cooking', 'level': 17}]
@@ -515,6 +524,7 @@ class Item:
         slot="feet",
         keywords=['Achievement reward'],
         value=108,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -527,6 +537,7 @@ class Item:
         slot="head",
         keywords=['Achievement reward'],
         value=108,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -539,6 +550,7 @@ class Item:
         slot="chest",
         keywords=['Achievement reward'],
         value=108,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -551,6 +563,7 @@ class Item:
         slot="legs",
         keywords=['Achievement reward'],
         value=108,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -563,6 +576,7 @@ class Item:
         slot="head",
         keywords=[],
         value=7,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Fishing', 'level': 7}]
@@ -575,6 +589,7 @@ class Item:
         slot="cape",
         keywords=['Underwater'],
         value=7,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -587,6 +602,7 @@ class Item:
         slot="feet",
         keywords=[],
         value=4,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Crafting', 'level': 14}]
@@ -599,6 +615,7 @@ class Item:
         slot="legs",
         keywords=[],
         value=4,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Crafting', 'level': 14}]
@@ -611,6 +628,7 @@ class Item:
         slot="chest",
         keywords=[],
         value=9,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Crafting', 'level': 12}]
@@ -623,6 +641,7 @@ class Item:
         slot="ring",
         keywords=['Ring'],
         value=30,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -635,6 +654,7 @@ class Item:
         slot="head",
         keywords=[],
         value=100,
+        rarity='legendary',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Trinketry', 'level': 50}]
@@ -647,6 +667,7 @@ class Item:
         slot="head",
         keywords=[],
         value=110,
+        rarity='legendary',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Agility', 'level': 35}]
@@ -659,6 +680,7 @@ class Item:
         slot="head",
         keywords=[],
         value=15,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -671,6 +693,7 @@ class Item:
         slot="feet",
         keywords=[],
         value=78,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Agility', 'level': 57}]
@@ -683,6 +706,7 @@ class Item:
         slot="cape",
         keywords=[],
         value=66,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Agility', 'level': 42}]
@@ -695,6 +719,7 @@ class Item:
         slot="hands",
         keywords=['Faction reward', 'Underwater'],
         value=10,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -707,6 +732,7 @@ class Item:
         slot="ring",
         keywords=['Achievement reward', 'Ring'],
         value=40,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -719,6 +745,7 @@ class Item:
         slot="ring",
         keywords=['Ring'],
         value=2,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Mining', 'level': 5}]
@@ -731,6 +758,7 @@ class Item:
         slot="ring",
         keywords=['Regional', 'Ring'],
         value=2,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -743,6 +771,7 @@ class Item:
         slot="cape",
         keywords=[],
         value=66,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Smithing', 'level': 33}]
@@ -755,6 +784,7 @@ class Item:
         slot="head",
         keywords=[],
         value=44,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Fishing', 'level': 15}]
@@ -767,6 +797,7 @@ class Item:
         slot="legs",
         keywords=[],
         value=66,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Fishing', 'level': 19}]
@@ -779,6 +810,7 @@ class Item:
         slot="chest",
         keywords=[],
         value=72,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Fishing', 'level': 62}]
@@ -791,6 +823,7 @@ class Item:
         slot="feet",
         keywords=['Underwater'],
         value=15,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -803,6 +836,7 @@ class Item:
         slot="legs",
         keywords=[],
         value=22,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Agility', 'level': 44}]
@@ -815,6 +849,7 @@ class Item:
         slot="chest",
         keywords=[],
         value=4,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Foraging', 'level': 7}]
@@ -827,6 +862,7 @@ class Item:
         slot="legs",
         keywords=[],
         value=4,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Foraging', 'level': 7}]
@@ -839,6 +875,7 @@ class Item:
         slot="feet",
         keywords=[],
         value=84,
+        rarity='legendary',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Woodcutting', 'level': 26}]
@@ -851,6 +888,7 @@ class Item:
         slot="chest",
         keywords=[],
         value=78,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Woodcutting', 'level': 24}]
@@ -863,6 +901,7 @@ class Item:
         slot="head",
         keywords=[],
         value=56,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Woodcutting', 'level': 25}]
@@ -875,6 +914,7 @@ class Item:
         slot="legs",
         keywords=[],
         value=32,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Woodcutting', 'level': 22}]
@@ -887,6 +927,7 @@ class Item:
         slot="feet",
         keywords=['Regional'],
         value=25,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Mining', 'level': 10}, {'type': 'reputation', 'faction': 'jarvonia', 'amount': 10}]
@@ -899,6 +940,7 @@ class Item:
         slot="hands",
         keywords=['Regional'],
         value=28,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Mining', 'level': 25}, {'type': 'reputation', 'faction': 'jarvonia', 'amount': 30}]
@@ -911,6 +953,7 @@ class Item:
         slot="head",
         keywords=['Regional'],
         value=120,
+        rarity='legendary',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Mining', 'level': 50}, {'type': 'reputation', 'faction': 'jarvonia', 'amount': 100}]
@@ -923,6 +966,7 @@ class Item:
         slot="legs",
         keywords=['Regional'],
         value=28,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Mining', 'level': 25}, {'type': 'reputation', 'faction': 'jarvonia', 'amount': 30}]
@@ -935,6 +979,7 @@ class Item:
         slot="chest",
         keywords=['Regional'],
         value=84,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Mining', 'level': 40}, {'type': 'reputation', 'faction': 'jarvonia', 'amount': 60}]
@@ -947,6 +992,7 @@ class Item:
         slot="back",
         keywords=['Regional'],
         value=84,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Foraging', 'level': 40}, {'type': 'reputation', 'faction': 'trellin', 'amount': 60}]
@@ -959,6 +1005,7 @@ class Item:
         slot="hands",
         keywords=[],
         value=8,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Foraging', 'level': 17}]
@@ -971,6 +1018,7 @@ class Item:
         slot="hands",
         keywords=['Achievement reward'],
         value=300,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -983,6 +1031,7 @@ class Item:
         slot="back",
         keywords=['Achievement reward', 'Spectral'],
         value=0,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -995,6 +1044,7 @@ class Item:
         slot="back",
         keywords=['Climbing gear'],
         value=32,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Agility', 'level': 38}]
@@ -1007,6 +1057,7 @@ class Item:
         slot="hands",
         keywords=[],
         value=48,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Crafting', 'level': 31}]
@@ -1019,6 +1070,7 @@ class Item:
         slot="feet",
         keywords=[],
         value=48,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Foraging', 'level': 30}]
@@ -1031,6 +1083,7 @@ class Item:
         slot="head",
         keywords=[],
         value=78,
+        rarity='legendary',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Foraging', 'level': 50}]
@@ -1043,6 +1096,7 @@ class Item:
         slot="feet",
         keywords=[],
         value=2,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -1055,6 +1109,7 @@ class Item:
         slot="cape",
         keywords=[],
         value=2,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -1067,6 +1122,7 @@ class Item:
         slot="head",
         keywords=[],
         value=2,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -1079,6 +1135,7 @@ class Item:
         slot="legs",
         keywords=[],
         value=2,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -1091,6 +1148,7 @@ class Item:
         slot="chest",
         keywords=[],
         value=2,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -1103,6 +1161,7 @@ class Item:
         slot="head",
         keywords=['Climbing gear'],
         value=100,
+        rarity='legendary',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Carpentry', 'level': 50}]
@@ -1115,6 +1174,7 @@ class Item:
         slot="hands",
         keywords=['Regional'],
         value=2,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'reputation', 'faction': 'jarvonia', 'amount': 1}]
@@ -1127,6 +1187,7 @@ class Item:
         slot="chest",
         keywords=['Life vest'],
         value=14,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Fishing', 'level': 24}]
@@ -1139,6 +1200,7 @@ class Item:
         slot="back",
         keywords=['Climbing gear', 'Regional'],
         value=84,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Agility', 'level': 40}]
@@ -1151,6 +1213,7 @@ class Item:
         slot="feet",
         keywords=['Regional'],
         value=25,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Woodcutting', 'level': 10}, {'type': 'reputation', 'faction': 'trellin', 'amount': 10}]
@@ -1163,6 +1226,7 @@ class Item:
         slot="hands",
         keywords=['Regional'],
         value=28,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Woodcutting', 'level': 25}, {'type': 'reputation', 'faction': 'trellin', 'amount': 30}]
@@ -1175,6 +1239,7 @@ class Item:
         slot="head",
         keywords=['Regional'],
         value=120,
+        rarity='legendary',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Woodcutting', 'level': 50}, {'type': 'reputation', 'faction': 'trellin', 'amount': 100}]
@@ -1187,6 +1252,7 @@ class Item:
         slot="legs",
         keywords=['Regional'],
         value=28,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Woodcutting', 'level': 25}, {'type': 'reputation', 'faction': 'trellin', 'amount': 30}]
@@ -1199,6 +1265,7 @@ class Item:
         slot="chest",
         keywords=['Regional'],
         value=84,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Woodcutting', 'level': 40}, {'type': 'reputation', 'faction': 'trellin', 'amount': 60}]
@@ -1211,6 +1278,7 @@ class Item:
         slot="feet",
         keywords=[],
         value=19,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Woodcutting', 'level': 10}]
@@ -1223,6 +1291,7 @@ class Item:
         slot="head",
         keywords=[],
         value=9,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Woodcutting', 'level': 12}]
@@ -1235,6 +1304,7 @@ class Item:
         slot="legs",
         keywords=[],
         value=4,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Woodcutting', 'level': 8}]
@@ -1247,6 +1317,7 @@ class Item:
         slot="feet",
         keywords=[],
         value=4,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Woodcutting', 'level': 6}]
@@ -1259,6 +1330,7 @@ class Item:
         slot="chest",
         keywords=[],
         value=40,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Woodcutting', 'level': 27}]
@@ -1271,6 +1343,7 @@ class Item:
         slot="feet",
         keywords=[],
         value=44,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Agility', 'level': 25}]
@@ -1283,6 +1356,7 @@ class Item:
         slot="head",
         keywords=['Magnetic'],
         value=100,
+        rarity='legendary',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Smithing', 'level': 50}]
@@ -1295,6 +1369,7 @@ class Item:
         slot="hands",
         keywords=['Regional'],
         value=28,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'reputation', 'faction': 'syrenthia', 'amount': 30}]
@@ -1307,6 +1382,7 @@ class Item:
         slot="head",
         keywords=['Advanced diving gear', 'Diving gear', 'Expert diving gear', 'Regional', 'Underwater'],
         value=120,
+        rarity='legendary',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'reputation', 'faction': 'syrenthia', 'amount': 100}]
@@ -1319,6 +1395,7 @@ class Item:
         slot="chest",
         keywords=['Advanced diving gear', 'Diving gear', 'Expert diving gear', 'Regional', 'Underwater'],
         value=84,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'reputation', 'faction': 'syrenthia', 'amount': 60}]
@@ -1331,6 +1408,7 @@ class Item:
         slot="feet",
         keywords=['Regional'],
         value=25,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'reputation', 'faction': 'syrenthia', 'amount': 10}]
@@ -1343,6 +1421,7 @@ class Item:
         slot="legs",
         keywords=['Advanced diving gear', 'Diving gear', 'Regional', 'Underwater'],
         value=28,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'reputation', 'faction': 'syrenthia', 'amount': 30}]
@@ -1355,6 +1434,7 @@ class Item:
         slot="chest",
         keywords=['Advanced diving gear', 'Diving gear', 'Underwater'],
         value=7,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Agility', 'level': 40}]
@@ -1367,6 +1447,7 @@ class Item:
         slot="chest",
         keywords=['Diving gear', 'Regional', 'Underwater'],
         value=2,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'reputation', 'faction': 'syrenthia', 'amount': 1}]
@@ -1379,6 +1460,7 @@ class Item:
         slot="hands",
         keywords=[],
         value=30,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Smithing', 'level': 16}]
@@ -1391,6 +1473,7 @@ class Item:
         slot="neck",
         keywords=[],
         value=32,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Mining', 'level': 25}]
@@ -1403,6 +1486,7 @@ class Item:
         slot="legs",
         keywords=[],
         value=60,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Mining', 'level': 35}]
@@ -1415,6 +1499,7 @@ class Item:
         slot="chest",
         keywords=[],
         value=66,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Mining', 'level': 32}]
@@ -1427,6 +1512,7 @@ class Item:
         slot="back",
         keywords=[],
         value=14,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Mining', 'level': 14}]
@@ -1439,6 +1525,7 @@ class Item:
         slot="head",
         keywords=['Light source'],
         value=36,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Mining', 'level': 23}]
@@ -1451,6 +1538,7 @@ class Item:
         slot="feet",
         keywords=[],
         value=48,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Crafting', 'level': 42}]
@@ -1463,6 +1551,7 @@ class Item:
         slot="head",
         keywords=['Faction reward', 'Regional'],
         value=0,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Foraging', 'level': 45}]
@@ -1475,6 +1564,7 @@ class Item:
         slot="feet",
         keywords=[],
         value=7,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Cooking', 'level': 17}]
@@ -1487,6 +1577,7 @@ class Item:
         slot="feet",
         keywords=[],
         value=5,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Foraging', 'level': 9}]
@@ -1499,6 +1590,7 @@ class Item:
         slot="feet",
         keywords=['Regional', 'Skis'],
         value=21,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Agility', 'level': 25}]
@@ -1511,6 +1603,7 @@ class Item:
         slot="ring",
         keywords=['Ring'],
         value=11,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -1523,6 +1616,7 @@ class Item:
         slot="ring",
         keywords=['Ring'],
         value=27,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -1535,6 +1629,7 @@ class Item:
         slot="ring",
         keywords=['Ring'],
         value=11,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -1547,6 +1642,7 @@ class Item:
         slot="hands",
         keywords=[],
         value=7,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Cooking', 'level': 5}]
@@ -1559,6 +1655,7 @@ class Item:
         slot="back",
         keywords=['Advanced diving gear', 'Diving gear', 'Expert diving gear', 'Faction reward', 'Underwater'],
         value=10,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -1571,6 +1668,7 @@ class Item:
         slot="legs",
         keywords=['Achievement reward'],
         value=10,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -1583,6 +1681,7 @@ class Item:
         slot="hands",
         keywords=[],
         value=9,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Agility', 'level': 29}]
@@ -1595,6 +1694,7 @@ class Item:
         slot="neck",
         keywords=['Achievement reward'],
         value=4,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -1607,6 +1707,7 @@ class Item:
         slot="hands",
         keywords=[],
         value=2,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'reputation', 'faction': 'syrenthia', 'amount': 1}]
@@ -1619,6 +1720,7 @@ class Item:
         slot="hands",
         keywords=[],
         value=5,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Foraging', 'level': 9}]
@@ -1631,6 +1733,7 @@ class Item:
         slot="feet",
         keywords=['Regional', 'Skis'],
         value=21,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Agility', 'level': 15}]
@@ -1643,6 +1746,7 @@ class Item:
         slot="head",
         keywords=[],
         value=25,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -1655,6 +1759,7 @@ class Item:
         slot="feet",
         keywords=['Faction reward', 'Proper gear'],
         value=5,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={'set_pieces': {'proper gear': {5: {'global': {'global': {'chest_finding': 20.0}}}}}},
         requirements=[]
@@ -1667,6 +1772,7 @@ class Item:
         slot="cape",
         keywords=['Faction reward', 'Proper gear'],
         value=5,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={'set_pieces': {'proper gear': {5: {'global': {'global': {'chest_finding': 20.0}}}}}},
         requirements=[]
@@ -1679,6 +1785,7 @@ class Item:
         slot="head",
         keywords=['Faction reward', 'Proper gear'],
         value=5,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={'set_pieces': {'proper gear': {5: {'global': {'global': {'chest_finding': 20.0}}}}}},
         requirements=[]
@@ -1691,6 +1798,7 @@ class Item:
         slot="legs",
         keywords=['Faction reward', 'Proper gear'],
         value=5,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={'set_pieces': {'proper gear': {5: {'global': {'global': {'chest_finding': 20.0}}}}}},
         requirements=[]
@@ -1703,6 +1811,7 @@ class Item:
         slot="chest",
         keywords=['Faction reward', 'Proper gear'],
         value=32,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={'set_pieces': {'proper gear': {5: {'global': {'global': {'chest_finding': 20.0}}}}}},
         requirements=[]
@@ -1715,6 +1824,7 @@ class Item:
         slot="head",
         keywords=[],
         value=40,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Crafting', 'level': 23}, {'type': 'skill', 'skill': 'Carpentry', 'level': 12}]
@@ -1727,6 +1837,7 @@ class Item:
         slot="hands",
         keywords=[],
         value=30,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Carpentry', 'level': 7}]
@@ -1739,6 +1850,7 @@ class Item:
         slot="legs",
         keywords=[],
         value=10,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Carpentry', 'level': 22}]
@@ -1751,6 +1863,7 @@ class Item:
         slot="chest",
         keywords=[],
         value=30,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Carpentry', 'level': 20}]
@@ -1763,6 +1876,7 @@ class Item:
         slot="ring",
         keywords=['Ring'],
         value=7,
+        rarity='ethereal',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'reputation', 'faction': 'jarvonia', 'amount': 150}]
@@ -1775,6 +1889,7 @@ class Item:
         slot="ring",
         keywords=['Achievement reward', 'Ring'],
         value=0,
+        rarity='legendary',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -1787,6 +1902,7 @@ class Item:
         slot="ring",
         keywords=['Ring'],
         value=66,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -1799,6 +1915,7 @@ class Item:
         slot="neck",
         keywords=['Achievement reward', 'Amulet'],
         value=52,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -1811,6 +1928,7 @@ class Item:
         slot="feet",
         keywords=['Regional'],
         value=25,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'reputation', 'faction': 'erdwise', 'amount': 10}]
@@ -1823,6 +1941,7 @@ class Item:
         slot="chest",
         keywords=['Regional'],
         value=84,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'reputation', 'faction': 'erdwise', 'amount': 60}]
@@ -1835,6 +1954,7 @@ class Item:
         slot="hands",
         keywords=['Regional'],
         value=28,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'reputation', 'faction': 'erdwise', 'amount': 30}]
@@ -1847,6 +1967,7 @@ class Item:
         slot="head",
         keywords=['Regional'],
         value=120,
+        rarity='legendary',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'reputation', 'faction': 'erdwise', 'amount': 100}]
@@ -1859,6 +1980,7 @@ class Item:
         slot="legs",
         keywords=['Regional'],
         value=28,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'reputation', 'faction': 'erdwise', 'amount': 30}]
@@ -1871,6 +1993,7 @@ class Item:
         slot="chest",
         keywords=[],
         value=9,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Agility', 'level': 9}]
@@ -1883,6 +2006,7 @@ class Item:
         slot="legs",
         keywords=[],
         value=9,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Agility', 'level': 7}]
@@ -1895,6 +2019,7 @@ class Item:
         slot="head",
         keywords=['Achievement reward'],
         value=7,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -1907,6 +2032,7 @@ class Item:
         slot="head",
         keywords=['Diving gear', 'Underwater'],
         value=7,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Agility', 'level': 20}]
@@ -1919,6 +2045,7 @@ class Item:
         slot="legs",
         keywords=['Diving gear', 'Underwater'],
         value=7,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Agility', 'level': 20}]
@@ -1931,6 +2058,7 @@ class Item:
         slot="chest",
         keywords=['Diving gear', 'Underwater'],
         value=7,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Agility', 'level': 20}]
@@ -1943,6 +2071,7 @@ class Item:
         slot="head",
         keywords=[],
         value=21,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Fishing', 'level': 32}]
@@ -1955,6 +2084,7 @@ class Item:
         slot="ring",
         keywords=['Achievement reward', 'Ring'],
         value=4,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -1967,6 +2097,7 @@ class Item:
         slot="feet",
         keywords=[],
         value=72,
+        rarity='legendary',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Agility', 'level': 15}]
@@ -1979,6 +2110,7 @@ class Item:
         slot="neck",
         keywords=['Amulet'],
         value=2,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -1991,6 +2123,7 @@ class Item:
         slot="chest",
         keywords=['Life vest'],
         value=5,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -2003,6 +2136,7 @@ class Item:
         slot="ring",
         keywords=['Ring'],
         value=2,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -2015,6 +2149,7 @@ class Item:
         slot="back",
         keywords=['Climbing gear'],
         value=5,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -2027,6 +2162,7 @@ class Item:
         slot="feet",
         keywords=['Socks'],
         value=1,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -2039,6 +2175,7 @@ class Item:
         slot="head",
         keywords=[],
         value=66,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Smithing', 'level': 24}]
@@ -2051,6 +2188,7 @@ class Item:
         slot="chest",
         keywords=[],
         value=30,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Smithing', 'level': 20}]
@@ -2063,6 +2201,7 @@ class Item:
         slot="legs",
         keywords=[],
         value=13,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Smithing', 'level': 12}]
@@ -2075,6 +2214,7 @@ class Item:
         slot="back",
         keywords=[],
         value=84,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Cooking', 'level': 62}]
@@ -2087,6 +2227,7 @@ class Item:
         slot="feet",
         keywords=[],
         value=3,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Fishing', 'level': 5}]
@@ -2099,6 +2240,7 @@ class Item:
         slot="feet",
         keywords=[],
         value=4,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Smithing', 'level': 10}, {'type': 'skill', 'skill': 'Mining', 'level': 8}]
@@ -2111,6 +2253,7 @@ class Item:
         slot="ring",
         keywords=['Ring'],
         value=52,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Agility', 'level': 30}]
@@ -2123,6 +2266,7 @@ class Item:
         slot="legs",
         keywords=[],
         value=9,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -2135,6 +2279,7 @@ class Item:
         slot="primary",
         keywords=['Weapon'],
         value=15,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -2147,6 +2292,7 @@ class Item:
         slot="head",
         keywords=['Advanced diving gear', 'Diving gear', 'Expert diving gear', 'Underwater'],
         value=7,
+        rarity='legendary',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -2159,6 +2305,7 @@ class Item:
         slot="back",
         keywords=['Achievement reward'],
         value=10,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -2171,6 +2318,7 @@ class Item:
         slot="feet",
         keywords=[],
         value=32,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Agility', 'level': 23}]
@@ -2183,6 +2331,7 @@ class Item:
         slot="back",
         keywords=['Climbing gear'],
         value=11,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Agility', 'level': 17}]
@@ -2195,6 +2344,7 @@ class Item:
         slot="head",
         keywords=['Achievement reward', 'Treasure hunter set'],
         value=10,
+        rarity='rare',
         location_reqs=[],
         gated_stats={'set_pieces': {'treasure hunter set': {1: {'global': {'global': {'find_collectibles': 5.0}}}, 2: {'global': {'global': {'find_collectibles': 5.0}}}, 3: {'global': {'global': {'find_collectibles': 10.0}}}}}},
         requirements=[]
@@ -2207,6 +2357,7 @@ class Item:
         slot="chest",
         keywords=['Achievement reward', 'Treasure hunter set'],
         value=10,
+        rarity='rare',
         location_reqs=[],
         gated_stats={'set_pieces': {'treasure hunter set': {1: {'global': {'global': {'find_collectibles': 5.0}}}, 2: {'global': {'global': {'find_collectibles': 5.0}}}, 3: {'global': {'global': {'find_collectibles': 10.0}}}}}},
         requirements=[]
@@ -2219,6 +2370,7 @@ class Item:
         slot="legs",
         keywords=['Achievement reward', 'Treasure hunter set'],
         value=10,
+        rarity='rare',
         location_reqs=[],
         gated_stats={'set_pieces': {'treasure hunter set': {1: {'global': {'global': {'find_collectibles': 5.0}}}, 2: {'global': {'global': {'find_collectibles': 5.0}}}, 3: {'global': {'global': {'find_collectibles': 10.0}}}}}},
         requirements=[]
@@ -2231,6 +2383,7 @@ class Item:
         slot="hands",
         keywords=['Climbing gear'],
         value=12,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Woodcutting', 'level': 21}]
@@ -2243,6 +2396,7 @@ class Item:
         slot="feet",
         keywords=[],
         value=44,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Fishing', 'level': 24}]
@@ -2255,6 +2409,7 @@ class Item:
         slot="head",
         keywords=['Faction reward', 'Regional'],
         value=7,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'character_level', 'level': 30}]
@@ -2267,6 +2422,7 @@ class Item:
         slot="chest",
         keywords=['Faction reward', 'Regional'],
         value=7,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'character_level', 'level': 30}]
@@ -2279,6 +2435,7 @@ class Item:
         slot="feet",
         keywords=[],
         value=22,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Foraging', 'level': 30}]
@@ -2291,6 +2448,7 @@ class Item:
         slot="ring",
         keywords=['Ring'],
         value=7,
+        rarity='ethereal',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -2303,6 +2461,7 @@ class Item:
         slot="legs",
         keywords=[],
         value=19,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Foraging', 'level': 25}]
@@ -2315,6 +2474,7 @@ class Item:
         slot="chest",
         keywords=[],
         value=21,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Foraging', 'level': 25}]
@@ -2327,6 +2487,7 @@ class Item:
         slot="head",
         keywords=[],
         value=32,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Carpentry', 'level': 17}]
@@ -2944,6 +3105,7 @@ class Item:
         slot="tools",
         keywords=['Crafting tool', 'Wrench'],
         value=15,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Crafting', 'level': 20}]
@@ -2956,6 +3118,7 @@ class Item:
         slot="tools",
         keywords=['Achievement reward'],
         value=0,
+        rarity='legendary',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -2968,6 +3131,7 @@ class Item:
         slot="tools",
         keywords=['Adventuring tool set', 'Fishing rod', 'Fishing tool'],
         value=10,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Fishing', 'level': 15}]
@@ -2980,6 +3144,7 @@ class Item:
         slot="tools",
         keywords=['Adventuring tool set', 'Cooking pan'],
         value=18,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Cooking', 'level': 15}]
@@ -2992,6 +3157,7 @@ class Item:
         slot="tools",
         keywords=['Adventuring tool set', 'Smithing hammer', 'Smithing tool'],
         value=18,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Smithing', 'level': 15}]
@@ -3004,6 +3170,7 @@ class Item:
         slot="tools",
         keywords=['Adventuring tool set', 'Hatchet', 'Woodcutting tool'],
         value=10,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Woodcutting', 'level': 15}]
@@ -3016,6 +3183,7 @@ class Item:
         slot="tools",
         keywords=['Adventuring tool set', 'Mining tool', 'Pickaxe'],
         value=10,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Mining', 'level': 15}]
@@ -3028,6 +3196,7 @@ class Item:
         slot="tools",
         keywords=['Adventuring tool set', 'Sander'],
         value=18,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Trinketry', 'level': 15}]
@@ -3040,6 +3209,7 @@ class Item:
         slot="tools",
         keywords=['Adventuring tool set', 'Carpentry tool', 'Saw'],
         value=18,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Carpentry', 'level': 15}]
@@ -3052,6 +3222,7 @@ class Item:
         slot="tools",
         keywords=['Adventuring tool set', 'Foraging tool', 'Sickle'],
         value=10,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Foraging', 'level': 15}]
@@ -3064,6 +3235,7 @@ class Item:
         slot="tools",
         keywords=['Adventuring tool set', 'Crafting tool', 'Wrench'],
         value=18,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Crafting', 'level': 15}]
@@ -3076,6 +3248,7 @@ class Item:
         slot="tools",
         keywords=[],
         value=44,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -3088,6 +3261,7 @@ class Item:
         slot="tools",
         keywords=[],
         value=25,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Trinketry', 'level': 37}]
@@ -3100,6 +3274,7 @@ class Item:
         slot="tools",
         keywords=['Hatchet', 'Woodcutting tool'],
         value=112,
+        rarity='legendary',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Woodcutting', 'level': 44}]
@@ -3112,6 +3287,7 @@ class Item:
         slot="tools",
         keywords=['Fishing lure'],
         value=240,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Fishing', 'level': 20}]
@@ -3124,6 +3300,7 @@ class Item:
         slot="tools",
         keywords=['Basket'],
         value=22,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Foraging', 'level': 28}]
@@ -3136,6 +3313,7 @@ class Item:
         slot="tools",
         keywords=['Skill book'],
         value=48,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Smithing', 'level': 30}]
@@ -3148,6 +3326,7 @@ class Item:
         slot="tools",
         keywords=['Foraging tool', 'Sickle'],
         value=120,
+        rarity='legendary',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Foraging', 'level': 40}]
@@ -3160,6 +3339,7 @@ class Item:
         slot="tools",
         keywords=['Regional'],
         value=2,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'reputation', 'faction': 'syrenthia', 'amount': 1}]
@@ -3172,6 +3352,7 @@ class Item:
         slot="tools",
         keywords=['Regional'],
         value=2,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'reputation', 'faction': 'trellin', 'amount': 1}]
@@ -3184,6 +3365,7 @@ class Item:
         slot="tools",
         keywords=['Regional'],
         value=2,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'reputation', 'faction': 'trellin', 'amount': 1}]
@@ -3196,6 +3378,7 @@ class Item:
         slot="tools",
         keywords=['Knife'],
         value=7,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Crafting', 'level': 18}]
@@ -3208,6 +3391,7 @@ class Item:
         slot="tools",
         keywords=[],
         value=4,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Fishing', 'level': 5}]
@@ -3220,6 +3404,7 @@ class Item:
         slot="tools",
         keywords=['Regional', 'Sander'],
         value=84,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Trinketry', 'level': 40}, {'type': 'reputation', 'faction': 'erdwise', 'amount': 60}]
@@ -3232,6 +3417,7 @@ class Item:
         slot="tools",
         keywords=['Skydisc'],
         value=4,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Agility', 'level': 1}]
@@ -3244,6 +3430,7 @@ class Item:
         slot="tools",
         keywords=[],
         value=4,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Carpentry', 'level': 6}]
@@ -3256,6 +3443,7 @@ class Item:
         slot="tools",
         keywords=['Skill book'],
         value=78,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Crafting', 'level': 30}]
@@ -3268,6 +3456,7 @@ class Item:
         slot="tools",
         keywords=['Cutting board'],
         value=4,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Cooking', 'level': 13}]
@@ -3280,6 +3469,7 @@ class Item:
         slot="tools",
         keywords=['Bug catching net'],
         value=72,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Foraging', 'level': 64}]
@@ -3292,6 +3482,7 @@ class Item:
         slot="tools",
         keywords=['Chisel'],
         value=4,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Trinketry', 'level': 5}]
@@ -3304,6 +3495,7 @@ class Item:
         slot="tools",
         keywords=['Cooking knife', 'Cooking tool'],
         value=4,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Cooking', 'level': 5}]
@@ -3316,6 +3508,7 @@ class Item:
         slot="tools",
         keywords=['Foraging tool'],
         value=8,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Foraging', 'level': 11}]
@@ -3328,6 +3521,7 @@ class Item:
         slot="tools",
         keywords=[],
         value=46,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Cooking', 'level': 50}]
@@ -3340,6 +3534,7 @@ class Item:
         slot="tools",
         keywords=['Light source'],
         value=21,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Foraging', 'level': 39}]
@@ -3352,6 +3547,7 @@ class Item:
         slot="tools",
         keywords=['Regional'],
         value=2,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'reputation', 'faction': 'trellin', 'amount': 1}]
@@ -3364,6 +3560,7 @@ class Item:
         slot="tools",
         keywords=['Skill book'],
         value=72,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Fishing', 'level': 30}]
@@ -3376,6 +3573,7 @@ class Item:
         slot="tools",
         keywords=['Fishing lure'],
         value=16,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Fishing', 'level': 10}]
@@ -3388,6 +3586,7 @@ class Item:
         slot="tools",
         keywords=[],
         value=40,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Fishing', 'level': 56}]
@@ -3400,6 +3599,7 @@ class Item:
         slot="tools",
         keywords=['Underwater'],
         value=30,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -3412,6 +3612,7 @@ class Item:
         slot="tools",
         keywords=['Ruler'],
         value=5,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Carpentry', 'level': 11}]
@@ -3424,6 +3625,7 @@ class Item:
         slot="tools",
         keywords=[],
         value=16,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Cooking', 'level': 15}]
@@ -3436,6 +3638,7 @@ class Item:
         slot="tools",
         keywords=[],
         value=4,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Cooking', 'level': 1}]
@@ -3448,6 +3651,7 @@ class Item:
         slot="tools",
         keywords=[],
         value=7,
+        rarity='ethereal',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'reputation', 'faction': 'erdwise', 'amount': 150}]
@@ -3460,6 +3664,7 @@ class Item:
         slot="tools",
         keywords=['Bellows', 'Smithing tool'],
         value=11,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Smithing', 'level': 15}]
@@ -3472,6 +3677,7 @@ class Item:
         slot="tools",
         keywords=[],
         value=10,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Trinketry', 'level': 9}]
@@ -3484,6 +3690,7 @@ class Item:
         slot="tools",
         keywords=['Skill book'],
         value=40,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Trinketry', 'level': 46}]
@@ -3496,6 +3703,7 @@ class Item:
         slot="tools",
         keywords=['Light source'],
         value=4,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -3508,6 +3716,7 @@ class Item:
         slot="tools",
         keywords=['Gold pan'],
         value=13,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Fishing', 'level': 13}]
@@ -3520,6 +3729,7 @@ class Item:
         slot="tools",
         keywords=['Chisel'],
         value=250,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Trinketry', 'level': 21}, {'type': 'skill', 'skill': 'Carpentry', 'level': 11}]
@@ -3532,6 +3742,7 @@ class Item:
         slot="tools",
         keywords=['Skydisc'],
         value=35,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Agility', 'level': 25}]
@@ -3544,6 +3755,7 @@ class Item:
         slot="tools",
         keywords=['Achievement reward'],
         value=375,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -3556,6 +3768,7 @@ class Item:
         slot="tools",
         keywords=['Light source'],
         value=11,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Mining', 'level': 10}]
@@ -3568,6 +3781,7 @@ class Item:
         slot="tools",
         keywords=['Regional'],
         value=2,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'reputation', 'faction': 'jarvonia', 'amount': 1}]
@@ -3580,6 +3794,7 @@ class Item:
         slot="tools",
         keywords=['Carpentry tool', 'Saw'],
         value=66,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Carpentry', 'level': 33}]
@@ -3592,6 +3807,7 @@ class Item:
         slot="tools",
         keywords=[],
         value=25,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Trinketry', 'level': 23}]
@@ -3604,6 +3820,7 @@ class Item:
         slot="tools",
         keywords=[],
         value=78,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Woodcutting', 'level': 32}]
@@ -3616,6 +3833,7 @@ class Item:
         slot="tools",
         keywords=[],
         value=78,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Mining', 'level': 27}]
@@ -3628,6 +3846,7 @@ class Item:
         slot="tools",
         keywords=['Faction reward', 'Hatchet', 'Regional', 'Woodcutting tool'],
         value=0,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Woodcutting', 'level': 10}]
@@ -3640,6 +3859,7 @@ class Item:
         slot="tools",
         keywords=['Carpentry tool'],
         value=9,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Carpentry', 'level': 16}]
@@ -3652,6 +3872,7 @@ class Item:
         slot="tools",
         keywords=['Fishing net', 'Fishing rod', 'Fishing tool'],
         value=240,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Fishing', 'level': 20}]
@@ -3664,6 +3885,7 @@ class Item:
         slot="tools",
         keywords=['Regional'],
         value=2,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'reputation', 'faction': 'erdwise', 'amount': 1}]
@@ -3676,6 +3898,7 @@ class Item:
         slot="tools",
         keywords=['Water'],
         value=8,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Agility', 'level': 15}]
@@ -3688,6 +3911,7 @@ class Item:
         slot="tools",
         keywords=[],
         value=6,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Smithing', 'level': 9}]
@@ -3700,6 +3924,7 @@ class Item:
         slot="tools",
         keywords=['Smithing hammer', 'Smithing tool'],
         value=56,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Smithing', 'level': 40}]
@@ -3712,6 +3937,7 @@ class Item:
         slot="tools",
         keywords=['Achievement reward'],
         value=2,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -3724,6 +3950,7 @@ class Item:
         slot="tools",
         keywords=['Cooking pot'],
         value=15,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Cooking', 'level': 20}]
@@ -3736,6 +3963,7 @@ class Item:
         slot="tools",
         keywords=['Cooking pan'],
         value=7,
+        rarity='legendary',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Cooking', 'level': 50}]
@@ -3748,6 +3976,7 @@ class Item:
         slot="tools",
         keywords=[],
         value=4,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Mining', 'level': 7}]
@@ -3760,6 +3989,7 @@ class Item:
         slot="tools",
         keywords=['Regional'],
         value=2,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -3772,6 +4002,7 @@ class Item:
         slot="tools",
         keywords=['Basket'],
         value=8,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Woodcutting', 'level': 13}]
@@ -3784,6 +4015,7 @@ class Item:
         slot="tools",
         keywords=['Log splitter'],
         value=52,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Woodcutting', 'level': 35}]
@@ -3796,6 +4028,7 @@ class Item:
         slot="tools",
         keywords=[],
         value=18,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Foraging', 'level': 35}]
@@ -3808,6 +4041,7 @@ class Item:
         slot="tools",
         keywords=['Regional'],
         value=2,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'reputation', 'faction': 'erdwise', 'amount': 1}]
@@ -3820,6 +4054,7 @@ class Item:
         slot="tools",
         keywords=['Magnifying lens'],
         value=48,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Trinketry', 'level': 36}, {'type': 'skill', 'skill': 'Crafting', 'level': 31}]
@@ -3832,6 +4067,7 @@ class Item:
         slot="tools",
         keywords=['Regional'],
         value=2,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'reputation', 'faction': 'erdwise', 'amount': 1}]
@@ -3844,6 +4080,7 @@ class Item:
         slot="tools",
         keywords=['Local map', 'Regional'],
         value=11,
+        rarity='epic',
         location_reqs=[],
         gated_stats={'item_ownership': {'map of jarvonia': {'traveling': {'jarvonia': {'double_action': 15.0}}}, 'map of erdwise': {'traveling': {'erdwise': {'double_action': 15.0}}}, 'map of trellin': {'traveling': {'trellin': {'double_action': 15.0}}}, 'map of syrenthia': {'traveling': {'syrenthia': {'double_action': 15.0}}}, 'map of halfling rebels': {'traveling': {'halfling_rebels': {'double_action': 15.0}}}}},
         requirements=[{'type': 'skill', 'skill': 'Agility', 'level': 22}]
@@ -3856,6 +4093,7 @@ class Item:
         slot="tools",
         keywords=['Local map', 'Regional'],
         value=11,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Agility', 'level': 22}]
@@ -3868,6 +4106,7 @@ class Item:
         slot="tools",
         keywords=['Local map', 'Regional'],
         value=11,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Agility', 'level': 22}]
@@ -3880,6 +4119,7 @@ class Item:
         slot="tools",
         keywords=['Local map', 'Regional'],
         value=11,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Agility', 'level': 22}]
@@ -3892,6 +4132,7 @@ class Item:
         slot="tools",
         keywords=['Local map', 'Regional'],
         value=11,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Agility', 'level': 22}]
@@ -3904,6 +4145,7 @@ class Item:
         slot="tools",
         keywords=['Local map', 'Regional'],
         value=11,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Agility', 'level': 22}]
@@ -3916,6 +4158,7 @@ class Item:
         slot="tools",
         keywords=['Cooking knife', 'Cooking tool'],
         value=18,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Cooking', 'level': 25}]
@@ -3928,6 +4171,7 @@ class Item:
         slot="tools",
         keywords=['Magnetic'],
         value=32,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Mining', 'level': 32}]
@@ -3940,6 +4184,7 @@ class Item:
         slot="tools",
         keywords=['Regional'],
         value=2,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -3952,6 +4197,7 @@ class Item:
         slot="tools",
         keywords=['Skill book'],
         value=36,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Agility', 'level': 45}]
@@ -3964,6 +4210,7 @@ class Item:
         slot="tools",
         keywords=['Spices'],
         value=27,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Cooking', 'level': 30}]
@@ -3985,6 +4232,7 @@ class Item:
         slot="tools",
         keywords=['Regional'],
         value=2,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'reputation', 'faction': 'jarvonia', 'amount': 1}]
@@ -3997,6 +4245,7 @@ class Item:
         slot="tools",
         keywords=[],
         value=7,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Foraging', 'level': 15}]
@@ -4009,6 +4258,7 @@ class Item:
         slot="tools",
         keywords=['Ruler'],
         value=8,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Carpentry', 'level': 18}]
@@ -4021,6 +4271,7 @@ class Item:
         slot="tools",
         keywords=[],
         value=10,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Trinketry', 'level': 18}]
@@ -4033,6 +4284,7 @@ class Item:
         slot="tools",
         keywords=[],
         value=11,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Carpentry', 'level': 17}]
@@ -4045,6 +4297,7 @@ class Item:
         slot="tools",
         keywords=['Skill book'],
         value=40,
+        rarity='legendary',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Cooking', 'level': 35}]
@@ -4057,6 +4310,7 @@ class Item:
         slot="tools",
         keywords=['Sander'],
         value=4,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Trinketry', 'level': 3}]
@@ -4069,6 +4323,7 @@ class Item:
         slot="tools",
         keywords=['Fishing net', 'Fishing tool'],
         value=8,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Fishing', 'level': 1}]
@@ -4081,6 +4336,7 @@ class Item:
         slot="tools",
         keywords=['Fishing rod', 'Fishing tool'],
         value=8,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Fishing', 'level': 1}]
@@ -4093,6 +4349,7 @@ class Item:
         slot="tools",
         keywords=['Hatchet', 'Woodcutting tool'],
         value=8,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Woodcutting', 'level': 1}]
@@ -4105,6 +4362,7 @@ class Item:
         slot="tools",
         keywords=['Mining tool', 'Pickaxe'],
         value=8,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Mining', 'level': 1}]
@@ -4117,6 +4375,7 @@ class Item:
         slot="tools",
         keywords=['Foraging tool', 'Sickle'],
         value=8,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Foraging', 'level': 1}]
@@ -4129,6 +4388,7 @@ class Item:
         slot="tools",
         keywords=['Achievement reward'],
         value=7,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -4141,6 +4401,7 @@ class Item:
         slot="tools",
         keywords=['Crafting tool', 'Screwdriver'],
         value=16,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={'skill_level': {'crafting': {50: {'crafting': {'global': {'double_rewards': 4.0}}}}}, 'activity_completion': {'underwater basket weaving': {50: {'crafting': {'global': {'no_materials_consumed': 3.0}}}}, 'tinkering': {200: {'crafting': {'global': {'work_efficiency': 9.0}}}}}},
         requirements=[{'type': 'skill', 'skill': 'Crafting', 'level': 16}]
@@ -4153,6 +4414,7 @@ class Item:
         slot="tools",
         keywords=['Regional'],
         value=0,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -4165,6 +4427,7 @@ class Item:
         slot="tools",
         keywords=['Chisel'],
         value=44,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Trinketry', 'level': 27}, {'type': 'skill', 'skill': 'Carpentry', 'level': 14}]
@@ -4177,6 +4440,7 @@ class Item:
         slot="tools",
         keywords=['Cooking knife', 'Cooking tool'],
         value=15,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Cooking', 'level': 25}]
@@ -4189,6 +4453,7 @@ class Item:
         slot="tools",
         keywords=['Foraging tool'],
         value=18,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Foraging', 'level': 22}]
@@ -4201,6 +4466,7 @@ class Item:
         slot="tools",
         keywords=[],
         value=7,
+        rarity='legendary',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -4213,6 +4479,7 @@ class Item:
         slot="tools",
         keywords=['Fishing lure'],
         value=48,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Fishing', 'level': 26}]
@@ -4225,6 +4492,7 @@ class Item:
         slot="tools",
         keywords=[],
         value=160,
+        rarity='legendary',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Mining', 'level': 42}]
@@ -4237,6 +4505,7 @@ class Item:
         slot="tools",
         keywords=['Bug catching net'],
         value=4,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -4249,6 +4518,7 @@ class Item:
         slot="tools",
         keywords=['Chisel'],
         value=5,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -4261,6 +4531,7 @@ class Item:
         slot="tools",
         keywords=['Gold pan'],
         value=4,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -4273,6 +4544,7 @@ class Item:
         slot="tools",
         keywords=['Smithing hammer', 'Smithing tool'],
         value=6,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -4285,6 +4557,7 @@ class Item:
         slot="tools",
         keywords=['Magnetic'],
         value=3,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -4297,6 +4570,7 @@ class Item:
         slot="tools",
         keywords=['Cooking pan'],
         value=4,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -4309,6 +4583,7 @@ class Item:
         slot="tools",
         keywords=['Carpentry tool', 'Saw'],
         value=5,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -4321,6 +4596,7 @@ class Item:
         slot="tools",
         keywords=['Light source'],
         value=6,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Agility', 'level': 10}]
@@ -4333,6 +4609,7 @@ class Item:
         slot="tools",
         keywords=['Crafting tool', 'Wrench'],
         value=5,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -4345,6 +4622,7 @@ class Item:
         slot="tools",
         keywords=['Ruler'],
         value=7,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Crafting', 'level': 18}]
@@ -4357,6 +4635,7 @@ class Item:
         slot="tools",
         keywords=[],
         value=6,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Foraging', 'level': 17}]
@@ -4369,6 +4648,7 @@ class Item:
         slot="tools",
         keywords=[],
         value=10,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Fishing', 'level': 13}]
@@ -4381,6 +4661,7 @@ class Item:
         slot="tools",
         keywords=[],
         value=9,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Cooking', 'level': 15}]
@@ -4393,6 +4674,7 @@ class Item:
         slot="tools",
         keywords=['Fishing lure', 'Regional'],
         value=7,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Fishing', 'level': 40}, {'type': 'reputation', 'faction': 'syrenthia', 'amount': 60}]
@@ -4405,6 +4687,7 @@ class Item:
         slot="tools",
         keywords=['Achievement reward'],
         value=15,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -4417,6 +4700,7 @@ class Item:
         slot="tools",
         keywords=['Achievement reward'],
         value=0,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -4429,6 +4713,7 @@ class Item:
         slot="tools",
         keywords=['Achievement reward'],
         value=0,
+        rarity='legendary',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -4441,6 +4726,7 @@ class Item:
         slot="tools",
         keywords=['Achievement reward'],
         value=15,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -4453,6 +4739,7 @@ class Item:
         slot="tools",
         keywords=['Hatchet', 'Woodcutting tool'],
         value=666,
+        rarity='ethereal',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Woodcutting', 'level': 50}, {'type': 'reputation', 'faction': 'trellin', 'amount': 150}]
@@ -4465,6 +4752,7 @@ class Item:
         slot="tools",
         keywords=['Faction reward', 'Regional'],
         value=0,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Agility', 'level': 40}]
@@ -4477,6 +4765,7 @@ class Item:
         slot="tools",
         keywords=[],
         value=4,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Agility', 'level': 1}]
@@ -4489,6 +4778,7 @@ class Item:
         slot="tools",
         keywords=['Water'],
         value=5,
+        rarity='common',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Agility', 'level': 1}]
@@ -4501,6 +4791,7 @@ class Item:
         slot="tools",
         keywords=['Skill book'],
         value=48,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Foraging', 'level': 35}]
@@ -4513,6 +4804,7 @@ class Item:
         slot="tools",
         keywords=['Gold pan', 'Regional'],
         value=66,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Mining', 'level': 40}, {'type': 'skill', 'skill': 'Fishing', 'level': 40}, {'type': 'reputation', 'faction': 'jarvonia', 'amount': 60}]
@@ -4525,6 +4817,7 @@ class Item:
         slot="tools",
         keywords=['Crafting tool', 'Saw'],
         value=30,
+        rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Crafting', 'level': 25}, {'type': 'skill', 'skill': 'Trinketry', 'level': 12}]
@@ -4537,6 +4830,7 @@ class Item:
         slot="tools",
         keywords=[],
         value=11,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Smithing', 'level': 17}]
@@ -4549,6 +4843,7 @@ class Item:
         slot="tools",
         keywords=['Skill book'],
         value=64,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Woodcutting', 'level': 30}]
@@ -4561,6 +4856,7 @@ class Item:
         slot="tools",
         keywords=[],
         value=64,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Woodcutting', 'level': 38}, {'type': 'skill', 'skill': 'Agility', 'level': 38}]
@@ -4573,6 +4869,7 @@ class Item:
         slot="tools",
         keywords=[],
         value=10,
+        rarity='uncommon',
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Trinketry', 'level': 26}]
@@ -4585,6 +4882,7 @@ class Item:
         slot="tools",
         keywords=['Faction reward', 'Regional'],
         value=15,
+        rarity='epic',
         location_reqs=[],
         gated_stats={'activity': {'sledding': {'global': {'global': {'steps_add': -5.0}}}}},
         requirements=[{'type': 'character_level', 'level': 40}]

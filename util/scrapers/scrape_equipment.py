@@ -93,6 +93,7 @@ def parse_item_page(html_content, item_name):
         'slot': None,  # Equipment slot
         'keywords': [],  # Item keywords
         'value': 0,  # Coin value
+        'rarity': None,  # Item rarity (common, uncommon, rare, epic, legendary, ethereal)
         'location_requirements': [],  # Regions/locations where item works
         'stats': {},  # Legacy flat stats
         'skill_stats': {},  # New format: {skill: {stat: value}}
@@ -149,6 +150,28 @@ def parse_item_page(html_content, item_name):
                         value_match = re.search(r'(\d+)', value_text)
                         if value_match:
                             item_data['value'] = int(value_match.group(1))
+                
+                # Extract rarity
+                if 'Rarity' in header_text:
+                    rarity_cell = row.find('td')
+                    if rarity_cell:
+                        # Try to find rarity from link title (e.g., "Special:MyLanguage/Rare Items")
+                        rarity_link = rarity_cell.find('a')
+                        if rarity_link:
+                            title = rarity_link.get('title', '').lower()
+                            # Extract rarity from title - check in order from longest to shortest to avoid substring matches
+                            for rarity_name in ['legendary', 'ethereal', 'uncommon', 'common', 'epic', 'rare']:
+                                if f'{rarity_name} items' in title or f'{rarity_name}_items' in title:
+                                    item_data['rarity'] = rarity_name
+                                    break
+                        
+                        # Fallback: try image alt text
+                        if not item_data['rarity']:
+                            rarity_img = rarity_cell.find('img')
+                            if rarity_img:
+                                alt_text = rarity_img.get('alt', '').strip().lower()
+                                if alt_text in ['common', 'uncommon', 'rare', 'epic', 'legendary', 'ethereal']:
+                                    item_data['rarity'] = alt_text
     
     # Parse requirements section
     requirements = []
@@ -806,12 +829,13 @@ def generate_equipment_py(items):
         '',
         'class ItemInstance(StatsMixin):',
         '    """Base class for item instances"""',
-        '    def __init__(self, name: str, uuid: str, stats: Dict, slot: str = None, keywords: list = None, value: int = 0, location_reqs: list = None, gated_stats: Dict = None, requirements: list = None):',
+        '    def __init__(self, name: str, uuid: str, stats: Dict, slot: str = None, keywords: list = None, value: int = 0, rarity: str = None, location_reqs: list = None, gated_stats: Dict = None, requirements: list = None):',
         '        self.name = name',
         '        self.uuid = uuid',
         '        self.slot = slot',
         '        self.keywords = keywords or []',
         '        self.value = value  # Coin value',
+        '        self.rarity = rarity  # Item rarity (common, uncommon, rare, epic, legendary, ethereal)',
         '        self.location_requirements = location_reqs or []  # Regions/locations where item works',
         '        self._stats = stats  # Nested dict: {skill: {location: {stat: value}}}',
         '        self.gated_stats = gated_stats or {}  # Stats with requirements (skill level, activity completion, etc.)',
@@ -846,7 +870,7 @@ def generate_equipment_py(items):
         '',
         # Generate achievement item class
         '',
-        'class AchievementItem:',
+        'class AchievementItem(StatsMixin):',
         '    """Item with stats that unlock at achievement point thresholds"""',
         '    def __init__(self, name: str, uuid: str, slot: str, keywords: list, value: int, achievement_stats: Dict[int, Dict[str, float]], requirements: list = None):',
         '        self.name = name',
@@ -856,6 +880,7 @@ def generate_equipment_py(items):
         '        self.value = value',
         '        self._achievement_stats = achievement_stats  # {ap_threshold: stats}',
         '        self.requirements = requirements or []  # Unlock requirements',
+        '        self.has_instance = True',
         '    ',
         '    def __getitem__(self, achievement_points: int):',
         '        """Allow accessing by achievement points like OMNI_TOOL[140]"""',
@@ -877,7 +902,7 @@ def generate_equipment_py(items):
         '                        for stat, value in location_data.items():',
         '                            accumulated_stats[skill][location][stat] = accumulated_stats[skill][location].get(stat, 0.0) + value',
         '        ',
-        '        return ItemInstance(f"{self.name} ({achievement_points})", self.uuid, accumulated_stats, self.slot, self.keywords, self.value, requirements=self.requirements)',
+        '        return ItemInstance(f"{self.name} ({achievement_points})", self.uuid, accumulated_stats, self.slot, self.keywords, self.value, rarity=None, requirements=self.requirements)',
         '    ',
         '    @property',
         '    def display_name(self):',
@@ -886,28 +911,11 @@ def generate_equipment_py(items):
         '        ap = util.walkscape_globals.ACHIEVEMENT_POINTS',
         '        return f"{self.name} ({ap} AP)"',
         '    ',
-        '    def is_unlocked(self, character=None, ignore_gear_requirements=False):',
-        '        """Check if achievement item is unlocked - delegates to current AP instance"""',
-        '        import util.walkscape_globals',
-        '        ap = util.walkscape_globals.ACHIEVEMENT_POINTS',
-        '        instance = self._get_stats_for_ap(ap)',
-        '        return instance.is_unlocked(character, ignore_gear_requirements)',
-        '    ',
-        '    def get_stats_for_skill(self, skill=None, location=None, activity=None, achievement_points=None):',
+        '    def get_instance(self, **kwargs):',
         '        """Get stats for achievement item at given AP level"""',
-        '        if achievement_points is None:',
-        '            import util.walkscape_globals',
-        '            achievement_points = util.walkscape_globals.ACHIEVEMENT_POINTS',
-        '        instance = self._get_stats_for_ap(achievement_points)',
-        '        return instance.get_stats_for_skill(skill, location, activity)',
-        '    ',
-        '    def attr(self, skill=None, location=None, activity=None, achievement_points: int = None):',
-        '        """Get attributes for achievement item at given AP level"""',
-        '        if achievement_points is None:',
-        '            import util.walkscape_globals',
-        '            achievement_points = util.walkscape_globals.ACHIEVEMENT_POINTS',
-        '        instance = self._get_stats_for_ap(achievement_points)',
-        '        return instance.attr(skill, location=location, activity=activity)',
+        '        import util.walkscape_globals',
+        '        achievement_points = util.walkscape_globals.ACHIEVEMENT_POINTS',
+        '        return self._get_stats_for_ap(achievement_points)',
         '    ',
         '    def __repr__(self):',
         '        import util.walkscape_globals',
@@ -940,7 +948,7 @@ def generate_equipment_py(items):
             f'        stats = self._base_stats.copy()',
             f'        stats.update(self._quality_stats.get("{quality}", {{}}))',
             f'        value = self._quality_values.get("{quality}", self.value)',
-            f'        return ItemInstance(f"{{self.name}} ({quality})", self.uuid, stats, self.slot, self.keywords, value)',
+            f'        return ItemInstance(f"{{self.name}} ({quality})", self.uuid, stats, self.slot, self.keywords, value, rarity=None)',
             '    ',
             ])
     
@@ -1032,6 +1040,7 @@ def generate_equipment_py(items):
                 stats = item['stats']
                 gated_stats = item.get('gated_stats', {})
                 requirements = item.get('requirements', [])
+                rarity = item.get('rarity')
                 
                 lines.extend([
                     f'    {item_const} = ItemInstance(',
@@ -1041,6 +1050,7 @@ def generate_equipment_py(items):
                     f'        slot="{slot}",',
                     f'        keywords={keywords},',
                     f'        value={item.get("value", 0)},',
+                    f'        rarity={repr(rarity)},',
                     f'        location_reqs={location_reqs},',
                     f'        gated_stats={gated_stats},',
                     f'        requirements={requirements}',

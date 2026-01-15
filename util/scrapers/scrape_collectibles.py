@@ -286,7 +286,7 @@ def generate_python_module(collectibles):
         'COLLECTIBLES_BY_EXPORT_NAME = {}',
         'for c in COLLECTIBLES:',
         '    # Convert display name to export name format (snake_case)',
-        '    export_name = c.name.lower().replace(" ", "_").replace("-", "_").replace("\'", "").replace("(", "").replace(")", "").replace(".", "")',
+        '    export_name = c.name.lower().replace(" ", "_").replace("-", "_").replace("\'", "").replace("(", "").replace(")", "")',
         '    COLLECTIBLES_BY_EXPORT_NAME[export_name] = c',
         '',
         'def by_export_name(export_name: str):',
