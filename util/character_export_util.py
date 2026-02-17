@@ -28,11 +28,25 @@ class Character:
         self.coins = data.get('coins', 0)
         self._all_items = {}
         
+        # Custom stats (UI toggles like activity completions)
+        # Format: {'screwdriver_underwater_basket_weaving': True, 'skate_skiing': True}
+        # None means "not set by UI, fall back to my_config"
+        # {} means "set by UI but empty, don't fall back to my_config"
+        self.custom_stats = data.get('custom_stats', None)
+        
         # Set global achievement points for AchievementItem defaults
         walkscape_globals.set_achievement_points(self.achievement_points)
         
+        # Set global custom stats for gated stats (only if not None)
+        if self.custom_stats is not None:
+            walkscape_globals.set_custom_stats(self.custom_stats)
+        
         # Skills
         self.skills = data.get('skills', {})
+        
+        # Calculate and set global total skill level (must be after self.skills is set)
+        self._total_skill_level = sum(xp_to_level(xp) for xp in self.skills.values())
+        walkscape_globals.set_total_skill_level(self._total_skill_level)
         
         # Gear (equipped items)
         self._gear_raw = data.get('gear', {})
@@ -162,6 +176,10 @@ class Character:
             skillName = skill.name
         xp = self.skills.get(skillName.lower(), 0)
         return xp_to_level(xp)
+    
+    def get_total_skill_level(self) -> int:
+        """Get total skill level (sum of all skill levels)"""
+        return self._total_skill_level
     
     def get_character_level(self) -> int:
         """Get character level based on total steps"""

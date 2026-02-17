@@ -543,11 +543,21 @@ def parse_requirements_section(soup, activity_data, activity_name):
                 print(f"  Found light source requirement: {count}")
         
         # Reputation requirements
-        rep_match = re.search(r'(\d+)\s+reputation\s+with\s+([^,\.]+)', text, re.IGNORECASE)
+        # Pattern 1: "Have [40] Erdwise faction reputation"
+        rep_match = re.search(r'Have\s+\[(\d+)\]\s+([^\s]+(?:\s+[^\s]+)?)\s+faction\s+reputation', text, re.IGNORECASE)
         if rep_match:
             amount = int(rep_match.group(1))
             faction = clean_text(rep_match.group(2))
             activity_data['requirements']['reputation'][faction] = amount
+            print(f"  Found reputation requirement: {faction} = {amount}")
+        else:
+            # Pattern 2: "40 reputation with Erdwise" (legacy format)
+            rep_match = re.search(r'(\d+)\s+reputation\s+with\s+([^,\.]+)', text, re.IGNORECASE)
+            if rep_match:
+                amount = int(rep_match.group(1))
+                faction = clean_text(rep_match.group(2))
+                activity_data['requirements']['reputation'][faction] = amount
+                print(f"  Found reputation requirement: {faction} = {amount}")
         
         # Activity completion requirements
         completion_match = re.search(r'completed?\s+(?:the\s+)?(.+?)\s+activity\s+\((\d+)\)\s+times', text, re.IGNORECASE)
@@ -724,8 +734,24 @@ def parse_drop_tables(soup, activity_data, activity_name):
         # Detect if this is a level-based table by checking headers
         header_row = table.find('tr')
         is_level_based = False
+        is_percentage_summary = False
         if header_row:
             header_texts = [th.get_text().replace('\n', ' ').strip().lower() for th in header_row.find_all('th')]
+            
+            # Check if this is a percentage summary table (should be skipped)
+            # These tables show calculated drop rates like "0.411%" and have headers like:
+            # "Item", "Actual Drop Rate", "Rarity", "Drop Rate", etc.
+            # They typically have very small percentages (< 1%) in the chance column
+            has_actual_drop_rate = any('actual' in h and 'drop' in h for h in header_texts)
+            has_rarity = any('rarity' in h for h in header_texts)
+            has_drop_rate_only = any(h == 'drop rate' or h == 'droprate' for h in header_texts)
+            
+            # If it has these summary-style headers, it's a calculated table - skip it
+            if has_actual_drop_rate or has_rarity or has_drop_rate_only:
+                is_percentage_summary = True
+                print(f"  Skipping percentage summary table (headers: {', '.join(header_texts[:5])})")
+                continue
+            
             # Check for level-based columns
             has_initial = any('initial' in h and 'appearance' in h for h in header_texts)
             has_max_level = any('max' in h and 'level' in h for h in header_texts)
@@ -752,6 +778,11 @@ def parse_drop_tables(soup, activity_data, activity_name):
             
             # Skip empty rows
             if not item_name or item_name == '':
+                continue
+            
+            # Skip rows where the item name is a percentage (like "0.411%")
+            # These are from calculated drop rate tables that should be ignored
+            if re.match(r'^\d+\.\d+%$', item_name):
                 continue
             
             # Skip skill/XP rows
@@ -870,8 +901,8 @@ def link_items_and_locations(activities):
         # Link drop table items
         for drop in activity['drop_table']:
             item_name = drop['item']
-            if item_name in ['Nothing', 'Coins']:
-                continue  # Skip special items
+            if item_name == 'Nothing':
+                continue  # Skip Nothing
             
             # Use the shared resolve function
             item_ref = resolve_item_reference(item_name, lookups)
@@ -886,7 +917,7 @@ def link_items_and_locations(activities):
         # Link secondary drop table items
         for drop in activity['secondary_drop_table']:
             item_name = drop['item']
-            if item_name in ['Nothing', 'Coins']:
+            if item_name == 'Nothing':
                 continue
             
             # Use the shared resolve function
@@ -1063,6 +1094,51 @@ def generate_module(activities):
         '        results = {}',
         '        all_drops = self.drop_table + self.secondary_drop_table',
         '        ',
+        '        # Add equipment item finding drops',
+        '        # Check for ItemFindingCategory.* stats and expand them',
+        '        equipment_drops = []',
+        '        for stat_name, stat_value in stats.items():',
+        '            if stat_name.startswith("ItemFindingCategory."):',
+        '                # Extract category constant name',
+        '                category_const = stat_name.split(".", 1)[1]',
+        '                try:',
+        '                    from util.autogenerated.item_finding import ItemFindingCategory',
+        '                    if hasattr(ItemFindingCategory, category_const):',
+        '                        category = getattr(ItemFindingCategory, category_const)',
+        '                        # stat_value is already in percentage form (1.5 = 1.5%), not decimal',
+        '                        expanded_drops = category.expand_with_chance(stat_value)',
+        '                        equipment_drops.extend(expanded_drops)',
+        '                except ImportError:',
+        '                    pass',
+        '        ',
+        '        # Also check collectible and consumable stats for ItemFindingCategory',
+        '        for stat_name, stat_value in collectible_stats.items():',
+        '            if stat_name.startswith("ItemFindingCategory."):',
+        '                category_const = stat_name.split(".", 1)[1]',
+        '                try:',
+        '                    from util.autogenerated.item_finding import ItemFindingCategory',
+        '                    if hasattr(ItemFindingCategory, category_const):',
+        '                        category = getattr(ItemFindingCategory, category_const)',
+        '                        expanded_drops = category.expand_with_chance(stat_value * 100)  # Collectibles are in decimal',
+        '                        equipment_drops.extend(expanded_drops)',
+        '                except ImportError:',
+        '                    pass',
+        '        ',
+        '        for stat_name, stat_value in consumable_stats.items():',
+        '            if stat_name.startswith("ItemFindingCategory."):',
+        '                category_const = stat_name.split(".", 1)[1]',
+        '                try:',
+        '                    from util.autogenerated.item_finding import ItemFindingCategory',
+        '                    if hasattr(ItemFindingCategory, category_const):',
+        '                        category = getattr(ItemFindingCategory, category_const)',
+        '                        expanded_drops = category.expand_with_chance(stat_value * 100)  # Consumables are in decimal',
+        '                        equipment_drops.extend(expanded_drops)',
+        '                except ImportError:',
+        '                    pass',
+        '        ',
+        '        # Combine equipment drops with activity drops',
+        '        all_drops = all_drops + equipment_drops',
+        '        ',
         '        # Store comprehensive calculation details for verbose mode',
         '        details = {',
         '            "primary_skill": self.primary_skill,',
@@ -1099,7 +1175,8 @@ def generate_module(activities):
         '        # Calculate secondary XP per step for each secondary skill',
         '        secondary_xp_per_step = {}',
         '        secondary_xp_per_action = {}',
-        '        total_xp = primary_xp_per_step',
+        '        total_xp_per_step = primary_xp_per_step',
+        '        total_xp_for_action = primary_xp_per_action',
         '        ',
         '        if self.secondary_xp:',
         '            for skill, xp in self.secondary_xp.items():',
@@ -1107,11 +1184,13 @@ def generate_module(activities):
         '                xp_per_step = xp_per_action / expected_steps_per_action',
         '                secondary_xp_per_action[skill] = xp_per_action',
         '                secondary_xp_per_step[skill] = xp_per_step',
-        '                total_xp += xp_per_step',
+        '                total_xp_per_step += xp_per_step',
+        '                total_xp_for_action += xp_per_action',
         '        ',
         '        details["secondary_xp_per_step"] = secondary_xp_per_step',
         '        details["secondary_xp_per_action"] = secondary_xp_per_action',
-        '        details["total_xp_per_step"] = total_xp',
+        '        details["total_xp_per_step"] = total_xp_per_step',
+        '        details["total_xp_for_action"] = total_xp_for_action',
         '        ',
         '        # Add all collectible stats to details (with "collectible_" prefix)',
         '        for stat_name, stat_value in collectible_stats.items():',

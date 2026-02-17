@@ -342,8 +342,12 @@ def _calculate_set_piece_counts_from_items(items: list) -> Dict[str, int]:
             if keyword_lower not in unique_items_per_set:
                 unique_items_per_set[keyword_lower] = set()
             
-            # Add item UUID to track uniqueness
-            unique_items_per_set[keyword_lower].add(item.uuid)
+            # Add item UUID to track uniqueness (skip if item doesn't have uuid, like consumables)
+            if hasattr(item, 'uuid'):
+                unique_items_per_set[keyword_lower].add(item.uuid)
+            else:
+                # For items without uuid (like consumables), use name as identifier
+                unique_items_per_set[keyword_lower].add(item.name)
     
     # Count unique items per set
     for set_name, uuids in unique_items_per_set.items():

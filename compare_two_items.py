@@ -4,7 +4,7 @@
 from util.walkscape_constants import *
 
 # Items to compare
-ITEM1 = Item.HYDRILIUM_SICKLE.GREAT
+ITEM1 = Item.HYDRILIUM_SICKLE.EXCELLENT
 ITEM2 = Item.IRON_SICKLE.PERFECT
 
 # Skill to compare for

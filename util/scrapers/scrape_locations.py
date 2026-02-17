@@ -96,6 +96,23 @@ def parse_location_page(location_name, from_folder=False, cache_file_path=None):
     
     soup = BeautifulSoup(html, 'html.parser')
     
+    # Extract icon name - look for <a title="LOCATION_NAME" href="...svg">
+    icon_name = None
+    for link in soup.find_all('a', title=location_name, href=True):
+        href = link.get('href', '')
+        if '.svg' in href.lower():
+            # Extract just the filename from the URL
+            # Format: /wiki/File:Castle_White_Icon.svg
+            parts = href.split('/')
+            if parts:
+                filename = parts[-1]
+                # Remove "File:" prefix if present
+                if filename.startswith('File:'):
+                    filename = filename[5:]
+                # Store as lowercase for consistency
+                icon_name = filename.lower()
+                break
+    
     # Extract primary region from "is a location that can be found in the X region"
     primary_region = None
     # Use \s+ to match one or more whitespace characters
@@ -116,6 +133,51 @@ def parse_location_page(location_name, from_folder=False, cache_file_path=None):
     if not primary_region:
         print(f"  ⚠ Could not find region for {location_name}, defaulting to jarvonia")
         primary_region = 'jarvonia'
+    
+    # Extract keywords - look for "Underwater" keyword in the Keyword section
+    keywords = []
+    
+    # Find the "Keyword" or "Keywords" heading
+    keyword_heading = soup.find(['h1', 'h2'], id='Keyword')
+    if not keyword_heading:
+        keyword_heading = soup.find(['h1', 'h2'], id='Keywords')
+    
+    if keyword_heading:
+        # Get the parent div and then find next siblings
+        keyword_div = keyword_heading.find_parent('div', class_='mw-heading')
+        if keyword_div:
+            current = keyword_div.find_next_sibling()
+        else:
+            current = keyword_heading.find_next_sibling()
+        
+        while current:
+            # Stop if we hit another heading
+            if current.name == 'div' and 'mw-heading' in current.get('class', []):
+                break
+            if current.name in ['h1', 'h2']:
+                break
+            
+            # Look for keyword links (Special:MyLanguage/Underwater, etc.)
+            for link in current.find_all('a', href=True):
+                href = link.get('href', '')
+                
+                # Only process Special:MyLanguage links
+                if 'Special:MyLanguage/' in href:
+                    # Extract the keyword name from the URL
+                    parts = href.split('/')
+                    if len(parts) >= 2:
+                        keyword_name = unquote(parts[-1])
+                        keyword_name = keyword_name.lower().replace(' ', '_')
+                        
+                        # Skip generic keyword pages (not actual location keywords)
+                        if 'keyword' in keyword_name and '#' in keyword_name:
+                            continue
+                        
+                        # Add if not already in list
+                        if keyword_name and keyword_name not in keywords:
+                            keywords.append(keyword_name)
+            
+            current = current.find_next_sibling()
     
     # Extract factions - look for faction links ONLY in the Faction section
     # This dynamically finds faction links without hardcoding faction names
@@ -172,13 +234,18 @@ def parse_location_page(location_name, from_folder=False, cache_file_path=None):
             
             current = current.find_next_sibling()
 
-    # Build regions list: primary region first, then all factions
+    # Build regions list: primary region first, then all factions, then keywords
     regions = [primary_region]
     
     # Add all factions (can be multiple, like Everhaven with both Trellin and Erdwise)
     for faction in factions:
         if faction not in regions:
             regions.append(faction)
+    
+    # Add all keywords (like 'underwater' for underwater locations)
+    for keyword in keywords:
+        if keyword not in regions:
+            regions.append(keyword)
     
     # Add any hardcoded extra regions (like 'underwater' for Syrenthia)
     for region in list(regions):  # Use list() to avoid modifying while iterating
@@ -188,13 +255,16 @@ def parse_location_page(location_name, from_folder=False, cache_file_path=None):
                 regions.append(extra)
     
     if location_name.lower() in HARD_CODED_EXTRA_REGIONS.keys():
-        regions.append(HARD_CODED_EXTRA_REGIONS[location_name.lower()])
+        extra = HARD_CODED_EXTRA_REGIONS[location_name.lower()]
+        if extra not in regions:
+            regions.append(extra)
     
     return {
         'name': location_name,
         'enum': loc_enum,
         'regions': regions,
-        'primary_region': primary_region
+        'primary_region': primary_region,
+        'icon_name': icon_name
     }
 
 def generate_locations_module(locations):
@@ -210,11 +280,12 @@ def generate_locations_module(locations):
         # LocationInfo class
         'class LocationInfo:',
         '    """Information about a location including all its region tags."""',
-        '    def __init__(self, name: str, regions: list):',
+        '    def __init__(self, name: str, regions: list, icon_name: str = None):',
         '        self.name = name',
         '        self.regions = regions  # List of all region tags (primary + factions)',
         '        self.primary_region = regions[0] if regions else None',
         '        self.is_underwater = \'underwater\' in regions',
+        '        self.icon_name = icon_name  # SVG icon filename (e.g., "Castle_White_Icon.svg")',
         '    ',
         '    def is_in_region(self, region: str) -> bool:',
         '        """Check if this location is in the specified region."""',
@@ -257,7 +328,8 @@ def generate_locations_module(locations):
             lines.append(f'    # {region.upper()}')
             for loc in sorted(by_region[region], key=lambda x: x['enum']):
                 regions_str = str(loc['regions'])
-                lines.append(f'    {loc["enum"]} = LocationInfo("{loc["name"]}", {regions_str})')
+                icon_str = f'"{loc["icon_name"]}"' if loc.get('icon_name') else 'None'
+                lines.append(f'    {loc["enum"]} = LocationInfo("{loc["name"]}", {regions_str}, {icon_str})')
             lines.append('')
         
         write_lines(f, lines)

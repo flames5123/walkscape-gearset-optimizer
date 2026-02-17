@@ -18,10 +18,15 @@ class ExportNames:
     
     ABSORBING_AMULET = "absorbing_amulet"
     ADAMANT_BAR = "adamant_bar"
+    ADAMANT_BAR_FINE = "adamant_bar_fine"
+    ADAMANT_HATCHET = "adamant_hatchet"
     ADAMANT_ORE = "adamant_ore"
+    ADAMANT_ORE_FINE = "adamant_ore_fine"
+    ADAMANT_PICKAXE = "adamant_pickaxe"
     ADJUSTABLE_WRENCH = "adjustable_wrench"
     ADORING_FAN_STATUE = "adoring_fan_statue"
     ADVENTURERS_ENAMEL_PIN = "adventurers_enamel_pin"
+    ADVENTURERS_ENAMEL_PIN_FINE = "adventurers_enamel_pin_fine"
     ADVENTURING_AMULET = "adventuring_amulet"
     ADVENTURING_FISHING_POLE = "adventuring_fishing_pole"
     ADVENTURING_FRYING_PAN = "adventuring_frying_pan"
@@ -55,22 +60,33 @@ class ExportNames:
     BACKPACK = "backpack"
     BAG_OF_ROCKS = "bag_of_rocks"
     BAGEL = "bagel"
+    BAGEL_FINE = "bagel_fine"
     BAMBOO_LOGS = "bamboo_logs"
+    BAMBOO_LOGS_FINE = "bamboo_logs_fine"
     BAMBOO_PLANK = "bamboo_plank"
+    BAMBOO_PLANK_FINE = "bamboo_plank_fine"
     BASIC_FISHING_NET = "basic_fishing_net"
     BASIC_HATCHET = "basic_hatchet"
     BASIC_PICKAXE = "basic_pickaxe"
     BASIC_SICKLE = "basic_sickle"
     BAT_TRINKET = "bat_trinket"
+    BAT_TRINKET_FINE = "bat_trinket_fine"
     BEAVER_TRINKET = "beaver_trinket"
+    BEAVER_TRINKET_FINE = "beaver_trinket_fine"
     BEEF_STEW = "beef_stew"
+    BEEF_STEW_FINE = "beef_stew_fine"
     BEER = "beer"
+    BEER_FINE = "beer_fine"
     BELL_PEPPER = "bell_pepper"
+    BELL_PEPPER_FINE = "bell_pepper_fine"
     BERRIES = "berries"
+    BERRIES_FINE = "berries_fine"
     BERTS_SUPER_SKIS = "berts_super_skis"
     BIG_BASKET = "big_basket"
     BIRCH_LOGS = "birch_logs"
+    BIRCH_LOGS_FINE = "birch_logs_fine"
     BIRCH_PLANK = "birch_plank"
+    BIRCH_PLANK_FINE = "birch_plank_fine"
     BIRCH_SKIS = "birch_skis"
     BLACKSMITHING_GUIDEBOOK = "blacksmithing_guidebook"
     BLUE_ICE_SICKLE = "blue_ice_sickle"
@@ -80,17 +96,26 @@ class ExportNames:
     BOGWOOD_SHORTS = "bogwood_shorts"
     BOGWOOD_VEST = "bogwood_vest"
     BONES = "bones"
+    BONES_FINE = "bones_fine"
     BOOTS_OF_SPEED = "boots_of_speed"
     BREAD = "bread"
+    BREAD_FINE = "bread_fine"
     BREEZY_SHIRT = "breezy_shirt"
     BRONZE_BAR = "bronze_bar"
+    BRONZE_BAR_FINE = "bronze_bar_fine"
+    BRONZE_CHISEL = "bronze_chisel"
+    BRONZE_HAMMER = "bronze_hammer"
     BRONZE_HATCHET = "bronze_hatchet"
+    BRONZE_PAN = "bronze_pan"
     BRONZE_PICKAXE = "bronze_pickaxe"
+    BRONZE_SAW = "bronze_saw"
     BRONZE_SHIELD = "bronze_shield"
     BRONZE_SWORD = "bronze_sword"
+    BRONZE_WRENCH = "bronze_wrench"
     BUBBLE_BAUBLE = "bubble_bauble"
     BUG_ATTRACTING_INCENSE = "bug_attracting_incense"
     BUG_BAIT = "bug_bait"
+    BUG_BAIT_FINE = "bug_bait_fine"
     BUG_REPELLING_INCENSE = "bug_repelling_incense"
     CAMOUFLAGE_CAPE = "camouflage_cape"
     CANDLEHAT = "candlehat"
@@ -100,86 +125,130 @@ class ExportNames:
     CARPENTERS_CLOGS = "carpenters_clogs"
     CARPENTRY_MEMOSPHERE = "carpentry_memosphere"
     CARROT = "carrot"
+    CARROT_FINE = "carrot_fine"
     CARVING_KNIFE = "carving_knife"
     CATCH_BUCKET = "catch_bucket"
     CATTAIL = "cattail"
+    CATTAIL_FINE = "cattail_fine"
     CHEFS_APRON = "chefs_apron"
     CHEFS_HAT = "chefs_hat"
     CHEFS_LEG_APRON = "chefs_leg_apron"
     CHOCOLATE = "chocolate"
+    CHOCOLATE_FINE = "chocolate_fine"
     CHOCOLATE_MILK = "chocolate_milk"
+    CHOCOLATE_MILK_FINE = "chocolate_milk_fine"
     CHROME_WOOL = "chrome_wool"
     CIRCULAR_ROOT_TRINKET = "circular_root_trinket"
+    CIRCULAR_ROOT_TRINKET_FINE = "circular_root_trinket_fine"
     CLAM_SHELL = "clam_shell"
+    CLAM_SHELL_FINE = "clam_shell_fine"
     CLAY_SKYDISC = "clay_skydisc"
     COAL = "coal"
+    COAL_FINE = "coal_fine"
     COMPASS_TRINKET = "compass_trinket"
+    COMPASS_TRINKET_FINE = "compass_trinket_fine"
     COMPRESSED_CHARCOAL = "compressed_charcoal"
     CONSERVATIONIST_BOOTS = "conservationist_boots"
     CONSERVATIONIST_HAT = "conservationist_hat"
     CONSERVATIONIST_SHIRT = "conservationist_shirt"
     CONSERVATIONIST_SHORTS = "conservationist_shorts"
     COOKED_ANGLERFISH = "cooked_anglerfish"
+    COOKED_ANGLERFISH_FINE = "cooked_anglerfish_fine"
     COOKED_CARP = "cooked_carp"
+    COOKED_CARP_FINE = "cooked_carp_fine"
     COOKED_JELLYFISH = "cooked_jellyfish"
+    COOKED_JELLYFISH_FINE = "cooked_jellyfish_fine"
     COOKED_LARGEMOUTH_BASS = "cooked_largemouth_bass"
+    COOKED_LARGEMOUTH_BASS_FINE = "cooked_largemouth_bass_fine"
     COOKED_LOBSTER = "cooked_lobster"
+    COOKED_LOBSTER_FINE = "cooked_lobster_fine"
     COOKED_PERCH = "cooked_perch"
+    COOKED_PERCH_FINE = "cooked_perch_fine"
     COOKED_PIKE = "cooked_pike"
+    COOKED_PIKE_FINE = "cooked_pike_fine"
     COOKED_SALMON = "cooked_salmon"
+    COOKED_SALMON_FINE = "cooked_salmon_fine"
     COOKED_SHARK = "cooked_shark"
+    COOKED_SHARK_FINE = "cooked_shark_fine"
     COOKED_SHRIMP = "cooked_shrimp"
+    COOKED_SHRIMP_FINE = "cooked_shrimp_fine"
     COOKED_SQUID = "cooked_squid"
+    COOKED_SQUID_FINE = "cooked_squid_fine"
     COOKED_STINGRAY = "cooked_stingray"
+    COOKED_STINGRAY_FINE = "cooked_stingray_fine"
     COOKED_SWORDFISH = "cooked_swordfish"
+    COOKED_SWORDFISH_FINE = "cooked_swordfish_fine"
     COOKED_TROUT = "cooked_trout"
+    COOKED_TROUT_FINE = "cooked_trout_fine"
     COOKING_MEMOSPHERE = "cooking_memosphere"
     COOL_SUNGLASSES = "cool_sunglasses"
     COOLING_ICICLE_TRINKET = "cooling_icicle_trinket"
+    COOLING_ICICLE_TRINKET_FINE = "cooling_icicle_trinket_fine"
     COPPER_BAR = "copper_bar"
+    COPPER_BAR_FINE = "copper_bar_fine"
     COPPER_HATCHET = "copper_hatchet"
     COPPER_ORE = "copper_ore"
+    COPPER_ORE_FINE = "copper_ore_fine"
     COPPER_PICKAXE = "copper_pickaxe"
     COPPER_SHIELD = "copper_shield"
     COPPER_SICKLE = "copper_sickle"
     COPPER_SWORD = "copper_sword"
     CORAL = "coral"
     CORAL_CAPE = "coral_cape"
+    CORAL_FINE = "coral_fine"
     CORAL_FISHING_SPEAR = "coral_fishing_spear"
     CORAL_PLANK = "coral_plank"
+    CORAL_PLANK_FINE = "coral_plank_fine"
     CRAFTING_BOOTS = "crafting_boots"
     CRAFTING_GUIDEBOOK = "crafting_guidebook"
     CRAFTING_MEMOSPHERE = "crafting_memosphere"
     CRAFTING_PANTS = "crafting_pants"
     CRAFTING_SHIRT = "crafting_shirt"
     CREME_BRULEE = "creme_brulee"
+    CREME_BRULEE_FINE = "creme_brulee_fine"
     CRUSTACEAN_CALL = "crustacean_call"
     CRYSTAL_COAL = "crystal_coal"
+    CRYSTAL_COAL_FINE = "crystal_coal_fine"
     CRYSTALLIZED_FLAME = "crystallized_flame"
+    CRYSTALLIZED_FLAME_FINE = "crystallized_flame_fine"
     CUCUMBER = "cucumber"
+    CUCUMBER_FINE = "cucumber_fine"
     CUTTING_BOARD = "cutting_board"
     DAR_WITTS_MONOCLE = "dar_witts_monocle"
+    DRAGONFLY_CATCHING_NET = "dragonfly_catching_net"
     DRIED_FRUIT = "dried_fruit"
+    DRIED_FRUIT_FINE = "dried_fruit_fine"
     DULL_CHISEL = "dull_chisel"
     DULL_KNIFE = "dull_knife"
     DULL_MACHETE = "dull_machete"
     DYNAMITE = "dynamite"
+    DYNAMITE_FINE = "dynamite_fine"
     EBERHART_CORKSCREW = "eberhart_corkscrew"
     ECTOPLASM = "ectoplasm"
+    ECTOPLASM_FINE = "ectoplasm_fine"
     ECTOPLASM_FISH = "ectoplasm_fish"
+    ECTOPLASM_FISH_FINE = "ectoplasm_fish_fine"
     ECTOPLASM_LOGS = "ectoplasm_logs"
+    ECTOPLASM_LOGS_FINE = "ectoplasm_logs_fine"
     ECTOPLASM_ROCK = "ectoplasm_rock"
+    ECTOPLASM_ROCK_FINE = "ectoplasm_rock_fine"
     EEL_TRINKET = "eel_trinket"
+    EEL_TRINKET_FINE = "eel_trinket_fine"
     EGG = "egg"
+    EGG_FINE = "egg_fine"
     ETHERNITE = "ethernite"
+    ETHERNITE_FINE = "ethernite_fine"
     EXERCISE_HEADBAND = "exercise_headband"
     EYE_PATCH = "eye_patch"
     FARGANITE_BAR = "farganite_bar"
+    FARGANITE_BAR_FINE = "farganite_bar_fine"
     FARGANITE_HATCHET = "farganite_hatchet"
     FARGANITE_ORE = "farganite_ore"
+    FARGANITE_ORE_FINE = "farganite_ore_fine"
     FARGANITE_PICKAXE = "farganite_pickaxe"
     FARGANITE_SHIELD = "farganite_shield"
     FARGANITE_SWORD = "farganite_sword"
+    FEATHER_BOOTS = "feather_boots"
     FEATHER_CAPE = "feather_cape"
     FIN_GLOVES = "fin_gloves"
     FINE_PEARL_RING = "fine_pearl_ring"
@@ -187,18 +256,24 @@ class ExportNames:
     FINGERSAW = "fingersaw"
     FIRE_RESISTANT_CLOAK = "fire_resistant_cloak"
     FIREBALL_WINE = "fireball_wine"
+    FIREBALL_WINE_FINE = "fireball_wine_fine"
     FIREFLIES_IN_A_JAR = "fireflies_in_a_jar"
     FIRESTARTER = "firestarter"
     FISHBONE = "fishbone"
+    FISHBONE_FINE = "fishbone_fine"
     FISHERMANS_HAT = "fishermans_hat"
     FISHERMANS_TROUSERS = "fishermans_trousers"
     FISHING_GUIDEBOOK = "fishing_guidebook"
     FISHING_LINE = "fishing_line"
+    FISHING_LINE_FINE = "fishing_line_fine"
     FISHING_LURE = "fishing_lure"
     FISHING_MEMOSPHERE = "fishing_memosphere"
     FISHING_SPEAR = "fishing_spear"
+    FISHING_STRINGER = "fishing_stringer"
+    FISHNET_SHIRT = "fishnet_shirt"
     FLATPACK_SHARK = "flatpack_shark"
     FLAX = "flax"
+    FLAX_FINE = "flax_fine"
     FLIMSY_RULER = "flimsy_ruler"
     FLIPPERS = "flippers"
     FLIPPY_SPATULA = "flippy_spatula"
@@ -214,28 +289,37 @@ class ExportNames:
     FORESTERS_PANTS = "foresters_pants"
     FORGE_BELLOWS = "forge_bellows"
     FORTIFIED_WINE = "fortified_wine"
+    FORTIFIED_WINE_FINE = "fortified_wine_fine"
     FRIED_FISH_SANDWICH = "fried_fish_sandwich"
+    FRIED_FISH_SANDWICH_FINE = "fried_fish_sandwich_fine"
     FRIED_NOODLES = "fried_noodles"
+    FRIED_NOODLES_FINE = "fried_noodles_fine"
     FROST_TOUCHED_BOOTS = "frost_touched_boots"
     FROST_TOUCHED_GAUNTLETS = "frost_touched_gauntlets"
     FROST_TOUCHED_HELM = "frost_touched_helm"
     FROST_TOUCHED_LEGGINGS = "frost_touched_leggings"
     FROST_TOUCHED_TORSO = "frost_touched_torso"
     FROZEN_BAIT = "frozen_bait"
+    FROZEN_BAIT_FINE = "frozen_bait_fine"
     FRUIT_CAKE = "fruit_cake"
+    FRUIT_CAKE_FINE = "fruit_cake_fine"
     FUNGAL_BACKPACK = "fungal_backpack"
     GARDENING_GLOVES = "gardening_gloves"
     GEM_BRACELET = "gem_bracelet"
     GEM_SHIELD = "gem_shield"
     GEM_TIPPED_TWEEZERS = "gem_tipped_tweezers"
     GEMISTRY_GUIDEBOOK = "gemistry_guidebook"
+    GHOST_TRAP_PACK = "ghost_trap_pack"
     GLOWSTICK = "glowstick"
     GOLD_BAR = "gold_bar"
+    GOLD_BAR_FINE = "gold_bar_fine"
     GOLD_ETHERNITE_RING = "gold_ethernite_ring"
     GOLD_JADE_RING = "gold_jade_ring"
     GOLD_NUGGET = "gold_nugget"
+    GOLD_NUGGET_FINE = "gold_nugget_fine"
     GOLD_OPAL_RING = "gold_opal_ring"
     GOLD_ORE = "gold_ore"
+    GOLD_ORE_FINE = "gold_ore_fine"
     GOLD_PAN = "gold_pan"
     GOLD_RING = "gold_ring"
     GOLD_RUBY_RING = "gold_ruby_ring"
@@ -247,6 +331,7 @@ class ExportNames:
     GOLDEN_SKYDISC = "golden_skydisc"
     GRAPPLING_HOOK = "grappling_hook"
     GRASS = "grass"
+    GRASS_FINE = "grass_fine"
     GREEDY_PIGGY_BANK = "greedy_piggy_bank"
     GRIPPY_GLOVES = "grippy_gloves"
     HALFLINGS_FEET_SLIPPERS = "halflings_feet_slippers"
@@ -255,61 +340,81 @@ class ExportNames:
     HANDSAW = "handsaw"
     HANDY_HAND_FILE = "handy_hand_file"
     HARDENED_KELP = "hardened_kelp"
+    HARDENED_KELP_FINE = "hardened_kelp_fine"
     HAT_WITH_A_FEATHER = "hat_with_a_feather"
     HEAVY_AXE_HANDLE = "heavy_axe_handle"
     HEAVY_PICK_HANDLE = "heavy_pick_handle"
     HEMP = "hemp"
+    HEMP_FINE = "hemp_fine"
     HERBERTS_BOOTS = "herberts_boots"
     HERBERTS_CAPE = "herberts_cape"
     HERBERTS_HAT = "herberts_hat"
     HERBERTS_PANTS = "herberts_pants"
     HERBERTS_SHIRT = "herberts_shirt"
     HERON_TRINKET = "heron_trinket"
+    HERON_TRINKET_FINE = "heron_trinket_fine"
     HIGHWATER_LOTUS = "highwater_lotus"
+    HIGHWATER_LOTUS_FINE = "highwater_lotus_fine"
     HONEYCOMB = "honeycomb"
+    HONEYCOMB_FINE = "honeycomb_fine"
     HOOKHAT = "hookhat"
     HYDRILIUM = "hydrilium"
     HYDRILIUM_BAR = "hydrilium_bar"
+    HYDRILIUM_BAR_FINE = "hydrilium_bar_fine"
     HYDRILIUM_DIVING_HELM = "hydrilium_diving_helm"
     HYDRILIUM_DIVING_LEGGINGS = "hydrilium_diving_leggings"
     HYDRILIUM_DIVING_TORSO = "hydrilium_diving_torso"
+    HYDRILIUM_FINE = "hydrilium_fine"
     HYDRILIUM_HATCHET = "hydrilium_hatchet"
     HYDRILIUM_LOG_SPLITTER = "hydrilium_log_splitter"
     HYDRILIUM_MAGNET = "hydrilium_magnet"
     HYDRILIUM_PICKAXE = "hydrilium_pickaxe"
     HYDRILIUM_SICKLE = "hydrilium_sickle"
+    HYDRILIUM_WRENCH = "hydrilium_wrench"
     ICE_AXE = "ice_axe"
     ICE_CUTTER = "ice_cutter"
     ICE_NETROD = "ice_netrod"
     INK_PEN = "ink_pen"
     IRON_BAR = "iron_bar"
+    IRON_BAR_FINE = "iron_bar_fine"
     IRON_HATCHET = "iron_hatchet"
     IRON_ORE = "iron_ore"
+    IRON_ORE_FINE = "iron_ore_fine"
     IRON_PICKAXE = "iron_pickaxe"
     IRON_SHIELD = "iron_shield"
     IRON_SICKLE = "iron_sickle"
     IRON_SWORD = "iron_sword"
     IRON_THERMOS = "iron_thermos"
     IRONWEED = "ironweed"
+    IRONWEED_FINE = "ironweed_fine"
     IRONWEED_TWINE = "ironweed_twine"
+    IRONWEED_TWINE_FINE = "ironweed_twine_fine"
     JADE = "jade"
+    JADE_FINE = "jade_fine"
+    JADE_TIPPED_STEEL_PAN = "jade_tipped_steel_pan"
     JARVONIAN_FLOWER_NECKLACE = "jarvonian_flower_necklace"
     JARVONIAN_PASTRY = "jarvonian_pastry"
+    JARVONIAN_PASTRY_FINE = "jarvonian_pastry_fine"
     JARVONIAN_POKER = "jarvonian_poker"
     JARVONIAN_SMITHS_HAMMER = "jarvonian_smiths_hammer"
     JELLY_SANDWICH = "jelly_sandwich"
+    JELLY_SANDWICH_FINE = "jelly_sandwich_fine"
     JELLYFISHING_NET = "jellyfishing_net"
     JUGGLING_BALLS = "juggling_balls"
     KELP = "kelp"
     KELP_DIVING_MASK = "kelp_diving_mask"
     KELP_DIVING_PANTS = "kelp_diving_pants"
     KELP_DIVING_SHIRT = "kelp_diving_shirt"
+    KELP_FINE = "kelp_fine"
     KELP_ROLLS = "kelp_rolls"
+    KELP_ROLLS_FINE = "kelp_rolls_fine"
     KELP_TWINE = "kelp_twine"
+    KELP_TWINE_FINE = "kelp_twine_fine"
     KNITTED_MITTENS = "knitted_mittens"
     LARGE_FISHING_NET = "large_fishing_net"
     LARGE_POT = "large_pot"
     LARGE_STONE = "large_stone"
+    LARGE_STONE_FINE = "large_stone_fine"
     LAVA_COOKING_PAN = "lava_cooking_pan"
     LIFE_VEST = "life_vest"
     LIGHT_MINING_SHOVEL = "light_mining_shovel"
@@ -326,7 +431,9 @@ class ExportNames:
     LONG_SPADE = "long_spade"
     LOOSE_CHANGE_POUCH = "loose_change_pouch"
     LOVEROSE = "loverose"
+    LOVEROSE_FINE = "loverose_fine"
     LUCKY_RABBIT_FOOT_TRINKET = "lucky_rabbit_foot_trinket"
+    LUCKY_RABBIT_FOOT_TRINKET_FINE = "lucky_rabbit_foot_trinket_fine"
     LUMBERJACK_BOOTS = "lumberjack_boots"
     LUMBERJACK_HAT = "lumberjack_hat"
     LUMBERJACK_PANTS = "lumberjack_pants"
@@ -334,10 +441,13 @@ class ExportNames:
     LUMBERJACK_SHIRT = "lumberjack_shirt"
     MAGNIFYING_LENS = "magnifying_lens"
     MAHOGANY_PLANK = "mahogany_plank"
+    MAHOGANY_PLANK_FINE = "mahogany_plank_fine"
     MAKEUP_SET = "makeup_set"
     MANGROVE_BASKET = "mangrove_basket"
     MANGROVE_LOGS = "mangrove_logs"
+    MANGROVE_LOGS_FINE = "mangrove_logs_fine"
     MANGROVE_PLANK = "mangrove_plank"
+    MANGROVE_PLANK_FINE = "mangrove_plank_fine"
     MAP_OF_ARENUM = "map_of_arenum"
     MAP_OF_ERDWISE = "map_of_erdwise"
     MAP_OF_HALFLING_REBELS = "map_of_halfling_rebels"
@@ -345,8 +455,11 @@ class ExportNames:
     MAP_OF_SYRENTHIA = "map_of_syrenthia"
     MAP_OF_TRELLIN = "map_of_trellin"
     MAPLE_LOGS = "maple_logs"
+    MAPLE_LOGS_FINE = "maple_logs_fine"
     MAPLE_PLANK = "maple_plank"
+    MAPLE_PLANK_FINE = "maple_plank_fine"
     MEASURING_SPOONS_TRINKET = "measuring_spoons_trinket"
+    MEASURING_SPOONS_TRINKET_FINE = "measuring_spoons_trinket_fine"
     MEAT_CLEAVER = "meat_cleaver"
     MEDIEVAL_SNEAKERS = "medieval_sneakers"
     MELTDOWN_MASK = "meltdown_mask"
@@ -358,9 +471,12 @@ class ExportNames:
     MERFOLK_DRESS = "merfolk_dress"
     MERFOLK_SHELL_COVERINGS = "merfolk_shell_coverings"
     METAL_SCRAP = "metal_scrap"
+    METAL_SCRAP_FINE = "metal_scrap_fine"
     METALWORKING_GLOVES = "metalworking_gloves"
     MILK = "milk"
+    MILK_FINE = "milk_fine"
     MILKWEED = "milkweed"
+    MILKWEED_FINE = "milkweed_fine"
     MINERS_BEARD = "miners_beard"
     MINERS_MAGNET = "miners_magnet"
     MINERS_PANTS = "miners_pants"
@@ -370,51 +486,73 @@ class ExportNames:
     MINING_MEMOSPHERE = "mining_memosphere"
     MODIFIED_PLATFORM_SHOES = "modified_platform_shoes"
     MOONDAISY = "moondaisy"
+    MOONDAISY_FINE = "moondaisy_fine"
     MOONSHINE = "moonshine"
+    MOONSHINE_FINE = "moonshine_fine"
     MOSQUITO_NET_HAT = "mosquito_net_hat"
     MOSS_CHEWIE = "moss_chewie"
     MOUNTAINEERING_GUIDEBOOK = "mountaineering_guidebook"
     MUD = "mud"
+    MUD_FINE = "mud_fine"
     MUD_PIE = "mud_pie"
+    MUD_PIE_FINE = "mud_pie_fine"
     MUSHROOM = "mushroom"
     MUSHROOM_CURRY = "mushroom_curry"
+    MUSHROOM_CURRY_FINE = "mushroom_curry_fine"
+    MUSHROOM_FINE = "mushroom_fine"
     NAME_TAG = "name_tag"
+    NAME_TAG_FINE = "name_tag_fine"
     NETTLE = "nettle"
+    NETTLE_FINE = "nettle_fine"
     NETTLE_TEA = "nettle_tea"
+    NETTLE_TEA_FINE = "nettle_tea_fine"
     NON_SLIP_SHOES = "non_slip_shoes"
     NON_WATERPROOF_BOOTS = "non_waterproof_boots"
     NORTHERN_SPICES = "northern_spices"
     NUT_MIX = "nut_mix"
+    NUT_MIX_FINE = "nut_mix_fine"
     OAK_FISHING_ROD = "oak_fishing_rod"
     OAK_LOGS = "oak_logs"
+    OAK_LOGS_FINE = "oak_logs_fine"
     OAK_PLANK = "oak_plank"
+    OAK_PLANK_FINE = "oak_plank_fine"
     OAK_SKIS = "oak_skis"
     OLD_COPPER_RING = "old_copper_ring"
     OLD_GOLD_RING = "old_gold_ring"
     OLD_SILVER_RING = "old_silver_ring"
     OMNI_TOOL = "omni_tool"
     OPAL = "opal"
+    OPAL_FINE = "opal_fine"
     OVEN_MITTENS = "oven_mittens"
     OXYGEN_TANK = "oxygen_tank"
     PANCAKE = "pancake"
+    PANCAKE_FINE = "pancake_fine"
     PANTS_OF_HASTE = "pants_of_haste"
     PARKOUR_GLOVES = "parkour_gloves"
     PATHFINDER = "pathfinder"
     PEARL_BRACELET = "pearl_bracelet"
     PEARLS = "pearls"
+    PEARLS_FINE = "pearls_fine"
     PEPPER = "pepper"
+    PEPPER_FINE = "pepper_fine"
     PERFECT_SNOWBALLS = "perfect_snowballs"
     PICKERS_GLOVES = "pickers_gloves"
     PICKLES = "pickles"
+    PICKLES_FINE = "pickles_fine"
     PINE_FISHING_ROD = "pine_fishing_rod"
     PINE_LOGS = "pine_logs"
+    PINE_LOGS_FINE = "pine_logs_fine"
     PINE_PLANK = "pine_plank"
+    PINE_PLANK_FINE = "pine_plank_fine"
     PINE_SKIS = "pine_skis"
     PINK_PEARL_TRINKET = "pink_pearl_trinket"
+    PINK_PEARL_TRINKET_FINE = "pink_pearl_trinket_fine"
     PIRATE_HAT = "pirate_hat"
     POINTY_SHEARS = "pointy_shears"
     PORRIDGE = "porridge"
+    PORRIDGE_FINE = "porridge_fine"
     POTATO = "potato"
+    POTATO_FINE = "potato_fine"
     PRECISE_RULER = "precise_ruler"
     PRETTY_PLIERS = "pretty_pliers"
     PROPER_BOOTS = "proper_boots"
@@ -428,45 +566,73 @@ class ExportNames:
     PROTECTIVE_SHIRT = "protective_shirt"
     PROTRACTOR = "protractor"
     RAW_ANGLERFISH = "raw_anglerfish"
+    RAW_ANGLERFISH_FINE = "raw_anglerfish_fine"
     RAW_CARP = "raw_carp"
+    RAW_CARP_FINE = "raw_carp_fine"
     RAW_JELLYFISH = "raw_jellyfish"
+    RAW_JELLYFISH_FINE = "raw_jellyfish_fine"
     RAW_LARGEMOUTH_BASS = "raw_largemouth_bass"
+    RAW_LARGEMOUTH_BASS_FINE = "raw_largemouth_bass_fine"
     RAW_LOBSTER = "raw_lobster"
+    RAW_LOBSTER_FINE = "raw_lobster_fine"
     RAW_MORAY = "raw_moray"
+    RAW_MORAY_FINE = "raw_moray_fine"
     RAW_PERCH = "raw_perch"
+    RAW_PERCH_FINE = "raw_perch_fine"
     RAW_PIKE = "raw_pike"
+    RAW_PIKE_FINE = "raw_pike_fine"
     RAW_SALMON = "raw_salmon"
+    RAW_SALMON_FINE = "raw_salmon_fine"
     RAW_SHARK = "raw_shark"
+    RAW_SHARK_FINE = "raw_shark_fine"
     RAW_SHRIMP = "raw_shrimp"
+    RAW_SHRIMP_FINE = "raw_shrimp_fine"
     RAW_SQUID = "raw_squid"
+    RAW_SQUID_FINE = "raw_squid_fine"
     RAW_STINGRAY = "raw_stingray"
+    RAW_STINGRAY_FINE = "raw_stingray_fine"
     RAW_STREAM_EEL = "raw_stream_eel"
+    RAW_STREAM_EEL_FINE = "raw_stream_eel_fine"
     RAW_SWORDFISH = "raw_swordfish"
+    RAW_SWORDFISH_FINE = "raw_swordfish_fine"
     RAW_TROUT = "raw_trout"
+    RAW_TROUT_FINE = "raw_trout_fine"
     RECIPE_BOOK = "recipe_book"
     REINFORCED_BELLOWS = "reinforced_bellows"
     RING_OF_ASH = "ring_of_ash"
     RING_OF_HOMESICKNESS = "ring_of_homesickness"
     RING_OF_PANDEMONIUM = "ring_of_pandemonium"
     ROASTED_BELL_PEPPER = "roasted_bell_pepper"
+    ROASTED_BELL_PEPPER_FINE = "roasted_bell_pepper_fine"
     ROCK_STAR_AMULET = "rock_star_amulet"
     ROOT = "root"
+    ROOT_FINE = "root_fine"
     ROTBUD = "rotbud"
+    ROTBUD_FINE = "rotbud_fine"
     ROUGH_ETHERNITE = "rough_ethernite"
+    ROUGH_ETHERNITE_FINE = "rough_ethernite_fine"
     ROUGH_JADE = "rough_jade"
+    ROUGH_JADE_FINE = "rough_jade_fine"
     ROUGH_OPAL = "rough_opal"
+    ROUGH_OPAL_FINE = "rough_opal_fine"
     ROUGH_RUBY = "rough_ruby"
+    ROUGH_RUBY_FINE = "rough_ruby_fine"
     ROUGH_SANDPAPER = "rough_sandpaper"
     ROUGH_STAR_PEARL = "rough_star_pearl"
+    ROUGH_STAR_PEARL_FINE = "rough_star_pearl_fine"
     ROUGH_SUN_STONE = "rough_sun_stone"
+    ROUGH_SUN_STONE_FINE = "rough_sun_stone_fine"
     ROUGH_TOPAZ = "rough_topaz"
+    ROUGH_TOPAZ_FINE = "rough_topaz_fine"
     ROUGH_WRENTMARINE = "rough_wrentmarine"
+    ROUGH_WRENTMARINE_FINE = "rough_wrentmarine_fine"
     ROYAL_TROUBADOUR_BOOTS = "royal_troubadour_boots"
     ROYAL_TROUBADOUR_CAPESUIT = "royal_troubadour_capesuit"
     ROYAL_TROUBADOUR_GLOVES = "royal_troubadour_gloves"
     ROYAL_TROUBADOUR_HAT = "royal_troubadour_hat"
     ROYAL_TROUBADOUR_PANTALOONS = "royal_troubadour_pantaloons"
     RUBY = "ruby"
+    RUBY_FINE = "ruby_fine"
     RUNNING_SHIRT = "running_shirt"
     RUNNING_SHORTS = "running_shorts"
     RUNNING_VISOR = "running_visor"
@@ -481,16 +647,25 @@ class ExportNames:
     RUSTY_SPYGLASS = "rusty_spyglass"
     SAILORS_HAT = "sailors_hat"
     SALMON_PIE = "salmon_pie"
+    SALMON_PIE_FINE = "salmon_pie_fine"
     SALT_CRYSTAL = "salt_crystal"
+    SALT_CRYSTAL_FINE = "salt_crystal_fine"
     SALTRUM = "saltrum"
+    SALTRUM_FINE = "saltrum_fine"
     SALTY_HOPS = "salty_hops"
+    SALTY_HOPS_FINE = "salty_hops_fine"
     SCHNITZEL = "schnitzel"
+    SCHNITZEL_FINE = "schnitzel_fine"
     SCREWDRIVER = "screwdriver"
     SEA_CABBAGE = "sea_cabbage"
+    SEA_CABBAGE_FINE = "sea_cabbage_fine"
     SEA_SHELL = "sea_shell"
+    SEA_SHELL_FINE = "sea_shell_fine"
     SEA_SPINACH = "sea_spinach"
+    SEA_SPINACH_FINE = "sea_spinach_fine"
     SETHS_SWAMP_COMPASS = "seths_swamp_compass"
     SHARK_TOOTH_TRINKET = "shark_tooth_trinket"
+    SHARK_TOOTH_TRINKET_FINE = "shark_tooth_trinket_fine"
     SHARP_CHISEL = "sharp_chisel"
     SHARP_KNIFE = "sharp_knife"
     SHARP_MACHETE = "sharp_machete"
@@ -500,12 +675,16 @@ class ExportNames:
     SHOES_OF_ESCAPE = "shoes_of_escape"
     SHOVEL_AXE = "shovel_axe"
     SHRIMP_TRINKET = "shrimp_trinket"
+    SHRIMP_TRINKET_FINE = "shrimp_trinket_fine"
     SILVER_BAR = "silver_bar"
+    SILVER_BAR_FINE = "silver_bar_fine"
     SILVER_ETHERNITE_RING = "silver_ethernite_ring"
     SILVER_JADE_RING = "silver_jade_ring"
     SILVER_NUGGET = "silver_nugget"
+    SILVER_NUGGET_FINE = "silver_nugget_fine"
     SILVER_OPAL_RING = "silver_opal_ring"
     SILVER_ORE = "silver_ore"
+    SILVER_ORE_FINE = "silver_ore_fine"
     SILVER_RING = "silver_ring"
     SILVER_RUBY_RING = "silver_ruby_ring"
     SILVER_STAR_PEARL_RING = "silver_star_pearl_ring"
@@ -533,12 +712,29 @@ class ExportNames:
     SMITHS_APRON = "smiths_apron"
     SMITHS_PANTS = "smiths_pants"
     SNOWDROP = "snowdrop"
+    SNOWDROP_FINE = "snowdrop_fine"
+    SPECTRAL_CHISEL = "spectral_chisel"
+    SPECTRAL_FISHING_CAGESPEAR = "spectral_fishing_cagespear"
+    SPECTRAL_FISHING_ROD = "spectral_fishing_rod"
+    SPECTRAL_HAMMER = "spectral_hammer"
+    SPECTRAL_HATCHET = "spectral_hatchet"
+    SPECTRAL_PAN = "spectral_pan"
+    SPECTRAL_PICKAXE = "spectral_pickaxe"
+    SPECTRAL_SAW = "spectral_saw"
+    SPECTRAL_SICKLE = "spectral_sickle"
+    SPECTRAL_WRENCH = "spectral_wrench"
+    SPICE_RACKPACK = "spice_rackpack"
     SPICY_PUMPKIN_JUICE = "spicy_pumpkin_juice"
+    SPICY_PUMPKIN_JUICE_FINE = "spicy_pumpkin_juice_fine"
     SPRUCE_LOGS = "spruce_logs"
+    SPRUCE_LOGS_FINE = "spruce_logs_fine"
     SPRUCE_PLANK = "spruce_plank"
+    SPRUCE_PLANK_FINE = "spruce_plank_fine"
     SQUISHY_FLIP_FLOPS = "squishy_flip_flops"
     STAR_PEARL = "star_pearl"
+    STAR_PEARL_FINE = "star_pearl_fine"
     STEEL_BAR = "steel_bar"
+    STEEL_BAR_FINE = "steel_bar_fine"
     STEEL_HATCHET = "steel_hatchet"
     STEEL_PICKAXE = "steel_pickaxe"
     STEEL_SHIELD = "steel_shield"
@@ -548,34 +744,53 @@ class ExportNames:
     STEPRING = "stepring"
     STICKY_FINGER_SHORTS = "sticky_finger_shorts"
     STONE = "stone"
+    STONE_FINE = "stone_fine"
     STURDY_BRANCH = "sturdy_branch"
+    STURDY_BRANCH_FINE = "sturdy_branch_fine"
     STURDY_FISHING_ROD_REST = "sturdy_fishing_rod_rest"
     STURDY_WHISK = "sturdy_whisk"
     SUN_STONE = "sun_stone"
+    SUN_STONE_FINE = "sun_stone_fine"
     SUNBLOSSOM = "sunblossom"
+    SUNBLOSSOM_FINE = "sunblossom_fine"
     SWASHBUCKLER_SWORD = "swashbuckler_sword"
     SWEET_CARROT_PIE = "sweet_carrot_pie"
+    SWEET_CARROT_PIE_FINE = "sweet_carrot_pie_fine"
     SWEET_KELP = "sweet_kelp"
+    SWEET_KELP_FINE = "sweet_kelp_fine"
     TARSILIUM_BAR = "tarsilium_bar"
+    TARSILIUM_BAR_FINE = "tarsilium_bar_fine"
+    TARSILIUM_HAMMER = "tarsilium_hammer"
     TARSILIUM_HATCHET = "tarsilium_hatchet"
     TARSILIUM_ORE = "tarsilium_ore"
+    TARSILIUM_ORE_FINE = "tarsilium_ore_fine"
     TARSILIUM_PICKAXE = "tarsilium_pickaxe"
+    TARSILIUM_SAW = "tarsilium_saw"
     TARSILIUM_SHIELD = "tarsilium_shield"
     TARSILIUM_SWORD = "tarsilium_sword"
     TARSILIUM_TOED_BOOTS = "tarsilium_toed_boots"
     TASTY_BREAKFAST = "tasty_breakfast"
+    TASTY_BREAKFAST_FINE = "tasty_breakfast_fine"
     TEAK_LOGS = "teak_logs"
+    TEAK_LOGS_FINE = "teak_logs_fine"
     TEAK_PLANK = "teak_plank"
+    TEAK_PLANK_FINE = "teak_plank_fine"
     TENTACLE_CROWN = "tentacle_crown"
     THISTLE = "thistle"
+    THISTLE_FINE = "thistle_fine"
     TIDAL_LURE = "tidal_lure"
     TIN_ORE = "tin_ore"
+    TIN_ORE_FINE = "tin_ore_fine"
     TINY_BACKPACK = "tiny_backpack"
     TOE_SHOES = "toe_shoes"
     TOMATO = "tomato"
+    TOMATO_FINE = "tomato_fine"
     TOPAZ = "topaz"
+    TOPAZ_FINE = "topaz_fine"
+    TOPAZ_TIPPED_CHISEL = "topaz_tipped_chisel"
     TOUGH_ROPE = "tough_rope"
     TRASH = "trash"
+    TRASH_FINE = "trash_fine"
     TRASH_GRABBER = "trash_grabber"
     TRAVELERS_KIT = "travelers_kit"
     TREASURE_GRABBER = "treasure_grabber"
@@ -587,16 +802,29 @@ class ExportNames:
     TRELLIN_BEAVER = "trellin_beaver"
     TRINKETRY_MEMOSPHERE = "trinketry_memosphere"
     TROUT_SOUP = "trout_soup"
+    TROUT_SOUP_FINE = "trout_soup_fine"
     TRUSTY_TENT = "trusty_tent"
     TWINE = "twine"
+    TWINE_FINE = "twine_fine"
     UNDERWATER_LOTUS = "underwater_lotus"
+    UNDERWATER_LOTUS_FINE = "underwater_lotus_fine"
     UNDERWATER_SALAD = "underwater_salad"
+    UNDERWATER_SALAD_FINE = "underwater_salad_fine"
     UNIDENTIFIED_REMAINS = "unidentified_remains"
+    UNIDENTIFIED_REMAINS_FINE = "unidentified_remains_fine"
     VEGGIE_SOUP = "veggie_soup"
+    VEGGIE_SOUP_FINE = "veggie_soup_fine"
     VIOLITE_BAR = "violite_bar"
+    VIOLITE_BAR_FINE = "violite_bar_fine"
+    VIOLITE_HATCHET = "violite_hatchet"
     VIOLITE_ORE = "violite_ore"
+    VIOLITE_ORE_FINE = "violite_ore_fine"
+    VIOLITE_PICKAXE = "violite_pickaxe"
+    VIOLITE_SICKLE = "violite_sickle"
     VOLCANIC_ASH = "volcanic_ash"
+    VOLCANIC_ASH_FINE = "volcanic_ash_fine"
     VOLCANIC_ROCK = "volcanic_rock"
+    VOLCANIC_ROCK_FINE = "volcanic_rock_fine"
     WADING_SHOES = "wading_shoes"
     WALKING_STICK = "walking_stick"
     WANDERLUST_WALKING_STICK = "wanderlust_walking_stick"
@@ -605,30 +833,41 @@ class ExportNames:
     WATER_BOTTLE = "water_bottle"
     WATERPROOF_BOOTS = "waterproof_boots"
     WHEAT = "wheat"
+    WHEAT_FINE = "wheat_fine"
     WHOLLY_RING = "wholly_ring"
     WIDOWS_KISS = "widows_kiss"
+    WIDOWS_KISS_FINE = "widows_kiss_fine"
     WILDERNESS_GUIDEBOOK = "wilderness_guidebook"
     WILDERNESS_PANTS = "wilderness_pants"
     WILDERNESS_SHIRT = "wilderness_shirt"
     WILLOW_FISHING_ROD = "willow_fishing_rod"
     WILLOW_LOGS = "willow_logs"
+    WILLOW_LOGS_FINE = "willow_logs_fine"
     WILLOW_PLANK = "willow_plank"
+    WILLOW_PLANK_FINE = "willow_plank_fine"
     WINE = "wine"
+    WINE_FINE = "wine_fine"
     WINTRY_PAN = "wintry_pan"
     WIRE_SAW = "wire_saw"
     WOLF_JAW_TONGS = "wolf_jaw_tongs"
     WOOD_SCRAP = "wood_scrap"
+    WOOD_SCRAP_FINE = "wood_scrap_fine"
     WOODCUTTING_GUIDEBOOK = "woodcutting_guidebook"
     WOODCUTTING_MEMOSPHERE = "woodcutting_memosphere"
     WOODEN_FISHING_POLE = "wooden_fishing_pole"
     WOODEN_SHIELD = "wooden_shield"
     WOODEN_STICK = "wooden_stick"
+    WOODEN_STICK_FINE = "wooden_stick_fine"
     WOODEN_SWORD = "wooden_sword"
     WOODPUCKER = "woodpucker"
     WOODWORKING_GLASSES = "woodworking_glasses"
+    WRAITHWATER_FLOWER_NECKLACE = "wraithwater_flower_necklace"
     WRENTMARINE = "wrentmarine"
+    WRENTMARINE_FINE = "wrentmarine_fine"
     YEW_LOGS = "yew_logs"
+    YEW_LOGS_FINE = "yew_logs_fine"
     YEW_PLANK = "yew_plank"
+    YEW_PLANK_FINE = "yew_plank_fine"
     ZIP_POUCH = "zip_pouch"
     ZIPPY_KICKSLED = "zippy_kicksled"
 
@@ -644,6 +883,8 @@ def _build_item_mapping():
     from util.autogenerated.equipment import Item
     return {
         "absorbing_amulet": Item.ABSORBING_AMULET,
+        "adamant_hatchet": Item.ADAMANT_HATCHET,
+        "adamant_pickaxe": Item.ADAMANT_PICKAXE,
         "adjustable_wrench": Item.ADJUSTABLE_WRENCH,
         "adoring_fan_statue": Item.ADORING_FAN_STATUE,
         "adventuring_amulet": Item.ADVENTURING_AMULET,
@@ -693,10 +934,15 @@ def _build_item_mapping():
         "bogwood_vest": Item.BOGWOOD_VEST,
         "boots_of_speed": Item.BOOTS_OF_SPEED,
         "breezy_shirt": Item.BREEZY_SHIRT,
+        "bronze_chisel": Item.BRONZE_CHISEL,
+        "bronze_hammer": Item.BRONZE_HAMMER,
         "bronze_hatchet": Item.BRONZE_HATCHET,
+        "bronze_pan": Item.BRONZE_PAN,
         "bronze_pickaxe": Item.BRONZE_PICKAXE,
+        "bronze_saw": Item.BRONZE_SAW,
         "bronze_shield": Item.BRONZE_SHIELD,
         "bronze_sword": Item.BRONZE_SWORD,
+        "bronze_wrench": Item.BRONZE_WRENCH,
         "bubble_bauble": Item.BUBBLE_BAUBLE,
         "bug_attracting_incense": Item.BUG_ATTRACTING_INCENSE,
         "bug_repelling_incense": Item.BUG_REPELLING_INCENSE,
@@ -733,6 +979,7 @@ def _build_item_mapping():
         "crustacean_call": Item.CRUSTACEAN_CALL,
         "cutting_board": Item.CUTTING_BOARD,
         "dar_witts_monocle": Item.DAR_WITTS_MONOCLE,
+        "dragonfly_catching_net": Item.DRAGONFLY_CATCHING_NET,
         "dull_chisel": Item.DULL_CHISEL,
         "dull_knife": Item.DULL_KNIFE,
         "dull_machete": Item.DULL_MACHETE,
@@ -743,6 +990,7 @@ def _build_item_mapping():
         "farganite_pickaxe": Item.FARGANITE_PICKAXE,
         "farganite_shield": Item.FARGANITE_SHIELD,
         "farganite_sword": Item.FARGANITE_SWORD,
+        "feather_boots": Item.FEATHER_BOOTS,
         "feather_cape": Item.FEATHER_CAPE,
         "fin_gloves": Item.FIN_GLOVES,
         "fine_pearl_ring": Item.FINE_PEARL_RING,
@@ -756,6 +1004,8 @@ def _build_item_mapping():
         "fishing_guidebook": Item.FISHING_GUIDEBOOK,
         "fishing_lure": Item.FISHING_LURE,
         "fishing_spear": Item.FISHING_SPEAR,
+        "fishing_stringer": Item.FISHING_STRINGER,
+        "fishnet_shirt": Item.FISHNET_SHIRT,
         "flatpack_shark": Item.FLATPACK_SHARK,
         "flimsy_ruler": Item.FLIMSY_RULER,
         "flippers": Item.FLIPPERS,
@@ -781,6 +1031,7 @@ def _build_item_mapping():
         "gem_shield": Item.GEM_SHIELD,
         "gem_tipped_tweezers": Item.GEM_TIPPED_TWEEZERS,
         "gemistry_guidebook": Item.GEMISTRY_GUIDEBOOK,
+        "ghost_trap_pack": Item.GHOST_TRAP_PACK,
         "glowstick": Item.GLOWSTICK,
         "gold_ethernite_ring": Item.GOLD_ETHERNITE_RING,
         "gold_jade_ring": Item.GOLD_JADE_RING,
@@ -819,6 +1070,7 @@ def _build_item_mapping():
         "hydrilium_magnet": Item.HYDRILIUM_MAGNET,
         "hydrilium_pickaxe": Item.HYDRILIUM_PICKAXE,
         "hydrilium_sickle": Item.HYDRILIUM_SICKLE,
+        "hydrilium_wrench": Item.HYDRILIUM_WRENCH,
         "ice_axe": Item.ICE_AXE,
         "ice_cutter": Item.ICE_CUTTER,
         "ice_netrod": Item.ICE_NETROD,
@@ -829,6 +1081,7 @@ def _build_item_mapping():
         "iron_sickle": Item.IRON_SICKLE,
         "iron_sword": Item.IRON_SWORD,
         "iron_thermos": Item.IRON_THERMOS,
+        "jade_tipped_steel_pan": Item.JADE_TIPPED_STEEL_PAN,
         "jarvonian_flower_necklace": Item.JARVONIAN_FLOWER_NECKLACE,
         "jarvonian_poker": Item.JARVONIAN_POKER,
         "jarvonian_smiths_hammer": Item.JARVONIAN_SMITHS_HAMMER,
@@ -986,6 +1239,17 @@ def _build_item_mapping():
         "smelting_goggles": Item.SMELTING_GOGGLES,
         "smiths_apron": Item.SMITHS_APRON,
         "smiths_pants": Item.SMITHS_PANTS,
+        "spectral_chisel": Item.SPECTRAL_CHISEL,
+        "spectral_fishing_cagespear": Item.SPECTRAL_FISHING_CAGESPEAR,
+        "spectral_fishing_rod": Item.SPECTRAL_FISHING_ROD,
+        "spectral_hammer": Item.SPECTRAL_HAMMER,
+        "spectral_hatchet": Item.SPECTRAL_HATCHET,
+        "spectral_pan": Item.SPECTRAL_PAN,
+        "spectral_pickaxe": Item.SPECTRAL_PICKAXE,
+        "spectral_saw": Item.SPECTRAL_SAW,
+        "spectral_sickle": Item.SPECTRAL_SICKLE,
+        "spectral_wrench": Item.SPECTRAL_WRENCH,
+        "spice_rackpack": Item.SPICE_RACKPACK,
         "squishy_flip_flops": Item.SQUISHY_FLIP_FLOPS,
         "steel_hatchet": Item.STEEL_HATCHET,
         "steel_pickaxe": Item.STEEL_PICKAXE,
@@ -998,8 +1262,10 @@ def _build_item_mapping():
         "sturdy_fishing_rod_rest": Item.STURDY_FISHING_ROD_REST,
         "sturdy_whisk": Item.STURDY_WHISK,
         "swashbuckler_sword": Item.SWASHBUCKLER_SWORD,
+        "tarsilium_hammer": Item.TARSILIUM_HAMMER,
         "tarsilium_hatchet": Item.TARSILIUM_HATCHET,
         "tarsilium_pickaxe": Item.TARSILIUM_PICKAXE,
+        "tarsilium_saw": Item.TARSILIUM_SAW,
         "tarsilium_shield": Item.TARSILIUM_SHIELD,
         "tarsilium_sword": Item.TARSILIUM_SWORD,
         "tarsilium_toed_boots": Item.TARSILIUM_TOED_BOOTS,
@@ -1007,6 +1273,7 @@ def _build_item_mapping():
         "tidal_lure": Item.TIDAL_LURE,
         "tiny_backpack": Item.TINY_BACKPACK,
         "toe_shoes": Item.TOE_SHOES,
+        "topaz_tipped_chisel": Item.TOPAZ_TIPPED_CHISEL,
         "tough_rope": Item.TOUGH_ROPE,
         "trash_grabber": Item.TRASH_GRABBER,
         "travelers_kit": Item.TRAVELERS_KIT,
@@ -1018,6 +1285,9 @@ def _build_item_mapping():
         "trekking_poles": Item.TREKKING_POLES,
         "trellin_beaver": Item.TRELLIN_BEAVER,
         "trusty_tent": Item.TRUSTY_TENT,
+        "violite_hatchet": Item.VIOLITE_HATCHET,
+        "violite_pickaxe": Item.VIOLITE_PICKAXE,
+        "violite_sickle": Item.VIOLITE_SICKLE,
         "wading_shoes": Item.WADING_SHOES,
         "walking_stick": Item.WALKING_STICK,
         "wanderlust_walking_stick": Item.WANDERLUST_WALKING_STICK,
@@ -1039,6 +1309,7 @@ def _build_item_mapping():
         "wooden_sword": Item.WOODEN_SWORD,
         "woodpucker": Item.WOODPUCKER,
         "woodworking_glasses": Item.WOODWORKING_GLASSES,
+        "wraithwater_flower_necklace": Item.WRAITHWATER_FLOWER_NECKLACE,
         "zip_pouch": Item.ZIP_POUCH,
         "zippy_kicksled": Item.ZIPPY_KICKSLED,
     }
@@ -1049,64 +1320,115 @@ def _build_consumable_mapping():
     return {
         "agility_memosphere": Consumable.AGILITY_MEMOSPHERE,
         "bagel": Consumable.BAGEL,
+        "bagel_fine": Consumable.BAGEL_FINE,
         "beef_stew": Consumable.BEEF_STEW,
+        "beef_stew_fine": Consumable.BEEF_STEW_FINE,
         "beer": Consumable.BEER,
+        "beer_fine": Consumable.BEER_FINE,
         "bread": Consumable.BREAD,
+        "bread_fine": Consumable.BREAD_FINE,
         "bug_bait": Consumable.BUG_BAIT,
+        "bug_bait_fine": Consumable.BUG_BAIT_FINE,
         "carpentry_memosphere": Consumable.CARPENTRY_MEMOSPHERE,
         "chocolate_milk": Consumable.CHOCOLATE_MILK,
+        "chocolate_milk_fine": Consumable.CHOCOLATE_MILK_FINE,
         "cooked_anglerfish": Consumable.COOKED_ANGLERFISH,
+        "cooked_anglerfish_fine": Consumable.COOKED_ANGLERFISH_FINE,
         "cooked_carp": Consumable.COOKED_CARP,
+        "cooked_carp_fine": Consumable.COOKED_CARP_FINE,
         "cooked_jellyfish": Consumable.COOKED_JELLYFISH,
+        "cooked_jellyfish_fine": Consumable.COOKED_JELLYFISH_FINE,
         "cooked_largemouth_bass": Consumable.COOKED_LARGEMOUTH_BASS,
+        "cooked_largemouth_bass_fine": Consumable.COOKED_LARGEMOUTH_BASS_FINE,
         "cooked_lobster": Consumable.COOKED_LOBSTER,
+        "cooked_lobster_fine": Consumable.COOKED_LOBSTER_FINE,
         "cooked_perch": Consumable.COOKED_PERCH,
+        "cooked_perch_fine": Consumable.COOKED_PERCH_FINE,
         "cooked_pike": Consumable.COOKED_PIKE,
+        "cooked_pike_fine": Consumable.COOKED_PIKE_FINE,
         "cooked_salmon": Consumable.COOKED_SALMON,
+        "cooked_salmon_fine": Consumable.COOKED_SALMON_FINE,
         "cooked_shark": Consumable.COOKED_SHARK,
+        "cooked_shark_fine": Consumable.COOKED_SHARK_FINE,
         "cooked_shrimp": Consumable.COOKED_SHRIMP,
+        "cooked_shrimp_fine": Consumable.COOKED_SHRIMP_FINE,
         "cooked_squid": Consumable.COOKED_SQUID,
+        "cooked_squid_fine": Consumable.COOKED_SQUID_FINE,
         "cooked_stingray": Consumable.COOKED_STINGRAY,
+        "cooked_stingray_fine": Consumable.COOKED_STINGRAY_FINE,
         "cooked_swordfish": Consumable.COOKED_SWORDFISH,
+        "cooked_swordfish_fine": Consumable.COOKED_SWORDFISH_FINE,
         "cooked_trout": Consumable.COOKED_TROUT,
+        "cooked_trout_fine": Consumable.COOKED_TROUT_FINE,
         "cooking_memosphere": Consumable.COOKING_MEMOSPHERE,
         "crafting_memosphere": Consumable.CRAFTING_MEMOSPHERE,
         "creme_brulee": Consumable.CREME_BRULEE,
+        "creme_brulee_fine": Consumable.CREME_BRULEE_FINE,
         "dried_fruit": Consumable.DRIED_FRUIT,
+        "dried_fruit_fine": Consumable.DRIED_FRUIT_FINE,
         "dynamite": Consumable.DYNAMITE,
+        "dynamite_fine": Consumable.DYNAMITE_FINE,
         "fireball_wine": Consumable.FIREBALL_WINE,
+        "fireball_wine_fine": Consumable.FIREBALL_WINE_FINE,
         "fishing_memosphere": Consumable.FISHING_MEMOSPHERE,
         "foraging_memosphere": Consumable.FORAGING_MEMOSPHERE,
         "fortified_wine": Consumable.FORTIFIED_WINE,
+        "fortified_wine_fine": Consumable.FORTIFIED_WINE_FINE,
         "fried_fish_sandwich": Consumable.FRIED_FISH_SANDWICH,
+        "fried_fish_sandwich_fine": Consumable.FRIED_FISH_SANDWICH_FINE,
         "fried_noodles": Consumable.FRIED_NOODLES,
+        "fried_noodles_fine": Consumable.FRIED_NOODLES_FINE,
         "frozen_bait": Consumable.FROZEN_BAIT,
+        "frozen_bait_fine": Consumable.FROZEN_BAIT_FINE,
         "fruit_cake": Consumable.FRUIT_CAKE,
+        "fruit_cake_fine": Consumable.FRUIT_CAKE_FINE,
         "jarvonian_pastry": Consumable.JARVONIAN_PASTRY,
+        "jarvonian_pastry_fine": Consumable.JARVONIAN_PASTRY_FINE,
         "jelly_sandwich": Consumable.JELLY_SANDWICH,
+        "jelly_sandwich_fine": Consumable.JELLY_SANDWICH_FINE,
         "kelp_rolls": Consumable.KELP_ROLLS,
+        "kelp_rolls_fine": Consumable.KELP_ROLLS_FINE,
         "mining_memosphere": Consumable.MINING_MEMOSPHERE,
         "moonshine": Consumable.MOONSHINE,
+        "moonshine_fine": Consumable.MOONSHINE_FINE,
         "mud_pie": Consumable.MUD_PIE,
+        "mud_pie_fine": Consumable.MUD_PIE_FINE,
         "mushroom_curry": Consumable.MUSHROOM_CURRY,
+        "mushroom_curry_fine": Consumable.MUSHROOM_CURRY_FINE,
         "nettle_tea": Consumable.NETTLE_TEA,
+        "nettle_tea_fine": Consumable.NETTLE_TEA_FINE,
         "nut_mix": Consumable.NUT_MIX,
+        "nut_mix_fine": Consumable.NUT_MIX_FINE,
         "pancake": Consumable.PANCAKE,
+        "pancake_fine": Consumable.PANCAKE_FINE,
         "pickles": Consumable.PICKLES,
+        "pickles_fine": Consumable.PICKLES_FINE,
         "porridge": Consumable.PORRIDGE,
+        "porridge_fine": Consumable.PORRIDGE_FINE,
         "roasted_bell_pepper": Consumable.ROASTED_BELL_PEPPER,
+        "roasted_bell_pepper_fine": Consumable.ROASTED_BELL_PEPPER_FINE,
         "salmon_pie": Consumable.SALMON_PIE,
+        "salmon_pie_fine": Consumable.SALMON_PIE_FINE,
         "saltrum": Consumable.SALTRUM,
+        "saltrum_fine": Consumable.SALTRUM_FINE,
         "schnitzel": Consumable.SCHNITZEL,
+        "schnitzel_fine": Consumable.SCHNITZEL_FINE,
         "smithing_memosphere": Consumable.SMITHING_MEMOSPHERE,
         "spicy_pumpkin_juice": Consumable.SPICY_PUMPKIN_JUICE,
+        "spicy_pumpkin_juice_fine": Consumable.SPICY_PUMPKIN_JUICE_FINE,
         "sweet_carrot_pie": Consumable.SWEET_CARROT_PIE,
+        "sweet_carrot_pie_fine": Consumable.SWEET_CARROT_PIE_FINE,
         "tasty_breakfast": Consumable.TASTY_BREAKFAST,
+        "tasty_breakfast_fine": Consumable.TASTY_BREAKFAST_FINE,
         "trinketry_memosphere": Consumable.TRINKETRY_MEMOSPHERE,
         "trout_soup": Consumable.TROUT_SOUP,
+        "trout_soup_fine": Consumable.TROUT_SOUP_FINE,
         "underwater_salad": Consumable.UNDERWATER_SALAD,
+        "underwater_salad_fine": Consumable.UNDERWATER_SALAD_FINE,
         "veggie_soup": Consumable.VEGGIE_SOUP,
+        "veggie_soup_fine": Consumable.VEGGIE_SOUP_FINE,
         "wine": Consumable.WINE,
+        "wine_fine": Consumable.WINE_FINE,
         "woodcutting_memosphere": Consumable.WOODCUTTING_MEMOSPHERE,
     }
 
@@ -1115,161 +1437,317 @@ def _build_material_mapping():
     from util.autogenerated.materials import Material
     return {
         "adamant_bar": Material.ADAMANT_BAR,
+        "adamant_bar_fine": Material.ADAMANT_BAR_FINE,
         "adamant_ore": Material.ADAMANT_ORE,
+        "adamant_ore_fine": Material.ADAMANT_ORE_FINE,
         "adventurers_enamel_pin": Material.ADVENTURERS_ENAMEL_PIN,
+        "adventurers_enamel_pin_fine": Material.ADVENTURERS_ENAMEL_PIN_FINE,
         "bamboo_logs": Material.BAMBOO_LOGS,
+        "bamboo_logs_fine": Material.BAMBOO_LOGS_FINE,
         "bamboo_plank": Material.BAMBOO_PLANK,
+        "bamboo_plank_fine": Material.BAMBOO_PLANK_FINE,
         "bat_trinket": Material.BAT_TRINKET,
+        "bat_trinket_fine": Material.BAT_TRINKET_FINE,
         "beaver_trinket": Material.BEAVER_TRINKET,
+        "beaver_trinket_fine": Material.BEAVER_TRINKET_FINE,
         "bell_pepper": Material.BELL_PEPPER,
+        "bell_pepper_fine": Material.BELL_PEPPER_FINE,
         "berries": Material.BERRIES,
+        "berries_fine": Material.BERRIES_FINE,
         "birch_logs": Material.BIRCH_LOGS,
+        "birch_logs_fine": Material.BIRCH_LOGS_FINE,
         "birch_plank": Material.BIRCH_PLANK,
+        "birch_plank_fine": Material.BIRCH_PLANK_FINE,
         "bones": Material.BONES,
+        "bones_fine": Material.BONES_FINE,
         "bronze_bar": Material.BRONZE_BAR,
+        "bronze_bar_fine": Material.BRONZE_BAR_FINE,
         "carrot": Material.CARROT,
+        "carrot_fine": Material.CARROT_FINE,
         "cattail": Material.CATTAIL,
+        "cattail_fine": Material.CATTAIL_FINE,
         "chocolate": Material.CHOCOLATE,
+        "chocolate_fine": Material.CHOCOLATE_FINE,
         "circular_root_trinket": Material.CIRCULAR_ROOT_TRINKET,
+        "circular_root_trinket_fine": Material.CIRCULAR_ROOT_TRINKET_FINE,
         "clam_shell": Material.CLAM_SHELL,
+        "clam_shell_fine": Material.CLAM_SHELL_FINE,
         "coal": Material.COAL,
+        "coal_fine": Material.COAL_FINE,
         "compass_trinket": Material.COMPASS_TRINKET,
+        "compass_trinket_fine": Material.COMPASS_TRINKET_FINE,
         "cooling_icicle_trinket": Material.COOLING_ICICLE_TRINKET,
+        "cooling_icicle_trinket_fine": Material.COOLING_ICICLE_TRINKET_FINE,
         "copper_bar": Material.COPPER_BAR,
+        "copper_bar_fine": Material.COPPER_BAR_FINE,
         "copper_ore": Material.COPPER_ORE,
+        "copper_ore_fine": Material.COPPER_ORE_FINE,
         "coral": Material.CORAL,
+        "coral_fine": Material.CORAL_FINE,
         "coral_plank": Material.CORAL_PLANK,
+        "coral_plank_fine": Material.CORAL_PLANK_FINE,
         "crystal_coal": Material.CRYSTAL_COAL,
+        "crystal_coal_fine": Material.CRYSTAL_COAL_FINE,
         "crystallized_flame": Material.CRYSTALLIZED_FLAME,
+        "crystallized_flame_fine": Material.CRYSTALLIZED_FLAME_FINE,
         "cucumber": Material.CUCUMBER,
+        "cucumber_fine": Material.CUCUMBER_FINE,
         "ectoplasm": Material.ECTOPLASM,
+        "ectoplasm_fine": Material.ECTOPLASM_FINE,
         "ectoplasm_fish": Material.ECTOPLASM_FISH,
+        "ectoplasm_fish_fine": Material.ECTOPLASM_FISH_FINE,
         "ectoplasm_logs": Material.ECTOPLASM_LOGS,
+        "ectoplasm_logs_fine": Material.ECTOPLASM_LOGS_FINE,
         "ectoplasm_rock": Material.ECTOPLASM_ROCK,
+        "ectoplasm_rock_fine": Material.ECTOPLASM_ROCK_FINE,
         "eel_trinket": Material.EEL_TRINKET,
+        "eel_trinket_fine": Material.EEL_TRINKET_FINE,
         "egg": Material.EGG,
+        "egg_fine": Material.EGG_FINE,
         "ethernite": Material.ETHERNITE,
+        "ethernite_fine": Material.ETHERNITE_FINE,
         "farganite_bar": Material.FARGANITE_BAR,
+        "farganite_bar_fine": Material.FARGANITE_BAR_FINE,
         "farganite_ore": Material.FARGANITE_ORE,
+        "farganite_ore_fine": Material.FARGANITE_ORE_FINE,
         "fishbone": Material.FISHBONE,
+        "fishbone_fine": Material.FISHBONE_FINE,
         "fishing_line": Material.FISHING_LINE,
+        "fishing_line_fine": Material.FISHING_LINE_FINE,
         "flax": Material.FLAX,
+        "flax_fine": Material.FLAX_FINE,
         "gold_bar": Material.GOLD_BAR,
+        "gold_bar_fine": Material.GOLD_BAR_FINE,
         "gold_nugget": Material.GOLD_NUGGET,
+        "gold_nugget_fine": Material.GOLD_NUGGET_FINE,
         "gold_ore": Material.GOLD_ORE,
+        "gold_ore_fine": Material.GOLD_ORE_FINE,
         "grass": Material.GRASS,
+        "grass_fine": Material.GRASS_FINE,
         "hardened_kelp": Material.HARDENED_KELP,
+        "hardened_kelp_fine": Material.HARDENED_KELP_FINE,
         "hemp": Material.HEMP,
+        "hemp_fine": Material.HEMP_FINE,
         "heron_trinket": Material.HERON_TRINKET,
+        "heron_trinket_fine": Material.HERON_TRINKET_FINE,
         "highwater_lotus": Material.HIGHWATER_LOTUS,
+        "highwater_lotus_fine": Material.HIGHWATER_LOTUS_FINE,
         "honeycomb": Material.HONEYCOMB,
+        "honeycomb_fine": Material.HONEYCOMB_FINE,
         "hydrilium": Material.HYDRILIUM,
         "hydrilium_bar": Material.HYDRILIUM_BAR,
+        "hydrilium_bar_fine": Material.HYDRILIUM_BAR_FINE,
+        "hydrilium_fine": Material.HYDRILIUM_FINE,
         "iron_bar": Material.IRON_BAR,
+        "iron_bar_fine": Material.IRON_BAR_FINE,
         "iron_ore": Material.IRON_ORE,
+        "iron_ore_fine": Material.IRON_ORE_FINE,
         "ironweed": Material.IRONWEED,
+        "ironweed_fine": Material.IRONWEED_FINE,
         "ironweed_twine": Material.IRONWEED_TWINE,
+        "ironweed_twine_fine": Material.IRONWEED_TWINE_FINE,
         "jade": Material.JADE,
+        "jade_fine": Material.JADE_FINE,
         "kelp": Material.KELP,
+        "kelp_fine": Material.KELP_FINE,
         "kelp_twine": Material.KELP_TWINE,
+        "kelp_twine_fine": Material.KELP_TWINE_FINE,
         "large_stone": Material.LARGE_STONE,
+        "large_stone_fine": Material.LARGE_STONE_FINE,
         "loverose": Material.LOVEROSE,
+        "loverose_fine": Material.LOVEROSE_FINE,
         "lucky_rabbit_foot_trinket": Material.LUCKY_RABBIT_FOOT_TRINKET,
+        "lucky_rabbit_foot_trinket_fine": Material.LUCKY_RABBIT_FOOT_TRINKET_FINE,
         "mahogany_plank": Material.MAHOGANY_PLANK,
+        "mahogany_plank_fine": Material.MAHOGANY_PLANK_FINE,
         "mangrove_logs": Material.MANGROVE_LOGS,
+        "mangrove_logs_fine": Material.MANGROVE_LOGS_FINE,
         "mangrove_plank": Material.MANGROVE_PLANK,
+        "mangrove_plank_fine": Material.MANGROVE_PLANK_FINE,
         "maple_logs": Material.MAPLE_LOGS,
+        "maple_logs_fine": Material.MAPLE_LOGS_FINE,
         "maple_plank": Material.MAPLE_PLANK,
+        "maple_plank_fine": Material.MAPLE_PLANK_FINE,
         "measuring_spoons_trinket": Material.MEASURING_SPOONS_TRINKET,
+        "measuring_spoons_trinket_fine": Material.MEASURING_SPOONS_TRINKET_FINE,
         "metal_scrap": Material.METAL_SCRAP,
+        "metal_scrap_fine": Material.METAL_SCRAP_FINE,
         "milk": Material.MILK,
+        "milk_fine": Material.MILK_FINE,
         "milkweed": Material.MILKWEED,
+        "milkweed_fine": Material.MILKWEED_FINE,
         "moondaisy": Material.MOONDAISY,
+        "moondaisy_fine": Material.MOONDAISY_FINE,
         "mud": Material.MUD,
+        "mud_fine": Material.MUD_FINE,
         "mushroom": Material.MUSHROOM,
+        "mushroom_fine": Material.MUSHROOM_FINE,
         "name_tag": Material.NAME_TAG,
+        "name_tag_fine": Material.NAME_TAG_FINE,
         "nettle": Material.NETTLE,
+        "nettle_fine": Material.NETTLE_FINE,
         "oak_logs": Material.OAK_LOGS,
+        "oak_logs_fine": Material.OAK_LOGS_FINE,
         "oak_plank": Material.OAK_PLANK,
+        "oak_plank_fine": Material.OAK_PLANK_FINE,
         "opal": Material.OPAL,
+        "opal_fine": Material.OPAL_FINE,
         "pearls": Material.PEARLS,
+        "pearls_fine": Material.PEARLS_FINE,
         "pepper": Material.PEPPER,
+        "pepper_fine": Material.PEPPER_FINE,
         "pine_logs": Material.PINE_LOGS,
+        "pine_logs_fine": Material.PINE_LOGS_FINE,
         "pine_plank": Material.PINE_PLANK,
+        "pine_plank_fine": Material.PINE_PLANK_FINE,
         "pink_pearl_trinket": Material.PINK_PEARL_TRINKET,
+        "pink_pearl_trinket_fine": Material.PINK_PEARL_TRINKET_FINE,
         "potato": Material.POTATO,
+        "potato_fine": Material.POTATO_FINE,
         "raw_anglerfish": Material.RAW_ANGLERFISH,
+        "raw_anglerfish_fine": Material.RAW_ANGLERFISH_FINE,
         "raw_carp": Material.RAW_CARP,
+        "raw_carp_fine": Material.RAW_CARP_FINE,
         "raw_jellyfish": Material.RAW_JELLYFISH,
+        "raw_jellyfish_fine": Material.RAW_JELLYFISH_FINE,
         "raw_largemouth_bass": Material.RAW_LARGEMOUTH_BASS,
+        "raw_largemouth_bass_fine": Material.RAW_LARGEMOUTH_BASS_FINE,
         "raw_lobster": Material.RAW_LOBSTER,
+        "raw_lobster_fine": Material.RAW_LOBSTER_FINE,
         "raw_moray": Material.RAW_MORAY,
+        "raw_moray_fine": Material.RAW_MORAY_FINE,
         "raw_perch": Material.RAW_PERCH,
+        "raw_perch_fine": Material.RAW_PERCH_FINE,
         "raw_pike": Material.RAW_PIKE,
+        "raw_pike_fine": Material.RAW_PIKE_FINE,
         "raw_salmon": Material.RAW_SALMON,
+        "raw_salmon_fine": Material.RAW_SALMON_FINE,
         "raw_shark": Material.RAW_SHARK,
+        "raw_shark_fine": Material.RAW_SHARK_FINE,
         "raw_shrimp": Material.RAW_SHRIMP,
+        "raw_shrimp_fine": Material.RAW_SHRIMP_FINE,
         "raw_squid": Material.RAW_SQUID,
+        "raw_squid_fine": Material.RAW_SQUID_FINE,
         "raw_stingray": Material.RAW_STINGRAY,
+        "raw_stingray_fine": Material.RAW_STINGRAY_FINE,
         "raw_stream_eel": Material.RAW_STREAM_EEL,
+        "raw_stream_eel_fine": Material.RAW_STREAM_EEL_FINE,
         "raw_swordfish": Material.RAW_SWORDFISH,
+        "raw_swordfish_fine": Material.RAW_SWORDFISH_FINE,
         "raw_trout": Material.RAW_TROUT,
+        "raw_trout_fine": Material.RAW_TROUT_FINE,
         "root": Material.ROOT,
+        "root_fine": Material.ROOT_FINE,
         "rotbud": Material.ROTBUD,
+        "rotbud_fine": Material.ROTBUD_FINE,
         "rough_ethernite": Material.ROUGH_ETHERNITE,
+        "rough_ethernite_fine": Material.ROUGH_ETHERNITE_FINE,
         "rough_jade": Material.ROUGH_JADE,
+        "rough_jade_fine": Material.ROUGH_JADE_FINE,
         "rough_opal": Material.ROUGH_OPAL,
+        "rough_opal_fine": Material.ROUGH_OPAL_FINE,
         "rough_ruby": Material.ROUGH_RUBY,
+        "rough_ruby_fine": Material.ROUGH_RUBY_FINE,
         "rough_star_pearl": Material.ROUGH_STAR_PEARL,
+        "rough_star_pearl_fine": Material.ROUGH_STAR_PEARL_FINE,
         "rough_sun_stone": Material.ROUGH_SUN_STONE,
+        "rough_sun_stone_fine": Material.ROUGH_SUN_STONE_FINE,
         "rough_topaz": Material.ROUGH_TOPAZ,
+        "rough_topaz_fine": Material.ROUGH_TOPAZ_FINE,
         "rough_wrentmarine": Material.ROUGH_WRENTMARINE,
+        "rough_wrentmarine_fine": Material.ROUGH_WRENTMARINE_FINE,
         "ruby": Material.RUBY,
+        "ruby_fine": Material.RUBY_FINE,
         "salt_crystal": Material.SALT_CRYSTAL,
+        "salt_crystal_fine": Material.SALT_CRYSTAL_FINE,
         "salty_hops": Material.SALTY_HOPS,
+        "salty_hops_fine": Material.SALTY_HOPS_FINE,
         "sea_cabbage": Material.SEA_CABBAGE,
+        "sea_cabbage_fine": Material.SEA_CABBAGE_FINE,
         "sea_shell": Material.SEA_SHELL,
+        "sea_shell_fine": Material.SEA_SHELL_FINE,
         "sea_spinach": Material.SEA_SPINACH,
+        "sea_spinach_fine": Material.SEA_SPINACH_FINE,
         "shark_tooth_trinket": Material.SHARK_TOOTH_TRINKET,
+        "shark_tooth_trinket_fine": Material.SHARK_TOOTH_TRINKET_FINE,
         "shrimp_trinket": Material.SHRIMP_TRINKET,
+        "shrimp_trinket_fine": Material.SHRIMP_TRINKET_FINE,
         "silver_bar": Material.SILVER_BAR,
+        "silver_bar_fine": Material.SILVER_BAR_FINE,
         "silver_nugget": Material.SILVER_NUGGET,
+        "silver_nugget_fine": Material.SILVER_NUGGET_FINE,
         "silver_ore": Material.SILVER_ORE,
+        "silver_ore_fine": Material.SILVER_ORE_FINE,
         "snowdrop": Material.SNOWDROP,
+        "snowdrop_fine": Material.SNOWDROP_FINE,
         "spruce_logs": Material.SPRUCE_LOGS,
+        "spruce_logs_fine": Material.SPRUCE_LOGS_FINE,
         "spruce_plank": Material.SPRUCE_PLANK,
+        "spruce_plank_fine": Material.SPRUCE_PLANK_FINE,
         "star_pearl": Material.STAR_PEARL,
+        "star_pearl_fine": Material.STAR_PEARL_FINE,
         "steel_bar": Material.STEEL_BAR,
+        "steel_bar_fine": Material.STEEL_BAR_FINE,
         "stone": Material.STONE,
+        "stone_fine": Material.STONE_FINE,
         "sturdy_branch": Material.STURDY_BRANCH,
+        "sturdy_branch_fine": Material.STURDY_BRANCH_FINE,
         "sun_stone": Material.SUN_STONE,
+        "sun_stone_fine": Material.SUN_STONE_FINE,
         "sunblossom": Material.SUNBLOSSOM,
+        "sunblossom_fine": Material.SUNBLOSSOM_FINE,
         "sweet_kelp": Material.SWEET_KELP,
+        "sweet_kelp_fine": Material.SWEET_KELP_FINE,
         "tarsilium_bar": Material.TARSILIUM_BAR,
+        "tarsilium_bar_fine": Material.TARSILIUM_BAR_FINE,
         "tarsilium_ore": Material.TARSILIUM_ORE,
+        "tarsilium_ore_fine": Material.TARSILIUM_ORE_FINE,
         "teak_logs": Material.TEAK_LOGS,
+        "teak_logs_fine": Material.TEAK_LOGS_FINE,
         "teak_plank": Material.TEAK_PLANK,
+        "teak_plank_fine": Material.TEAK_PLANK_FINE,
         "thistle": Material.THISTLE,
+        "thistle_fine": Material.THISTLE_FINE,
         "tin_ore": Material.TIN_ORE,
+        "tin_ore_fine": Material.TIN_ORE_FINE,
         "tomato": Material.TOMATO,
+        "tomato_fine": Material.TOMATO_FINE,
         "topaz": Material.TOPAZ,
+        "topaz_fine": Material.TOPAZ_FINE,
         "trash": Material.TRASH,
+        "trash_fine": Material.TRASH_FINE,
         "twine": Material.TWINE,
+        "twine_fine": Material.TWINE_FINE,
         "underwater_lotus": Material.UNDERWATER_LOTUS,
+        "underwater_lotus_fine": Material.UNDERWATER_LOTUS_FINE,
         "unidentified_remains": Material.UNIDENTIFIED_REMAINS,
+        "unidentified_remains_fine": Material.UNIDENTIFIED_REMAINS_FINE,
         "violite_bar": Material.VIOLITE_BAR,
+        "violite_bar_fine": Material.VIOLITE_BAR_FINE,
         "violite_ore": Material.VIOLITE_ORE,
+        "violite_ore_fine": Material.VIOLITE_ORE_FINE,
         "volcanic_ash": Material.VOLCANIC_ASH,
+        "volcanic_ash_fine": Material.VOLCANIC_ASH_FINE,
         "volcanic_rock": Material.VOLCANIC_ROCK,
+        "volcanic_rock_fine": Material.VOLCANIC_ROCK_FINE,
         "wheat": Material.WHEAT,
+        "wheat_fine": Material.WHEAT_FINE,
         "widows_kiss": Material.WIDOWS_KISS,
+        "widows_kiss_fine": Material.WIDOWS_KISS_FINE,
         "willow_logs": Material.WILLOW_LOGS,
+        "willow_logs_fine": Material.WILLOW_LOGS_FINE,
         "willow_plank": Material.WILLOW_PLANK,
+        "willow_plank_fine": Material.WILLOW_PLANK_FINE,
         "wood_scrap": Material.WOOD_SCRAP,
+        "wood_scrap_fine": Material.WOOD_SCRAP_FINE,
         "wooden_stick": Material.WOODEN_STICK,
+        "wooden_stick_fine": Material.WOODEN_STICK_FINE,
         "wrentmarine": Material.WRENTMARINE,
+        "wrentmarine_fine": Material.WRENTMARINE_FINE,
         "yew_logs": Material.YEW_LOGS,
+        "yew_logs_fine": Material.YEW_LOGS_FINE,
         "yew_plank": Material.YEW_PLANK,
+        "yew_plank_fine": Material.YEW_PLANK_FINE,
     }
 
 
@@ -1359,8 +1837,15 @@ def get_item_from_export_name(export_name: str, item_type: str = None) -> Option
     
     # Try removing "_fine" suffix for consumables/materials
     if export_lower.endswith("_fine"):
-        # Already has _fine, try exact match
-        pass
+        base_name = export_lower[:-5]  # Remove "_fine"
+        # Look up the fine variant directly (e.g., "fruit_cake_fine" in mapping)
+        fine_item = mapping.get(export_lower)
+        if fine_item:
+            return fine_item
+        # Fall back to base item if fine variant not in mapping
+        base_item = mapping.get(base_name)
+        if base_item:
+            return base_item
     else:
         # Try adding _fine
         fine_name = export_lower + "_fine"

@@ -1,0 +1,45 @@
+# Database files - DO NOT commit
+sessions.db
+sessions.db-journal
+*.db
+*.db-journal
+
+# Docker Compose - Each environment has its own
+docker-compose.yml
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Testing
+.pytest_cache/
+.hypothesis/
+htmlcov/
+.coverage
+
+# Docker
+.dockerignore

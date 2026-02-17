@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Walkscape Optimizer</title>
+
+    <!-- jQuery 3.7.1 from official CDN -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"
+        integrity="sha256-/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=" crossorigin="anonymous"></script>
+
+    <!-- html2canvas for screenshot capture -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"
+        integrity="sha512-BNaRQnYJYiPSqHHDb58B0yaPfCu+Wgds8Gp/gU33kqBtgNS4tSPHuGibyoeqMV/TJlSKda6FXzoEyYGjTe+vXA=="
+        crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+
+    <!-- Pako 2.1.0 for gzip compression/decompression (local copy) -->
+    <script src="/static/js/pako.min.js"></script>
+
+    <!-- Styles -->
+    <link rel="stylesheet" href="/static/css/styles.css?v=3">
+</head>
+
+<body>
+    <!-- Header Bar -->
+    <header class="header-bar">
+        <div class="header-content">
+            <button class="help-btn" id="help-btn" aria-label="Help & Tutorial" title="Help & Tutorial">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
+                    <path
+                        d="M10,19H13V22H10V19M12,2C17.35,2.22 19.68,7.62 16.5,11.67C15.67,12.67 14.33,13.33 13.67,14.17C13,15 13,16 13,17H10C10,15.33 10,13.92 10.67,12.92C11.33,11.92 12.67,11.33 13.5,10.67C15.92,8.43 15.32,5.26 12,5A3,3 0 0,0 9,8H6A6,6 0 0,1 12,2Z" />
+                </svg>
+            </button>
+            <h1>Walkscape Optimizer</h1>
+            <div class="header-buttons">
+                <button class="about-btn" id="about-btn" aria-label="About" title="About this tool">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
+                        <path
+                            d="M11,9H13V7H11M12,20C7.59,20 4,16.41 4,12C4,7.59 7.59,4 12,4C16.41,4 20,7.59 20,12C20,16.41 16.41,20 12,20M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M11,17H13V11H11V17Z" />
+                    </svg>
+                </button>
+                <button class="report-btn" id="report-btn" aria-label="Report Bug" title="Report a bug">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
+                        <path
+                            d="M12,8H4A2,2 0 0,0 2,10V14A2,2 0 0,0 4,16H5V20A1,1 0 0,0 6,21H8A1,1 0 0,0 9,20V16H12L17,20V4L12,8M21.5,12C21.5,13.71 20.54,15.26 19,16V8C20.54,8.75 21.5,10.3 21.5,12Z" />
+                    </svg>
+                </button>
+                <button class="settings-gear" id="settings-btn" aria-label="Settings">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
+                        <path
+                            d="M12,15.5A3.5,3.5 0 0,1 8.5,12A3.5,3.5 0 0,1 12,8.5A3.5,3.5 0 0,1 15.5,12A3.5,3.5 0 0,1 12,15.5M19.43,12.97C19.47,12.65 19.5,12.33 19.5,12C19.5,11.67 19.47,11.34 19.43,11L21.54,9.37C21.73,9.22 21.78,8.95 21.66,8.73L19.66,5.27C19.54,5.05 19.27,4.96 19.05,5.05L16.56,6.05C16.04,5.66 15.5,5.32 14.87,5.07L14.5,2.42C14.46,2.18 14.25,2 14,2H10C9.75,2 9.54,2.18 9.5,2.42L9.13,5.07C8.5,5.32 7.96,5.66 7.44,6.05L4.95,5.05C4.73,4.96 4.46,5.05 4.34,5.27L2.34,8.73C2.21,8.95 2.27,9.22 2.46,9.37L4.57,11C4.53,11.34 4.5,11.67 4.5,12C4.5,12.33 4.53,12.65 4.57,12.97L2.46,14.63C2.27,14.78 2.21,15.05 2.34,15.27L4.34,18.73C4.46,18.95 4.73,19.03 4.95,18.95L7.44,17.94C7.96,18.34 8.5,18.68 9.13,18.93L9.5,21.58C9.54,21.82 9.75,22 10,22H14C14.25,22 14.46,21.82 14.5,21.58L14.87,18.93C15.5,18.67 16.04,18.34 16.56,17.94L19.05,18.95C19.27,19.03 19.54,18.95 19.66,18.73L21.66,15.27C21.78,15.05 21.73,14.78 21.54,14.63L19.43,12.97Z" />
+                    </svg>
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <!-- Mobile Tab Navigation (visible < 769px) -->
+    <nav class="mobile-tabs" id="mobile-tabs">
+        <button class="mobile-tab active" data-column="column-1">
+            <img src="/assets/icons/character.svg" alt="Character" class="tab-icon">
+            <span>Character</span>
+        </button>
+        <button class="mobile-tab" data-column="column-2">
+            <img src="/assets/icons/items.svg" alt="Gear" class="tab-icon">
+            <span>Gear</span>
+        </button>
+        <button class="mobile-tab" data-column="column-3">
+            <img src="/assets/icons/activities.svg" alt="Activity" class="tab-icon">
+            <span>Activity</span>
+        </button>
+    </nav>
+
+    <!-- Main Content Area -->
+    <main class="main-content">
+        <!-- Column 1: Character Data -->
+        <div class="column column-1 active-mobile-column" id="column-1">
+            <div class="column-header">
+                <h2>Character Data</h2>
+            </div>
+            <div class="column-content">
+                <!-- Content will be dynamically generated by JavaScript -->
+            </div>
+        </div>
+
+        <!-- Column 2: Gear Stats -->
+        <div class="column column-2" id="column-2">
+            <div class="column-header">
+                <h2>Gear Stats</h2>
+                <button id="randomize-gear-btn" class="randomize-btn" title="Randomize equipped gear">🎲
+                    Randomize</button>
+            </div>
+            <div class="column-content">
+                <!-- Gear Set Manager -->
+                <div id="gear-set-manager"></div>
+
+                <!-- Filter Checkboxes -->
+                <div id="filter-checkboxes"></div>
+
+                <!-- Gear Slot Grid -->
+                <div id="gear-slot-grid"></div>
+
+                <!-- Action Buttons -->
+                <div id="action-buttons"></div>
+
+                <!-- Combined Stats Section -->
+                <div id="combined-stats-section"></div>
+            </div>
+        </div>
+
+        <!-- Column 3: Activity/Craft Selection -->
+        <div class="column column-3" id="column-3">
+            <div class="column-header">
+                <h2>Activity/Craft Selection</h2>
+                <button id="randomize-activity-btn" class="randomize-btn" title="Randomize activity or recipe">🎲
+                    Randomize</button>
+            </div>
+            <div class="column-content">
+                <!-- Activity Selector Dropdown -->
+                <div id="activity-selector-dropdown"></div>
+
+                <!-- Recipe Selector Dropdown (TODO) -->
+                <div id="recipe-selector-dropdown"></div>
+
+                <!-- Activity/Recipe Info Section (TODO) -->
+                <div id="activity-recipe-info"></div>
+
+                <!-- Drops Section (TODO) -->
+                <div id="drops-section"></div>
+
+                <!-- Calculator Section (TODO) -->
+                <div id="calculator-section"></div>
+            </div>
+        </div>
+    </main>
+
+    <!-- About Modal -->
+    <div id="about-modal" class="modal-overlay" style="display: none;">
+        <div class="modal about-modal-content">
+            <div class="modal-header">
+                <h2>About Walkscape Optimizer</h2>
+                <button class="close-btn" id="about-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="about-section about-version">
+                    <p id="about-version-info">Loading version info...</p>
+                </div>
+                <div class="about-section">
+                    <h3>Known Issues</h3>
+                    <ul class="about-list">
+                        <li>Sometimes the optimizer gets stuck</li>
+                        <li>Activity-specific stats (like sledding with Zippy Kicksled) may incorrectly apply globally
+                        </li>
+                        <li>Sometimes activity optimization won't select a primary/secondary</li>
+                        <li>No arrow keys usable on slot selection yet</li>
+                    </ul>
+                </div>
+
+                <div class="about-section">
+                    <h3>Planned/TODO Features</h3>
+                    <ul class="about-list">
+                        <li>Service auto-selection based on character unlocks</li>
+                        <li>Activity system implementation (sledding, etc.)</li>
+                        <li>Advanced optimization algorithms (genetic/constraint-based)</li>
+                        <li>Full regional stat filtering for all locations</li>
+                        <li>Activity & Recipe favorites</li>
+                        <li>"Only show items with applicable stats" checkbox</li>
+                    </ul>
+                </div>
+
+                <div class="about-section about-credits">
+                    <p><strong>Developed by</strong> Flames5123</p>
+                    <p><strong>Special thanks to</strong> Arky and fala's tools, which both inspired this project.</p>
+                    <p>All copyright for icons, colors, and designs belong to Not A Cult. Thank you for creating an
+                        amazingly fun and engaging game!</p>
+                    <p>Thank you for helping test the tool! Thanks to all my IRL friends and partners for helping push
+                        me to get this done and inspiring me with steps!</p>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-primary" id="about-ok">OK</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Help/Tutorial Modal -->
+    <div id="help-modal" class="modal-overlay" style="display: none;">
+        <div class="modal help-modal-content">
+            <div class="modal-header">
+                <h2>Help & Tutorial</h2>
+                <button class="close-btn" id="help-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="help-section">
+                    <h3>Getting Started</h3>
+                    <ol class="help-list">
+                        <li><strong>Import Your Character:</strong> Click "Import Character Data" in settings to paste
+                            your character export JSON from the game</li>
+                        <li><strong>Select Activity/Recipe:</strong> Choose what you want to optimize for in Column 3
+                        </li>
+                        <li><strong>Equip Items:</strong> Click gear slots to select items from your inventory</li>
+                        <li><strong>Optimize:</strong> Click the "Optimize" button to find the best gear combination
+                        </li>
+                    </ol>
+                </div>
+
+                <div class="help-section">
+                    <h3>Key Features</h3>
+                    <ul class="help-list">
+                        <li><strong>Activity Optimization:</strong> Find the best gear for activities</li>
+                        <li><strong>Crafting Optimization:</strong> Optimize gear for crafting recipes with specific
+                            services/locations</li>
+                        <li><strong>Gear Sets:</strong> Save and load different equipment configurations</li>
+                    </ul>
+                </div>
+                <div class="help-section">
+                    <h3>Tips & Tricks</h3>
+                    <ul class="help-list">
+                        <li>Optimization settings and target item settings will prioritize MANY different stats. Play
+                            around with them in whatever order!</li>
+                        <li>Use the "Show Owned Only" filter to see only items you have</li>
+                        <li>Hide items you don't want to use with the checkbox in the <b>Owned Items</b> section</li>
+                        <li>Override item quality for crafted items to test different scenarios</li>
+                        <li>Save multiple gear sets for different activities</li>
+                        <li>Use Custom Stats to plan for future character levels</li>
+                        <li>Check the drops section to see what you can get from activities</li>
+                    </ul>
+                </div>
+
+                <div class="help-section">
+                    <h3>Need More Help?</h3>
+                    <p>If you encounter issues or have questions:</p>
+                    <ul class="help-list">
+                        <li>Check the "About" section for known issues</li>
+                        <li>Report bugs using the bug report button</li>
+                    </ul>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-primary" id="help-ok">Got it!</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Bug Report Modal -->
+    <div id="bug-report-modal" class="modal-overlay" style="display: none;">
+        <div class="modal bug-report-modal-content">
+            <div class="modal-header">
+                <h2>Report a Bug</h2>
+                <button class="close-btn" id="bug-report-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p class="bug-report-intro">
+                    Help us improve by reporting issues you encounter. Your report will include:
+                </p>
+                <ul class="bug-report-info">
+                    <li>Screenshots of this site</li>
+                    <li>Your current settings and gear configuration</li>
+                    <li>Browser and app version information</li>
+                </ul>
+
+                <div class="form-group">
+                    <label for="bug-description">What happened? <span class="required">*</span></label>
+                    <textarea id="bug-description" rows="6" placeholder="Describe the issue you encountered..."
+                        maxlength="5000" required></textarea>
+                    <div class="char-count">
+                        <span id="bug-description-count">0</span> / 5000
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="bug-include-screenshots" checked>
+                        <span>Include screenshots of this site</span>
+                    </label>
+                </div>
+
+                <div class="bug-report-status" id="bug-report-status"></div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" id="bug-report-cancel">Cancel</button>
+                <button class="btn btn-primary" id="bug-report-submit">
+                    <span class="btn-text">Submit Report</span>
+                    <span class="btn-spinner" style="display: none;">⏳</span>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- JavaScript Modules -->
+    <script type="module" src="/static/js/main.js"></script>
+</body>
+
+</html>

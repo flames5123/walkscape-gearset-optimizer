@@ -10,8 +10,8 @@ from util.gearset_utils import decode_gearset, calculate_gear_stats, Gearset
 from util.walkscape_constants import Skill, Location
 
 # Paste your gearset export string here
-ACTIVITY = Activity.CAVE_DIVING
-GEARSET_EXPORT = "H4sIAAAAAAAAE8WWyW7bMBCGXyXwpZeMwX3pq9SBMSSHsWAtrqS0MYK8e0fuoWiQpkrhoCcRw+3jP5ueNs1M3bT5fPPlaTOfT8SjzYGwbG5vNk1f6JENYhnzsmXuabdpyo5Hu4sJDucyNm3z0O1L863p7/cHajsQOaqQSwJCn8BE5yEpjCCrU4TJGElqx1fsNl8fsG3m888TRxzpp3nG+8XUP7Tt84JC4ziMF8y759ubX6gZ+bsSdVm7H+r+gG0FzIeGvtEIWTGSrh4KlgImFQ1IVULVNlclrZTFvYKah64b+vfBJszHtbDD4/me+v2M/RGsMqFmciCFrWAwaEgiJ1CFghZZRpnElRDzgab5n30/85kDpBS9stGCkDqCKQyeZLWAMhgUKVQryyu4LfGDC47n9xGfxqbjTX9iXva/tX2iPFxu/dcDDtiXaYViUlrtggjglEAwyjuIQVko3mNB74yN8kpOZCXXEF182DU9jZ+m/Qn7eQKrDTPWAsQuBBOCBzQ+g84+6WyrTy5eCbKn9cnwO6SoAVXVyOkQOB2YCdBJCRGrVxk9p4u+EmQlWpMNWYtYC4e4csJzxDsCRMaSIaJwMUnU9irlbuQsW8GTqqJAIQBGzQrFEiFKCiDQhIRRGK4aV1LoJZH870TzMLRrA+vS/LYTv+GhxXHa5hHrTGU7HZu2ZeuWI2/5zDx5qXSnJh/xkbY9djSDLNnYZBC8Etw7jMoQow2g0VCMUltOmutVupcP+4PUl4dNTXdqaSnI+QDkjTWZJQ/RE5jKwCgztzjlVdFBF53rB4mvXmesLkh0qEBwvQGjPUIKsoKWSouiU1IlfRCRfkO12g7flz52GvKR5u84s3jSZbLBsFqR2McoCKKtEXzUKqrqfZbXqjYvUc2Kktjhfc+RyHqhN6T5t0WyoIgagnYRqsyqOmeEq+aDKO1fmuXd8w+xVlVEZQoAAA=="
+ACTIVITY = Activity.RESCUE_TEAM
+GEARSET_EXPORT = "H4sIAAAAAAAAA62VW27bMBBF96LvDMD3IxvoIupAGJJDW40suZLc1Aiy945SoECQuDWq/EgAQUqHd+7ceW66hY5zc//1uVkuJ2rumwNhae6abij0s7kXd687eP1513Rl19zvXhdgOg9DN+zbH908TqAcGlUCgVfOg7G1QNLFQqCsUpZC2aB2zd2u+X7Gvlsur9/J4/E4Dq/LC+55aTj3/Qv/m6ZpnFaoh5e7P1wZ+fVvrnVbO9b2gH0FzIeOftAEWTlFunooWAqYVDQgVQlV21yVtFIWt5EvYX68gW/8ednT0C44PIJVJtRMDqSwFQwGDUnkBKpQ0CLLKJPYqtqB5uUGrGUinM8TtYfzsNDUfuPb0AIqJfIkIiSlWTfDJU0+SUBppJISEZPeSHiauiNOl48Y13PXjs2Ux6H8x8EDDmW+TRFq58zXYpfnHp9mqCZHWjWQYlXDshDRugJO1OBywIK+bFSjp/2NcG/KdcJhmdnl2kVrDUSfApjsAoTEkEIUqt7kal3ayDfQv1wuEmNYDOBSVNxqRgCKECCWLJMVzscY30F8GcdyK0IlusXRIz6282M3gySpKlICIVNeq+YgOuQoUCGWpKwvZDeqMrFH/o7kbQyo1gaPPnJprOVw4qavgjVhD5E0WxvpLYS8qktf2v36WPeDQh294cx2SPhbHBRcMu1SSWSTrRY3ci3j2N9QLyzjStRWHNp5weVMq2/RFFlAqJA4fTzLZ7QFZ4TlltOiRPpUuOuiHYcO1r3ghZbFKA3GKe4xwb5KSiComKWy6LUT5lOZ1DWm2o9Pq2CncY3qJ1zyAaTLZIPhwRaJEwoFcULVCD5qFVX1PsutNntLp6/RMQ/nUhqXpScwZIIxTITFGzAReaBQjpC1UCSEVdnVT8Uy17D2nOrl0p66/f7SpnUIhyplzJWg+shsfh12OWnQZGuq3KOpyE9lszeNqdPHIff+yMPLL7CU3iLFCQAA"
 LOCATION = None # None = use first location from activity
 
 SKILL_LEVEL = None # None = auto-detect from character
@@ -59,8 +59,8 @@ def main():
         required_ap = ACTIVITY.requirements.get("achievement_points", 0)
         if required_ap > 0:
             from util.walkscape_globals import ACHIEVEMENT_POINTS
-            if ACHIEVEMENT_POINTS < required_ap:
-                print(f"  ✗ {required_ap} achievement points (you have {ACHIEVEMENT_POINTS})")
+            if int(ACHIEVEMENT_POINTS) < required_ap:
+                print(f"  ✗ {required_ap} achievement points (you have {int(ACHIEVEMENT_POINTS)})")
             else:
                 print(f"  ✓ {required_ap} achievement points")
         

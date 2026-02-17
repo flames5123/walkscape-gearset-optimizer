@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """
-Optimize gearsets for activity efficiency - Version 11.
-Fast greedy + local search refinement.
+Optimize gearsets for activity efficiency - Version 12.
+Fast greedy + 1-swap + optional 2-swap local search refinement.
 
 Approach:
-1. Use V9's greedy algorithm to get initial solution (fast)
-2. Refine using local search (swap each slot with all items)
-3. Repeat until no improvements found
-4. Guaranteed to find local optimum
+1. Use greedy algorithm to get initial solution (fast)
+2. Refine using 1-swap local search (swap each slot with all items)
+3. If no 1-swap improvement, try 2-swap (swap pairs of slots) as fallback
+4. Repeat until no improvements found
+5. Guaranteed to find local optimum
 
-This combines speed (greedy) with quality (local search refinement).
+The 2-swap search can find set bonuses and synergies that 1-swap misses,
+but is much slower (O(S² × I²) vs O(S × I)). It only runs when 1-swap
+fails to improve, making it efficient.
 """
 
 # Standard library imports
@@ -37,20 +40,34 @@ from util.walkscape_constants import *
 # Array of sorting priorities (first = primary, second = tiebreaker, etc.)
 SORTING_PRIORITY = [
     Sorting.STEPS_PER_REWARD_ROLL,       # Primary: minimize steps per reward
-    Sorting.XP_PER_STEP,                 # Tiebreaker 1: maximize XP per step
+    Sorting.XP_PER_STEP,
+    # Sorting.STEPS_PER_REWARD_ROLL,                 # Tiebreaker 1: maximize XP per step
     Sorting.EXPECTED_STEPS_PER_ACTION,   # Tiebreaker 2: minimize steps per action
-    Sorting.TOTAL_XP,
+    # Sorting.XP_PER_STEP,
 ]
 
-ACTIVITY = Activity.PLAINS_FORAGING
+ACTIVITY = Activity.TREASURE_HUNT
 
 # Target a specific item drop (None = optimize for general activity efficiency)
 # Supports strings, Item, Material, Collectible, Consumable, etc.
-TARGET_ITEM = Material.FLAX
-
+TARGET_ITEM = Collectible.TREASURE_HUNTER_TOKEN
+# TARGET_ITEM = None
 VERBOSE = True
 SLOTS_TO_TEST = []
 MAX_ITERATIONS = 100  # Max local search iterations
+ENABLE_2_SWAP = True  # Enable 2-swap testing (slower but may find better combinations)
+INCLUDE_CONSUMABLES = False  # Include consumables in optimization (set by UI)
+                              # TODO: Implement consumable optimization for activities
+                              # Currently only implemented for crafting
+CONSUMABLE_ITEMS = []  # List of consumable items to test (set by UI/worker)
+
+# Debug specific 2-swap combinations
+DEBUG_2_SWAP = True
+DEBUG_SLOT_PAIRS = [('head', 'legs')]  # Specific slot pairs to debug
+DEBUG_ITEMS = {
+    'head': ['Hydrilium Diving Helm', 'Mosquito'],  # Items to watch in head slot
+    'legs': ['Wilderness Pants', 'Merfolk']  # Items to watch in legs slot
+}
 
 # ============================================================================
 # HELPER FUNCTIONS
@@ -69,15 +86,30 @@ def is_fine_material_target(target) -> bool:
     name = get_target_name(target)
     return "(Fine)" in name
 
-def calculate_gearset_metrics(gearset_dict: dict, activity, character, final: bool = False) -> Dict[str, float]:
+def calculate_gearset_metrics(gearset_dict: dict, activity, character, final: bool = False, consumable=None) -> Dict[str, float]:
     """
     Calculate metrics for a complete gearset using Activity's get_expected_drop_rate.
     
     This function aggregates stats and calls activity.get_expected_drop_rate(verbose=True)
     which returns comprehensive metrics including all efficiency calculations.
+    
+    Args:
+        gearset_dict: Slot -> Item mapping
+        activity: Activity to optimize for
+        character: Character object
+        final: Whether this is the final display calculation
+        consumable: Optional consumable item to include in stats (if None, uses gearset's consumable slot)
     """
-    # Get all items from gearset
-    items = [item for item in gearset_dict.values() if item is not None]
+    # Get all items from gearset (exclude consumable slot - handled separately)
+    items = [item for slot, item in gearset_dict.items() if item is not None and slot != 'consumable']
+    
+    # Auto-extract consumable from gearset if not explicitly provided
+    if consumable is None:
+        consumable = gearset_dict.get('consumable')
+    
+    # Add consumable to items list if provided
+    if consumable is not None:
+        items.append(consumable)
     
     # Aggregate all stats using shared function
     skill = activity.primary_skill.lower()
@@ -110,25 +142,25 @@ def calculate_gearset_metrics(gearset_dict: dict, activity, character, final: bo
             if target_name in drop_rates:
                 # Override steps_per_reward_roll with steps per specific item
                 metrics['steps_per_reward_roll'] = drop_rates[target_name]
-                metrics['reward_rolls_per_step'] = 1.0 / drop_rates[target_name] if drop_rates[target_name] > 0 else 0
             else:
                 # Target item not in drop table
                 if VERBOSE:
                     print(f"  Warning: {target_name} not found in drop rates (available: {list(drop_rates.keys())})")
                 # Use a penalty value
-                metrics['steps_per_reward_roll'] = 999999.0
-                metrics['reward_rolls_per_step'] = 0.0
+                metrics['steps_per_reward_roll'] = 999999999.0
         except Exception as e:
             # If calculation fails, use a very high penalty value
             if VERBOSE:
                 print(f"  Warning: Could not calculate drop rate: {e}")
-            metrics['steps_per_reward_roll'] = 999999.0
-            metrics['reward_rolls_per_step'] = 0.0
+            metrics['steps_per_reward_roll'] = 999999999.0
     
     if final: 
         # Needed to get the collectibles in the final dispaly 
+        items_for_final = [item for slot, item in gearset_dict.items() if item is not None and slot != 'consumable']
+        if consumable is not None:
+            items_for_final.append(consumable)
         total_stats = aggregate_gearset_stats(
-            items=items,
+            items=items_for_final,
             skill=skill,
             location=location,
             character=character, 
@@ -142,10 +174,15 @@ def calculate_gearset_metrics(gearset_dict: dict, activity, character, final: bo
 # GREEDY INITIAL SOLUTION (from V9)
 # ============================================================================
 
-def get_greedy_initial_solution(activity, character) -> dict:
+def get_greedy_initial_solution(activity, character, consumable=None) -> dict:
     """
     Get initial solution using greedy algorithm (fast).
     Returns gearset dict.
+    
+    Args:
+        activity: Activity to optimize for
+        character: Character object
+        consumable: Optional consumable item to include in stats
     """
     print("Getting initial solution (greedy)...")
     
@@ -189,6 +226,7 @@ def get_greedy_initial_solution(activity, character) -> dict:
         
         best_item = None
         best_metric = float('inf') if not SORTING_PRIORITY[0].is_reverse else float('-inf')
+        fallback_item = None  # Track first valid item as fallback
         
         for item in all_items:
             if not hasattr(item, 'slot') or item.slot != item_slot:
@@ -209,7 +247,11 @@ def get_greedy_initial_solution(activity, character) -> dict:
             if not is_gearset_valid(test_gearset, character, activity=None, check_requirements=False):
                 continue
             
-            metrics, _ = calculate_gearset_metrics(test_gearset, activity, character)
+            # Track first valid item as fallback (for slots with no stat items like weapons)
+            if fallback_item is None:
+                fallback_item = item
+            
+            metrics, _ = calculate_gearset_metrics(test_gearset, activity, character, consumable=consumable)
             metric_value = metrics[SORTING_PRIORITY[0].metric_key]
             
             # Boost items that have needed keywords
@@ -228,7 +270,8 @@ def get_greedy_initial_solution(activity, character) -> dict:
                     best_metric = metric_value
                     best_item = item
         
-        gearset[slot] = best_item
+        # Use best item if found, otherwise use fallback (first valid item)
+        gearset[slot] = best_item if best_item else fallback_item
         
         # Update keyword counts
         if best_item:
@@ -279,7 +322,7 @@ def get_greedy_initial_solution(activity, character) -> dict:
             if not is_gearset_valid(test_gearset, character, activity=None, check_requirements=False):
                 continue
             
-            metrics, _ = calculate_gearset_metrics(test_gearset, activity, character)
+            metrics, _ = calculate_gearset_metrics(test_gearset, activity, character, consumable=consumable)
             metric_value = metrics[SORTING_PRIORITY[0].metric_key]
             
             # Boost items that have needed keywords
@@ -311,6 +354,45 @@ def get_greedy_initial_solution(activity, character) -> dict:
         else:
             print(f"  {slot}: None (no valid tools found)")
     
+    # Add consumable slot if consumables are available
+    if CONSUMABLE_ITEMS:
+        slot = 'consumable'
+        gearset[slot] = None
+        best_value = None
+        best_item = None
+        
+        for item in CONSUMABLE_ITEMS:
+            test_gearset = dict(gearset)
+            test_gearset[slot] = item
+            
+            metrics, _ = calculate_gearset_metrics(test_gearset, activity, character, consumable=item)
+            metric_value = metrics[SORTING_PRIORITY[0].metric_key]
+            
+            if best_value is None or (
+                (SORTING_PRIORITY[0].is_reverse and metric_value > best_value) or
+                (not SORTING_PRIORITY[0].is_reverse and metric_value < best_value)
+            ):
+                best_value = metric_value
+                best_item = item
+        
+        # Also test without consumable
+        test_gearset = dict(gearset)
+        test_gearset[slot] = None
+        metrics, _ = calculate_gearset_metrics(test_gearset, activity, character, consumable=None)
+        metric_value = metrics[SORTING_PRIORITY[0].metric_key]
+        
+        if best_value is None or (
+            (SORTING_PRIORITY[0].is_reverse and metric_value > best_value) or
+            (not SORTING_PRIORITY[0].is_reverse and metric_value < best_value)
+        ):
+            best_item = None
+        
+        gearset[slot] = best_item
+        if best_item:
+            print(f"  consumable: {best_item.name}")
+        else:
+            print(f"  consumable: None")
+    
     print(f"\nInitial gearset has {sum(1 for item in gearset.values() if item)} items")
     return gearset
 
@@ -318,27 +400,38 @@ def get_greedy_initial_solution(activity, character) -> dict:
 # LOCAL SEARCH REFINEMENT
 # ============================================================================
 
-def local_search_refine(initial_gearset: dict, activity, character, max_iterations: int) -> dict:
+def local_search_refine(initial_gearset: dict, activity, character, max_iterations: int, consumable=None) -> dict:
     """
-    Refine gearset using local search (hill climbing).
+    Refine gearset using local search (hill climbing) with 2-swap fallback.
     
     Strategy:
-    1. For each slot, try swapping with every other item
-    2. If better, keep the swap
-    3. Repeat until no improvements found
+    1. For each slot, try swapping with every other item (1-swap)
+    2. If better, keep the swap and restart
+    3. If no 1-swap improves, try 2-swaps (swap pairs of slots)
+    4. Repeat until no improvements found
+    
+    The 2-swap only runs when 1-swap fails, making it efficient.
+    Consumable is treated as a regular slot if present in the gearset.
+    
+    Args:
+        initial_gearset: Starting gearset dict (may include 'consumable' slot)
+        activity: Activity to optimize for
+        character: Character object
+        max_iterations: Maximum iterations
+        consumable: Deprecated - consumable is now in the gearset dict
     
     Returns:
         Refined gearset dict
     """
     print(f"\n{'='*70}")
-    print(f"LOCAL SEARCH REFINEMENT")
+    print(f"LOCAL SEARCH REFINEMENT (1-SWAP + 2-SWAP FALLBACK)")
     print(f"{'='*70}")
     
     current_gearset = initial_gearset.copy()
     metric_key = SORTING_PRIORITY[0].metric_key
     
     # Calculate initial metrics
-    current_metrics, current_stats = calculate_gearset_metrics(current_gearset, activity, character)
+    current_metrics, current_stats = calculate_gearset_metrics(current_gearset, activity, character, consumable=consumable)
     current_value = current_metrics[metric_key]
     
     print(f"Initial {metric_key}: {current_value:.4f}")
@@ -354,21 +447,37 @@ def local_search_refine(initial_gearset: dict, activity, character, max_iteratio
             
             all_items.append(item)
     
+    # Pre-organize items by slot for faster lookup
+    items_by_slot = {}
+    for item in all_items:
+        if not hasattr(item, 'slot'):
+            continue
+        slot_type = item.slot
+        if slot_type not in items_by_slot:
+            items_by_slot[slot_type] = []
+        items_by_slot[slot_type].append(item)
+    
+    # Add consumable items as a slot type
+    if CONSUMABLE_ITEMS:
+        items_by_slot['consumable'] = list(CONSUMABLE_ITEMS)
+    
+    slots = list(current_gearset.keys())
+    one_swap_count = 0
+    two_swap_count = 0
+    
     for iteration in range(max_iterations):
         if VERBOSE:
             print(f"\nIteration {iteration + 1}:")
         improved = False
-        best_swap = None
-        best_value = current_value
-        best_gearset = None
-        best_gearset_metrics = current_metrics
-        best_gearset_stats = None
         
         swaps_tested = 0
         swaps_valid = 0
         
-        # Try swapping each slot
-        for slot in current_gearset.keys():
+        # Store metrics at start of iteration for comparison
+        best_gearset_metrics = current_metrics
+        
+        # Phase 1: Try 1-swap (single item swaps) - greedy approach
+        for slot in slots:
             current_item = current_gearset[slot]
             
             # Debug for slots
@@ -380,18 +489,15 @@ def local_search_refine(initial_gearset: dict, activity, character, max_iteratio
                 item_slot = 'ring'
             elif slot.startswith('tool'):
                 item_slot = 'tools'
+            elif slot == 'consumable':
+                item_slot = 'consumable'
             else:
                 item_slot = slot
             
             # Try every other item in this slot
-            legs_items_tested = 0
             valid_items_for_slot = 0
-            better_items_found = 0
-            for new_item in all_items:
+            for new_item in items_by_slot.get(item_slot, []):
                 swaps_tested += 1
-                
-                if not hasattr(new_item, 'slot') or new_item.slot != item_slot:
-                    continue
                 
                 if new_item == current_item:
                     continue
@@ -414,50 +520,207 @@ def local_search_refine(initial_gearset: dict, activity, character, max_iteratio
                 swaps_valid += 1
                 
                 # Calculate metrics
-                test_metrics, test_stats = calculate_gearset_metrics(test_gearset, activity, character)
-                test_value = test_metrics[metric_key]
+                try:
+                    test_metrics, test_stats = calculate_gearset_metrics(test_gearset, activity, character, consumable=consumable)
+                    
+                    if VERBOSE and slot in SLOTS_TO_TEST and valid_items_for_slot <= 10:
+                        test_value = test_metrics[metric_key]
+                        print(f"      -> Valid! Metric: {test_value:.4f} (current: {current_value:.4f})")
+                    
+                    # Multi-level comparison
+                    is_better = Sorting.is_better(test_metrics, current_metrics, SORTING_PRIORITY)
+                    
+                    if is_better:
+                        # Take first improvement immediately (greedy)
+                        old_name = current_item.name if current_item else "None"
+                        current_gearset = test_gearset
+                        current_metrics = test_metrics
+                        current_stats = test_stats
+                        current_value = test_metrics[metric_key]
+                        improved = True
+                        one_swap_count += 1
+                        
+                        if VERBOSE:
+                            print(f"  Improved! 1-swap {slot}: {old_name} → {new_item.name}")
+                            for sorting in SORTING_PRIORITY:
+                                metric_key_display = sorting.metric_key
+                                val_a = best_gearset_metrics[metric_key_display]
+                                val_b = test_metrics[metric_key_display]
+                                print(f"    {sorting.display_name}: {val_a:.2f} → {val_b:.2f} (Δ {val_b - val_a:+.2f})")
+                                if val_a != val_b:
+                                    break
+                        
+                        break  # Exit item loop, move to next slot
+                except:
+                    continue
+            
+            if improved:
+                break  # Exit slot loop, restart iteration
+        
+        # Phase 2: If no 1-swap helped and 2-swap enabled, try 2-swaps
+        if not improved and ENABLE_2_SWAP:
+            if VERBOSE:
+                print(f"  No 1-swap improvements, trying 2-swaps...")
+            
+            two_swaps_tested = 0
+            two_swaps_valid = 0
+            
+            # Use greedy approach: take first improvement and restart
+            for i, slot1 in enumerate(slots):
+                current_item1 = current_gearset[slot1]
                 
-                if VERBOSE and slot in SLOTS_TO_TEST and valid_items_for_slot <= 10:
-                    print(f"      -> Valid! Metric: {test_value:.4f} (current best: {best_value:.4f})")
+                # Determine slot type for slot1
+                if slot1.startswith('ring'):
+                    item_slot1 = 'ring'
+                elif slot1.startswith('tool'):
+                    item_slot1 = 'tools'
+                else:
+                    item_slot1 = slot1
                 
-                # Multi-level comparison (primary, secondary, tertiary)
-                # Note: Using inline logic for performance (method calls are 10x slower)
-                is_better = Sorting.is_better(test_metrics, best_gearset_metrics, SORTING_PRIORITY)
+                items1 = items_by_slot.get(item_slot1, [])
                 
-                if is_better:
-                    best_value = test_value
-                    best_swap = (slot, current_item, new_item)
-                    best_gearset = test_gearset.copy()
-                    best_gearset_metrics = test_metrics
-                    best_gearset_stats = test_stats
-                    improved = True
+                for j, slot2 in enumerate(slots):
+                    if j <= i:  # Skip same slot and already tested pairs
+                        continue
+                    
+                    current_item2 = current_gearset[slot2]
+                    
+                    # Determine slot type for slot2
+                    if slot2.startswith('ring'):
+                        item_slot2 = 'ring'
+                    elif slot2.startswith('tool'):
+                        item_slot2 = 'tools'
+                    else:
+                        item_slot2 = slot2
+                    
+                    items2 = items_by_slot.get(item_slot2, [])
+                    
+                    # Debug logging for specific slot pairs
+                    is_debug_pair = DEBUG_2_SWAP and (slot1, slot2) in DEBUG_SLOT_PAIRS
+                    if is_debug_pair:
+                        print(f"\n  DEBUG: Testing slot pair ({slot1}, {slot2})")
+                        print(f"    Current: {slot1}={current_item1.name if current_item1 else 'None'}, {slot2}={current_item2.name if current_item2 else 'None'}")
+                        print(f"    Available items for {slot1}: {len(items1)}")
+                        print(f"    Available items for {slot2}: {len(items2)}")
+                    
+                    # Try every combination of items for these two slots
+                    for new_item1 in items1:
+                        if new_item1 == current_item1:
+                            continue
+                        
+                        # Check if this is a debug item for slot1
+                        is_debug_item1 = is_debug_pair and any(name in new_item1.name for name in DEBUG_ITEMS.get(slot1, []))
+                        
+                        for new_item2 in items2:
+                            if new_item2 == current_item2:
+                                continue
+                            
+                            # Check if this is a debug item for slot2
+                            is_debug_item2 = is_debug_pair and any(name in new_item2.name for name in DEBUG_ITEMS.get(slot2, []))
+                            
+                            # Debug this specific combination
+                            is_debug_combo = is_debug_item1 and is_debug_item2
+                            
+                            if is_debug_combo:
+                                print(f"\n    DEBUG COMBO: Testing {new_item1.name} + {new_item2.name}")
+                            
+                            two_swaps_tested += 1
+                            
+                            # Create test gearset with both swaps
+                            test_gearset = current_gearset.copy()
+                            test_gearset[slot1] = new_item1
+                            test_gearset[slot2] = new_item2
+                            
+                            # Validate
+                            is_valid = is_gearset_valid(test_gearset, character, activity, check_requirements=True)
+                            
+                            if is_debug_combo:
+                                print(f"      Valid: {is_valid}")
+                                if not is_valid:
+                                    # Try to determine why it's invalid
+                                    print(f"      Checking constraints...")
+                                    print(f"        UUID unique: {validate_uuid_uniqueness(test_gearset)}")
+                                    print(f"        Keywords valid: {validate_tool_keywords(test_gearset)}")
+                                    print(f"        Requirements met: {meets_activity_requirements(test_gearset, activity, character)}")
+                            
+                            if not is_valid:
+                                continue
+                            
+                            two_swaps_valid += 1
+                            
+                            # Calculate metrics
+                            try:
+                                test_metrics, test_stats = calculate_gearset_metrics(test_gearset, activity, character, consumable=consumable)
+                                
+                                if is_debug_combo:
+                                    print(f"      Metrics calculated successfully")
+                                    for sorting in SORTING_PRIORITY:
+                                        metric_key_display = sorting.metric_key
+                                        val_current = current_metrics[metric_key_display]
+                                        val_test = test_metrics[metric_key_display]
+                                        print(f"        {sorting.display_name}: {val_current:.4f} → {val_test:.4f} (Δ {val_test - val_current:+.4f})")
+                                
+                                # Multi-level comparison
+                                is_better_result = Sorting.is_better(test_metrics, current_metrics, SORTING_PRIORITY)
+                                
+                                if is_debug_combo:
+                                    print(f"      Is better: {is_better_result}")
+                                
+                                if is_better_result:
+                                    # Take first improvement immediately (greedy)
+                                    current_gearset = test_gearset
+                                    current_metrics = test_metrics
+                                    current_stats = test_stats
+                                    current_value = test_metrics[metric_key]
+                                    improved = True
+                                    two_swap_count += 1
+                                    
+                                    if VERBOSE:
+                                        old_name1 = current_item1.name if current_item1 else "None"
+                                        old_name2 = current_item2.name if current_item2 else "None"
+                                        print(f"  Improved! 2-swap:")
+                                        print(f"    {slot1}: {old_name1} → {new_item1.name}")
+                                        print(f"    {slot2}: {old_name2} → {new_item2.name}")
+                                        for sorting in SORTING_PRIORITY:
+                                            metric_key_display = sorting.metric_key
+                                            val_a = best_gearset_metrics[metric_key_display]
+                                            val_b = test_metrics[metric_key_display]
+                                            print(f"    {sorting.display_name}: {val_a:.2f} → {val_b:.2f} (Δ {val_b - val_a:+.2f})")
+                                            if val_a != val_b:
+                                                break
+                                    
+                                    break  # Exit item2 loop
+                            except Exception as e:
+                                if is_debug_combo:
+                                    print(f"      ERROR calculating metrics: {e}")
+                                continue
+                        
+                        if improved:
+                            break  # Exit item1 loop
+                    
+                    if improved:
+                        break  # Exit slot2 loop
+                
+                if improved:
+                    break  # Exit slot1 loop
+            
+            if VERBOSE:
+                print(f"  Tested {two_swaps_tested} 2-swaps, {two_swaps_valid} valid")
         
         if VERBOSE:
-            print(f"  Tested {swaps_tested} swaps, {swaps_valid} valid")
+            print(f"  Total: {swaps_tested} 1-swaps tested, {swaps_valid} valid")
         
+        # Apply improvement if found (either from 1-swap or 2-swap)
         if improved:
-            slot, old_item, new_item = best_swap
-            old_name = old_item.name if old_item else "None"
-            if VERBOSE:
-                print(f"  Improved! Swapped {slot}: {old_name} → {new_item.name}")
-                for sorting in SORTING_PRIORITY:
-                    metric_key = sorting.metric_key
-                    val_a = current_metrics[metric_key]
-                    val_b = best_gearset_metrics[metric_key]
-                    print(f"  {sorting.display_name}: {val_a:.2f} → {val_b:.2f} (Δ {val_b - val_a:+.2f})")
-                    if val_a != val_b:
-                        break
-                
-            current_gearset = best_gearset
-            current_value = best_value
-            current_metrics = best_gearset_metrics
-            current_gearset_stats = best_gearset_stats
+            # Stats already updated in the phase that found improvement
+            pass
         else:
             if VERBOSE:
                 print(f"  No improvements found. Converged!")
             break
     
     print(f"\nFinal {metric_key}: {current_value:.4f}")
+    print(f"Improvements: {one_swap_count} from 1-swap, {two_swap_count} from 2-swap")
     return current_gearset
 
 # ============================================================================
@@ -468,9 +731,10 @@ if __name__ == '__main__':
     character = get_character()
     
     print(f"\n{'='*70}")
-    print(f"V11: GREEDY + LOCAL SEARCH")
+    print(f"V12: GREEDY + 1-SWAP + 2-SWAP LOCAL SEARCH")
     print(f"{'='*70}")
     print(f"Activity: {ACTIVITY.name}")
+    print(f"2-swap enabled: {ENABLE_2_SWAP}")
     
     if TARGET_ITEM is not None:
         target_name = get_target_name(TARGET_ITEM)
@@ -494,7 +758,7 @@ if __name__ == '__main__':
     print(f"\nGreedy solution found in {greedy_time:.2f}s")
     print(f"Initial {metric_key}: {initial_metrics[metric_key]:.4f}")
     
-    # Step 2: Refine using local search
+    # Step 2: Refine using local search (1-swap + 2-swap fallback)
     start_time = time.time()
     final_gearset = local_search_refine(initial_gearset, ACTIVITY, character, MAX_ITERATIONS)
     refine_time = time.time() - start_time

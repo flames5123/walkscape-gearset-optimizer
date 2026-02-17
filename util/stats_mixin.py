@@ -113,19 +113,80 @@ class StatsMixin:
                 if diving_count < required_count:
                     return False
             
+            elif req_type == 'achievement_points':
+                # Check achievement points
+                required_amount = req.get('amount', 0)
+                
+                # Get character's achievement points
+                char_ap = 0
+                if hasattr(character, 'achievement_points'):
+                    char_ap = character.achievement_points
+                else:
+                    # Fall back to global AP
+                    try:
+                        import util.walkscape_globals
+                        char_ap = int(util.walkscape_globals.ACHIEVEMENT_POINTS)
+                    except (ImportError, AttributeError, ValueError):
+                        pass  # If can't check, assume requirement is NOT met
+                
+                if char_ap < required_amount:
+                    return False
+            
+            elif req_type == 'activity_completion':
+                # Check if activity has been completed required number of times
+                activity = req.get('activity')
+                required_completions = req.get('completions', 0)
+                
+                # Normalize to build custom stat ID: activityname
+                activity_normalized = activity.lower().replace(' ', '_').replace("'", "")
+                
+                # Check if character has custom_stats set (not None)
+                has_completed = False
+                if hasattr(character, 'custom_stats') and character.custom_stats is not None:
+                    # Character has custom_stats from UI - use it exclusively (don't fall back)
+                    # The custom_stat_id for unlock requirements is just the activity name
+                    # If key not in dict, it means False (user hasn't toggled it)
+                    has_completed = character.custom_stats.get(activity_normalized, False)
+                else:
+                    # Character doesn't have custom_stats (None or missing) - fall back to my_config
+                    try:
+                        import my_config
+                        activity_upper = activity.upper().replace(" ", "_").replace("'", "")
+                        var_name = f"{activity_upper}_{required_completions}_COMPLETIONS"
+                        has_completed = getattr(my_config, var_name, False)
+                    except (ImportError, AttributeError):
+                        pass  # If can't check, assume requirement is NOT met
+                
+                if not has_completed:
+                    return False
+            
             elif req_type == 'access':
-                # Check region access using my_config variables
+                # Check region access
                 region = req.get('region', '').lower()
-                try:
-                    import my_config
-                    # Check for ACCESS_REGIONNAME variable (e.g., ACCESS_SYRENTHIA)
-                    access_var = f'ACCESS_{region.upper()}'
-                    has_access = getattr(my_config, access_var, True)  # Default to True if not specified
-                    if not has_access:
-                        return False
-                except (ImportError, AttributeError):
-                    # If can't check, assume accessible
-                    pass
+                
+                # Normalize region name for custom_stats lookup
+                region_normalized = region.replace(' ', '_').replace("'", "")
+                custom_stat_id = f"access_{region_normalized}"
+                
+                # Check if character has custom_stats set (not None)
+                has_access = True  # Default to True (accessible)
+                if hasattr(character, 'custom_stats') and character.custom_stats is not None:
+                    # Character has custom_stats from UI - use it exclusively (don't fall back)
+                    # If key not in dict, default to True (accessible unless explicitly set to False)
+                    has_access = character.custom_stats.get(custom_stat_id, True)
+                else:
+                    # Character doesn't have custom_stats (None or missing) - fall back to my_config
+                    try:
+                        import my_config
+                        # Check for ACCESS_REGIONNAME variable (e.g., ACCESS_SYRENTHIA)
+                        access_var = f'ACCESS_{region.upper()}'
+                        has_access = getattr(my_config, access_var, True)  # Default to True if not specified
+                    except (ImportError, AttributeError):
+                        # If can't check, assume accessible
+                        pass
+                
+                if not has_access:
+                    return False
         
         return True
 
@@ -322,27 +383,53 @@ class StatsMixin:
                             if skill.matches_skill(stat_skill):
                                 combined = self._add_location_stats(locations, location, combined)
         
+        # Check total_skill_level gates (sum of all skill levels)
+        # Structure: {'total_skill_level': {threshold: {skill: {location: {stat: value}}}}}
+        if "total_skill_level" in self.gated_stats:
+            # Use global total skill level (set by Character init)
+            import util.walkscape_globals
+            total_level = util.walkscape_globals.get_total_skill_level()
+            for threshold, threshold_stats in self.gated_stats["total_skill_level"].items():
+                if total_level >= threshold:
+                    # Add stats from this threshold
+                    for stat_skill, locations in threshold_stats.items():
+                        if skill.matches_skill(stat_skill):
+                            combined = self._add_location_stats(locations, location, combined)
+        
         # Check activity_completion gates
         if "activity_completion" in self.gated_stats:
-            try:
-                import my_config
+            for activity_name, thresholds in self.gated_stats["activity_completion"].items():
+                # Normalize activity name for lookup (spaces → underscores, lowercase)
+                activity_normalized = activity_name.lower().replace(' ', '_').replace("'", "")
                 
-                for activity_name, thresholds in self.gated_stats["activity_completion"].items():
-                    # Build config variable name: SCREWDRIVER_UNDERWATER_BASKET_WEAVING_50_COMPLETIONS
-                    item_name_upper = self.name.upper().replace(" ", "_").replace("'", "")
-                    activity_upper = activity_name.upper().replace(" ", "_")
+                for threshold, threshold_stats in thresholds.items():
+                    # Build custom stat ID: itemname_activityname
+                    item_name_normalized = self.name.lower().replace(' ', '_').replace("'", "")
+                    custom_stat_id = f"{item_name_normalized}_{activity_normalized}"
                     
-                    for threshold, threshold_stats in thresholds.items():
-                        var_name = f"{item_name_upper}_{activity_upper}_{threshold}_COMPLETIONS"
-                        has_completed = getattr(my_config, var_name, False)
-                        
-                        if has_completed:
-                            # Add stats from this threshold
-                            for stat_skill, locations in threshold_stats.items():
-                                if skill.matches_skill(stat_skill):
-                                    combined = self._add_location_stats(locations, location, combined)
-            except (ImportError, AttributeError):
-                pass  # Config not available, skip activity_completion gated stats
+                    # Check if character has custom_stats set (not None)
+                    has_completed = False
+                    if character and hasattr(character, 'custom_stats') and character.custom_stats is not None:
+                        # Character has custom_stats from UI - use it exclusively (don't fall back)
+                        # If key not in dict, it means False (user hasn't toggled it)
+                        has_completed = character.custom_stats.get(custom_stat_id, False)
+                    else:
+                        # Character doesn't have custom_stats (None or missing) - fall back to my_config
+                        try:
+                            import my_config
+                            # Build config variable name: ITEMNAME_ACTIVITYNAME_N_COMPLETIONS
+                            item_upper = self.name.upper().replace(" ", "_").replace("'", "")
+                            activity_upper = activity_name.upper().replace(" ", "_").replace("'", "")
+                            var_name = f"{item_upper}_{activity_upper}_{threshold}_COMPLETIONS"
+                            has_completed = getattr(my_config, var_name, False)
+                        except (ImportError, AttributeError):
+                            pass  # Config not available, skip
+                    
+                    if has_completed:
+                        # Add stats from this threshold
+                        for stat_skill, locations in threshold_stats.items():
+                            if skill.matches_skill(stat_skill):
+                                combined = self._add_location_stats(locations, location, combined)
         
         # Check activity gates (stats that only apply while doing a specific activity)
         # Structure: {'activity': {activity_name: {skill: {location: {stat: value}}}}}

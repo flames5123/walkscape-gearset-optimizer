@@ -1,0 +1,2998 @@
+#!/usr/bin/env python3
+"""
+FastAPI application for Walkscape UI.
+
+Provides REST API endpoints for session management, character import,
+and configuration updates. Serves static files for the frontend.
+"""
+
+import json
+import uuid
+import logging
+from typing import Dict, Any, Optional
+
+from fastapi import FastAPI, HTTPException, Request, Response, Cookie, BackgroundTasks
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+
+from ui.database import DatabaseManager
+from util.character_export_util import Character
+
+# ============================================================================
+# LOGGING CONFIGURATION
+# ============================================================================
+
+class SessionUUIDAccessLogFormatter(logging.Formatter):
+    """Custom formatter that adds session UUID to access logs."""
+    
+    def format(self, record):
+        # Check if this is an actual uvicorn access log (has client_addr from uvicorn)
+        is_uvicorn_access_log = hasattr(record, 'client_addr') and record.client_addr != 'N/A'
+        
+        if not is_uvicorn_access_log:
+            # For non-access logs, use a simple format
+            session_uuid = getattr(record, 'session_uuid', None)
+            if session_uuid:
+                record.msg = f"[{session_uuid[:8]}] {record.msg}"
+            # Use simple format without uvicorn fields
+            return f"{record.levelname}: {record.getMessage()}"
+        
+        # For uvicorn access logs, add missing fields
+        if not hasattr(record, 'levelprefix'):
+            record.levelprefix = ''
+        
+        if not hasattr(record, 'request_line'):
+            record.request_line = 'N/A'
+        
+        if not hasattr(record, 'status_code'):
+            record.status_code = 'N/A'
+        
+        # Get session UUID from the record if available
+        session_uuid = getattr(record, 'session_uuid', None)
+        
+        if session_uuid:
+            # Add session UUID prefix to the message
+            record.msg = f"[{session_uuid[:8]}] {record.msg}"
+        
+        return super().format(record)
+
+
+class StaticFileLogFilter(logging.Filter):
+    """Filter out static file and asset requests from access logs."""
+    
+    STATIC_PREFIXES = ('/static/', '/assets/', '/favicon.ico')
+    
+    def filter(self, record):
+        msg = record.getMessage()
+        for prefix in self.STATIC_PREFIXES:
+            if prefix in msg:
+                return False
+        return True
+
+
+# Configure uvicorn access logger
+def setup_logging():
+    """Setup custom logging with session UUID support.
+    Filters out static file requests to reduce log noise."""
+    access_logger = logging.getLogger("uvicorn.access")
+    access_logger.addFilter(StaticFileLogFilter())
+
+
+# ============================================================================
+# LOGGING HELPERS
+# ============================================================================
+
+def log(message: str, session_uuid: Optional[str] = None):
+    """
+    Log a message with optional session UUID prefix.
+    
+    Args:
+        message: Message to log
+        session_uuid: Optional session UUID to include in log
+    """
+    if session_uuid:
+        print(f"[{session_uuid[:8]}] {message}")
+    else:
+        print(message)
+
+# ============================================================================
+# CUSTOM STATIC FILES WITH CACHING
+# ============================================================================
+
+class CachedStaticFiles(StaticFiles):
+    """StaticFiles with cache headers for images and assets."""
+    
+    def file_response(self, *args, **kwargs) -> FileResponse:
+        response = super().file_response(*args, **kwargs)
+        # Cache images for 1 year (they never change)
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        return response
+
+
+class ShortCachedStaticFiles(StaticFiles):
+    """StaticFiles with short cache + revalidation for JS/CSS/SVG."""
+    
+    def file_response(self, *args, **kwargs) -> FileResponse:
+        response = super().file_response(*args, **kwargs)
+        # Cache for 1 hour, but revalidate with ETag on next request
+        # This means the browser will use cached version for 1 hour,
+        # then send If-None-Match and get a 304 if unchanged
+        response.headers["Cache-Control"] = "public, max-age=3600, must-revalidate"
+        return response
+
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
+
+DATABASE_PATH = "sessions.db"
+
+# ============================================================================
+# PYDANTIC MODELS
+# ============================================================================
+
+class SessionData(BaseModel):
+    """Session data response model."""
+    uuid: str
+    character_config: Optional[Dict[str, Any]] = None
+    ui_config: Dict[str, Any] = Field(default_factory=dict)
+    last_updated: str
+
+
+class ImportData(BaseModel):
+    """Character import request model."""
+    export_json: str
+
+
+class ConfigUpdate(BaseModel):
+    """Configuration update request model."""
+    path: str
+    value: Any
+
+
+class ErrorResponse(BaseModel):
+    """Error response model."""
+    error: bool = True
+    code: str
+    message: str
+    details: Optional[str] = None
+
+
+class GearSetSlots(BaseModel):
+    """Gear set slots model - represents equipment in each slot."""
+    # Gear slots
+    head: Optional[Dict[str, Any]] = None
+    cape: Optional[Dict[str, Any]] = None
+    back: Optional[Dict[str, Any]] = None
+    hands: Optional[Dict[str, Any]] = None
+    chest: Optional[Dict[str, Any]] = None
+    neck: Optional[Dict[str, Any]] = None
+    primary: Optional[Dict[str, Any]] = None
+    legs: Optional[Dict[str, Any]] = None
+    secondary: Optional[Dict[str, Any]] = None
+    ring1: Optional[Dict[str, Any]] = None
+    ring2: Optional[Dict[str, Any]] = None
+    feet: Optional[Dict[str, Any]] = None
+    # Tool slots
+    tool0: Optional[Dict[str, Any]] = None
+    tool1: Optional[Dict[str, Any]] = None
+    tool2: Optional[Dict[str, Any]] = None
+    tool3: Optional[Dict[str, Any]] = None
+    tool4: Optional[Dict[str, Any]] = None
+    tool5: Optional[Dict[str, Any]] = None
+    # Consumable and pet slots
+    consumable: Optional[Dict[str, Any]] = None
+    pet: Optional[Dict[str, Any]] = None
+
+
+class GearSetData(BaseModel):
+    """Gear set data for create/update requests."""
+    name: str = Field(..., min_length=1, max_length=100)
+    slots: Dict[str, Any] = Field(default_factory=dict)
+    id: Optional[str] = None  # Optional for updates
+
+
+class GearSetResponse(BaseModel):
+    """Gear set response model."""
+    id: str
+    session_uuid: str
+    name: str
+    slots_json: Dict[str, Any]
+    export_string: Optional[str] = None
+    is_optimized: bool = False
+    created_at: str
+    updated_at: str
+
+# ============================================================================
+# APPLICATION SETUP
+# ============================================================================
+
+app = FastAPI(
+    title="Walkscape UI API",
+    description="REST API for Walkscape Optimizer UI",
+    version="1.0.0"
+)
+
+# Add CORS middleware for development
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Initialize database
+_db_instance = DatabaseManager(DATABASE_PATH)
+
+# Track active optimizations per session
+_active_optimizations = set()
+
+# Setup custom logging with session UUID
+setup_logging()
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Re-apply log filter after uvicorn initializes (needed with --reload)."""
+    setup_logging()
+
+# ============================================================================
+# DEPENDENCY INJECTION
+# ============================================================================
+
+def get_db() -> DatabaseManager:
+    """Get database instance (for dependency injection in tests)."""
+    return _db_instance
+
+# Mount static file directories with caching
+app.mount("/static", ShortCachedStaticFiles(directory="ui/static"), name="static")
+app.mount("/assets", CachedStaticFiles(directory="assets"), name="assets")
+
+# ============================================================================
+# MIDDLEWARE
+# ============================================================================
+
+@app.middleware("http")
+async def session_middleware(request: Request, call_next):
+    """
+    Session middleware for UUID cookie handling.
+    
+    Checks for session UUID in cookies. If not present, generates a new UUID
+    and sets it in the response cookie.
+    """
+    # Get session UUID from cookie
+    session_uuid = request.cookies.get("session_uuid")
+    
+    # Generate new UUID if not present
+    if not session_uuid:
+        session_uuid = str(uuid.uuid4())
+    
+    # Store in request state for handlers to access
+    request.state.session_uuid = session_uuid
+    
+    # Process request
+    response = await call_next(request)
+    
+    # Always set/refresh the cookie to ensure consistent settings
+    # This ensures JavaScript and server cookies have the same attributes
+    response.set_cookie(
+        key="session_uuid",
+        value=session_uuid,
+        max_age=31536000,  # 1 year in seconds
+        path="/",  # Explicitly set path
+        httponly=False,  # Allow JavaScript to read the cookie
+        samesite="lax",  # Allow cookie in same-site contexts
+        secure=False  # Set to True in production with HTTPS
+    )
+    
+    return response
+
+@app.middleware("http")
+async def logging_context_middleware(request: Request, call_next):
+    """
+    Add session UUID to logging context for access logs.
+    """
+    import contextvars
+    
+    # Get session UUID from request state (set by session_middleware)
+    session_uuid = getattr(request.state, 'session_uuid', None)
+    
+    # Store in context var for access by logging formatter
+    if session_uuid:
+        # Create a context variable for this request
+        log_extra = contextvars.ContextVar('log_extra', default={})
+        log_extra.set({'session_uuid': session_uuid})
+        
+        # Monkey-patch the logging record factory to include session UUID
+        old_factory = logging.getLogRecordFactory()
+        
+        def record_factory(*args, **kwargs):
+            record = old_factory(*args, **kwargs)
+            record.session_uuid = session_uuid
+            return record
+        
+        logging.setLogRecordFactory(record_factory)
+    
+    response = await call_next(request)
+    
+    # Restore old factory if we changed it
+    if session_uuid:
+        logging.setLogRecordFactory(old_factory)
+    
+    return response
+
+@app.middleware("http")
+async def api_audit_middleware(request: Request, call_next):
+    """
+    Log API access for analytics.
+    Only logs /api/* endpoints, skips static files and health checks.
+    """
+    response = await call_next(request)
+    
+    # Only log API endpoints
+    if request.url.path.startswith("/api/"):
+        session_uuid = getattr(request.state, 'session_uuid', 'unknown')
+        user_agent = request.headers.get('user-agent', '')
+        # Get real IP (handle proxies)
+        ip_address = request.headers.get('x-forwarded-for', request.client.host if request.client else 'unknown')
+        
+        try:
+            db = get_db()
+            db.log_api_access(
+                session_uuid=session_uuid,
+                endpoint=request.url.path,
+                method=request.method,
+                user_agent=user_agent,
+                ip_address=ip_address
+            )
+        except Exception as e:
+            # Don't fail requests if logging fails
+            log(f"Failed to log API access: {e}", session_uuid)
+    
+    return response
+
+# ============================================================================
+# ROOT ENDPOINT
+# ============================================================================
+
+@app.get("/", response_class=HTMLResponse)
+async def root():
+    """Serve the main HTML page."""
+    with open("ui/static/index.html", "r") as f:
+        return HTMLResponse(content=f.read())
+
+# ============================================================================
+# SESSION API ENDPOINTS
+# ============================================================================
+
+@app.get("/api/session/{uuid}", response_model=SessionData)
+async def get_session(uuid: str):
+    """
+    Retrieve or create session data.
+    
+    If the session UUID doesn't exist, creates a new session automatically.
+    
+    Args:
+        uuid: Session UUID
+        
+    Returns:
+        SessionData with uuid, character_config, ui_config, last_updated
+    """
+    # Try to get existing session
+    session = get_db().get_session(uuid)
+    
+    # Create new session if doesn't exist
+    if not session:
+        session = get_db().create_session(uuid)
+    
+    return SessionData(**session)
+
+
+@app.post("/api/session/{uuid}/import")
+async def import_character(uuid: str, data: ImportData):
+    """
+    Import character data from game export JSON.
+    
+    Parses the character export using character_export_util and stores
+    the parsed data in the session's character_config.
+    
+    Args:
+        uuid: Session UUID
+        data: ImportData with export_json string
+        
+    Returns:
+        Success message with session data
+        
+    Raises:
+        HTTPException: If JSON is invalid or doesn't match expected schema
+    """
+    try:
+        # Parse character export
+        character = Character(data.export_json)
+        
+        # Build character config from parsed data
+        # Store both XP and levels for skills
+        skill_levels = {}
+        skill_xp = {}
+        for skill_name, xp in character.skills.items():
+            skill_levels[skill_name] = character.get_skill_level(skill_name)
+            skill_xp[skill_name] = xp
+        
+        # Parse item qualities and quantities from inventory + bank + gear
+        item_qualities = {}  # item_id -> {quality -> quantity} for crafted items
+        item_quantities = {}  # item_id -> quantity for non-crafted items
+        
+        # Combine all sources: inventory, bank, and equipped gear
+        all_items_raw = {**character._inventory_raw, **character._bank_raw}
+        
+        # Add gear items (each equipped item counts as quantity 1)
+        for slot, export_name in character._gear_raw.items():
+            if export_name:
+                all_items_raw[export_name] = all_items_raw.get(export_name, 0) + 1
+        
+        # Import the function to get items from export names
+        from util.autogenerated.export_names import get_item_from_export_name
+        
+        log(f"Processing {len(all_items_raw)} items for quality/quantity parsing (inventory + bank + gear)...", uuid)
+        
+        # Map rarity suffixes to quality names
+        rarity_to_quality = {
+            'common': 'Normal',
+            'uncommon': 'Good',
+            'rare': 'Great',
+            'epic': 'Excellent',
+            'legendary': 'Perfect',
+            'ethereal': 'Eternal'
+        }
+        
+        log(f"=== BACKEND: PARSING ITEMS ===", uuid)
+        
+        for export_name, quantity in all_items_raw.items():
+            quality = None
+            base_export_name = export_name
+            
+            # Check for rarity suffix (e.g., "silver_opal_ring_common")
+            for rarity_suffix, quality_name in rarity_to_quality.items():
+                if export_name.endswith(f'_{rarity_suffix}'):
+                    base_export_name = export_name[:-len(f'_{rarity_suffix}')]
+                    quality = quality_name
+                    log(f"  Found rarity suffix: {export_name} -> base={base_export_name}, quality={quality}", uuid)
+                    break
+            
+            # Also check for quality in parentheses (e.g., "Gold Ruby Ring (Great)")
+            if not quality and '(' in export_name and ')' in export_name:
+                parts = export_name.rsplit('(', 1)
+                if len(parts) == 2:
+                    base_export_name = parts[0].strip()
+                    quality_part = parts[1].rstrip(')')
+                    
+                    # Check if it's a quality name
+                    valid_qualities = ['Normal', 'Good', 'Great', 'Excellent', 'Perfect', 'Eternal']
+                    if quality_part in valid_qualities:
+                        quality = quality_part
+            
+            # Get item from base export name (without quality suffix)
+            item = get_item_from_export_name(base_export_name)
+            
+            if item:
+                # Get item ID using the same logic as catalog._name_to_id
+                # Convert: lowercase, spaces to underscores, remove parentheses, hyphens to underscores, remove apostrophes
+                item_id = item.name.lower().replace(' ', '_').replace('(', '').replace(')', '').replace('-', '_').replace("'", '')
+                
+                if quality:
+                    # Crafted item with quality
+                    log(f"  ✓ Crafted: {export_name} -> {item.name} -> {item_id} (quality: {quality}, qty: {quantity})", uuid)
+                    
+                    # Store quality and quantity - GROUP BY ITEM_ID
+                    if item_id not in item_qualities:
+                        item_qualities[item_id] = {}
+                    
+                    # Add this quality's quantity to the item
+                    if quality not in item_qualities[item_id]:
+                        item_qualities[item_id][quality] = 0
+                    item_qualities[item_id][quality] += quantity
+                else:
+                    # Non-crafted item - just track total quantity
+                    log(f"  ✓ Non-crafted: {export_name} -> {item.name} -> {item_id} (qty: {quantity})", uuid)
+                    
+                    if item_id not in item_quantities:
+                        item_quantities[item_id] = 0
+                    item_quantities[item_id] += quantity
+            else:
+                if quality:  # Only log if we found a quality but couldn't find the item
+                    log(f"  ✗ Could not find item for: {export_name} (base: {base_export_name}, quality: {quality})", uuid)
+        
+        log(f"=== BACKEND: FINAL RESULTS ===", uuid)
+        log(f"item_qualities: {json.dumps(item_qualities, indent=2)}", uuid)
+        log(f"item_quantities: {json.dumps(item_quantities, indent=2)}", uuid)
+        log(f"=== END BACKEND PARSING ===", uuid)
+
+        character_config = {
+            "name": character.name,
+            "game_version": character.game_version,
+            "steps": character.steps,
+            "achievement_points": character.achievement_points,
+            "total_skill_level": character.get_total_skill_level(),
+            "coins": character.coins,
+            "skills": skill_levels,  # Store levels for display
+            "skills_xp": skill_xp,  # Store XP for progress calculation
+            "reputation": character.reputation,
+            # Store export names for owned items (inventory + bank + gear)
+            "owned_items": list(set(
+                list(character._inventory_raw.keys()) + 
+                list(character._bank_raw.keys()) +
+                [export_name for export_name in character._gear_raw.values() if export_name]
+            )),
+            "collectibles": character._collectibles_raw,
+            # Store gear as export names
+            "gear": character._gear_raw,
+            # Store item qualities and quantities
+            "item_qualities": item_qualities,
+            "item_quantities": item_quantities,
+        }
+        
+        # Ensure session exists
+        session = get_db().get_session(uuid)
+        if not session:
+            session = get_db().create_session(uuid)
+        
+        # Update character config
+        get_db().update_character_config(uuid, character_config)
+        
+        # Get updated session
+        session = get_db().get_session(uuid)
+        
+        return {
+            "success": True,
+            "message": "Character data imported successfully",
+            "session": SessionData(**session)
+        }
+        
+    except json.JSONDecodeError as e:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": True,
+                "code": "INVALID_JSON",
+                "message": "The provided JSON is not valid",
+                "details": str(e)
+            }
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": True,
+                "code": "INVALID_EXPORT",
+                "message": "Valid JSON but doesn't match character export schema",
+                "details": str(e)
+            }
+        )
+
+
+@app.patch("/api/session/{uuid}/config")
+async def update_config(uuid: str, update: ConfigUpdate):
+    """
+    Update a specific configuration path.
+    
+    Supports nested paths like "items.TRAVELERS_KIT.has" or "skills.mining".
+    Automatically determines whether to update character_config or ui_config.
+    
+    Args:
+        uuid: Session UUID
+        update: ConfigUpdate with path and value
+        
+    Returns:
+        Success message
+        
+    Raises:
+        HTTPException: If session doesn't exist
+    """
+    # Ensure session exists
+    session = get_db().get_session(uuid)
+    if not session:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": True,
+                "code": "SESSION_NOT_FOUND",
+                "message": f"Session {uuid} not found"
+            }
+        )
+    
+    try:
+        # Update the config path
+        get_db().update_config_path(uuid, update.path, update.value)
+        
+        return {
+            "success": True,
+            "message": f"Updated {update.path} to {update.value}"
+        }
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": True,
+                "code": "DATABASE_ERROR",
+                "message": "Failed to update configuration",
+                "details": str(e)
+            }
+        )
+
+# ============================================================================
+# GEAR SET API ENDPOINTS
+# ============================================================================
+
+@app.get("/api/session/{uuid}/gearsets", response_model=list[GearSetResponse])
+async def get_gear_sets(uuid: str):
+    """
+    Get all gear sets for a session.
+    
+    Args:
+        uuid: Session UUID
+        
+    Returns:
+        List of gear sets with id, name, slots_json, timestamps
+    """
+    # Ensure session exists
+    session = get_db().get_session(uuid)
+    if not session:
+        # Create session if doesn't exist
+        get_db().create_session(uuid)
+    
+    gear_sets = get_db().get_gear_sets(uuid)
+    return gear_sets
+
+
+@app.post("/api/session/{uuid}/gearsets", response_model=GearSetResponse)
+async def save_gear_set(uuid: str, data: GearSetData):
+    """
+    Save or update a gear set.
+    
+    If data.id is provided and exists, updates that gear set.
+    If data.name matches an existing gear set, updates that gear set.
+    Otherwise, creates a new gear set.
+    
+    Args:
+        uuid: Session UUID
+        data: GearSetData with name, slots, and optional id
+        
+    Returns:
+        Saved gear set data
+        
+    Raises:
+        HTTPException: If name conflicts with existing gear set (when creating new)
+    """
+    # Ensure session exists
+    session = get_db().get_session(uuid)
+    if not session:
+        get_db().create_session(uuid)
+    
+    try:
+        gear_set = get_db().save_gear_set(
+            session_uuid=uuid,
+            name=data.name,
+            slots_json=data.slots,
+            gear_set_id=data.id
+        )
+        return gear_set
+        
+    except ValueError as e:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": True,
+                "code": "DUPLICATE_NAME",
+                "message": str(e)
+            }
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": True,
+                "code": "DATABASE_ERROR",
+                "message": "Failed to save gear set",
+                "details": str(e)
+            }
+        )
+
+
+@app.delete("/api/session/{uuid}/gearsets/{gearset_id}")
+async def delete_gear_set(uuid: str, gearset_id: str):
+    """
+    Delete a gear set.
+    
+    Args:
+        uuid: Session UUID
+        gearset_id: Gear set ID to delete
+        
+    Returns:
+        Success message
+        
+    Raises:
+        HTTPException: If gear set not found
+    """
+    # Ensure session exists
+    session = get_db().get_session(uuid)
+    if not session:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": True,
+                "code": "SESSION_NOT_FOUND",
+                "message": f"Session {uuid} not found"
+            }
+        )
+    
+    deleted = get_db().delete_gear_set(uuid, gearset_id)
+    
+    if not deleted:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": True,
+                "code": "GEAR_SET_NOT_FOUND",
+                "message": f"Gear set {gearset_id} not found"
+            }
+        )
+    
+    return {
+        "success": True,
+        "message": f"Gear set {gearset_id} deleted"
+    }
+
+# ============================================================================
+# STATIC DATA ENDPOINTS
+# ============================================================================
+
+@app.get("/api/items")
+async def get_items(response: Response):
+    """
+    Get full item catalog with categories.
+    
+    Returns all items organized by category:
+    - Collectibles
+    - Consumables (by skill)
+    - Materials
+    - Loot (achievement rewards, activity drops, faction rewards, shop items, chests)
+    - Crafted (by keyword)
+    - Pets
+    
+    Returns:
+        Dict with categories and item counts
+    """
+    from ui.catalog import ItemCatalog
+    
+    # Set cache headers - this data rarely changes
+    response.headers["Cache-Control"] = "public, max-age=3600"  # Cache for 1 hour
+    response.headers["ETag"] = "items-v1"  # Simple versioning
+    
+    catalog = ItemCatalog()
+    
+    return {
+        "categories": catalog.categories,
+        "counts": catalog.get_categories()
+    }
+
+
+@app.get("/api/catalog")
+async def get_catalog(response: Response):
+    """
+    Get flat item catalog for gear selection popup.
+    
+    Returns all items as a flat list with full details needed for
+    the item selection popup (slot, stats, rarity, etc.)
+    
+    Returns:
+        Dict with items array and collectibles array
+    """
+    from ui.catalog import ItemCatalog
+    from util.walkscape_constants import Item
+    
+    # Set cache headers - this data rarely changes
+    response.headers["Cache-Control"] = "public, max-age=3600"  # Cache for 1 hour
+    response.headers["ETag"] = "catalog-v1"  # Simple versioning
+    
+    catalog = ItemCatalog()
+    
+    # Flatten all items from categories into a single list
+    all_items = []
+    
+    def add_items_from_category(category_data):
+        """Recursively extract items from category structure"""
+        if isinstance(category_data, dict):
+            # Check if this is an item (has 'id' field)
+            if 'id' in category_data and 'name' in category_data:
+                all_items.append(category_data)
+            else:
+                # Recurse into subcategories
+                for key, value in category_data.items():
+                    if isinstance(value, (dict, list)):
+                        add_items_from_category(value)
+        elif isinstance(category_data, list):
+            for item in category_data:
+                add_items_from_category(item)
+    
+    # Extract items from all categories (except collectibles, we'll handle those separately)
+    for category_name, category_data in catalog.categories.items():
+        if category_name != 'collectibles':
+            add_items_from_category(category_data)
+    
+    # Get collectibles separately
+    collectibles = catalog.categories.get('collectibles', [])
+    
+    # Note: No session UUID available in this endpoint (static data)
+    log(f"Catalog API: Returning {len(all_items)} items and {len(collectibles)} collectibles")
+    
+    return {
+        "items": all_items,
+        "collectibles": collectibles
+    }
+
+@app.get("/api/skills")
+async def get_skills(response: Response):
+    """
+    Get skill definitions with categories.
+    
+    Returns all skills organized by category:
+    - Gathering: Fishing, Foraging, Mining, Woodcutting
+    - Artisan: Carpentry, Cooking, Crafting, Smithing, Trinketry
+    - Utility: All other skills (Agility, Traveling, etc.)
+    
+    Returns:
+        Dict with skill categories and definitions
+    """
+    from util.walkscape_constants import Skill
+    
+    # Set cache headers - this data never changes
+    response.headers["Cache-Control"] = "public, max-age=86400"  # Cache for 24 hours
+    response.headers["ETag"] = "skills-v1"  # Simple versioning
+    
+    # Define skill categories
+    gathering_skills = ['fishing', 'foraging', 'mining', 'woodcutting']
+    artisan_skills = ['carpentry', 'cooking', 'crafting', 'smithing', 'trinketry']
+    utility_skills = ['agility']  # Only Agility is a traditional skill in Utility
+    
+    # Build skill list
+    skills = []
+    for attr_name in dir(Skill):
+        if attr_name.startswith('_') or not attr_name.isupper():
+            continue
+        
+        skill = getattr(Skill, attr_name)
+        if not hasattr(skill, 'name') or not hasattr(skill, 'value'):
+            continue
+        
+        # Determine category
+        skill_value = skill.value.lower()
+        if skill_value in gathering_skills:
+            category = 'Gathering'
+        elif skill_value in artisan_skills:
+            category = 'Artisan'
+        elif skill_value in utility_skills:
+            category = 'Utility'
+        else:
+            # Skip skills that aren't in any category (like Traveling)
+            continue
+        
+        skills.append({
+            'id': skill_value,
+            'name': skill.name,
+            'display_name': skill_value.capitalize(),
+            'category': category
+        })
+    
+    # Sort by category then name
+    skills.sort(key=lambda x: (x['category'], x['display_name']))
+    
+    # Group by category
+    by_category = {
+        'Gathering': [],
+        'Artisan': [],
+        'Utility': []
+    }
+    
+    for skill in skills:
+        by_category[skill['category']].append(skill)
+    
+    return {
+        "skills": skills,
+        "by_category": by_category
+    }
+
+
+@app.get("/api/activities")
+async def get_activities(request: Request, response: Response):
+    """
+    Get all activities organized by skill.
+    
+    Returns activities with:
+    - Icon paths
+    - Locations
+    - Requirements (skill, keyword, reputation, achievement points)
+    - Drop tables (with level-based drop rates calculated)
+    - Base stats (steps, xp, max efficiency)
+    
+    Returns:
+        Dict with activities organized by skill category
+    """
+    from util.autogenerated.activities import Activity, ActivityInfo
+    
+    # Set cache headers - this data rarely changes
+    response.headers["Cache-Control"] = "public, max-age=3600"  # Cache for 1 hour
+    response.headers["ETag"] = "activities-v1"  # Simple versioning
+    
+    # Collect all activities
+    activities_by_skill = {}
+    all_activities = []
+    
+    for attr_name in dir(Activity):
+        if attr_name.startswith('_'):
+            continue
+        
+        activity = getattr(Activity, attr_name)
+        if not isinstance(activity, ActivityInfo):
+            continue
+        
+        # Build activity data
+        skill = activity.primary_skill or 'Other'
+        
+        # Generate activity ID from name
+        activity_id = activity.name.lower().replace(' ', '_').replace('(', '').replace(')', '').replace('-', '_').replace("'", '')
+        
+        # Build icon path - skill folder + activity name
+        skill_folder = skill.lower() if skill != 'Other' else 'other'
+        icon_filename = activity.name.lower().replace(' ', '_').replace("'", '').replace('-', '_')
+        icon_path = f"/assets/icons/activities/{skill_folder}/{icon_filename}.svg"
+        
+        # Build locations list
+        locations = []
+        for loc in activity.locations:
+            if hasattr(loc, 'name'):
+                loc_id = loc.name.lower().replace(' ', '_').replace("'", '')
+                locations.append({
+                    'id': loc_id,
+                    'name': loc.name,
+                    'regions': loc.regions if hasattr(loc, 'regions') else [],
+                    'is_underwater': loc.is_underwater if hasattr(loc, 'is_underwater') else False,
+                    'icon_name': loc.icon_name if hasattr(loc, 'icon_name') else None
+                })
+        
+        # Build requirements
+        requirements = {
+            'skill_requirements': activity.skill_requirements,
+            'keyword_counts': activity.requirements.get('keyword_counts', {}),
+            'reputation': activity.requirements.get('reputation', {}),
+            'achievement_points': activity.requirements.get('achievement_points', 0),
+            'activity_completions': activity.requirements.get('activity_completions', {})
+        }
+        
+        # Build drop table
+        drop_table = []
+        
+        # Get character skill level for level-based drops
+        character_skill_level = 1
+        if hasattr(request, 'state') and hasattr(request.state, 'session_uuid'):
+            try:
+                session = get_db().get_session(request.state.session_uuid)
+                if session and session.get('character_config'):
+                    char_config = session['character_config']
+                    skill_name = skill.lower()
+                    character_skill_level = char_config.get('skills', {}).get(skill_name, 1)
+            except:
+                pass
+        
+        # Calculate total weight for level-based drops
+        has_level_based = any(hasattr(drop, 'is_level_based') and drop.is_level_based for drop in activity.drop_table)
+        total_weight = 0.0
+        non_level_weighted_percent = 10.0
+        if has_level_based:
+            for drop in activity.drop_table:
+                if hasattr(drop, 'is_level_based') and drop.is_level_based:
+                    total_weight += drop.calculate_weight(character_skill_level)
+            
+            # Calculate non_level_weighted_percent
+            total_final_chance = sum(drop.final_chance for drop in activity.drop_table if hasattr(drop, 'final_chance') and drop.final_chance)
+            non_level_weighted_percent = 100.0 - total_final_chance
+        
+        for drop in activity.drop_table:
+            if drop.item_name == 'Nothing':
+                continue
+            
+            # Get drop chance (static or level-based)
+            if hasattr(drop, 'is_level_based') and drop.is_level_based:
+                chance_percent = drop.get_chance_at_level(character_skill_level, total_weight, non_level_weighted_percent)
+            else:
+                chance_percent = drop.chance_percent
+            
+            # Check if this material has a fine version
+            # Check if item_ref is a Material and if a fine version exists
+            has_fine = False
+            if drop.item_ref and drop.item_ref.startswith('Material.'):
+                try:
+                    from util.autogenerated.materials import Material
+                    material_name = drop.item_ref.replace('Material.', '')
+                    # Check if MATERIAL_NAME_FINE exists
+                    fine_name = f"{material_name}_FINE"
+                    has_fine = hasattr(Material, fine_name)
+                except Exception as e:
+                    pass
+            
+            drop_entry = {
+                'item_name': drop.item_name,
+                'item_ref': drop.item_ref,
+                'chance_percent': chance_percent,
+                'has_fine_material': has_fine,
+                'quantity': {
+                    'min': drop.quantity.min_qty if not drop.quantity.is_na else None,
+                    'max': drop.quantity.max_qty if not drop.quantity.is_na else None,
+                    'is_static': drop.quantity.is_static if hasattr(drop.quantity, 'is_static') else False
+                }
+            }
+            drop_table.append(drop_entry)
+        
+        # Build secondary drop table
+        secondary_drop_table = []
+        for drop in activity.secondary_drop_table:
+            # Get drop chance (static or level-based)
+            if hasattr(drop, 'is_level_based') and drop.is_level_based:
+                chance_percent = drop.get_chance_at_level(character_skill_level, total_weight, non_level_weighted_percent)
+            else:
+                chance_percent = drop.chance_percent
+            
+            # Check if this material has a fine version
+            # Check if item_ref is a Material and if a fine version exists
+            has_fine = False
+            if drop.item_ref and drop.item_ref.startswith('Material.'):
+                try:
+                    from util.autogenerated.materials import Material
+                    material_name = drop.item_ref.replace('Material.', '')
+                    # Check if MATERIAL_NAME_FINE exists
+                    fine_name = f"{material_name}_FINE"
+                    has_fine = hasattr(Material, fine_name)
+                except Exception as e:
+                    pass
+            
+            drop_entry = {
+                'item_name': drop.item_name,
+                'item_ref': drop.item_ref,
+                'chance_percent': chance_percent,
+                'has_fine_material': has_fine,
+                'quantity': {
+                    'min': drop.quantity.min_qty if not drop.quantity.is_na else None,
+                    'max': drop.quantity.max_qty if not drop.quantity.is_na else None,
+                    'is_static': drop.quantity.is_static if hasattr(drop.quantity, 'is_static') else False
+                }
+            }
+            secondary_drop_table.append(drop_entry)
+        
+        # Build secondary XP
+        secondary_xp = {}
+        if activity.secondary_xp:
+            for skill_name, xp in activity.secondary_xp.items():
+                secondary_xp[skill_name] = xp
+        
+        # Build faction reputation reward
+        faction_reward = None
+        if activity.faction_reputation_reward:
+            faction_reward = {
+                'faction': activity.faction_reputation_reward.name,
+                'value': activity.faction_reputation_reward.value
+            }
+        
+        activity_data = {
+            'id': activity_id,
+            'name': activity.name,
+            'primary_skill': skill,
+            'icon_path': icon_path,
+            'locations': locations,
+            'requirements': requirements,
+            'drop_table': drop_table,
+            'secondary_drop_table': secondary_drop_table,
+            'base_steps': activity.base_steps,
+            'base_xp': activity.base_xp,
+            'secondary_xp': secondary_xp,
+            'max_efficiency': activity.max_efficiency,
+            'faction_reputation_reward': faction_reward,
+            'description': activity.description
+        }
+        
+        all_activities.append(activity_data)
+        
+        # Organize by skill
+        if skill not in activities_by_skill:
+            activities_by_skill[skill] = []
+        activities_by_skill[skill].append(activity_data)
+    
+    # Sort activities within each skill alphabetically
+    for skill in activities_by_skill:
+        activities_by_skill[skill].sort(key=lambda x: x['name'])
+    
+    # Sort skills alphabetically
+    sorted_skills = sorted(activities_by_skill.keys())
+    sorted_by_skill = {skill: activities_by_skill[skill] for skill in sorted_skills}
+    
+    return {
+        'activities': all_activities,
+        'by_skill': sorted_by_skill,
+        'count': len(all_activities)
+    }
+
+
+@app.post("/api/calculate-activity-stats")
+async def calculate_activity_stats(request: Request):
+    """
+    Calculate all stats for an activity with current gearset.
+    
+    Request body:
+        activity_id: Activity ID
+        gearset: Current gearset slots {slot: {itemId, quality}}
+        location_id: Selected location ID
+        consumable_id: Optional consumable ID
+    
+    Returns:
+        Calculated stats with breakdown of contributors
+    """
+    from util.autogenerated.activities import Activity
+    from util.gearset_utils import Gearset
+    from util.autogenerated.equipment import Item
+    from util.autogenerated.locations import Location
+    
+    body = await request.json()
+    activity_id = body.get('activity_id')
+    gearset_slots = body.get('gearset', {})
+    location_id = body.get('location_id')
+    consumable_id = body.get('consumable_id')
+    
+    # Find activity
+    activity = None
+    for attr_name in dir(Activity):
+        if attr_name.startswith('_'):
+            continue
+        act = getattr(Activity, attr_name)
+        if isinstance(act, type(Activity.REPAIR_THE_BANK)):  # ActivityInfo type
+            act_id = act.name.lower().replace(' ', '_').replace('(', '').replace(')', '').replace('-', '_').replace("'", '')
+            if act_id == activity_id:
+                activity = act
+                break
+    
+    if not activity:
+        return {"error": "Activity not found"}, 404
+    
+    # Find location
+    location = None
+    if location_id:
+        for attr_name in dir(Location):
+            if attr_name.startswith('_'):
+                continue
+            loc = getattr(Location, attr_name)
+            if hasattr(loc, 'name'):
+                loc_id = loc.name.lower().replace(' ', '_').replace("'", '')
+                if loc_id == location_id:
+                    location = loc
+                    break
+    
+    # Build gearset from slots
+    # Convert UI format to Python Gearset
+    items = []
+    for slot, slot_data in gearset_slots.items():
+        if not slot_data or not slot_data.get('itemId'):
+            continue
+        
+        item_id = slot_data['itemId']
+        quality = slot_data.get('quality')
+        
+        # Find item by ID
+        item = Item.by_id(item_id, quality=quality)
+        if item:
+            items.append(item)
+    
+    # Create gearset from items
+    gearset = Gearset.from_items(items)
+    
+    # Get character
+    character = None
+    if hasattr(request, 'state') and hasattr(request.state, 'session_uuid'):
+        try:
+            session = get_db().get_session(request.state.session_uuid)
+            if session and session.get('character_config'):
+                from ui.database import Character
+                character = Character.from_dict(session['character_config'])
+        except:
+            pass
+    
+    # Calculate stats using get_total_stats
+    skill = activity.primary_skill
+    gear_stats = gearset.get_total_stats(skill, location=location)
+    
+    # Get consumable stats if provided
+    consumable = None
+    if consumable_id:
+        # TODO: Load consumable by ID
+        pass
+    
+    # Call get_expected_drop_rate with verbose=True to get full breakdown
+    results, details = activity.get_expected_drop_rate(
+        stats=gear_stats,
+        location=location,
+        verbose=True,
+        character=character,
+        consumable=consumable
+    )
+    
+    return {
+        'activity': {
+            'id': activity_id,
+            'name': activity.name,
+            'primary_skill': activity.primary_skill
+        },
+        'stats': gear_stats,
+        'details': details,
+        'drop_rates': results
+    }
+
+
+@app.get("/api/recipes")
+async def get_recipes(response: Response):
+    """
+    Get all recipes organized by skill.
+    
+    Returns recipes with:
+    - Materials as array of alternative groups
+    - has_fine_option flag (true if recipe uses only materials/consumables)
+    - Base stats (steps, xp, max efficiency)
+    - Service type required
+    
+    Returns:
+        Dict with recipes organized by skill category
+    """
+    from util.autogenerated.recipes import RecipeInstance
+    from util.autogenerated.materials import Material
+    from util.autogenerated.consumables import Consumable
+    from util.autogenerated.equipment import Item
+    import util.autogenerated.recipes as recipes_module
+    
+    # Set cache headers - this data rarely changes
+    response.headers["Cache-Control"] = "public, max-age=3600"  # Cache for 1 hour
+    response.headers["ETag"] = "recipes-v1"  # Simple versioning
+    
+    # Collect all recipes
+    recipes_by_skill = {}
+    all_recipes = []
+    
+    for attr_name in dir(recipes_module):
+        if attr_name.startswith('_'):
+            continue
+        
+        recipe = getattr(recipes_module, attr_name)
+        if not isinstance(recipe, RecipeInstance):
+            continue
+        
+        # Generate recipe ID from attribute name
+        recipe_id = attr_name.lower()
+        
+        # Build materials as array of alternative groups
+        # Each group is an array of {material_id, material_name, quantity, type}
+        material_groups = []
+        has_fine_option = True  # Assume true, set to false if equipment found
+        
+        for group in recipe.materials:
+            group_materials = []
+            for qty, material_obj in group:
+                # Determine material type and name
+                material_type = 'unknown'
+                material_name = str(material_obj)
+                material_id = ''
+                material_icon_name = ''
+                
+                if isinstance(material_obj, type(Material.BIRCH_LOGS)) if hasattr(Material, 'BIRCH_LOGS') else False:
+                    material_type = 'material'
+                    material_name = material_obj.name
+                    material_id = material_obj.name.lower().replace(' ', '_').replace("'", '')
+                    material_icon_name = material_obj.name.replace(' ', '_').lower()  # Lowercase for icon filename
+                elif hasattr(material_obj, 'name'):
+                    material_name = material_obj.name
+                    # Keep apostrophes for icon paths, but create a clean ID for lookups
+                    material_id = material_name.lower().replace(' ', '_').replace('(', '').replace(')', '')
+                    material_icon_name = material_name.replace(' ', '_').lower()  # Lowercase for icon filename
+                    
+                    # Check type by module
+                    obj_module = type(material_obj).__module__
+                    if 'material' in obj_module:
+                        material_type = 'material'
+                    elif 'consumable' in obj_module:
+                        material_type = 'consumable'
+                    elif 'equipment' in obj_module:
+                        material_type = 'equipment'
+                        has_fine_option = False  # Equipment inputs mean no fine option
+                    else:
+                        # Try to detect by class name
+                        class_name = type(material_obj).__name__
+                        if 'Material' in class_name:
+                            material_type = 'material'
+                        elif 'Consumable' in class_name:
+                            material_type = 'consumable'
+                        elif 'Item' in class_name:
+                            material_type = 'equipment'
+                            has_fine_option = False
+                
+                group_materials.append({
+                    'material_id': material_id,
+                    'material_name': material_name,
+                    'material_icon_name': material_icon_name,  # Icon filename with apostrophes
+                    'quantity': qty,
+                    'type': material_type
+                })
+            
+            material_groups.append(group_materials)
+        
+        # Build icon path - use output item icon
+        # Resolve output_item to get the correct icon path
+        icon_path = f"/assets/icons/items/equipment/{recipe_id}.svg"  # Default fallback
+        
+        if recipe.output_item:
+            # Parse output_item string like "Material.PINE_PLANK" or "Item.IRON_SICKLE"
+            try:
+                if "." in recipe.output_item:
+                    class_name, attr_name = recipe.output_item.split(".", 1)
+                    
+                    # Get the actual object
+                    output_obj = None
+                    if class_name == "Material":
+                        output_obj = getattr(Material, attr_name, None)
+                        if output_obj:
+                            # Use material icon
+                            item_name = output_obj.name.replace(' (Fine)', '')  # Remove fine suffix
+                            icon_filename = item_name.replace(' ', '_').lower() + '.svg'
+                            icon_path = f"/assets/icons/items/materials/{icon_filename}"
+                    elif class_name == "Item":
+                        output_obj = getattr(Item, attr_name, None)
+                        if output_obj:
+                            # Use equipment icon
+                            icon_filename = output_obj.name.replace(' ', '_').lower() + '.svg'
+                            icon_path = f"/assets/icons/items/equipment/{icon_filename}"
+                    elif class_name == "Consumable":
+                        output_obj = getattr(Consumable, attr_name, None)
+                        if output_obj:
+                            # Use consumable icon
+                            item_name = output_obj.name.replace(' (Fine)', '')  # Remove fine suffix
+                            icon_filename = item_name.replace(' ', '_').lower() + '.svg'
+                            icon_path = f"/assets/icons/items/consumables/{icon_filename}"
+            except Exception as e:
+                # Note: No session UUID available in this endpoint (static data)
+                log(f"Warning: Failed to resolve output_item '{recipe.output_item}' for recipe '{recipe.name}': {e}")
+        
+        recipe_data = {
+            'id': recipe_id,
+            'name': recipe.name,
+            'skill': recipe.skill,
+            'level': recipe.level,
+            'service_type': recipe.service,
+            'quantity': recipe.quantity,
+            'output_item': recipe.output_item,  # Add output_item for quality check
+            'materials': material_groups,
+            'has_fine_option': has_fine_option,
+            'base_xp': recipe.base_xp,
+            'base_steps': recipe.base_steps,
+            'max_efficiency': recipe.max_efficiency,
+            'icon_path': icon_path
+        }
+        
+        all_recipes.append(recipe_data)
+        
+        # Organize by skill
+        skill = recipe.skill
+        if skill not in recipes_by_skill:
+            recipes_by_skill[skill] = []
+        recipes_by_skill[skill].append(recipe_data)
+    
+    # Sort recipes within each skill alphabetically (case-insensitive)
+    for skill in recipes_by_skill:
+        recipes_by_skill[skill].sort(key=lambda x: x['name'].lower())
+    
+    # Sort skills alphabetically
+    sorted_skills = sorted(recipes_by_skill.keys())
+    sorted_by_skill = {skill: recipes_by_skill[skill] for skill in sorted_skills}
+    
+    return {
+        'recipes': all_recipes,
+        'by_skill': sorted_by_skill,
+        'count': len(all_recipes)
+    }
+
+
+@app.get("/api/services")
+async def get_services(response: Response):
+    """
+    Get all services with unlock requirements.
+    
+    Returns services with:
+    - Tier (Basic/Advanced)
+    - Category (Carpentry, Cooking, etc.)
+    - Location
+    - Stats bonuses
+    - Requirements (skill, reputation, keyword counts)
+    
+    Returns:
+        Dict with services organized by category
+    """
+    from util.autogenerated.services import Service, ServiceInstance
+    
+    # Set cache headers - this data rarely changes
+    response.headers["Cache-Control"] = "public, max-age=3600"  # Cache for 1 hour
+    response.headers["ETag"] = "services-v1"  # Simple versioning
+    
+    # Collect all services
+    services_by_category = {}
+    all_services = []
+    
+    for attr_name in dir(Service):
+        if attr_name.startswith('_'):
+            continue
+        
+        service = getattr(Service, attr_name)
+        if not isinstance(service, ServiceInstance):
+            continue
+        
+        # Generate service ID from attribute name
+        service_id = attr_name.lower()
+        
+        # Get category name
+        category = service.category.value if hasattr(service.category, 'value') else str(service.category)
+        
+        # Get location info
+        location_data = None
+        if service.location:
+            loc = service.location
+            location_data = {
+                'id': loc.name.lower().replace(' ', '_').replace("'", ''),
+                'name': loc.name,
+                'regions': loc.regions if hasattr(loc, 'regions') else [],
+                'is_underwater': loc.is_underwater if hasattr(loc, 'is_underwater') else False,
+                'icon_name': loc.icon_name if hasattr(loc, 'icon_name') else None
+            }
+        
+        # Build requirements
+        requirements = {
+            'skill': service.requirements.get('skill', {}),
+            'reputation': service.requirements.get('reputation', {}),
+            'keyword_counts': service.requirements.get('keyword_counts', {}),
+            'access': service.requirements.get('access', [])
+        }
+        
+        # Build stats - keep nested structure for frontend
+        stats = service._stats if service._stats else {}
+        
+        # Build gated stats (reputation-based bonuses)
+        gated_stats = {}
+        if service.gated_stats:
+            gated_stats = service.gated_stats
+        
+        # Determine if Basic or Advanced
+        tier_lower = service.tier.lower()
+        is_basic = 'basic' in tier_lower
+        is_advanced = 'advanced' in tier_lower
+        
+        service_data = {
+            'id': service_id,
+            'name': service.name,
+            'display_name': f"{service.name} ({service.location.name})" if service.location else service.name,
+            'category': category,
+            'tier': service.tier,
+            'is_basic': is_basic,
+            'is_advanced': is_advanced,
+            'location': location_data,
+            'requirements': requirements,
+            'stats': stats,
+            'gated_stats': gated_stats
+        }
+        
+        all_services.append(service_data)
+        
+        # Organize by category
+        if category not in services_by_category:
+            services_by_category[category] = []
+        services_by_category[category].append(service_data)
+    
+    # Sort services within each category: Basic first, then named Basic, then Advanced
+    def service_sort_key(s):
+        tier = s['tier'].lower()
+        name = s['name'].lower()
+        
+        # Priority: 1=Basic (unnamed), 2=Basic (named), 3=Advanced
+        if 'basic' in tier:
+            if name.startswith('basic'):
+                return (1, name)  # Unnamed basic
+            else:
+                return (2, name)  # Named basic
+        else:
+            return (3, name)  # Advanced
+    
+    for category in services_by_category:
+        services_by_category[category].sort(key=service_sort_key)
+    
+    # Sort categories alphabetically
+    sorted_categories = sorted(services_by_category.keys())
+    sorted_by_category = {cat: services_by_category[cat] for cat in sorted_categories}
+    
+    return {
+        'services': all_services,
+        'by_category': sorted_by_category,
+        'count': len(all_services)
+    }
+
+
+@app.get("/api/services/for-recipe/{recipe_id}")
+async def get_services_for_recipe(recipe_id: str, request: Request):
+    """
+    Get services that can be used for a specific recipe.
+    
+    Filters services by recipe's service_type and sorts them:
+    - Basic services first (unnamed)
+    - Named Basic services second
+    - Advanced services last
+    
+    Includes unlock status based on session character data.
+    
+    Args:
+        recipe_id: Recipe ID (e.g., "iron_sickle")
+        request: Request object to get session UUID
+        
+    Returns:
+        Dict with filtered services and unlock status
+        
+    Raises:
+        HTTPException: If recipe not found
+    """
+    # Import data directly instead of calling endpoints
+    import util.autogenerated.recipes as recipes_module
+    from util.autogenerated.recipes import RecipeInstance
+    from util.walkscape_constants import Service
+    
+    # Find the recipe by attribute name (recipe_id is like "bronze_saw")
+    recipe_obj = None
+    for attr_name in dir(recipes_module):
+        if attr_name.lower() == recipe_id.lower():
+            obj = getattr(recipes_module, attr_name)
+            if isinstance(obj, RecipeInstance):
+                recipe_obj = obj
+                break
+    
+    if not recipe_obj:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": True,
+                "code": "RECIPE_NOT_FOUND",
+                "message": f"Recipe {recipe_id} not found"
+            }
+        )
+    
+    # Convert recipe to dict format expected by the rest of the function
+    recipe = {
+        'id': recipe_id,
+        'name': recipe_obj.name,
+        'service_type': recipe_obj.service,  # RecipeInstance has 'service' attribute
+        'skill': recipe_obj.skill,
+        'level': recipe_obj.level
+    }
+    
+    # Get session data for unlock status
+    session_uuid = request.state.session_uuid
+    session = get_db().get_session(session_uuid)
+    character_config = session.get('character_config') if session else None
+    
+    # Convert services to dict format expected by the rest of the function
+    # Replicate the logic from get_services() endpoint
+    all_services = []
+    for attr_name in dir(Service):
+        if attr_name.startswith('_'):
+            continue
+        service_obj = getattr(Service, attr_name)
+        if not hasattr(service_obj, 'name'):
+            continue
+        
+        # Get location info - match the structure from get_services()
+        location_data = None
+        if service_obj.location:
+            loc = service_obj.location
+            location_data = {
+                'id': loc.name.lower().replace(' ', '_').replace("'", ''),
+                'name': loc.name,
+                'regions': loc.regions if hasattr(loc, 'regions') else [],
+                'is_underwater': loc.is_underwater if hasattr(loc, 'is_underwater') else False,
+                'icon_name': loc.icon_name if hasattr(loc, 'icon_name') else None
+            }
+        
+        # Determine if Basic or Advanced from tier string
+        tier_lower = service_obj.tier.lower()
+        is_basic = 'basic' in tier_lower
+        is_advanced = 'advanced' in tier_lower
+        
+        all_services.append({
+            'id': attr_name.lower(),  # Use attribute name as ID
+            'name': service_obj.name,
+            'category': service_obj.category.value if hasattr(service_obj.category, 'value') else str(service_obj.category),
+            'tier': service_obj.tier,
+            'is_basic': is_basic,
+            'is_advanced': is_advanced,
+            'location': location_data,
+            'requirements': {
+                'skill': service_obj.requirements.get('skill', {}),
+                'reputation': service_obj.requirements.get('reputation', {}),
+                'keyword_counts': service_obj.requirements.get('keyword_counts', {})
+            },
+            'stats': service_obj._stats,
+            'gated_stats': service_obj.gated_stats if hasattr(service_obj, 'gated_stats') else {}
+        })
+    
+    # Filter services that can be used for this recipe
+    # Match by service tier (e.g., "Basic Kitchen" in tier field)
+    recipe_service_type = recipe['service_type']  # e.g., "Basic Sawmill" or "Advanced Cursed Sawmill"
+    valid_services = []
+    
+    for service in all_services:
+        # Check if service tier matches the recipe's service type
+        # The tier field contains the full service type (e.g., "Basic Sawmill", "Advanced Kitchen")
+        service_tier_full = service['tier']  # e.g., "Advanced Sawmill"
+        service_name = service['name']  # e.g., "Cursed Sawmill"
+        
+        # Two matching modes:
+        # 1. Specific service match: "Advanced Cursed Sawmill" requires name="Cursed Sawmill" + tier="Advanced Sawmill"
+        # 2. Generic tier match: "Advanced Sawmill" matches any service with tier="Advanced Sawmill"
+        
+        # Check if recipe specifies a specific service (has extra words beyond tier + base type)
+        # Extract tier level (Basic or Advanced)
+        recipe_tier_level = 'basic' if 'Basic' in recipe_service_type else 'advanced'
+        service_tier_level = 'basic' if 'Basic' in service_tier_full else 'advanced'
+        
+        # Remove tier prefix to get the rest
+        recipe_without_tier = recipe_service_type.replace('Basic ', '').replace('Advanced ', '')  # e.g., "Cursed Sawmill" or "Sawmill"
+        service_base_type = service_tier_full.replace('Basic ', '').replace('Advanced ', '')  # e.g., "Sawmill"
+        
+        # Check if recipe specifies a specific service (has more than just base type)
+        # e.g., "Cursed Sawmill" vs "Sawmill"
+        is_specific_service = recipe_without_tier.lower() != service_base_type.lower()
+        
+        if is_specific_service:
+            # Specific service match: check if service name matches the extra part
+            # e.g., "Cursed Sawmill" should match service name "Cursed Sawmill"
+            if service_name.lower() != recipe_without_tier.lower():
+                continue
+            
+            # Also check tier level matches
+            if recipe_tier_level != service_tier_level:
+                continue
+        else:
+            # Generic tier match: just check base type and tier compatibility
+            if recipe_without_tier.lower() != service_base_type.lower():
+                continue
+            
+            # Check tier compatibility
+            # Advanced services can do Basic recipes (backwards compatible)
+            # Basic services cannot do Advanced recipes
+            if recipe_tier_level == 'advanced' and service_tier_level == 'basic':
+                continue
+        
+        # Check unlock status
+        is_unlocked = True
+        missing_requirements = []
+        
+        if character_config:
+            # Check skill requirements
+            for skill_name, required_level in service['requirements']['skill'].items():
+                char_level = character_config.get('skills', {}).get(skill_name.lower(), 0)
+                if char_level < required_level:
+                    is_unlocked = False
+                    missing_requirements.append(f"{skill_name} level {required_level} (have {char_level})")
+            
+            # Check reputation requirements
+            for faction, required_amount in service['requirements']['reputation'].items():
+                char_rep = character_config.get('reputation', {}).get(faction, 0)
+                if char_rep < required_amount:
+                    is_unlocked = False
+                    missing_requirements.append(f"{faction} reputation {required_amount} (have {char_rep})")
+            
+            # Check keyword requirements (diving gear, etc.)
+            for keyword, required_count in service['requirements']['keyword_counts'].items():
+                if required_count > 0:
+                    # For now, we can't check gear without loading the full gearset
+                    # Mark as potentially locked if diving gear required
+                    if keyword.lower() == 'diving gear':
+                        missing_requirements.append(f"{required_count}x {keyword} required")
+        else:
+            # No character data - mark as potentially locked if has requirements
+            if (service['requirements']['skill'] or 
+                service['requirements']['reputation'] or 
+                service['requirements']['keyword_counts']):
+                is_unlocked = False
+                missing_requirements.append("Character data not loaded")
+        
+        # Add unlock status to service data
+        service_with_status = service.copy()
+        service_with_status['is_unlocked'] = is_unlocked
+        service_with_status['missing_requirements'] = missing_requirements
+        
+        valid_services.append(service_with_status)
+    
+    # Group services by name and collect their locations
+    services_grouped = {}
+    for service in valid_services:
+        service_name = service['name']
+        
+        if service_name not in services_grouped:
+            # Create new group
+            services_grouped[service_name] = {
+                'id': service_name.lower().replace(' ', '_'),  # Use name as ID for grouped service
+                'name': service_name,
+                'category': service['category'],
+                'tier': service['tier'],
+                'is_basic': service['is_basic'],
+                'is_advanced': service['is_advanced'],
+                'stats': service['stats'],  # Add stats to grouped service
+                'locations': [],
+                'is_unlocked': True,  # Will be False if ALL locations are locked
+                'missing_requirements': []
+            }
+        
+        # Add this location to the group
+        if service['location']:
+            session_uuid = getattr(request.state, 'session_uuid', None)
+            log(f"DEBUG: Adding location for {service['name']} at {service['location']['name']}", session_uuid)
+            log(f"  Service stats: {service['stats']}", session_uuid)
+            
+            services_grouped[service_name]['locations'].append({
+                'service_id': service['id'],  # Original service ID with location
+                'location': service['location'],
+                'is_unlocked': service['is_unlocked'],
+                'missing_requirements': service['missing_requirements'],
+                'requirements': service['requirements'],
+                'stats': service['stats'],
+                'gated_stats': service['gated_stats']
+            })
+            
+            log(f"  Location data stats: {services_grouped[service_name]['locations'][-1]['stats']}", session_uuid)
+            
+            # Service is unlocked if ANY location is unlocked
+            # (We'll show red border on locked locations specifically)
+    
+    # Convert to list and sort
+    grouped_services_list = list(services_grouped.values())
+    
+    # Sort services: Basic first, then named Basic, then Advanced
+    def service_sort_key(s):
+        tier = s['tier'].lower()
+        name = s['name'].lower()
+        
+        # Priority: 1=Basic (unnamed), 2=Basic (named), 3=Advanced
+        if 'basic' in tier:
+            if name.startswith('basic'):
+                return (1, name)  # Unnamed basic
+            else:
+                return (2, name)  # Named basic
+        else:
+            return (3, name)  # Advanced
+    
+    grouped_services_list.sort(key=service_sort_key)
+    
+    return {
+        'recipe_id': recipe_id,
+        'recipe_name': recipe['name'],
+        'recipe_service_type': recipe['service_type'],
+        'services': grouped_services_list,
+        'count': len(grouped_services_list)
+    }
+
+
+@app.get("/api/custom-stats")
+async def get_custom_stats():
+    """
+    Get available custom stat options.
+    
+    Returns all boolean custom stat options from my_config that can be toggled:
+    - screwdriver_underwater_basket_weaving
+    - screwdriver_tinkering
+    - access_syrenthia
+    - has_underwater_map
+    
+    Returns:
+        Dict with custom stat options and their descriptions
+    """
+    # Define available custom stats with descriptions
+    custom_stats = [
+        {
+            'id': 'screwdriver_underwater_basket_weaving',
+            'name': 'Screwdriver: Underwater Basket Weaving',
+            'description': '50+ completions of Underwater Basket Weaving activity',
+            'default': False
+        },
+        {
+            'id': 'screwdriver_tinkering',
+            'name': 'Screwdriver: Tinkering',
+            'description': '200+ completions of Tinkering activity',
+            'default': False
+        },
+        {
+            'id': 'classic_skiing',
+            'name': 'Skis: Classic Skiing',
+            'description': '50+ completions of Classic Skiing activity<br/>Requirement for Bert\'s super-skis and Pine skis',
+            'default': False
+        },
+        {
+            'id': 'skate_skiing',
+            'name': 'Skis: Skate Skiing',
+            'description': '50+ completions of Class Skiing activity<br/>Requirement for Bert\'s super-skis and Oak skis',
+            'default': False
+        },
+        {
+            'id': 'underwater_swimming',
+            'name': 'Hydrilium diving gear: Underwater Swimming',
+            'description': '25+ completions of Underwater Swimming activity<br/>Requirement for all 3 Hydrilium diving gear pieces',
+            'default': False
+        },
+        {
+            'id': 'firewood_making',
+            'name': 'Log Splitters: Firewood Making',
+            'description': '200+ completions of Firewood Making activity<br/>Requirement for Log splitter and Hydrilium log splitter',
+            'default': False
+        }
+        # ,
+        # {
+        #     'id': 'access_syrenthia',
+        #     'name': 'Access to Syrenthia',
+        #     'description': 'Unlocked access to underwater Syrenthia region',
+        #     'default': False
+        # }
+    ]
+    
+    return {
+        "custom_stats": custom_stats
+    }
+
+
+@app.get("/api/item-finding-categories")
+async def get_item_finding_categories():
+    """
+    Get item finding category information for display.
+    
+    Returns category display names, quantities, and singular forms for proper formatting.
+    """
+    from util.autogenerated.item_finding import ItemFindingCategory
+    
+    categories = {}
+    
+    for attr_name in dir(ItemFindingCategory):
+        if attr_name.startswith('_'):
+            continue
+        
+        category = getattr(ItemFindingCategory, attr_name)
+        if hasattr(category, 'drops') and len(category.drops) > 0:
+            # Get quantity range from first drop (all items in category have same quantity)
+            first_drop = category.drops[0]
+            min_qty = first_drop.quantity.min_qty
+            max_qty = first_drop.quantity.max_qty
+            
+            # Create singular form of display name
+            display_name = category.name
+            display_name_singular = display_name.rstrip('s') if display_name.endswith('s') and display_name != 'Ectoplasm' else display_name
+            # Special cases
+            if display_name == "Adventurers' Guild Tokens":
+                display_name_singular = "Adventurers' guild token"
+            elif display_name == "Gold Pieces":
+                display_name_singular = "gold pieces"  # Already plural in meaning
+            elif display_name == "Sea Shells":
+                display_name_singular = "sea shell"
+            
+            # Icon name should be singular (matching the actual file)
+            # The icon files are named after the singular form
+            icon_name_base = attr_name.lower()  # e.g., "adventurers_guild_tokens"
+            
+            # Remove trailing 's' for plural categories
+            if icon_name_base.endswith('s') and icon_name_base not in ['ectoplasm', 'gold_pieces']:
+                icon_name_singular = icon_name_base[:-1]  # Remove trailing 's'
+            else:
+                icon_name_singular = icon_name_base
+            
+            icon_name = f'find_{icon_name_singular}'
+            
+            categories[attr_name] = {
+                'display_name': display_name,
+                'display_name_singular': display_name_singular,
+                'min_qty': min_qty,
+                'max_qty': max_qty,
+                'icon_name': icon_name
+            }
+    
+    return categories
+
+
+@app.post("/api/expand-equipment-drops")
+async def expand_equipment_drops(request: Request):
+    """
+    Expand ItemFindingCategory stats to actual drop entries.
+    
+    Request body:
+        stats: Dict of stats including ItemFindingCategory.* entries
+    
+    Returns:
+        List of expanded drop entries with has_fine_material flag
+    """
+    from util.autogenerated.item_finding import ItemFindingCategory
+    from util.item_utils import DropEntry, Quantity
+    import logging
+    
+    logger = logging.getLogger(__name__)
+    
+    body = await request.json()
+    stats = body.get('stats', {})
+    
+    logger.info(f"=== expand_equipment_drops called ===")
+    logger.info(f"Received stats: {stats}")
+    
+    expanded_drops = []
+    
+    for stat_name, stat_value in stats.items():
+        if stat_name.startswith('ItemFindingCategory.'):
+            category_const = stat_name.split('.', 1)[1]
+            logger.info(f"Processing category: {category_const} with value {stat_value}")
+            
+            if hasattr(ItemFindingCategory, category_const):
+                category = getattr(ItemFindingCategory, category_const)
+                logger.info(f"  Category found: {category.name} with {len(category.drops)} items")
+                
+                # Expand with the stat value (already in percentage form)
+                drops = category.expand_with_chance(stat_value)
+                logger.info(f"  Expanded to {len(drops)} drops")
+                
+                for drop in drops:
+                    # Check if this item has a fine version
+                    has_fine = False
+                    try:
+                        if drop.item_object:
+                            # Check if it's a Material with has_fine_material method
+                            if hasattr(drop.item_object, 'has_fine_material'):
+                                has_fine = drop.item_object.has_fine_material()
+                            # Check if it's a Consumable - look for fine version by name
+                            else:
+                                from util.autogenerated.consumables import Consumable
+                                # Try to find fine version: "Bug bait" -> "BUG_BAIT_FINE"
+                                item_name_enum = drop.item_name.upper().replace(' ', '_').replace("'", '').replace('-', '_')
+                                fine_enum_name = item_name_enum + '_FINE'
+                                if hasattr(Consumable, fine_enum_name):
+                                    has_fine = True
+                                    logger.info(f"    {drop.item_name} has fine version: {fine_enum_name}")
+                    except Exception as e:
+                        logger.error(f"    Error checking fine version for {drop.item_name}: {e}")
+                    
+                    logger.info(f"    Adding drop: {drop.item_name} ({drop.chance_percent}%) has_fine={has_fine}")
+                    
+                    expanded_drops.append({
+                        'item_name': drop.item_name,
+                        'item_ref': drop.item_ref,
+                        'chance_percent': drop.chance_percent,
+                        'min_qty': drop.quantity.min_qty,
+                        'max_qty': drop.quantity.max_qty,
+                        'has_fine_material': has_fine
+                    })
+            else:
+                logger.warning(f"Category not found: {category_const}")
+    
+    logger.info(f"Returning {len(expanded_drops)} expanded drops")
+    logger.info(f"=== expand_equipment_drops END ===")
+    
+    return {'drops': expanded_drops}
+
+
+@app.post("/api/all-item-finding-drops")
+async def get_all_item_finding_drops(request: Request):
+    """
+    Get all possible item finding drops from ALL owned items for a given skill.
+    Scans all equipment items and collects ItemFindingCategory stats.
+    
+    Request body:
+        skill: Skill name (e.g., 'fishing', 'cooking', 'global')
+    
+    Returns:
+        List of expanded drop entries from all owned items
+    """
+    from util.autogenerated.equipment import Item, ItemInstance, CraftedItem, AchievementItem
+    from util.autogenerated.item_finding import ItemFindingCategory
+    from util.autogenerated.consumables import Consumable
+    from util.walkscape_constants import Skill
+    import logging
+    
+    logger = logging.getLogger(__name__)
+    
+    body = await request.json()
+    skill = body.get('skill', 'global')
+    
+    logger.info(f"=== all-item-finding-drops for skill: {skill} ===")
+    
+    # Collect ALL ItemFindingCategory stats from ALL equipment items
+    all_stats = {}
+    
+    for attr_name in dir(Item):
+        if attr_name.startswith('_'):
+            continue
+        
+        item = getattr(Item, attr_name)
+        if not isinstance(item, (ItemInstance, CraftedItem, AchievementItem)):
+            continue
+        
+        if not hasattr(item, '_stats'):
+            continue
+        
+        # Check all skills in the item's stats
+        for stat_skill, location_data in item._stats.items():
+            # Match global or the specific skill
+            if stat_skill != 'global' and stat_skill != skill:
+                # Also check component skills (e.g., 'agility' matches 'travel')
+                try:
+                    skill_obj = Skill.from_name(skill)
+                    if skill_obj and not skill_obj.matches_skill(stat_skill):
+                        continue
+                except:
+                    continue
+            
+            for location, stats in location_data.items():
+                for stat_name, stat_value in stats.items():
+                    if stat_name.startswith('ItemFindingCategory.'):
+                        if stat_name not in all_stats:
+                            all_stats[stat_name] = 0
+                        all_stats[stat_name] = max(all_stats[stat_name], stat_value)  # Use max, not sum (different items)
+    
+    logger.info(f"Found {len(all_stats)} unique ItemFindingCategory stats: {all_stats}")
+    
+    # Expand all categories to actual drops
+    expanded_drops = []
+    
+    for stat_name, stat_value in all_stats.items():
+        category_const = stat_name.split('.', 1)[1]
+        
+        if hasattr(ItemFindingCategory, category_const):
+            category = getattr(ItemFindingCategory, category_const)
+            drops = category.expand_with_chance(stat_value)
+            
+            for drop in drops:
+                # Check if this item has a fine version
+                has_fine = False
+                try:
+                    if drop.item_object:
+                        if hasattr(drop.item_object, 'has_fine_material'):
+                            has_fine = drop.item_object.has_fine_material()
+                        else:
+                            item_name_enum = drop.item_name.upper().replace(' ', '_').replace("'", '').replace('-', '_')
+                            fine_enum_name = item_name_enum + '_FINE'
+                            if hasattr(Consumable, fine_enum_name):
+                                has_fine = True
+                except:
+                    pass
+                
+                expanded_drops.append({
+                    'item_name': drop.item_name,
+                    'item_ref': drop.item_ref,
+                    'chance_percent': drop.chance_percent,
+                    'min_qty': drop.quantity.min_qty,
+                    'max_qty': drop.quantity.max_qty,
+                    'has_fine_material': has_fine
+                })
+    
+    logger.info(f"Returning {len(expanded_drops)} expanded drops")
+    
+    return {'drops': expanded_drops}
+
+
+# ============================================================================
+# BUG REPORT API ENDPOINTS
+# ============================================================================
+
+class BugReportData(BaseModel):
+    """Bug report submission model."""
+    description: str = Field(..., min_length=1, max_length=5000)
+    app_version: str
+    browser_info: str
+    screenshots: Optional[Dict[str, str]] = None  # tab_name -> base64 data
+
+
+@app.post("/api/bug-reports")
+async def submit_bug_report(request: Request, data: BugReportData):
+    """
+    Submit a new bug report.
+    
+    Creates a snapshot of the current session state and stores it with
+    the bug report for later review.
+    
+    Args:
+        request: Request object to get session UUID
+        data: Bug report data with description, version, browser info, screenshots
+        
+    Returns:
+        Created bug report with IDs
+    """
+    original_uuid = request.state.session_uuid
+    
+    # Get current session
+    session = get_db().get_session(original_uuid)
+    if not session:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": True,
+                "code": "SESSION_NOT_FOUND",
+                "message": "Session not found"
+            }
+        )
+    
+    # Create snapshot session with new UUID
+    snapshot_uuid = str(uuid.uuid4())
+    snapshot_session = get_db().create_session(snapshot_uuid)
+    
+    # Copy character_config and ui_config to snapshot
+    if session.get('character_config'):
+        get_db().update_character_config(snapshot_uuid, session['character_config'])
+    if session.get('ui_config'):
+        get_db().update_ui_config(snapshot_uuid, session['ui_config'])
+    
+    # Copy gear sets to snapshot
+    gear_sets = get_db().get_gear_sets(original_uuid)
+    for gear_set in gear_sets:
+        get_db().create_gear_set(
+            session_uuid=snapshot_uuid,
+            name=gear_set['name'],
+            slots_json=gear_set['slots_json']
+        )
+    
+    # Create bug report
+    report = get_db().create_bug_report(
+        original_session_uuid=original_uuid,
+        snapshot_session_uuid=snapshot_uuid,
+        description=data.description,
+        app_version=data.app_version,
+        browser_info=data.browser_info,
+        screenshots_json=data.screenshots
+    )
+    
+    return {
+        "success": True,
+        "message": "Bug report submitted successfully",
+        "report": report
+    }
+
+
+@app.get("/api/bug-reports")
+async def list_bug_reports(reviewed: Optional[bool] = None):
+    """
+    List all bug reports, optionally filtered by reviewed status.
+    
+    Args:
+        reviewed: If True, only reviewed. If False, only unreviewed. If None, all.
+        
+    Returns:
+        List of bug reports
+    """
+    reports = get_db().get_bug_reports(reviewed=reviewed)
+    return {
+        "reports": reports,
+        "count": len(reports)
+    }
+
+
+@app.get("/api/bug-reports/{report_id}")
+async def get_bug_report_detail(report_id: str):
+    """
+    Get detailed information about a specific bug report.
+    
+    Includes the snapshot session data for review.
+    
+    Args:
+        report_id: Bug report ID
+        
+    Returns:
+        Bug report with snapshot session data
+    """
+    report = get_db().get_bug_report(report_id)
+    if not report:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": True,
+                "code": "REPORT_NOT_FOUND",
+                "message": f"Bug report {report_id} not found"
+            }
+        )
+    
+    # Get snapshot session
+    snapshot_session = get_db().get_session(report['snapshot_session_uuid'])
+    
+    # Get snapshot gear sets
+    snapshot_gear_sets = get_db().get_gear_sets(report['snapshot_session_uuid'])
+    
+    return {
+        "report": report,
+        "snapshot_session": snapshot_session,
+        "snapshot_gear_sets": snapshot_gear_sets
+    }
+
+
+class ReviewData(BaseModel):
+    """Bug report review model."""
+    reviewed_by: str = Field(..., min_length=1, max_length=100)
+    notes: Optional[str] = Field(None, max_length=2000)
+
+
+@app.patch("/api/bug-reports/{report_id}/review")
+async def mark_bug_report_reviewed(report_id: str, data: ReviewData):
+    """
+    Mark a bug report as reviewed.
+    
+    Args:
+        report_id: Bug report ID
+        data: Review data with reviewer name and optional notes
+        
+    Returns:
+        Success message
+    """
+    updated = get_db().mark_report_reviewed(
+        report_id=report_id,
+        reviewed_by=data.reviewed_by,
+        notes=data.notes
+    )
+    
+    if not updated:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": True,
+                "code": "REPORT_NOT_FOUND",
+                "message": f"Bug report {report_id} not found"
+            }
+        )
+    
+    return {
+        "success": True,
+        "message": f"Bug report {report_id} marked as reviewed"
+    }
+
+
+# ============================================================================
+# HEALTH CHECK
+# ============================================================================
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint."""
+    return {"status": "healthy"}
+
+
+@app.get("/api/optimization-result")
+async def get_optimization_result(request: Request):
+    """
+    Get the result of the most recent optimization for this session.
+    
+    Returns:
+        Export string and metadata, or null if no result available
+    """
+    session_uuid = request.state.session_uuid
+    session = get_db().get_session(session_uuid)
+    
+    if session and session.get('ui_config'):
+        result = session['ui_config'].get('optimization_result')
+        if result:
+            # Clear the result after retrieving (one-time use)
+            ui_config = session['ui_config']
+            del ui_config['optimization_result']
+            get_db().update_ui_config(session_uuid, ui_config)
+            
+            log(f"✓ Retrieved and cleared optimization result", session_uuid)
+            return result
+    
+    return None
+
+
+@app.get("/api/optimization-settings")
+async def get_optimization_settings(request: Request):
+    """
+    Get optimization settings including available sorting options.
+    
+    Returns:
+        Available sorting metrics for activities and recipes,
+        plus current user preferences from session
+    """
+    from util.walkscape_constants import Sorting, SortingType
+    
+    # Get session
+    session_uuid = request.state.session_uuid
+    session = get_db().get_session(session_uuid)
+    
+    # Get current preferences from session
+    ui_config = session.get('ui_config', {}) if session else {}
+    activity_sorting = ui_config.get('optimize_sorting_activity', [])
+    recipe_sorting = ui_config.get('optimize_sorting_recipe', [])
+    activity_include_consumables = ui_config.get('activity_include_consumables', False)
+    recipe_include_consumables = ui_config.get('recipe_include_consumables', False)
+    
+    # Build available sorting options
+    activity_options = []
+    recipe_options = []
+    
+    # Quality-specific metrics (have "X Quality" in display name)
+    quality_specific_keys = ['materials_for_target', 'steps_for_target', 'total_crafts']
+    
+    for sorting in Sorting:
+        option = {
+            'key': sorting.metric_key,
+            'name': sorting.name,
+            'display_name': sorting.display_name,
+            'is_reverse': sorting.is_reverse,
+            'requires_quality': sorting.metric_key in quality_specific_keys
+        }
+        
+        # Check which types this sorting applies to
+        if SortingType.ACTIVITY in sorting.types:
+            activity_options.append(option)
+        if SortingType.RECIPE in sorting.types:
+            recipe_options.append(option)
+    
+    # If no preferences saved, use default order (enum order)
+    if not activity_sorting:
+        activity_sorting = [opt['key'] for opt in activity_options]
+    if not recipe_sorting:
+        recipe_sorting = [opt['key'] for opt in recipe_options]
+    
+    return {
+        'activity': {
+            'options': activity_options,
+            'current_order': activity_sorting,
+            'include_consumables': activity_include_consumables
+        },
+        'recipe': {
+            'options': recipe_options,
+            'current_order': recipe_sorting,
+            'include_consumables': recipe_include_consumables
+        }
+    }
+
+
+@app.post("/api/optimization-settings")
+async def save_optimization_settings(request: Request):
+    """
+    Save optimization sorting preferences to session.
+    
+    Request body:
+        activity_sorting: Array of metric keys in priority order
+        recipe_sorting: Array of metric keys in priority order
+    """
+    body = await request.json()
+    activity_sorting = body.get('activity_sorting', [])
+    recipe_sorting = body.get('recipe_sorting', [])
+    activity_include_consumables = body.get('activity_include_consumables', False)
+    recipe_include_consumables = body.get('recipe_include_consumables', False)
+    
+    session_uuid = request.state.session_uuid
+    log(f"Saving optimization settings:", session_uuid)
+    log(f"  Activity sorting: {activity_sorting}", session_uuid)
+    log(f"  Recipe sorting: {recipe_sorting}", session_uuid)
+    log(f"  Activity include consumables: {activity_include_consumables}", session_uuid)
+    log(f"  Recipe include consumables: {recipe_include_consumables}", session_uuid)
+    
+    # Get session
+    session = get_db().get_session(session_uuid)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    # Update UI config directly (not using update_config_path which has path logic)
+    ui_config = session.get('ui_config', {})
+    ui_config['optimize_sorting_activity'] = activity_sorting
+    ui_config['optimize_sorting_recipe'] = recipe_sorting
+    ui_config['activity_include_consumables'] = activity_include_consumables
+    ui_config['recipe_include_consumables'] = recipe_include_consumables
+    
+    get_db().update_ui_config(session_uuid, ui_config)
+    
+    log(f"✓ Optimization settings saved", session_uuid)
+    
+    return {
+        'success': True,
+        'message': 'Optimization settings saved'
+    }
+
+
+@app.post("/api/optimize-gearset")
+async def optimize_gearset(request: Request, background_tasks: BackgroundTasks):
+    """
+    Optimize gearset for an activity or recipe.
+    
+    Runs optimization in background and auto-saves result as a gearset.
+    
+    Request body:
+        type: 'activity' or 'recipe'
+        id: Activity or recipe ID
+        sorting_priority: Optional array of sorting metrics
+        target_item: Optional target item for activities
+        target_quality: Optional target quality for recipes
+    
+    Returns:
+        Immediate response with status, optimization runs in background
+    """
+    from datetime import datetime
+    
+    body = await request.json()
+    opt_type = body.get('type')  # 'activity' or 'recipe'
+    opt_id = body.get('id')
+    sorting_priority = body.get('sorting_priority', [])
+    target_item = body.get('target_item')
+    target_quality = body.get('target_quality', 'Perfect')
+    service_id = body.get('service_id')  # For recipes
+    include_consumables = body.get('include_consumables', False)  # For optimization
+    
+    # Get session
+    session_uuid = request.state.session_uuid
+    session = get_db().get_session(session_uuid)
+    
+    # Build character config from either imported data or UI overrides
+    character_config = session.get('character_config') if session else None
+    
+    # Apply user overrides to character_config if they exist
+    if character_config and session:
+        ui_config = session.get('ui_config', {})
+        user_overrides = ui_config.get('user_overrides', {})
+        
+        # Override achievement_points if user has manually set it
+        if user_overrides.get('achievement_points') is not None:
+            character_config['achievement_points'] = user_overrides['achievement_points']
+        
+        # Override coins if user has manually set it
+        if user_overrides.get('coins') is not None:
+            character_config['coins'] = user_overrides['coins']
+        
+        # Override skills if user has manually set them
+        if user_overrides.get('skills'):
+            character_config['skills'] = user_overrides['skills']
+        if user_overrides.get('skills_xp'):
+            character_config['skills_xp'] = user_overrides['skills_xp']
+        
+        # Override reputation if user has manually set it
+        if user_overrides.get('reputation'):
+            character_config['reputation'] = user_overrides['reputation']
+    
+    if not character_config:
+        # No imported character data - build from UI overrides
+        ui_config = session.get('ui_config', {}) if session else {}
+        user_overrides = ui_config.get('user_overrides', {})
+        
+        # Check if we have at least some skill data
+        override_skills = user_overrides.get('skills', {})
+        override_skills_xp = user_overrides.get('skills_xp', {})
+        
+        if not override_skills and not override_skills_xp:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": True,
+                    "code": "NO_CHARACTER",
+                    "message": "No character data found. Please import your character or manually set skill levels."
+                }
+            )
+        
+        # Collect owned items from UI overrides
+        owned_items = []
+        override_items = user_overrides.get('items', {})
+        for item_id, item_state in override_items.items():
+            if item_state.get('has', False):
+                owned_items.append(item_id)
+        
+        # Build minimal character config from UI overrides
+        character_config = {
+            "name": "Manual Input",
+            "game_version": "1.0",
+            "steps": 0,  # Will be calculated from skills_xp
+            "achievement_points": user_overrides.get('achievement_points', 0),
+            "coins": user_overrides.get('coins', 0),
+            "skills": override_skills,
+            "skills_xp": override_skills_xp,
+            "reputation": user_overrides.get('reputation', {}),
+            "owned_items": owned_items,
+            "collectibles": [],
+            "gear": {},
+            "item_quantities": {},
+            "item_qualities": {},
+        }
+        
+        # Calculate total steps from skills_xp
+        total_steps = sum(override_skills_xp.values())
+        character_config["steps"] = total_steps
+        
+        log(f"Built character config from UI overrides: {len(override_skills)} skills, {total_steps} total steps, {len(owned_items)} owned items", session_uuid)
+    
+    # Check if optimization already running for this session
+    if session_uuid in _active_optimizations:
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": True,
+                "code": "OPTIMIZATION_IN_PROGRESS",
+                "message": "An optimization is already running. Please wait for it to complete."
+            }
+        )
+    
+    # Mark session as having active optimization
+    _active_optimizations.add(session_uuid)
+    
+    # Get sorting priorities from session if not provided
+    if not sorting_priority:
+        ui_config = session.get('ui_config', {})
+        if opt_type == 'activity':
+            sorting_priority = ui_config.get('optimize_sorting_activity', [])
+        else:
+            sorting_priority = ui_config.get('optimize_sorting_recipe', [])
+    
+    # Add background task (not asyncio.create_task)
+    background_tasks.add_task(
+        run_optimization_background,
+        session_uuid,
+        opt_type,
+        opt_id,
+        sorting_priority,
+        character_config,
+        target_item,
+        target_quality,
+        service_id,
+        include_consumables
+    )
+    
+    # Return immediate response
+    return {
+        "success": True,
+        "message": "Optimization started in background. You'll be notified when complete.",
+        "type": opt_type,
+        "id": opt_id
+    }
+
+
+def run_optimization_background(
+    session_uuid: str,
+    opt_type: str,
+    opt_id: str,
+    sorting_priority: list,
+    character_config: dict,
+    target_item: str = None,
+    target_quality: str = 'Perfect',
+    service_id: str = None,
+    include_consumables: bool = False
+):
+    """
+    Run optimization in background and save result.
+    """
+    import sys
+    import os
+    import subprocess
+    import json
+    import tempfile
+    from datetime import datetime
+    
+    try:
+        # Get ui_config for hide states
+        session = get_db().get_session(session_uuid)
+        ui_config = session.get('ui_config', {}) if session else {}
+        
+        # Create a temporary file with the optimization request
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+            request_data = {
+                'type': opt_type,
+                'id': opt_id,
+                'sorting_priority': sorting_priority,
+                'character_config': character_config,
+                'ui_config': ui_config,  # Include ui_config for hide states
+                'target_item': target_item,
+                'target_quality': target_quality,
+                'service_id': service_id,
+                'include_consumables': include_consumables
+            }
+            json.dump(request_data, f)
+            temp_file = f.name
+        
+        # Get the project root directory (parent of ui/)
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        
+        log(f"Starting optimization subprocess...", session_uuid)
+        log(f"  Command: python3 -m ui.optimize_worker {temp_file}", session_uuid)
+        log(f"  CWD: {project_root}", session_uuid)
+        
+        # Run the optimization script
+        result = subprocess.run(
+            [sys.executable, '-m', 'ui.optimize_worker', temp_file],
+            cwd=project_root,
+            capture_output=True,
+            text=True,
+            timeout=120  # 2 minute timeout
+        )
+        limit = -1 # First X chars
+        
+        log(f"Subprocess completed with return code: {result.returncode}", session_uuid)
+        log(f"STDOUT: {result.stdout[:limit]}", session_uuid) 
+        log(f"STDERR: {result.stderr[:limit]}", session_uuid)
+        
+        # Clean up temp file
+        try:
+            os.unlink(temp_file)
+        except:
+            pass
+        
+        if result.returncode != 0:
+            error_msg = result.stderr or result.stdout or "Unknown error"
+            log(f"❌ Background optimization failed: {error_msg}", session_uuid)
+            return
+        
+        # Parse the result
+        try:
+            response_data = json.loads(result.stdout)
+        except json.JSONDecodeError as e:
+            log(f"❌ Failed to parse optimization result as JSON: {e}", session_uuid)
+            log(f"Raw output: {result.stdout}", session_uuid)
+            return
+        
+        if not response_data.get('success'):
+            log(f"❌ Optimization failed: {response_data.get('error', 'Unknown error')}", session_uuid)
+            return
+        
+        # Generate gearset name
+        activity_name = response_data.get('activity_name') or response_data.get('recipe_name', 'Unknown')
+        date_str = datetime.now().strftime('%Y-%m-%d %H:%M')
+        
+        # Get sorting priority names
+        sort_names = []
+        if sorting_priority:
+            # Map metric keys to short names
+            metric_names = {
+                'steps_per_reward_roll': 'Steps/Reward',
+                'expected_steps_per_action': 'Steps/Action',
+                'primary_xp_per_step': 'XP/Step',
+                'materials_for_target': 'Materials',
+                'steps_for_target': 'Steps',
+                'current_steps': 'Steps/Craft'
+            }
+            sort_names = [metric_names.get(m, m) for m in sorting_priority[:2]]
+        
+        if sort_names:
+            sort_str = f" [{' > '.join(sort_names)}]"
+        else:
+            # Default sorting based on type
+            if opt_type == 'activity':
+                sort_str = " [Steps/Reward > XP/Step]"
+            else:
+                sort_str = " [Materials > Steps]"
+        
+        gearset_name = f"{activity_name} - {date_str}{sort_str}"
+        
+        # Get export string and convert to UI format using catalog
+        export_string = response_data['gearset_export']
+        
+        # Decode the export
+        import base64
+        import gzip
+        decoded_bytes = base64.b64decode(export_string)
+        decompressed = gzip.decompress(decoded_bytes).decode('utf-8')
+        gearset_data = json.loads(decompressed)
+        
+        # Fetch catalog to enrich items (same as frontend does)
+        from ui.catalog import ItemCatalog
+        catalog = ItemCatalog()
+        all_items = []
+        
+        # Flatten catalog items
+        def extract_items(obj):
+            if isinstance(obj, dict):
+                if 'uuid' in obj:
+                    all_items.append(obj)
+                else:
+                    for value in obj.values():
+                        extract_items(value)
+            elif isinstance(obj, list):
+                for item in obj:
+                    extract_items(item)
+        
+        extract_items(catalog.categories)
+        
+        log(f"Catalog loaded with {len(all_items)} items", session_uuid)
+        
+        # Convert to slots format with full item objects
+        slots = {}
+        for item in gearset_data.get('items', []):
+            slot_name = item['type']
+            item_json = item.get('item')
+            
+            if not item_json:
+                continue
+            
+            item_data = json.loads(item_json)
+            
+            if not item_data or not item_data.get('id'):
+                continue
+            
+            # Map slot names
+            if slot_name == 'tool':
+                slot_name = f"tool{item['index']}"
+            elif slot_name == 'ring':
+                slot_name = f"ring{item['index'] + 1}"
+            
+            # Find item in catalog by UUID
+            uuid = item_data['id']
+            quality_rarity = item_data.get('quality')
+            
+            full_item = next((cat_item for cat_item in all_items if cat_item.get('uuid') == uuid), None)
+            
+            if full_item:
+                # Clone and convert to JSON-serializable dict with ALL fields
+                enriched_item = {
+                    'itemId': full_item.get('id'),
+                    'uuid': full_item.get('uuid'),
+                    'name': full_item.get('name'),
+                    'icon_path': full_item.get('icon_path'),
+                    'rarity': full_item.get('rarity'),
+                    'quality': None,
+                    'keywords': full_item.get('keywords', []),
+                    'is_fine': full_item.get('is_fine', False),
+                    'stats': full_item.get('stats', {}),  # CRITICAL: Include stats!
+                    'slot': full_item.get('slot'),
+                    'value': full_item.get('value')
+                }
+                
+                # Update quality/rarity for crafted items
+                if quality_rarity:
+                    quality_map = {
+                        'common': 'Normal',
+                        'uncommon': 'Good',
+                        'rare': 'Great',
+                        'epic': 'Excellent',
+                        'legendary': 'Perfect',
+                        'ethereal': 'Eternal'
+                    }
+                    enriched_item['quality'] = quality_map.get(quality_rarity)
+                    enriched_item['rarity'] = quality_rarity
+                
+        gearset_name = f"{activity_name} - {date_str}{sort_str}"
+        
+        # Check if name already exists and append (1), (2), etc. if needed
+        db = get_db()
+        existing_names = set()
+        all_gearsets = db.get_gear_sets(session_uuid)
+        for gs in all_gearsets:
+            existing_names.add(gs['name'])
+        
+        # If name exists, append (1), (2), etc.
+        if gearset_name in existing_names:
+            counter = 1
+            while f"{gearset_name} ({counter})" in existing_names:
+                counter += 1
+            gearset_name = f"{gearset_name} ({counter})"
+        
+        # Get export string - this is all we need
+        export_string = response_data['gearset_export']
+        
+        log(f"✓ Optimization complete! Saving as: {gearset_name}", session_uuid)
+        
+        # Build slots_json with consumable info if present
+        # Export string doesn't support consumables, so we store them in slots_json
+        slots_json = {}
+        if response_data.get('consumable'):
+            consumable_info = response_data['consumable']
+            # Look up consumable in catalog to get full item data
+            from ui.catalog import ItemCatalog
+            catalog = ItemCatalog()
+            consumable_item = None
+            
+            def find_consumable(obj):
+                if isinstance(obj, dict):
+                    if obj.get('name') == consumable_info['name'] and obj.get('type') == 'consumable':
+                        return obj
+                    for value in obj.values():
+                        result = find_consumable(value)
+                        if result:
+                            return result
+                elif isinstance(obj, list):
+                    for item in obj:
+                        result = find_consumable(item)
+                        if result:
+                            return result
+                return None
+            
+            consumable_item = find_consumable(catalog.categories)
+            if consumable_item:
+                slots_json['consumable'] = {
+                    'itemId': consumable_item.get('id'),
+                    'name': consumable_item.get('name'),
+                    'icon_path': consumable_item.get('icon_path'),
+                    'rarity': consumable_item.get('rarity', 'common'),
+                    'stats': consumable_item.get('stats', {}),
+                    'slot': 'consumable',
+                    'type': 'consumable',
+                    'keywords': consumable_item.get('keywords', []),
+                }
+                log(f"  Consumable saved: {consumable_info['name']}", session_uuid)
+            else:
+                # Fine consumable: catalog stores base name with has_fine flag
+                # Try looking up the base name and use fine stats
+                is_fine = consumable_info['name'].endswith('(Fine)')
+                if is_fine:
+                    base_name = consumable_info['name'].replace(' (Fine)', '')
+                    
+                    def find_base_consumable(obj):
+                        if isinstance(obj, dict):
+                            if obj.get('name') == base_name and obj.get('type') == 'consumable':
+                                return obj
+                            for value in obj.values():
+                                result = find_base_consumable(value)
+                                if result:
+                                    return result
+                        elif isinstance(obj, list):
+                            for item in obj:
+                                result = find_base_consumable(item)
+                                if result:
+                                    return result
+                        return None
+                    
+                    base_item = find_base_consumable(catalog.categories)
+                    if base_item:
+                        slots_json['consumable'] = {
+                            'itemId': base_item.get('id') + '_fine',
+                            'name': consumable_info['name'],
+                            'icon_path': base_item.get('icon_path'),
+                            'rarity': 'fine',
+                            'stats': base_item.get('stats_fine', base_item.get('stats', {})),
+                            'slot': 'consumable',
+                            'type': 'consumable',
+                            'is_fine': True,
+                            'keywords': base_item.get('keywords', []),
+                        }
+                        log(f"  Fine consumable saved: {consumable_info['name']}", session_uuid)
+        
+        # Save export string + optional consumable in slots_json
+        # Frontend will decode export and merge slots_json for consumable
+        db.save_gear_set(
+            session_uuid=session_uuid,
+            name=gearset_name,
+            slots_json=slots_json,
+            export_string=export_string,
+            is_optimized=True
+        )
+        
+        log(f"✓ Saved gearset: {gearset_name}", session_uuid)
+        
+    except subprocess.TimeoutExpired:
+        log(f"Optimization timed out after 120 seconds", session_uuid)
+    except Exception as e:
+        import traceback
+        log(f"Background optimization error: {traceback.format_exc()}", session_uuid)
+    finally:
+        # Always remove session from active optimizations
+        _active_optimizations.discard(session_uuid)
+
+
+@app.get("/api/version")
+async def get_version():
+    """Get application version and git commit info."""
+    import subprocess
+    from pathlib import Path
+    
+    try:
+        git_dir = Path(__file__).parent.parent
+        log(f"Attempting to get version from git at: {git_dir}")
+        
+        # Check if .git directory exists
+        git_folder = git_dir / '.git'
+        log(f".git directory exists: {git_folder.exists()}")
+        
+        # Get last commit timestamp
+        result = subprocess.run(
+            ['git', '-P', 'log', '-1', '--format=%ci'],
+            cwd=git_dir,
+            capture_output=True,
+            text=True
+        )
+        
+        if result.returncode != 0:
+            log(f"Git command failed with return code {result.returncode}")
+            log(f"Git stderr: {result.stderr}")
+            log(f"Git stdout: {result.stdout}")
+            raise Exception(f"Git command failed: {result.stderr}")
+        
+        commit_date = result.stdout.strip()
+        log(f"Got commit date: {commit_date}")
+        
+        # Get relative time (git calculates this correctly)
+        result = subprocess.run(
+            ['git', '-P', 'log', '-1', '--format=%cr'],
+            cwd=git_dir,
+            capture_output=True,
+            text=True
+        )
+        commit_relative = result.stdout.strip()
+        log(f"Got commit relative: {commit_relative}")
+        
+        # Get commit hash
+        result = subprocess.run(
+            ['git', '-P', 'log', '-1', '--format=%h'],
+            cwd=git_dir,
+            capture_output=True,
+            text=True
+        )
+        commit_hash = result.stdout.strip()
+        log(f"Got commit hash: {commit_hash}")
+        
+        return {
+            "version": "1.0.0",
+            "commit_date": commit_date,
+            "commit_relative": commit_relative,
+            "commit_hash": commit_hash,
+            "last_updated": f"{commit_date} ({commit_relative})"
+        }
+    except Exception as e:
+        log(f"Error getting version info: {e}")
+        # Fallback if git is not available
+        return {
+            "version": "1.0.0",
+            "error": "Version info unavailable"
+        }
+        return {
+            "version": "1.0.0",
+            "error": "Version info unavailable"
+        }
+
+
+# ============================================================================
+# API ACCESS AUDIT ENDPOINTS
+# ============================================================================
+
+@app.get("/api/audit/stats")
+async def get_api_audit_stats(days: int = 7):
+    """
+    Get API access statistics for the last N days.
+    
+    Args:
+        days: Number of days to look back (default: 7)
+        
+    Returns:
+        Statistics including total requests, unique sessions, requests by endpoint, etc.
+    """
+    try:
+        stats = get_db().get_api_access_stats(days=days)
+        return stats
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": True,
+                "code": "STATS_ERROR",
+                "message": str(e)
+            }
+        )
+
+
+@app.get("/api/audit/session/{uuid}")
+async def get_session_audit(uuid: str, limit: int = 100):
+    """
+    Get API access history for a specific session.
+    
+    Args:
+        uuid: Session UUID
+        limit: Maximum number of records to return (default: 100)
+        
+    Returns:
+        List of access log entries for the session
+    """
+    try:
+        logs = get_db().get_session_api_access(session_uuid=uuid, limit=limit)
+        return {"logs": logs, "count": len(logs)}
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": True,
+                "code": "AUDIT_ERROR",
+                "message": str(e)
+            }
+        )

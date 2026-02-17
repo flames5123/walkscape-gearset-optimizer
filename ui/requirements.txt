@@ -1,0 +1,18 @@
+# Walkscape UI - Backend Dependencies
+# Python 3.11+
+
+# Web Framework
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+
+# Data Validation
+pydantic==2.5.3
+
+# Testing
+pytest==7.4.4
+pytest-asyncio==0.23.3
+hypothesis==6.98.3
+httpx==0.26.0  # Required for FastAPI TestClient
+
+# Database (SQLite is built-in to Python)
+# No additional dependencies needed for SQLite

@@ -211,6 +211,16 @@ def calculate_crafting_metrics(
     total_xp = base_xp * (1 + bonus_xp_percent) + bonus_xp_add
     primary_xp_per_step = total_xp / expected_steps_per_action if expected_steps_per_action > 0 else 0
     
+    # Calculate chest finding efficiency
+    # Chest finding works like other finding bonuses - increases drop rate
+    chest_finding = total_stats.get('chest_finding', 0.0) if total_stats else 0.0
+    # Base chest drop rate is typically 1% (0.01), modified by chest_finding
+    base_chest_rate = 0.01
+    chest_rate_with_bonus = base_chest_rate * (1 + chest_finding)
+    # Steps per chest = steps per action / (chest rate * (1 + DR))
+    # DR affects all drops including chests
+    steps_per_chest = expected_steps_per_action / (chest_rate_with_bonus * (1 + double_rewards)) if chest_rate_with_bonus > 0 else 999999
+    
     return {
         'current_steps': current_steps,
         'expected_steps_per_action': expected_steps_per_action,
@@ -219,6 +229,7 @@ def calculate_crafting_metrics(
         'crafts_per_material': crafts_per_material,
         'primary_xp_per_step': primary_xp_per_step,
         'quality_outcome': quality_outcome,
+        'steps_for_chest': steps_per_chest,
     }
 
 # ============================================================================

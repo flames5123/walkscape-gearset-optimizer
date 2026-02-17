@@ -339,7 +339,7 @@ def meets_activity_requirements(gearset_dict: dict, activity, character) -> bool
     required_ap = activity.requirements.get("achievement_points", 0)
     if required_ap > 0:
         from util.walkscape_globals import ACHIEVEMENT_POINTS
-        if ACHIEVEMENT_POINTS < required_ap:
+        if int(ACHIEVEMENT_POINTS) < required_ap:
             return False
     
     # Check all keyword requirements from keyword_counts

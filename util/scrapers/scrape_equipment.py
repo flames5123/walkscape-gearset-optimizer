@@ -25,6 +25,13 @@ CACHE_FILE = get_cache_file('equipment_cache.html')
 # Quality levels for crafted items
 QUALITY_LEVELS = ['Normal', 'Good', 'Great', 'Excellent', 'Perfect', 'Eternal']
 
+# Items that map directly to single items (not categories)
+# These should use direct item references instead of ItemFindingCategory
+DIRECT_ITEM_DROPS = {
+    'bird nest',
+    'coin pouch',
+}
+
 # Set bonus definitions
 # Structure: {set_keyword: {piece_count: {skill: {location: {stat: value}}}}}
 SET_BONUS_DEFINITIONS = {
@@ -220,6 +227,37 @@ def parse_item_page(html_content, item_name):
                         'level': level
                     })
                     continue
+                
+                # Parse activity completion requirement: "Complete the X activity [N] times" or "Have completed the X activity [N] times"
+                # Pattern matches: activity name and completion count
+                activity_match = re.search(r'(?:Complete|completed)\s+the\s+(.+?)\s+activity\s+\[(\d+)\]\s+times', req_text, re.IGNORECASE)
+                if activity_match:
+                    # Extract activity name from the HTML to get clean text
+                    activity_link = li.find('a', href=re.compile(r'/wiki/.*'))
+                    if activity_link:
+                        activity_name = activity_link.get('title', '').replace('Special:MyLanguage/', '')
+                        completions = int(activity_match.group(2))
+                        
+                        # Normalize activity name (lowercase, underscores)
+                        activity_normalized = activity_name.lower().replace(' ', '_').replace("'", "")
+                        
+                        requirements.append({
+                            'type': 'activity_completion',
+                            'activity': activity_normalized,
+                            'completions': completions
+                        })
+                    continue
+                
+                # Parse achievement point requirement: "Have [120] achievement points" or "Have (120) achievement points"
+                # Note: HTML may have tags between brackets and number, so use get_text() result
+                ap_match = re.search(r'Have\s+[\(\[](\d+)[\)\]]\s+achievement\s+points?', req_text, re.IGNORECASE)
+                if ap_match:
+                    amount = int(ap_match.group(1))
+                    requirements.append({
+                        'type': 'achievement_points',
+                        'amount': amount
+                    })
+                    continue
     
     item_data['requirements'] = requirements
     
@@ -397,10 +435,7 @@ def parse_item_page(html_content, item_name):
                     line = lines[i]
                     line_lower = line.lower()
                     
-                    # Skip requirement lines (total skill level, reputation, etc.)
-                    if 'have a' in line_lower and 'total skill level' in line_lower:
-                        i += 1
-                        continue
+                    # Skip requirement lines (reputation, etc.)
                     if 'have' in line_lower and 'reputation' in line_lower:
                         i += 1
                         continue
@@ -478,6 +513,18 @@ def parse_item_page(html_content, item_name):
                                     'type': 'activity_completion',
                                     'activity': activity_name,
                                     'completions': completions
+                                }
+                                next_i += 1
+                                continue
+                        
+                        if 'have a' in next_line_lower and 'total skill level' in next_line_lower:
+                            # Total skill level requirement: "Have a [100] total skill level."
+                            tsl_match = re.search(r'have a\s+[\(\[](\d+)[\)\]]\s+total skill level', next_line_lower)
+                            if tsl_match:
+                                threshold = int(tsl_match.group(1))
+                                skill_level_req = {
+                                    'type': 'total_skill_level',
+                                    'threshold': threshold
                                 }
                                 next_i += 1
                                 continue
@@ -641,6 +688,26 @@ def parse_gated_stat_line(text, item_data, location_req=None, skill_level_req=No
             gate_type = 'set_pieces'
             gate_key = skill_level_req['set_name']
             threshold = skill_level_req['piece_count']
+        elif req_type == 'total_skill_level':
+            # Total skill level requirement (e.g., "Have a [100] total skill level.")
+            # Structure: {'total_skill_level': {threshold: {skill: {location: {stat: value}}}}}
+            gate_type = 'total_skill_level'
+            threshold = skill_level_req['threshold']
+            
+            # Initialize nested structure (no gate_key, just threshold directly)
+            if gate_type not in item_data['gated_stats']:
+                item_data['gated_stats'][gate_type] = {}
+            if threshold not in item_data['gated_stats'][gate_type]:
+                item_data['gated_stats'][gate_type][threshold] = {}
+            if skill not in item_data['gated_stats'][gate_type][threshold]:
+                item_data['gated_stats'][gate_type][threshold][skill] = {}
+            
+            location_key = normalize_location_name(location_req) if location_req else 'global'
+            if location_key not in item_data['gated_stats'][gate_type][threshold][skill]:
+                item_data['gated_stats'][gate_type][threshold][skill][location_key] = {}
+            
+            item_data['gated_stats'][gate_type][threshold][skill][location_key][final_stat_name] = final_value
+            return  # Early return for total_skill_level gates
         else:
             return  # Unknown gate type
         
@@ -661,6 +728,101 @@ def parse_gated_stat_line(text, item_data, location_req=None, skill_level_req=No
         item_data['gated_stats'][gate_type][gate_key][threshold][skill][location_key][final_stat_name] = final_value
 
 
+def parse_item_drop_line(text, item_data, location_req=None):
+    """Parse an item drop line like '+1.5% Chance to find 1 Adventurers' guild token'"""
+    text_lower = text.lower()
+    
+    # Pattern: +X% Chance to find [quantity] [item/category]
+    # Note: The text may have "While doing X" at the end, which we should ignore
+    drop_match = re.search(r'([+-]?\d+(?:\.\d+)?)\s*%\s*chance to find\s+(.+?)(?:\s+while\s+doing|\s+while\s+in|$)', text_lower, re.IGNORECASE)
+    if not drop_match:
+        return False  # Not an item drop line
+    
+    chance = float(drop_match.group(1))
+    drop_text = drop_match.group(2).strip()
+    
+    # Parse quantity and item name from the ORIGINAL text (not lowercased) to preserve capitalization
+    # Find the same position in the original text
+    original_start = drop_match.start(2)
+    original_end = drop_match.end(2)
+    original_drop_text = text[original_start:original_end].strip()
+    
+    # Patterns: "1 item", "1 to 10 items", "1-10 items"
+    quantity_match = re.match(r'(\d+)(?:\s+to\s+|\s*-\s*)?(\d+)?\s+(.+)', original_drop_text, re.IGNORECASE)
+    if not quantity_match:
+        return False
+    
+    min_qty = int(quantity_match.group(1))
+    max_qty = int(quantity_match.group(2)) if quantity_match.group(2) else min_qty
+    item_name = quantity_match.group(3).strip()
+    
+    # Determine skill context
+    skill = extract_skill_from_text(text)
+    
+    # Initialize skill_stats structure if needed
+    if 'skill_stats' not in item_data:
+        item_data['skill_stats'] = {}
+    if skill not in item_data['skill_stats']:
+        item_data['skill_stats'][skill] = {}
+    
+    location_key = normalize_location_name(location_req) if location_req else 'global'
+    if location_key not in item_data['skill_stats'][skill]:
+        item_data['skill_stats'][skill][location_key] = {}
+    
+    # Convert item name to stat name
+    item_name_lower = item_name.lower()
+    item_name_normalized = item_name_lower.replace(' ', '_').replace("'", '')
+    
+    # Check if this is a direct item (bird nest, coin pouch)
+    if item_name_lower in DIRECT_ITEM_DROPS:
+        # Use direct item reference - will be resolved later
+        stat_name = f"find_{item_name_normalized}"
+    else:
+        # Try to resolve as ItemFindingCategory
+        # Import here to avoid circular dependency
+        try:
+            from util.autogenerated.item_finding import ItemFindingCategory
+            
+            # Try to find matching category by checking:
+            # 1. Category name matches the drop text (e.g., "Random Gem" == "random gem")
+            # 2. Any item in the category matches the drop text (e.g., "Adventurers' guild token" in ADVENTURERS_GUILD_TOKENS)
+            category_found = False
+            for attr_name in dir(ItemFindingCategory):
+                if attr_name.startswith('_'):
+                    continue
+                
+                category = getattr(ItemFindingCategory, attr_name)
+                if hasattr(category, 'name'):
+                    # Check if category name matches
+                    if category.name.lower() == item_name_lower:
+                        stat_name = f"ItemFindingCategory.{attr_name}"
+                        category_found = True
+                        break
+                    
+                    # Check if any item in the category matches
+                    if hasattr(category, 'drops'):
+                        for drop in category.drops:
+                            if drop.item_name.lower() == item_name_lower:
+                                stat_name = f"ItemFindingCategory.{attr_name}"
+                                category_found = True
+                                break
+                    
+                    if category_found:
+                        break
+            
+            if not category_found:
+                # Not a category, use direct item reference
+                stat_name = f"find_{item_name_normalized}"
+        except ImportError:
+            # ItemFindingCategory not available yet, use direct reference
+            stat_name = f"find_{item_name_normalized}"
+    
+    # Store as stat (value is the chance percentage)
+    item_data['skill_stats'][skill][location_key][stat_name] = chance
+    
+    return True  # Successfully parsed as item drop
+
+
 def parse_stat_line_with_location(text, item_data, location_req=None):
     """Parse a stat line with explicit location requirement"""
     text_lower = text.lower()
@@ -668,6 +830,11 @@ def parse_stat_line_with_location(text, item_data, location_req=None):
     # Skip lines that are just location requirements
     if 'while in' in text_lower and not any(kw in text_lower for kw in ['%', '+', '-']):
         return
+    
+    # Check if this is an item drop line first
+    if 'chance to find' in text_lower:
+        if parse_item_drop_line(text, item_data, location_req):
+            return  # Successfully parsed as item drop
     
     # Determine which skill this stat applies to using shared function
     skill = extract_skill_from_text(text)
@@ -820,7 +987,7 @@ def generate_equipment_py(items):
     with open(output_file, 'w', encoding='utf-8') as f:
         write_module_header(f, 'Auto-generated equipment data from Walkscape wiki', 'scrape_equipment.py')
         write_imports(f, [
-            'from typing import Dict, Optional, Union, TYPE_CHECKING',
+            'from typing import Dict, Optional, Union, TYPE_CHECKING, List',
             'from util.walkscape_constants import Attribute, Skill, SkillInstance, LocationInfo, Location',
             'from util.stats_mixin import StatsMixin'
         ])
@@ -909,25 +1076,25 @@ def generate_equipment_py(items):
         '    def display_name(self):',
         '        """Get name with current achievement points"""',
         '        import util.walkscape_globals',
-        '        ap = util.walkscape_globals.ACHIEVEMENT_POINTS',
+        '        ap = int(util.walkscape_globals.ACHIEVEMENT_POINTS)',
         '        return f"{self.name} ({ap} AP)"',
         '    ',
         '    def get_instance(self, **kwargs):',
         '        """Get stats for achievement item at given AP level"""',
         '        import util.walkscape_globals',
-        '        achievement_points = util.walkscape_globals.ACHIEVEMENT_POINTS',
+        '        achievement_points = int(util.walkscape_globals.ACHIEVEMENT_POINTS)',
         '        return self._get_stats_for_ap(achievement_points)',
         '    ',
         '    def __repr__(self):',
         '        import util.walkscape_globals',
-        '        ap = util.walkscape_globals.ACHIEVEMENT_POINTS',
+        '        ap = int(util.walkscape_globals.ACHIEVEMENT_POINTS)',
         '        return f"AchievementItem({self.name} ({ap} AP))"',
         '',
         # Generate crafted item class
         '',
         'class CraftedItem:',
         '    """Item with quality levels"""',
-        '    def __init__(self, name: str, uuid: str, slot: str, keywords: list, value: int, base_stats: Dict[str, float], quality_stats: Dict[str, Dict[str, float]], quality_values: Dict[str, int] = None):',
+        '    def __init__(self, name: str, uuid: str, slot: str, keywords: list, value: int, base_stats: Dict[str, float], quality_stats: Dict[str, Dict[str, float]], quality_values: Dict[str, int] = None, requirements: list = None):',
         '        self.name = name',
         '        self.uuid = uuid',
         '        self.slot = slot',
@@ -936,6 +1103,7 @@ def generate_equipment_py(items):
         '        self._base_stats = base_stats',
         '        self._quality_stats = quality_stats',
         '        self._quality_values = quality_values or {}',
+        '        self.requirements = requirements or []',
         '    ',
         ]
         
@@ -949,7 +1117,7 @@ def generate_equipment_py(items):
             f'        stats = self._base_stats.copy()',
             f'        stats.update(self._quality_stats.get("{quality}", {{}}))',
             f'        value = self._quality_values.get("{quality}", self.value)',
-            f'        return ItemInstance(f"{{self.name}} ({quality})", self.uuid, stats, self.slot, self.keywords, value, rarity=None)',
+            f'        return ItemInstance(f"{{self.name}} ({quality})", self.uuid, stats, self.slot, self.keywords, value, rarity=None, requirements=self.requirements)',
             '    ',
             ])
     
@@ -990,7 +1158,7 @@ def generate_equipment_py(items):
         '        # Handle achievement items - use global AP',
         '        if isinstance(item, AchievementItem):',
         '            import util.walkscape_globals',
-        '            ap = util.walkscape_globals.ACHIEVEMENT_POINTS',
+        '            ap = int(util.walkscape_globals.ACHIEVEMENT_POINTS)',
         '            return item[ap]',
         '        ',
         '        return item',
@@ -1008,6 +1176,7 @@ def generate_equipment_py(items):
                 base_stats = item['stats']
                 quality_stats = item['quality_stats']
                 quality_values = item.get('quality_values', {})
+                requirements = item.get('requirements', [])
                 lines.extend([
                     f'    {item_const} = CraftedItem(',
                     f'        name="{item["name"]}",',
@@ -1017,7 +1186,8 @@ def generate_equipment_py(items):
                     f'        value={item.get("value", 0)},',
                     f'        base_stats={base_stats},',
                     f'        quality_stats={quality_stats},',
-                    f'        quality_values={quality_values}',
+                    f'        quality_values={quality_values},',
+                    f'        requirements={requirements}',
                     '    )',
                 ])
             elif item['is_achievement']:

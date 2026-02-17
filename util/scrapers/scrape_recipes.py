@@ -20,6 +20,19 @@ RECIPES_URL = 'https://wiki.walkscape.app/wiki/Recipes'
 CACHE_DIR = get_cache_dir('recipes')
 CACHE_FILE = get_cache_file('recipes_cache.html')
 
+# Recipe name overrides - maps cleaned recipe name to desired enum name
+# Use this when the automatic cleaning produces incorrect names
+# Key: cleaned recipe name (after removing prefixes like "Harden ")
+# Value: desired enum name (will be uppercased and have spaces replaced with _)
+# 
+# Examples:
+#   'kelp': 'HARDENED_KELP'  - "Harden kelp" → "HARDENED_KELP" instead of "KELP"
+#   'wood': 'TREATED_WOOD'   - "Treat wood" → "TREATED_WOOD" instead of "WOOD"
+#
+RECIPE_NAME_OVERRIDES = {
+    'kelp': 'HARDENED_KELP',  # "Harden kelp" → "HARDENED_KELP" instead of "KELP"
+}
+
 # Create validator instance
 validator = ScraperValidator()
 
@@ -146,6 +159,44 @@ def extract_output_quantity(td):
     return 1, text
 
 
+def resolve_output_item(item_name):
+    """
+    Resolve output item name to actual Item, Material, or Consumable object.
+    
+    Args:
+        item_name: Name of the output item
+        
+    Returns:
+        Tuple of (object, type_str) where type_str is 'Item', 'Material', or 'Consumable'
+        Returns (None, None) if not found
+    """
+    # Try to resolve as Material first (most common for recipes)
+    material_obj = resolve_material(item_name)
+    if material_obj:
+        # Check what type it actually is
+        from util.walkscape_constants import Material, Item, Consumable
+        
+        # Check if it's a Material
+        for attr_name in dir(Material):
+            if not attr_name.startswith('_'):
+                if getattr(Material, attr_name, None) is material_obj:
+                    return material_obj, 'Material'
+        
+        # Check if it's an Item
+        for attr_name in dir(Item):
+            if not attr_name.startswith('_'):
+                if getattr(Item, attr_name, None) is material_obj:
+                    return material_obj, 'Item'
+        
+        # Check if it's a Consumable
+        for attr_name in dir(Consumable):
+            if not attr_name.startswith('_'):
+                if getattr(Consumable, attr_name, None) is material_obj:
+                    return material_obj, 'Consumable'
+    
+    return None, None
+
+
 def extract_service_and_level(service_td, level_td):
     """
     Extract service name and level from cells.
@@ -235,71 +286,64 @@ def parse_recipe_experience_from_item_page(item_name, recipe_name, item_url, cac
     
     soup = BeautifulSoup(html, 'html.parser')
     
-    # Find "Primary Recipe Output" h2 heading
-    recipe_heading = soup.find('h2', id='Primary_Recipe_Output')
-    if not recipe_heading:
-        return None
-    
-    # Find the table with caption "Recipe Experience" after this heading
-    current = recipe_heading.parent
-    while current:
-        current = current.find_next_sibling()
-        if not current:
-            break
+    # Find ALL tables with "Recipe Experience" caption on the page
+    # (some items have multiple recipe variants in separate tables)
+    for table in soup.find_all('table'):
+        caption = table.find('caption')
+        if not caption or 'Recipe Experience' not in caption.get_text():
+            continue
         
-        # Check if this is a table with "Recipe Experience" caption
-        if current.name == 'table':
-            caption = current.find('caption')
-            if caption and 'Recipe Experience' in caption.get_text():
-                # Found the table! Now find the row that matches our recipe name
-                rows = current.find_all('tr')[1:]  # Skip header
+        rows = table.find_all('tr')[1:]  # Skip header
+        
+        for data_row in rows:
+            cells = data_row.find_all('td')
+            
+            # Cell 1 has the recipe name
+            if len(cells) >= 7:
+                row_recipe_name = clean_text(cells[1].get_text())
                 
-                for data_row in rows:
-                    cells = data_row.find_all('td')
-                    
-                    # Cell 1 has the recipe name
-                    if len(cells) >= 7:
-                        row_recipe_name = clean_text(cells[1].get_text())
+                # Check if this row matches our recipe name
+                if row_recipe_name == recipe_name:
+                    try:
+                        base_xp = float(clean_text(cells[2].get_text()))
+                        base_steps = int(clean_text(cells[3].get_text()))
                         
-                        # Check if this row matches our recipe name
-                        if row_recipe_name == recipe_name:
-                            try:
-                                base_xp = float(clean_text(cells[2].get_text()))
-                                base_steps = int(clean_text(cells[3].get_text()))
-                                
-                                # Max efficiency is in cells[6] as a percentage like "50%"
-                                max_eff_text = clean_text(cells[6].get_text()).replace('%', '')
-                                max_eff_pct = float(max_eff_text)
-                                # Convert percentage to decimal (50% -> 0.5, 60% -> 0.6)
-                                max_efficiency = round(max_eff_pct / 100.0, 2)
-                                
-                                return {
-                                    'base_xp': base_xp,
-                                    'base_steps': base_steps,
-                                    'max_efficiency': max_efficiency
-                                }
-                            except (ValueError, IndexError) as e:
-                                print(f"    ⚠ Error parsing recipe experience: {e}")
-                                return None
-                
-                # If we didn't find a matching row, return None
-                print(f"    ⚠ Recipe '{recipe_name}' not found in Recipe Experience table")
-                return None
-        
-        # Stop if we hit another h2
-        if current.name == 'h2':
-            break
+                        # Max efficiency is in cells[6]
+                        # New format: "150%" means 100% base + 50% bonus
+                        # Old format: "50%" means 50% bonus directly
+                        max_eff_text = clean_text(cells[6].get_text()).replace('%', '')
+                        max_eff_pct = float(max_eff_text)
+                        # Wiki now shows 100% as base, so subtract it
+                        if max_eff_pct >= 100:
+                            max_efficiency = round((max_eff_pct - 100.0) / 100.0, 4)
+                        else:
+                            max_efficiency = round(max_eff_pct / 100.0, 4)
+                        
+                        return {
+                            'base_xp': base_xp,
+                            'base_steps': base_steps,
+                            'max_efficiency': max_efficiency
+                        }
+                    except (ValueError, IndexError) as e:
+                        print(f"    ⚠ Error parsing recipe experience: {e}")
+                        return None
     
+    print(f"    ⚠ Recipe '{recipe_name}' not found in any Recipe Experience table")
     return None
 
 
 def extract_max_efficiency(td):
     """Extract max efficiency as decimal from the min steps cell."""
     text = clean_text(td.get_text())
-    # Pattern: "66(+50%)" or "66(+21.5%)" -> extract 50 or 21.5, convert to 0.5 or 0.215
+    # Old format: "66(+50%)" -> extract 50, convert to 0.5
     match = re.search(r'\(\+(\d+\.?\d*)%\)', text)
     if match:
-        return float(match.group(1)) / 100.0  # Convert to decimal
+        return float(match.group(1)) / 100.0
+    # New format: "150%" means 100% base + 50% bonus -> extract 150, subtract 100, convert to 0.5
+    match = re.search(r'(\d+\.?\d*)%', text)
+    if match:
+        raw = float(match.group(1))
+        return round((raw - 100.0) / 100.0, 4) if raw > 100 else 0.0
     return 0.0
 
 def parse_recipes():
@@ -411,13 +455,45 @@ def parse_recipes():
                     validator.add_item_issue(output_item_name, [f"Failed to parse numeric values: {e}"])
                     continue
             
+            # Try to resolve output item to get a string reference
+            output_obj, output_type = resolve_output_item(output_item_name)
+            
+            # Build string reference for output_item
+            output_item_ref = None
+            if output_obj and output_type:
+                # Find the enum name for the object
+                try:
+                    from util.walkscape_constants import Material, Item, Consumable
+                    
+                    if output_type == 'Material':
+                        for attr_name in dir(Material):
+                            if not attr_name.startswith('_'):
+                                if getattr(Material, attr_name, None) is output_obj:
+                                    output_item_ref = f'Material.{attr_name}'
+                                    break
+                    elif output_type == 'Item':
+                        for attr_name in dir(Item):
+                            if not attr_name.startswith('_'):
+                                if getattr(Item, attr_name, None) is output_obj:
+                                    output_item_ref = f'Item.{attr_name}'
+                                    break
+                    elif output_type == 'Consumable':
+                        for attr_name in dir(Consumable):
+                            if not attr_name.startswith('_'):
+                                if getattr(Consumable, attr_name, None) is output_obj:
+                                    output_item_ref = f'Consumable.{attr_name}'
+                                    break
+                except:
+                    pass
+            
             recipe = {
                 'name': recipe_name,  # Use full recipe name like "Cut a birch plank"
-                'output_item': output_item_name,  # Item name for cache lookup
+                'output_item_name': output_item_name,  # Item name for cache lookup
+                'output_item_ref': output_item_ref,  # String reference like 'Material.PINE_PLANK' or 'Item.WOODEN_SHIELD'
                 'skill': skill,
                 'level': level,
                 'service': service,
-                'quantity': output_quantity,  # NEW: output quantity
+                'quantity': output_quantity,
                 'materials': materials,  # Now array of arrays
                 'base_xp': base_xp,
                 'base_steps': base_steps,
@@ -446,12 +522,13 @@ def generate_python_module(recipes):
         """
         Clean recipe name to create a better enum name.
         Removes common prefixes like "Craft a", "Make a", "Smelt a", etc.
+        Checks RECIPE_NAME_OVERRIDES for custom mappings.
         """
         # Remove common prefixes
         prefixes = [
             'Craft a ', 'Craft an ', 'Craft ',
             'Make a ', 'Make an ', 'Make ',
-            'Smelt a ', 'Smelt an ', 'Smelt ',
+            'Smelt a ', 'Smelt an ', 'Smelt into ', 'Smelt ',
             'Create a ', 'Create an ', 'Create ',
             'Cut a ', 'Cut an ', 'Cut into ', 'Cut ',
             'Fry a ', 'Fry an ', 'Fry ',
@@ -460,7 +537,7 @@ def generate_python_module(recipes):
             'Weave a ', 'Weave an ', 'Weave ',
             'Spin ', 'Assemble ', 'Prepare a ', 'Prepare an ', 'Prepare ',
             'Mix ', 'Harden ', 'Upcycle ',
-            'Smelt into ', 'Forge into ',
+            'Forge into ', 'Ferment ', 'Distill '
         ]
         
         cleaned = name
@@ -468,6 +545,12 @@ def generate_python_module(recipes):
             if cleaned.startswith(prefix):
                 cleaned = cleaned[len(prefix):]
                 break
+        
+        # Check for override mapping (case-insensitive)
+        cleaned_lower = cleaned.lower()
+        for override_key, override_value in RECIPE_NAME_OVERRIDES.items():
+            if cleaned_lower == override_key.lower():
+                return override_value
         
         return cleaned
     
@@ -490,9 +573,7 @@ def generate_python_module(recipes):
         write_imports(f, [
             'from dataclasses import dataclass',
             'from typing import List, Tuple, Optional, Union',
-            'from util.autogenerated.materials import Material', 
-            'from util.autogenerated.equipment import Item',
-            'from util.autogenerated.consumables import Consumable',
+            'from util.walkscape_constants import Material, Item, Consumable',
         ])
         
         lines = [
@@ -500,6 +581,7 @@ def generate_python_module(recipes):
         'class RecipeInstance:',
         '    """Represents a crafting recipe."""',
         '    name: str',
+        '    output_item: Optional[str]  # String reference like "Material.PINE_PLANK" or None',
         '    skill: str',
         '    level: int',
         '    service: str',
@@ -508,6 +590,23 @@ def generate_python_module(recipes):
         '    base_xp: float  # Can be decimal like 21.5',
         '    base_steps: int',
         '    max_efficiency: float  # Decimal bonus (0.5 = 50%, can be decimal like 0.215 = 21.5%)',
+        '    ',
+        '    def get_output_item_object(self):',
+        '        """Resolve output_item string reference to actual Item, Material, or Consumable object."""',
+        '        if not self.output_item:',
+        '            return None',
+        '        ',
+        '        # Parse the string reference like "Material.PINE_PLANK"',
+        '        if "." in self.output_item:',
+        '            class_name, attr_name = self.output_item.split(".", 1)',
+        '            if class_name == "Material":',
+        '                return getattr(Material, attr_name, None)',
+        '            elif class_name == "Item":',
+        '                return getattr(Item, attr_name, None)',
+        '            elif class_name == "Consumable":',
+        '                return getattr(Consumable, attr_name, None)',
+        '        ',
+        '        return None',
         ''
         ]
         # Generate direct instantiation like equipment.py
@@ -555,7 +654,9 @@ def generate_python_module(recipes):
                         # Found material - store direct reference
                         obj_ref = None
                         try:
-                            from util.walkscape_constants import Material, Item, Consumable
+                            from util.autogenerated.materials import Material
+                            from util.autogenerated.equipment import Item
+                            from util.autogenerated.consumables import Consumable
                             # Find which class it belongs to
                             for attr_name in dir(Material):
                                 if not attr_name.startswith('_'):
@@ -589,11 +690,15 @@ def generate_python_module(recipes):
                 materials_str += '],\n'  # End alternative group
             materials_str += '    ]'
             
+            # Format output_item as string reference or None
+            output_item_str = repr(recipe['output_item_ref']) if recipe['output_item_ref'] else 'None'
+            
             # Direct instantiation
             lines.extend([
                 '',
                 f'{enum_name} = RecipeInstance(',
                 f'    name={repr(recipe["name"])},',
+                f'    output_item={output_item_str},',
                 f'    skill={repr(recipe["skill"])},',
                 f'    level={recipe["level"]},',
                 f'    service={repr(recipe["service"])},',

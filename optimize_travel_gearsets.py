@@ -41,19 +41,8 @@ TEST_ROUTES = [
     # Add more specific routes here
 ]
 
-# Option 2: Generate routes from locations (uncomment to use)
-# Uncomment the locations you want, and all routes connecting them will be optimized
-# TEST_LOCATIONS = [
-#     # Jarvonia
-#     Location.KALLAHEIM,
-#     Location.PORT_SKILDAR,
-#     Location.FRUSENHOLM,
-#     # ... add more locations
-# ]
-# TEST_ROUTES = get_test_routes()  # Generates all routes between TEST_LOCATIONS
-
 # Display options
-VERBOSE = False  # Enable debug output
+VERBOSE = True  # Enable debug output
 MAX_ITERATIONS = 100
 
 # Items to ignore
@@ -68,57 +57,57 @@ IGNORED_ITEMS = {
 TEST_LOCATIONS = [
     # Jarvonia
     Location.KALLAHEIM,
-    Location.PORT_SKILDAR,
-    Location.FRUSENHOLM,
-    Location.CENTAHAM,
-    Location.COLDINGTON,
-    Location.AZURAZERA,
-    Location.CASBRANT_FIELDS,
-    Location.NURTURING_NOOK_SPRINGS,
-    Location.BARBANTOK,
-    Location.NOMAD_WOODS,
-    Location.FORT_OF_PERMAFROST,
-    Location.HORN_OF_RESPITE,
-    Location.NOISELESS_PASS,
-    Location.FROSTBITE_MOUNTAIN,
-    Location.NORSACK_PLAINS,
-    Location.WINTER_WAVES_GLACIER,
+    # Location.PORT_SKILDAR,
+    # Location.FRUSENHOLM,
+    # Location.CENTAHAM,
+    # Location.COLDINGTON,
+    # Location.AZURAZERA,
+    # Location.CASBRANT_FIELDS,
+    # Location.NURTURING_NOOK_SPRINGS,
+    # Location.BARBANTOK,
+    # Location.NOMAD_WOODS,
+    # Location.FORT_OF_PERMAFROST,
+    # Location.HORN_OF_RESPITE,
+    # Location.NOISELESS_PASS,
+    # Location.FROSTBITE_MOUNTAIN,
+    # Location.NORSACK_PLAINS,
+    # Location.WINTER_WAVES_GLACIER,
     Location.DISENCHANTED_FOREST,
-    Location.PIT_OF_PITTANCE,
-    Location.BEACH_OF_WOES,
-    Location.BLACK_EYE_PEAK,
-    Location.SANGUINE_HILLS,
-    Location.WINTERS_END,
+    # Location.PIT_OF_PITTANCE,
+    # Location.BEACH_OF_WOES,
+    # Location.BLACK_EYE_PEAK,
+    # Location.SANGUINE_HILLS,
+    # Location.WINTERS_END,
     
-    # Syrenthia (Underwater)
-    Location.CASBRANTS_GRAVE,
-    Location.VASTALUME,
-    Location.DARKTIDE_TRENCH,
-    Location.ELARAS_LAGOON,
-    Location.KELP_FOREST,
-    Location.UNDERWATER_CAVE,
+    # # Syrenthia (Underwater)
+    # Location.CASBRANTS_GRAVE,
+    # Location.VASTALUME,
+    # Location.DARKTIDE_TRENCH,
+    # Location.ELARAS_LAGOON,
+    # Location.KELP_FOREST,
+    # Location.UNDERWATER_CAVE,
     
-    # Trellin
-    Location.SALSFIRTH,
-    Location.EVERHAVEN,
-    Location.FARSAND_COAST,
-    Location.MANGROVE_FOREST,
-    Location.GRANFIDDICH,
-    Location.GRANFIDDICH_SHORES,
-    Location.WARRENFIELD,
+    # # Trellin
+    # Location.SALSFIRTH,
+    # Location.EVERHAVEN,
+    # Location.FARSAND_COAST,
+    # Location.MANGROVE_FOREST,
+    # Location.GRANFIDDICH,
+    # Location.GRANFIDDICH_SHORES,
+    # Location.WARRENFIELD,
     
-    # Erdwise
-    Location.BLACKSPELL_PORT,
-    Location.BILGEMONT_PORT,
-    Location.OLD_ARENA_RUINS,
-    Location.RED_COAST,
+    # # Erdwise
+    # Location.BLACKSPELL_PORT,
+    # Location.BILGEMONT_PORT,
+    # Location.OLD_ARENA_RUINS,
+    # Location.RED_COAST,
     
-    # # Halfling Rebels
-    Location.WITCHED_WOODS,
-    Location.BOG_TOP,
-    Location.BOG_BOTTOM,
-    Location.HALFLING_CAMPGROUNDS,
-    Location.HALFMAW_HIDEOUT,
+    # # # Halfling Rebels
+    # Location.WITCHED_WOODS,
+    # Location.BOG_TOP,
+    # Location.BOG_BOTTOM,
+    # Location.HALFLING_CAMPGROUNDS,
+    # Location.HALFMAW_HIDEOUT,
     
     # # Other
     # Location.BLACKRANE,
@@ -745,7 +734,8 @@ def print_results(route_results, character, test_routes):
             if item:
                 print(f"    {slot:<12} {item.name}")
         
-        print(f"\n  Export: {export_str}")
+        print(f"\nExport:")
+        print(f"{export_str}")
         
         if VERBOSE:
             print(f"  Converged in {iterations} iterations")

@@ -37,7 +37,7 @@ validator = ScraperValidator()
 # ============================================================================
 
 def parse_pets_list():
-    """Parse the main pets page to get list of pets."""
+    """Parse the main pets page to get list of pets from the wiki table."""
     html = download_page(PETS_URL, CACHE_FILE, rescrape=RESCRAPE)
     if not html:
         return []
@@ -45,55 +45,63 @@ def parse_pets_list():
     soup = BeautifulSoup(html, 'html.parser')
     pets = []
     
-    # The pets page doesn't have a table - pets are linked in the content
-    # Look for links in the main content area
-    content = soup.find('div', class_='mw-parser-output')
-    if not content:
-        print("⚠ Warning: Could not find content area")
+    # The pets page has a wikitable with columns:
+    # Pet Name (icon + link) | Rare Pet Name (icon + link) | Pet Egg Name (icon + link)
+    table = soup.find('table', class_='wikitable')
+    if not table:
+        print("⚠ Warning: Could not find pets wikitable")
         return []
     
-    # Find all links that might be pets
-    # Pets typically have their own pages
-    print("\nSearching for pet links...")
-    for link in content.find_all('a'):
-        href = link.get('href', '')
-        if not href.startswith('/wiki/'):
+    print("\nParsing pets table...")
+    for row in table.find_all('tr')[1:]:  # Skip header row
+        cells = row.find_all('td')
+        if len(cells) < 5:
             continue
         
-        # Skip common pages
-        if any(skip in href for skip in ['/wiki/File:', '/wiki/Special:', '/wiki/Category:', 
-                                          '/wiki/Pets', '/wiki/Activities', '/wiki/Egg']):
+        # Cell 0: pet icon, Cell 1: pet name link
+        # Cell 2: rare pet icon, Cell 3: rare pet name link
+        # Cell 4: egg icon + egg name link
+        pet_link = cells[1].find('a')
+        rare_link = cells[3].find('a')
+        egg_link = cells[4].find('a', href=True)
+        
+        if not pet_link:
             continue
         
-        name = clean_text(link.get_text())
+        pet_name = clean_text(pet_link.get_text())
+        rare_name = clean_text(rare_link.get_text()) if rare_link else None
+        egg_name = None
+        egg_url = None
         
-        # Skip empty or very short names
-        if not name or len(name) < 3:
-            continue
+        # Egg link - find the text link (not the image link)
+        for link in cells[4].find_all('a'):
+            href = link.get('href', '')
+            if '/wiki/File:' in href:
+                continue
+            text = clean_text(link.get_text())
+            if text:
+                egg_name = text
+                egg_url = 'https://wiki.walkscape.app' + href.replace('/wiki/Special:MyLanguage/', '/wiki/')
+                break
         
-        # Skip common words that aren't pets
-        if name.lower() in ['pets', 'egg', 'eggs', 'activities', 'shops', 'arenum']:
-            continue
+        # Build pet URL from the link href
+        href = pet_link.get('href', '')
+        # Handle Special:MyLanguage redirects
+        url = 'https://wiki.walkscape.app' + href.replace('/wiki/Special:MyLanguage/', '/wiki/')
         
-        url = 'https://wiki.walkscape.app' + href
-        
-        # Check if this page has a pet infobox by looking for "Experience To Hatch"
-        # We'll validate this when parsing the individual page
-        pets.append({
-            'name': name,
+        pet_info = {
+            'name': pet_name,
             'url': url,
-        })
+            'rare_name': rare_name,
+            'egg_name': egg_name,
+        }
+        if egg_url:
+            pet_info['_egg_url'] = egg_url
+        
+        pets.append(pet_info)
+        print(f"  Found pet: {pet_name} (rare: {rare_name}, egg: {egg_name})")
     
-    # Remove duplicates
-    seen = set()
-    unique_pets = []
-    for pet in pets:
-        if pet['name'] not in seen:
-            seen.add(pet['name'])
-            unique_pets.append(pet)
-            print(f"  Found potential pet: {pet['name']}")
-    
-    return unique_pets
+    return pets
 
 
 def parse_pet_page(pet_info):

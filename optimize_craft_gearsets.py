@@ -34,8 +34,8 @@ from util.walkscape_constants import *
 # ============================================================================
 
 # Recipe and service
-RECIPE = Recipe.FARGANITE_PICKAXE
-SERVICE = Service.TIDAL_WORKSHOP_VASTALUME  # Or None to auto-select
+RECIPE = Recipe.CORAL_FISHING_SPEAR
+SERVICE = Service.BASIC_WORKSHOP_FRUSENHOLM  # Or None to auto-select
 SKILL_LEVEL = None  # None = auto-detect from character
 
 # Target configuration

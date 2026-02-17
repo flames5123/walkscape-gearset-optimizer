@@ -1,108 +1,87 @@
 #!/usr/bin/env python3
 """
-Scrape export names from equipment, consumables, and materials URLs.
-Generates export_names.py with URL slug to Item/Consumable/Material mappings.
+Generate export names from equipment, consumables, and materials modules.
+Generates export_names.py with export name to Item/Consumable/Material mappings.
+
+This scraper reads directly from the generated Python modules instead of
+scraping the wiki, since those modules already have the canonical item names.
 """
 
-from bs4 import BeautifulSoup
 from scraper_utils import *
 import sys
+import re
 
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-EQUIPMENT_CACHE = get_cache_dir('equipment') / 'equipment.html'
-CONSUMABLES_CACHE = get_cache_file('consumables_cache.html')
-MATERIALS_CACHE = get_cache_file('materials_cache.html')
+# Note: We can't import walkscape_constants here because it imports export_names
+# which we're regenerating. The equipment module will handle its own imports.
 
-def extract_export_names_from_page(cache_file, item_type):
-    """Extract export names from a wiki page's URLs."""
-    print(f"Reading {cache_file}...")
-    if not cache_file.exists():
-        print(f"WARNING: {item_type} cache not found. Skipping.")
+def extract_export_names_from_file(module_path, item_type):
+    """Extract export names by parsing the Python file directly (no imports)."""
+    print(f"Reading {module_path}...")
+    
+    if not module_path.exists():
+        print(f"WARNING: {module_path} not found")
         return []
     
-    html = cache_file.read_text(encoding='utf-8')
-    soup = BeautifulSoup(html, 'html.parser')
-    
     export_names = []
-    seen_urls = set()
+    seen_enum_names = set()
+    content = module_path.read_text(encoding='utf-8')
     
-    # Find all links in tables
-    tables = soup.find_all('table', class_='wikitable')
+    # Find all item definitions using regex
+    # Pattern: ITEM_NAME = ItemInstance(name="Item Name", ...)
+    # or: ITEM_NAME = CraftedItem(name="Item Name", ...)
+    # or: ITEM_NAME = AchievementItem(name="Item Name", ...)
+    # Match content between quotes (either single or double)
+    pattern = r'^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(?:ItemInstance|CraftedItem|AchievementItem|ConsumableItem|MaterialInstance)\(\s*name=["' + "'" + r'](.*?)["' + "'" + r']'
     
-    for table in tables:
-        rows = table.find_all('tr')[1:]  # Skip header
+    for match in re.finditer(pattern, content, re.MULTILINE):
+        enum_name = match.group(1)
+        item_name = match.group(2)
         
-        for row in rows:
-            # Find item link
-            link = row.find('a', href=lambda x: x and '/wiki/' in x and 'File:' not in x)
-            if not link:
-                continue
-            
-            href = link.get('href', '')
-            if not href.startswith('/wiki/'):
-                continue
-            
-            # Extract URL slug (last part after /wiki/)
-            url_slug = href.split('/wiki/')[-1]
-            
-            # Skip special pages (except Special:MyLanguage which is used for consumables/materials)
-            if 'Special:' in url_slug and not url_slug.startswith('Special:MyLanguage/'):
-                continue
-            
-            # For Special:MyLanguage links, extract the actual item name
-            if url_slug.startswith('Special:MyLanguage/'):
-                url_slug = url_slug.replace('Special:MyLanguage/', '')
-            
-            # Skip file/category/template pages
-            if any(skip in url_slug for skip in ['File:', 'Category:', 'Template:']):
-                continue
-            
-            # Skip non-item pages
-            skip_pages = ['Equipment', 'Activity_Equipment', 'Shop_Equipment', 'Upgraded_Equipment',
-                         'Consumables', 'Materials']
-            if url_slug in skip_pages:
-                continue
-            
-            if url_slug in seen_urls:
-                continue
-            
-            seen_urls.add(url_slug)
-            
-            # Convert URL slug to export name (lowercase with underscores)
-            # Decode URL encoding (%27 = apostrophe, etc.)
-            import urllib.parse
-            url_slug = urllib.parse.unquote(url_slug)
-            # Remove apostrophes and replace hyphens/spaces with underscores
-            export_name = url_slug.lower().replace("'", "").replace("-", "_").replace(" ", "_")
-            item_name = link.get_text().strip()
-            
-            export_names.append({
-                'export_name': export_name,
-                'url_slug': url_slug,
-                'item_name': item_name,
-                'item_type': item_type
-            })
+        # Skip duplicates (can happen with quality variants or other reasons)
+        if enum_name in seen_enum_names:
+            continue
+        seen_enum_names.add(enum_name)
+        
+        # Include _FINE variants for materials/consumables so they can be looked up directly
+        
+        # Convert ENUM_NAME to export_name (lowercase)
+        # The enum name is the source of truth for the export name
+        export_name = enum_name.lower()
+        
+        export_names.append({
+            'export_name': export_name,
+            'enum_name': enum_name,
+            'item_name': item_name,
+            'item_type': item_type
+        })
     
     return export_names
 
 def extract_all_export_names():
-    """Extract export names from equipment, consumables, and materials."""
+    """Extract export names from equipment, consumables, and materials files."""
     all_names = []
     
+    # Get paths to the generated files
+    autogen_dir = Path(__file__).parent.parent / 'autogenerated'
+    
     # Extract from equipment
-    equipment_names = extract_export_names_from_page(EQUIPMENT_CACHE, 'equipment')
+    equipment_path = autogen_dir / 'equipment.py'
+    equipment_names = extract_export_names_from_file(equipment_path, 'equipment')
     print(f"  Found {len(equipment_names)} equipment items")
     all_names.extend(equipment_names)
     
     # Extract from consumables
-    consumables_names = extract_export_names_from_page(CONSUMABLES_CACHE, 'consumable')
+    consumables_path = autogen_dir / 'consumables.py'
+    consumables_names = extract_export_names_from_file(consumables_path, 'consumable')
     print(f"  Found {len(consumables_names)} consumables")
     all_names.extend(consumables_names)
     
     # Extract from materials
-    materials_names = extract_export_names_from_page(MATERIALS_CACHE, 'material')
+    materials_path = autogen_dir / 'materials.py'
+    materials_names = extract_export_names_from_file(materials_path, 'material')
     print(f"  Found {len(materials_names)} materials")
     all_names.extend(materials_names)
     
@@ -136,10 +115,17 @@ def generate_export_names_module(export_names):
         '    ',
         ]
 
-        # Add all export name constants
+        # Add all export name constants (deduplicated by constant name)
+        seen_constants = set()
         for entry in sorted(export_names, key=lambda x: x['export_name']):
             export_const = entry['export_name'].upper().replace("'", "").replace("-", "_").replace(" ", "_")
             export_value = entry['export_name']
+            
+            # Skip if we've already added this constant
+            if export_const in seen_constants:
+                continue
+            seen_constants.add(export_const)
+            
             lines.append(f'    {export_const} = "{export_value}"')
         
         lines.extend([
@@ -161,9 +147,8 @@ def generate_export_names_module(export_names):
         # Equipment mapping
         for entry in sorted(equipment, key=lambda x: x['export_name']):
             export_name = entry['export_name']
-            url_slug = entry['url_slug']
-            item_enum = url_slug.upper().replace("'", "").replace("-", "_").replace(" ", "_")
-            lines.append(f'        "{export_name}": Item.{item_enum},')
+            enum_name = entry['enum_name']
+            lines.append(f'        "{export_name}": Item.{enum_name},')
         
         lines.extend([
         '    }',
@@ -177,9 +162,8 @@ def generate_export_names_module(export_names):
         # Consumables mapping
         for entry in sorted(consumables, key=lambda x: x['export_name']):
             export_name = entry['export_name']
-            url_slug = entry['url_slug']
-            item_enum = url_slug.upper().replace("'", "").replace("-", "_").replace(" ", "_")
-            lines.append(f'        "{export_name}": Consumable.{item_enum},')
+            enum_name = entry['enum_name']
+            lines.append(f'        "{export_name}": Consumable.{enum_name},')
         
         lines.extend([
         '    }',
@@ -193,9 +177,8 @@ def generate_export_names_module(export_names):
         # Materials mapping
         for entry in sorted(materials, key=lambda x: x['export_name']):
             export_name = entry['export_name']
-            url_slug = entry['url_slug']
-            item_enum = url_slug.upper().replace("'", "").replace("-", "_").replace(" ", "_")
-            lines.append(f'        "{export_name}": Material.{item_enum},')
+            enum_name = entry['enum_name']
+            lines.append(f'        "{export_name}": Material.{enum_name},')
         
         lines.extend([
         '    }',
@@ -289,8 +272,15 @@ def generate_export_names_module(export_names):
         '    ',
         '    # Try removing "_fine" suffix for consumables/materials',
         '    if export_lower.endswith("_fine"):',
-        '        # Already has _fine, try exact match',
-        '        pass',
+        '        base_name = export_lower[:-5]  # Remove "_fine"',
+        '        # Look up the fine variant directly (e.g., "fruit_cake_fine" in mapping)',
+        '        fine_item = mapping.get(export_lower)',
+        '        if fine_item:',
+        '            return fine_item',
+        '        # Fall back to base item if fine variant not in mapping',
+        '        base_item = mapping.get(base_name)',
+        '        if base_item:',
+        '            return base_item',
         '    else:',
         '        # Try adding _fine',
         '        fine_name = export_lower + "_fine"',

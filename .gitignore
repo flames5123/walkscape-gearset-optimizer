@@ -1,0 +1,94 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs and temp files
+*.log
+*.txt
+!requirements.txt
+out.txt
+debug.txt
+*.tmp
+
+# Database files
+sessions.db
+sessions.db-journal
+*.db
+*.db-journal
+
+# Copyrighted game assets - download with setup.sh
+assets/icons/
+assets/fonts/
+ui/static/icons/*.svg
+
+# Wiki HTML cache - regenerate with scrapers
+util/cache/
+
+# Personal config - copy from my_config.example.py
+my_config.py
+
+# Kiro IDE config
+.kiro/
+
+# Hypothesis test data
+.hypothesis/
+
+# Pytest cache
+.pytest_cache/
+
+# Test artifacts
+test.svg
+test_output.svg
+
+# Backup files
+*_backup.py
+*_old.py
+
+# One-off scripts and reports (not part of the tool)
+console-export-*.log
+walkscape-ui_logs*.txt
+found_wiki_icons.txt
+special_items_report.txt
+CURRENCY_IMPLEMENTATION_SUMMARY.md
+GIT_CASE_CHANGES_EXPLAINED.md
+ICON_MIGRATION_COMPLETE.md
+ICON_MIGRATION_FINAL_REPORT.md
+
+# One-off utility scripts (not part of the core tool)
+add_svg_border.py
+browse_wiki_files.py
+diagnostic_final.py
+download_attribute_icons.py
+download_faction_icons.sh
+download_item_finding_icons.py
+download_misc_icons.py
+export_release.py
+extract_faction_colors.py
+find_special_requirements.py
+find_wiki_icons.py
+find_wiki_icons_quick.py
+git_force_case_changes.py
+git_rename_icons_lowercase.sh
+rename_icons_lowercase.py
+verify_icon_paths.py
+ui-local
+.clocignore
