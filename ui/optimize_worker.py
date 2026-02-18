@@ -61,9 +61,18 @@ def main():
         }
         
         # Reconstruct inventory from owned_items with quantities
+        # NOTE: owned_items includes gear export names, but gear is already in
+        # minimal_export['gear']. Character.items adds gear + inventory + bank,
+        # so we must subtract gear counts to avoid double-counting.
         item_quantities = character_config.get('item_quantities', {})
         item_qualities = character_config.get('item_qualities', {})
         owned_items = character_config.get('owned_items', [])
+        gear_export_names = [v for v in character_config.get('gear', {}).values() if v]
+        
+        # Count how many times each export name appears in gear (for multi-slot items like rings)
+        gear_counts = {}
+        for export_name in gear_export_names:
+            gear_counts[export_name] = gear_counts.get(export_name, 0) + 1
         
         # Start with all owned items (set quantity to 1 by default)
         for export_name in owned_items:
@@ -83,6 +92,14 @@ def main():
                 quality_suffix = quality.lower()
                 export_name = f"{item_id}_{quality_suffix}"
                 minimal_export['inventory'][export_name] = qty
+        
+        # Subtract gear counts from inventory to avoid double-counting
+        # (Character.items adds gear + inventory, so equipped items would be counted twice)
+        for export_name, gear_qty in gear_counts.items():
+            if export_name in minimal_export['inventory']:
+                minimal_export['inventory'][export_name] = max(0, minimal_export['inventory'][export_name] - gear_qty)
+                if minimal_export['inventory'][export_name] == 0:
+                    del minimal_export['inventory'][export_name]
         
         character = Character(json.dumps(minimal_export))
         
