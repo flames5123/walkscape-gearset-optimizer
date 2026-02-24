@@ -214,26 +214,38 @@ class ApiClient {
      * Show success toast notification
      * @param {string} message - Success message to display
      */
-    showSuccess(message) {
+    showSuccess(message, options = {}) {
+        const duration = options.duration || 3000;
+        const onClick = options.onClick || null;
+
         // Remove any existing success toasts
         $('.success-toast').remove();
 
-        // Create new success toast
-        const $toast = $('<div class="success-toast"></div>').text(message);
+        // Create new success toast (use html() if HTML content provided)
+        const $toast = $('<div class="success-toast"></div>');
+        if (options.html) {
+            $toast.html(options.html);
+        } else {
+            $toast.text(message);
+        }
         $('body').append($toast);
 
         // Fade in
         $toast.fadeIn(300);
 
-        // Auto-dismiss after 3 seconds
-        setTimeout(() => {
+        // Auto-dismiss
+        const dismissTimer = setTimeout(() => {
             $toast.fadeOut(300, () => {
                 $toast.remove();
             });
-        }, 3000);
+        }, duration);
 
-        // Allow manual dismiss by clicking
+        // Click handler
         $toast.on('click', () => {
+            clearTimeout(dismissTimer);
+            if (onClick) {
+                onClick();
+            }
             $toast.fadeOut(300, () => {
                 $toast.remove();
             });

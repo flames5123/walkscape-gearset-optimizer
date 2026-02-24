@@ -56,6 +56,8 @@ class StateStore {
                 useFine: false,
                 showCombinedDrops: false,
                 hideOwnedCollectibles: false,
+                travelStart: null,
+                travelEnd: null,
                 calculator: {
                     steps: 0,
                     actions: 0,
@@ -286,14 +288,23 @@ class StateStore {
                         data.character_config.owned_items.forEach(itemId => {
                             // Strip quality suffix for crafted items
                             // e.g., "kelp_diving_mask_uncommon" -> "kelp_diving_mask"
-                            const qualities = ['_common', '_uncommon', '_rare', '_epic', '_legendary', '_ethereal'];
+                            const raritySuffixes = ['_common', '_uncommon', '_rare', '_epic', '_legendary', '_ethereal'];
+                            const rarityToQuality = {
+                                'common': 'Normal',
+                                'uncommon': 'Good',
+                                'rare': 'Great',
+                                'epic': 'Excellent',
+                                'legendary': 'Perfect',
+                                'ethereal': 'Eternal'
+                            };
                             let baseId = itemId;
                             let quality = null;  // Don't set quality for non-crafted items
 
-                            for (const qualitySuffix of qualities) {
+                            for (const qualitySuffix of raritySuffixes) {
                                 if (itemId.endsWith(qualitySuffix)) {
                                     baseId = itemId.slice(0, -qualitySuffix.length);
-                                    quality = qualitySuffix.slice(1); // Remove leading underscore
+                                    const rarity = qualitySuffix.slice(1); // Remove leading underscore
+                                    quality = rarityToQuality[rarity] || 'Normal';
                                     break;
                                 }
                             }
@@ -475,6 +486,20 @@ class StateStore {
                         };
                         console.log('Restored current gear from ui_config:', this.state.gearsets.current);
                     }
+
+                    // Restore column3 selection (activity/recipe/service/location)
+                    if (data.ui_config.column3Selection) {
+                        const saved = data.ui_config.column3Selection;
+                        this.state.column3.selectedActivity = saved.selectedActivity ?? null;
+                        this.state.column3.selectedRecipe = saved.selectedRecipe ?? null;
+                        this.state.column3.selectedService = saved.selectedService ?? null;
+                        this.state.column3.selectedLocation = saved.selectedLocation ?? null;
+                        this.state.column3.useFine = saved.useFine ?? false;
+                        this.state.column3.hideOwnedCollectibles = saved.hideOwnedCollectibles ?? false;
+                        this.state.column3.travelStart = saved.travelStart ?? null;
+                        this.state.column3.travelEnd = saved.travelEnd ?? null;
+                        console.log('Restored column3 selection from ui_config:', saved);
+                    }
                 } else {
                     // No ui_config from backend, ensure skipped_import is false for new users
                     console.log('No ui_config from backend, initializing with defaults');
@@ -492,6 +517,12 @@ class StateStore {
                 this._notifySubscribers('items');
                 this._notifySubscribers('ui');
                 this._notifySubscribers('gearsets');
+                this._notifySubscribers('column3.selectedActivity');
+                this._notifySubscribers('column3.selectedRecipe');
+                this._notifySubscribers('column3.selectedService');
+                this._notifySubscribers('column3.selectedLocation');
+                this._notifySubscribers('column3.useFine');
+                this._notifySubscribers('column3.hideOwnedCollectibles');
             })
             .fail((xhr, status, error) => {
                 console.error('Failed to load session:', error);
@@ -543,6 +574,52 @@ class StateStore {
 
         // Auto-save current gear to backend
         this._saveCurrentGear();
+    }
+
+    /**
+     * Save column3 selection (activity/recipe/service/location) to backend (auto-save)
+     * @private
+     */
+    _saveColumn3Selection() {
+        if (!this.state.session.loaded || !this.state.session.uuid) {
+            return;
+        }
+
+        // Debounce column3 saves
+        if (this._column3SaveTimeout) {
+            clearTimeout(this._column3SaveTimeout);
+        }
+
+        this._column3SaveTimeout = setTimeout(() => {
+            const column3Data = {
+                selectedActivity: this.state.column3.selectedActivity,
+                selectedRecipe: this.state.column3.selectedRecipe,
+                selectedService: this.state.column3.selectedService,
+                selectedLocation: this.state.column3.selectedLocation,
+                useFine: this.state.column3.useFine,
+                hideOwnedCollectibles: this.state.column3.hideOwnedCollectibles,
+                travelStart: this.state.column3.travelStart,
+                travelEnd: this.state.column3.travelEnd
+            };
+
+            console.log('Auto-saving column3 selection:', column3Data);
+
+            $.ajax({
+                url: `/api/session/${this.state.session.uuid}/config`,
+                method: 'PATCH',
+                contentType: 'application/json',
+                data: JSON.stringify({
+                    path: 'ui.column3Selection',
+                    value: column3Data
+                }),
+                success: (response) => {
+                    console.log('Column3 selection auto-saved successfully');
+                },
+                error: (xhr, status, error) => {
+                    console.error('Failed to auto-save column3 selection:', error);
+                }
+            });
+        }, 500);
     }
 
     /**

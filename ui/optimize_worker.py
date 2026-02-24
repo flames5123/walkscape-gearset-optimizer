@@ -40,8 +40,58 @@ def main():
         sorting_priority = request.get('sorting_priority', [])
         include_consumables = request.get('include_consumables', False)
         
+        # Parse sorting_priority: supports both old format (plain strings)
+        # and new format ([key, weight] tuples)
+        def parse_sorting_priority(sorting_priority):
+            """Convert sorting_priority to (priority_objs, weights_dict).
+            
+            Handles both old format (list of string keys) and new format
+            (list of [key, weight] tuples). Old format entries get weight 100.
+            
+            Returns:
+                Tuple of (list of Sorting enums, dict of Sorting enum → int weight)
+            """
+            from util.walkscape_constants import Sorting
+            
+            priority_objs = []
+            weights_dict = {}
+            
+            for entry in sorting_priority:
+                if isinstance(entry, (list, tuple)) and len(entry) == 2:
+                    key, weight = entry[0], int(entry[1])
+                elif isinstance(entry, str):
+                    key, weight = entry, 100
+                else:
+                    continue
+                
+                # Clamp weight to 0-100
+                weight = max(0, min(100, weight))
+                
+                # Find matching Sorting enum
+                for sort in Sorting:
+                    if sort.metric_key == key:
+                        priority_objs.append(sort)
+                        weights_dict[sort] = weight
+                        break
+            
+            return priority_objs, weights_dict
+        
         # Create character
         from util.character_export_util import Character
+        
+        # Use XP if available, otherwise convert levels to XP
+        # Some old sessions may have partial skills_xp (only some skills), so merge both
+        skills_xp = character_config.get('skills_xp', {})
+        skills_levels = character_config.get('skills', {})
+        
+        from util.walkscape_constants import level_to_xp
+        skills_data = {}
+        # Start with all skills from levels dict (converted to XP)
+        for skill, level in skills_levels.items():
+            skills_data[skill] = level_to_xp(level)
+        # Override with actual XP where available
+        for skill, xp in skills_xp.items():
+            skills_data[skill] = xp
         
         # Reconstruct a minimal export JSON from character_config
         # The session stores parsed data, not the original export
@@ -51,55 +101,118 @@ def main():
             "steps": character_config.get('steps', 0),
             "achievement_points": character_config.get('achievement_points', 0),
             "coins": character_config.get('coins', 0),
-            "skills": character_config.get('skills_xp', {}),  # Use XP, not levels
+            "skills": skills_data,
             "reputation": character_config.get('reputation', {}),
-            "inventory": {},  # Will be populated from owned_items
+            "inventory": {},  # Will be populated below
             "bank": {},
-            "gear": character_config.get('gear', {}),
+            "gear": {},  # Not needed - optimizer finds best gear from inventory
             "collectibles": character_config.get('collectibles', []),
             "custom_stats": ui_config.get('custom_stats', {})  # Pass custom_stats directly
         }
         
-        # Reconstruct inventory from owned_items with quantities
-        # NOTE: owned_items includes gear export names, but gear is already in
-        # minimal_export['gear']. Character.items adds gear + inventory + bank,
-        # so we must subtract gear counts to avoid double-counting.
-        item_quantities = character_config.get('item_quantities', {})
-        item_qualities = character_config.get('item_qualities', {})
-        owned_items = character_config.get('owned_items', [])
-        gear_export_names = [v for v in character_config.get('gear', {}).values() if v]
+        # Reconstruct items state the same way the frontend does (state.js loadSession):
+        # 1. Build base state from character_config (owned_items, item_qualities, item_quantities)
+        # 2. Apply user overrides from ui_config.user_overrides.items
+        # 3. Build inventory with only the selected quality per item (qty 1),
+        #    except rings which get ring1_quality + ring2_quality
         
-        # Count how many times each export name appears in gear (for multi-slot items like rings)
-        gear_counts = {}
-        for export_name in gear_export_names:
-            gear_counts[export_name] = gear_counts.get(export_name, 0) + 1
+        # Quality suffix mappings
+        quality_suffixes = ['_common', '_uncommon', '_rare', '_epic', '_legendary', '_ethereal']
+        quality_to_suffix = {
+            'Normal': '_common', 'Good': '_uncommon', 'Great': '_rare',
+            'Excellent': '_epic', 'Perfect': '_legendary', 'Eternal': '_ethereal',
+            'common': '_common', 'uncommon': '_uncommon', 'rare': '_rare',
+            'epic': '_epic', 'legendary': '_legendary', 'ethereal': '_ethereal',
+        }
         
-        # Start with all owned items (set quantity to 1 by default)
-        for export_name in owned_items:
-            minimal_export['inventory'][export_name] = 1
+        # Step 1: Build base items state from character_config (mirrors state.js logic)
+        items_state = {}
         
-        # Override with actual quantities for non-crafted items
-        for item_id, qty in item_quantities.items():
-            # Find the export name for this item_id
-            # The export name might be the item_id itself or might need conversion
-            # For now, use item_id as export name (they should match for non-crafted items)
-            minimal_export['inventory'][item_id] = qty
+        # From owned_items: mark items as owned, detect crafted quality
+        for export_name in character_config.get('owned_items', []):
+            base_id = export_name
+            quality = None
+            for suffix in quality_suffixes:
+                if export_name.endswith(suffix):
+                    base_id = export_name[:-len(suffix)]
+                    quality = suffix[1:]  # Remove leading underscore
+                    break
+            
+            if quality:
+                items_state[base_id] = {'has': True, 'quality': quality}
+            else:
+                items_state[base_id] = {'has': True}
         
-        # Add crafted items with quality suffixes
-        for item_id, qualities in item_qualities.items():
-            for quality, qty in qualities.items():
-                # Add quality suffix
-                quality_suffix = quality.lower()
-                export_name = f"{item_id}_{quality_suffix}"
-                minimal_export['inventory'][export_name] = qty
+        # From item_qualities: set ring1_quality, ring2_quality, and quality (highest)
+        quality_hierarchy = ['Eternal', 'Perfect', 'Excellent', 'Great', 'Good', 'Normal']
+        for item_id, qualities_obj in character_config.get('item_qualities', {}).items():
+            sorted_qualities = sorted(
+                qualities_obj.keys(),
+                key=lambda q: quality_hierarchy.index(q) if q in quality_hierarchy else 999
+            )
+            if sorted_qualities:
+                if item_id not in items_state:
+                    items_state[item_id] = {'has': True}
+                highest = sorted_qualities[0]
+                highest_qty = qualities_obj[highest]
+                items_state[item_id]['quality'] = highest
+                items_state[item_id]['ring1_quality'] = highest
+                
+                if highest_qty >= 2:
+                    items_state[item_id]['ring2_quality'] = highest
+                elif len(sorted_qualities) > 1:
+                    items_state[item_id]['ring2_quality'] = sorted_qualities[1]
+                else:
+                    items_state[item_id]['ring2_quality'] = 'None'
         
-        # Subtract gear counts from inventory to avoid double-counting
-        # (Character.items adds gear + inventory, so equipped items would be counted twice)
-        for export_name, gear_qty in gear_counts.items():
-            if export_name in minimal_export['inventory']:
-                minimal_export['inventory'][export_name] = max(0, minimal_export['inventory'][export_name] - gear_qty)
-                if minimal_export['inventory'][export_name] == 0:
-                    del minimal_export['inventory'][export_name]
+        # From item_quantities: set ring_quantity for non-crafted items
+        for item_id, quantity in character_config.get('item_quantities', {}).items():
+            if item_id not in items_state:
+                items_state[item_id] = {'has': True}
+            items_state[item_id]['ring_quantity'] = min(quantity, 2)
+        
+        # Step 2: Apply user overrides from ui_config (user toggling has/hide/quality in UI)
+        user_overrides = ui_config.get('user_overrides', {}).get('items', {})
+        for item_id, overrides in user_overrides.items():
+            if item_id not in items_state:
+                items_state[item_id] = {}
+            items_state[item_id].update(overrides)
+        
+        # Step 3: Build inventory from merged state
+        for item_id, state in items_state.items():
+            if not state.get('has', False):
+                continue
+            
+            # Skip entirely hidden items
+            if state.get('hide', False):
+                continue
+            
+            quality = state.get('quality')
+            ring1_quality = state.get('ring1_quality')
+            
+            if ring1_quality:
+                # Crafted ring: add ring1_quality and ring2_quality as separate entries
+                # Respect hide_ring1 and hide_ring2 flags
+                ring2_quality = state.get('ring2_quality', 'None')
+                
+                if not state.get('hide_ring1', False):
+                    suffix1 = quality_to_suffix.get(ring1_quality, '_common')
+                    export_name1 = f"{item_id}{suffix1}"
+                    minimal_export['inventory'][export_name1] = minimal_export['inventory'].get(export_name1, 0) + 1
+                
+                if ring2_quality and ring2_quality != 'None' and not state.get('hide_ring2', False):
+                    suffix2 = quality_to_suffix.get(ring2_quality, '_common')
+                    export_name2 = f"{item_id}{suffix2}"
+                    minimal_export['inventory'][export_name2] = minimal_export['inventory'].get(export_name2, 0) + 1
+            elif quality:
+                # Crafted non-ring: add at selected quality, qty 1
+                suffix = quality_to_suffix.get(quality, '_common')
+                export_name = f"{item_id}{suffix}"
+                minimal_export['inventory'][export_name] = 1
+            else:
+                # Non-crafted item: qty 1 (or ring_quantity for rings)
+                ring_quantity = state.get('ring_quantity', 1)
+                minimal_export['inventory'][item_id] = ring_quantity
         
         character = Character(json.dumps(minimal_export))
         
@@ -277,17 +390,12 @@ def main():
             optimize_activity_gearsets.IGNORED_ITEMS = hidden_items  # Use UI hide states
             optimize_activity_gearsets.INCLUDE_CONSUMABLES = include_consumables  # Use UI checkbox
             
-            # Set sorting priority if provided
+            # Set sorting priority and weights if provided
             if sorting_priority:
-                from util.walkscape_constants import Sorting
-                priority_objs = []
-                for key in sorting_priority:
-                    for sort in Sorting:
-                        if sort.metric_key == key:
-                            priority_objs.append(sort)
-                            break
+                priority_objs, weights_dict = parse_sorting_priority(sorting_priority)
                 if priority_objs:
                     optimize_activity_gearsets.SORTING_PRIORITY = priority_objs
+                    optimize_activity_gearsets.SORTING_WEIGHTS = weights_dict
             
             # Log consumable setting
             if include_consumables:
@@ -438,17 +546,12 @@ def main():
             optimize_craft_gearsets.IGNORED_ITEMS = hidden_items  # Use UI hide states
             optimize_craft_gearsets.INCLUDE_CONSUMABLES = include_consumables  # Use UI checkbox
             
-            # Set sorting priority if provided
+            # Set sorting priority and weights if provided
             if sorting_priority:
-                from util.walkscape_constants import Sorting
-                priority_objs = []
-                for key in sorting_priority:
-                    for sort in Sorting:
-                        if sort.metric_key == key:
-                            priority_objs.append(sort)
-                            break
+                priority_objs, weights_dict = parse_sorting_priority(sorting_priority)
                 if priority_objs:
                     optimize_craft_gearsets.SORTING_PRIORITY = priority_objs
+                    optimize_craft_gearsets.SORTING_WEIGHTS = weights_dict
             
             # Determine consumables to test
             consumables_to_test = [None]  # Always test without consumable
@@ -545,6 +648,88 @@ def main():
                     'name': best_consumable.name,
                     'id': best_consumable.id if hasattr(best_consumable, 'id') else None
                 }
+            
+            sys.stdout = old_stdout
+            print(json.dumps(result))
+        
+        elif opt_type == 'travel':
+            import optimize_travel_gearsets
+            from util.gearset_utils import encode_gearset
+            from util.walkscape_constants import Sorting
+            
+            # Parse segments from request
+            segments = request.get('segments', [])
+            if not segments:
+                sys.stdout = old_stdout
+                print(json.dumps({'success': False, 'error': 'No route segments provided'}))
+                sys.exit(1)
+            
+            # Set sorting priority and weights if provided
+            priority_objs = None
+            weights_dict = {}
+            if sorting_priority:
+                priority_objs, weights_dict = parse_sorting_priority(sorting_priority)
+            
+            if not priority_objs:
+                priority_objs = [Sorting.AVG_TRAVEL_STEPS, Sorting.XP_PER_STEP]
+                weights_dict = {s: 100 for s in priority_objs}
+            
+            # Set weights on the travel optimizer module
+            optimize_travel_gearsets.SORTING_WEIGHTS = weights_dict
+            
+            print(f"Travel optimization: {len(segments)} segments, priority={[s.display_name for s in priority_objs]}")
+            
+            # Run optimization
+            gearset, metrics, iterations = optimize_travel_gearsets.optimize_for_route(
+                segments=segments,
+                character=character,
+                sorting_priority=priority_objs,
+                hidden_items=hidden_items,
+                include_consumables=include_consumables,
+            )
+            
+            print(f"Travel optimization complete in {iterations} iterations")
+            print(f"  Total steps: {metrics.get('total_steps', 0)}")
+            print(f"  Avg steps: {metrics.get('avg_travel_steps', 0):.1f}")
+            
+            # Generate export
+            export_string = encode_gearset(gearset)
+            
+            # Calculate per-segment stats for the response
+            from util.gearset_utils import aggregate_gearset_stats
+            from optimize_travel_gearsets import calculate_route_steps, _segments_to_routes
+            
+            items = [item for item in gearset.values() if item is not None]
+            routes = _segments_to_routes(segments)
+            
+            segment_stats = []
+            for seg, route in zip(segments, routes):
+                stats = aggregate_gearset_stats(
+                    items=items,
+                    skill='travel',
+                    location=route[0],
+                    character=character,
+                    include_level_bonus=True,
+                    include_collectibles=True,
+                )
+                steps = calculate_route_steps(route, stats, character)
+                segment_stats.append({
+                    'start': seg['start'],
+                    'end': seg['end'],
+                    'steps_avg': steps,
+                    'work_efficiency': round(stats.get('work_efficiency', 0.0) * 100, 1),
+                    'double_action': round(stats.get('double_action', 0.0) * 100, 1),
+                })
+            
+            # Build result
+            result = {
+                'success': True,
+                'type': 'travel',
+                'gearset_export': export_string,
+                'metrics': metrics,
+                'stats': segment_stats,
+                'items': {slot: item.name if item else None for slot, item in gearset.items()},
+            }
             
             sys.stdout = old_stdout
             print(json.dumps(result))

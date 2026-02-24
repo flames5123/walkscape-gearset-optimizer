@@ -94,11 +94,15 @@ class RecipeInfoSection extends Component {
                 if (recipe) {
                     this.recipe = recipe;
                     this.selectedMaterialGroup = 0;
-                    this.useFine = false;
 
-                    // Fetch services for this recipe and auto-select
-                    // This returns the selected service and location
-                    const context = await this.loadServicesForRecipe();
+                    // Restore useFine from store state if available
+                    this.useFine = store.state.column3?.useFine || false;
+
+                    // Fetch services for this recipe
+                    // Try to restore saved service/location, otherwise auto-select
+                    const savedService = store.state.column3?.selectedService;
+                    const savedLocation = store.state.column3?.selectedLocation;
+                    const context = await this.loadServicesForRecipe(savedService, savedLocation);
 
                     // Notify Column 2 with all context at once (recipe + service + location)
                     // This prevents multiple renders and duplicate contributors
@@ -111,6 +115,10 @@ class RecipeInfoSection extends Component {
                             context?.locationId || null
                         );
                     }
+
+                    // Save the auto-selected service/location to session
+                    // (the dropdown's save fires before these async calls complete)
+                    store._saveColumn3Selection();
 
                     // Column 3 will re-render when Column 2 calls onStatsCalculated callback
                     return;
@@ -133,9 +141,25 @@ class RecipeInfoSection extends Component {
     }
 
     /**
+     * Get regions for a location within a service
+     * @param {Object} service - Service object with locations array
+     * @param {string} locationId - Location ID to find regions for
+     * @returns {Array} Array of region strings
+     */
+    getLocationRegions(service, locationId) {
+        if (service.locations) {
+            const loc = service.locations.find(l => l.location.id === locationId);
+            if (loc && loc.location.regions && loc.location.regions.length > 0) {
+                return loc.location.regions;
+            }
+        }
+        return [locationId];
+    }
+
+    /**
      * Load services for the current recipe
      */
-    async loadServicesForRecipe() {
+    async loadServicesForRecipe(savedServiceId = null, savedLocationId = null) {
         if (!this.recipe) {
             return;
         }
@@ -143,7 +167,47 @@ class RecipeInfoSection extends Component {
         try {
             const response = await $.get(`/api/services/for-recipe/${this.recipe.id}`);
 
-            // Auto-select first Basic service (grouped by name)
+            // Try to restore saved service/location if provided
+            if (savedServiceId) {
+                for (const service of response.services) {
+                    if (service.locations) {
+                        const matchingLocation = service.locations.find(loc => loc.service_id === savedServiceId);
+                        if (matchingLocation) {
+                            this.selectedService = service.id;
+                            this.selectedServiceSpecific = matchingLocation.service_id;
+
+                            // Try to restore saved location within this service
+                            if (savedLocationId) {
+                                const savedLoc = service.locations.find(loc => loc.location.id === savedLocationId);
+                                if (savedLoc) {
+                                    this.selectedLocation = savedLoc.location.id;
+                                    this.selectedServiceSpecific = savedLoc.service_id;
+                                } else {
+                                    this.selectedLocation = matchingLocation.location.id;
+                                }
+                            } else {
+                                this.selectedLocation = matchingLocation.location.id;
+                            }
+
+                            if (!store.state.column3) {
+                                store.state.column3 = {};
+                            }
+                            store.state.column3.selectedService = this.selectedServiceSpecific;
+                            store.state.column3.selectedLocation = this.selectedLocation;
+
+                            const locationRegions = this.getLocationRegions(service, this.selectedLocation);
+                            console.log('Restored saved service:', this.selectedService, 'location:', this.selectedLocation);
+
+                            return {
+                                serviceId: this.selectedServiceSpecific,
+                                locationId: locationRegions
+                            };
+                        }
+                    }
+                }
+            }
+
+            // Fallback: auto-select first Basic service
             let firstBasic = null;
             let firstUnlockedBasic = null;
             let firstService = null;
@@ -343,6 +407,9 @@ class RecipeInfoSection extends Component {
             );
         }
 
+        // Auto-save selection to session
+        store._saveColumn3Selection();
+
         // Don't call render() here - Column 2 callback will handle it
     }
 
@@ -405,6 +472,9 @@ class RecipeInfoSection extends Component {
             this.notifyColumn2LocationChange([locationId]);
         }
 
+        // Auto-save selection to session
+        store._saveColumn3Selection();
+
         // Don't call render() here - Column 2 callback will handle it
         // This prevents race conditions between multiple renders
         console.log('Location selected, waiting for Column 2 callback to trigger render');
@@ -436,6 +506,9 @@ class RecipeInfoSection extends Component {
 
         // Notify subscribers
         store._notifySubscribers('column3.useFine');
+
+        // Auto-save selection to session
+        store._saveColumn3Selection();
 
         this.render();
     }
@@ -905,13 +978,15 @@ class RecipeInfoSection extends Component {
         const currentWEPercent = column2Stats.work_efficiency || 0;  // Already in percentage format
         const maxWEPercent = this.recipe.max_efficiency * 100;
 
-        // Format WE - show 2 decimals if needed, otherwise 1 or 0
-        const currentWEFormatted = (currentWEPercent % 1 === 0)
-            ? currentWEPercent.toFixed(0)
-            : (currentWEPercent % 0.1 < 0.01)
-                ? currentWEPercent.toFixed(1)
-                : currentWEPercent.toFixed(2);
-        const maxWEFormatted = (maxWEPercent % 1 === 0) ? maxWEPercent.toFixed(0) : maxWEPercent.toFixed(1);
+        // Format WE for display - offset by 100 to match in-game display (100% = no bonus)
+        const currentWEDisplay = currentWEPercent + 100;
+        const maxWEDisplay = maxWEPercent + 100;
+        const currentWEFormatted = (currentWEDisplay % 1 === 0)
+            ? currentWEDisplay.toFixed(0)
+            : (currentWEDisplay % 0.1 < 0.01)
+                ? currentWEDisplay.toFixed(1)
+                : currentWEDisplay.toFixed(2);
+        const maxWEFormatted = (maxWEDisplay % 1 === 0) ? maxWEDisplay.toFixed(0) : maxWEDisplay.toFixed(1);
 
         // Check if WE exceeds or equals max (for green highlighting)
         const weExceedsMax = currentWEPercent >= maxWEPercent;

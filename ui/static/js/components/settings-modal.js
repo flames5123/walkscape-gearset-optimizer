@@ -36,8 +36,15 @@ class SettingsModal extends Component {
         this.includeConsumablesRecipe = false;
         this.showItemFindingDrops = this.loadShowItemFindingDrops();
 
+        // Optimization presets
+        this.activityPresets = [];
+        this.recipePresets = [];
+        this.selectedActivityPresetId = null;
+        this.selectedRecipePresetId = null;
+
         // Load optimization settings (async, will re-render when loaded)
         this.loadOptimizationSettings();
+        this.loadOptimizationPresets();
 
         this.render();
         this.attachEvents();
@@ -45,6 +52,8 @@ class SettingsModal extends Component {
 
     /**
      * Load optimization settings from API
+     * Data model: activitySorting and recipeSorting are arrays of [metric_key, weight] tuples
+     * where weight is an integer 0-100.
      */
     async loadOptimizationSettings() {
         try {
@@ -55,8 +64,11 @@ class SettingsModal extends Component {
                 activity: response.activity.options,
                 recipe: response.recipe.options
             };
-            this.activitySorting = response.activity.current_order;
-            this.recipeSorting = response.recipe.current_order;
+
+            // current_order is already [key, weight] tuples from API
+            // Normalize in case of old format (plain strings)
+            this.activitySorting = this._normalizeSortingTuples(response.activity.current_order);
+            this.recipeSorting = this._normalizeSortingTuples(response.recipe.current_order);
 
             // Load consumables flags from response or default to false
             this.includeConsumablesActivity = response.activity.include_consumables || false;
@@ -75,6 +87,90 @@ class SettingsModal extends Component {
         } catch (error) {
             console.error('Failed to load optimization settings:', error);
         }
+    }
+
+    /**
+     * Normalize sorting data to [key, weight] tuple format.
+     * Handles both old format (plain string arrays) and new format ([key, weight] tuples).
+     * @param {Array} sortingList - Array of strings or [key, weight] tuples
+     * @returns {Array} Array of [key, weight] tuples
+     */
+    _normalizeSortingTuples(sortingList) {
+        if (!sortingList || !sortingList.length) return [];
+        return sortingList.map(entry => {
+            if (typeof entry === 'string') {
+                return [entry, 100];
+            }
+            if (Array.isArray(entry) && entry.length === 2) {
+                return [entry[0], Math.max(0, Math.min(100, Math.floor(Number(entry[1]) || 100)))];
+            }
+            return [String(entry), 100];
+        });
+    }
+
+    /**
+     * Update the weight in the internal data model from a sort-item DOM element.
+     * @param {jQuery} $item - The .sort-item element
+     */
+    _updateWeightFromDOM($item) {
+        const key = $item.data('key');
+        const weight = parseInt($item.find('.weight-slider').val(), 10);
+        const isActivity = $item.closest('.sort-list').hasClass('activity-sort-list');
+
+        const sorting = isActivity ? this.activitySorting : this.recipeSorting;
+        const entry = sorting.find(e => e[0] === key);
+        if (entry) {
+            entry[1] = weight;
+        }
+        // Clear preset selection since user manually changed settings
+        this._clearPresetSelection(isActivity ? 'activity' : 'recipe');
+        // Debounce save — clear previous timer and set new one
+        clearTimeout(this._weightSaveTimer);
+        this._weightSaveTimer = setTimeout(() => this.saveOptimizationSettings(), 300);
+    }
+
+    /**
+     * Clear the preset selection for a type (user manually changed settings).
+     * @param {string} presetType - 'activity' or 'recipe'
+     */
+    _clearPresetSelection(presetType) {
+        if (presetType === 'activity') {
+            this.selectedActivityPresetId = null;
+        } else {
+            this.selectedRecipePresetId = null;
+        }
+    }
+
+    /**
+     * Update the slider track background to show a filled blue bar from 0 to current value.
+     * @param {HTMLInputElement} slider - The range input element
+     */
+    _updateSliderTrack(slider) {
+        const val = slider.value;
+        const pct = ((val - slider.min) / (slider.max - slider.min)) * 100;
+        slider.style.background = `linear-gradient(to right, var(--accent-primary) 0%, var(--accent-primary) ${pct}%, var(--bg-primary) ${pct}%, var(--bg-primary) 100%)`;
+    }
+
+    /**
+     * Re-render the optimization tab while preserving scroll position.
+     * Used by remove, add, and reset handlers.
+     */
+    _rerenderOptimizationTab() {
+        // Save scroll position before re-render
+        const $modal = this.$element.find('.settings-modal');
+        const scrollTop = $modal.scrollTop();
+
+        this.render();
+        this.attachEvents();
+        this.$element.find('.modal-overlay').css('display', 'flex').addClass('show');
+        this.activeTab = 'optimization';
+        this.$element.find('.tab-content').hide();
+        this.$element.find('.optimization-tab').show();
+        this.$element.find('.settings-tab').removeClass('active');
+        this.$element.find('.settings-tab[data-tab="optimization"]').addClass('active');
+
+        // Restore scroll position after re-render
+        this.$element.find('.settings-modal').scrollTop(scrollTop);
     }
 
     /**
@@ -260,31 +356,55 @@ class SettingsModal extends Component {
      * @returns {string} HTML string
      */
     renderOptimizationTab() {
-        // Render activity sorting list
-        const activityItems = this.activitySorting.map((key, index) => {
-            const option = this.sortingOptions.activity.find(opt => opt.key === key);
-            if (!option) return '';
+        const renderSortList = (sorting, options, listClass) => {
+            const isSingle = sorting.length <= 1;
+            const usedKeys = new Set(sorting.map(entry => entry[0]));
+            const availableOptions = options.filter(opt => !usedKeys.has(opt.key));
+
+            const items = sorting.map((entry, index) => {
+                const [key, weight] = entry;
+                const option = options.find(opt => opt.key === key);
+                if (!option) return '';
+
+                return `
+                    <div class="sort-item" data-key="${key}" data-index="${index}" data-weight="${weight}">
+                        <span class="drag-handle">☰</span>
+                        <div class="sort-item-content">
+                            <span class="sort-name">${option.display_name}</span>
+                            <div class="sort-weight-row">
+                                <input type="range" class="weight-slider" min="0" max="100" value="${weight}" />
+                                <input type="number" class="weight-input" min="0" max="100" value="${weight}" />
+                                <span class="weight-pct">%</span>
+                            </div>
+                        </div>
+                        <button class="sort-remove-btn" ${isSingle ? 'disabled' : ''} title="Remove this priority">✕</button>
+                    </div>
+                `;
+            }).join('');
+
+            // Add button with dropdown
+            const addDropdownOptions = availableOptions.map(opt =>
+                `<option value="${opt.key}">${opt.display_name}</option>`
+            ).join('');
+
+            const addButton = availableOptions.length > 0 ? `
+                <div class="sort-add-wrapper">
+                    <button class="sort-add-btn" title="Add optimization priority">+ Add Optimization Priority</button>
+                    <select class="sort-add-dropdown" style="display:none;">
+                        <option value="">Select a metric...</option>
+                        ${addDropdownOptions}
+                    </select>
+                </div>
+            ` : '';
 
             return `
-                <div class="sort-item" data-key="${key}" data-index="${index}">
-                    <span class="drag-handle">☰</span>
-                    <span class="sort-name">${option.display_name}</span>
+                ${addButton}
+                <div class="sort-list ${listClass}">
+                    ${items}
                 </div>
+                <button class="sort-reset-btn" data-list="${listClass}">↺ Reset to Default</button>
             `;
-        }).join('');
-
-        // Render recipe sorting list
-        const recipeItems = this.recipeSorting.map((key, index) => {
-            const option = this.sortingOptions.recipe.find(opt => opt.key === key);
-            if (!option) return '';
-
-            return `
-                <div class="sort-item" data-key="${key}" data-index="${index}">
-                    <span class="drag-handle">☰</span>
-                    <span class="sort-name">${option.display_name}</span>
-                </div>
-            `;
-        }).join('');
+        };
 
         return `
             <div class="optimization-settings">
@@ -300,6 +420,14 @@ class SettingsModal extends Component {
                         font-size: 0.9em;
                         margin: 0;
                     ">💡 <strong>Tip:</strong> To exclude specific items or consumables from optimization, go to the <strong>Owned Items</strong> section in Column 1 and check the "Hide" checkbox. This works for both normal and fine consumables.</p>
+                </div>
+                
+                <div class="weight-explanation">
+                    <span class="weight-explanation-icon">ℹ️</span>
+                    <div>
+                        <p>The weight slider sets a <strong>minimum threshold</strong>: the optimizer won't let a goal drop below this % of its best achievable value.</p>
+                        <p>At <strong>100%</strong>, the next priority is used as a tiebreaker (current behavior). Lower values give the optimizer more flexibility to improve lower-priority goals.</p>
+                    </div>
                 </div>
                 
                 <div class="setting-section" style="margin-bottom: var(--spacing-lg);">
@@ -331,7 +459,7 @@ class SettingsModal extends Component {
                         font-size: 1.1em;
                         margin-bottom: var(--spacing-md);
                         font-weight: 600;
-                    ">Activity Gearset Optimization</h3>
+                    ">Activity Gear Set Optimization</h3>
                     <p style="
                         color: var(--text-secondary);
                         font-size: 0.9em;
@@ -343,18 +471,10 @@ class SettingsModal extends Component {
                             <input type="checkbox" class="include-consumables-activity-checkbox" ${this.includeConsumablesActivity ? 'checked' : ''} />
                             <span class="optimizer-checkbox-label">Include consumables in optimization</span>
                         </label>
-                        <p style="
-                            color: var(--text-muted);
-                            font-size: 0.85em;
-                            margin-top: var(--spacing-xs);
-                            margin-left: 26px;
-                            font-style: italic;
-                        ">Note: Consumable optimization for activities is not yet implemented.</p>
                     </div>
                     
-                    <div class="sort-list activity-sort-list">
-                        ${activityItems}
-                    </div>
+                    ${this.renderPresetBar('activity')}
+                    ${renderSortList(this.activitySorting, this.sortingOptions.activity, 'activity-sort-list')}
                 </div>
                 
                 <div class="setting-section" style="margin-top: var(--spacing-xl);">
@@ -363,7 +483,7 @@ class SettingsModal extends Component {
                         font-size: 1.1em;
                         margin-bottom: var(--spacing-md);
                         font-weight: 600;
-                    ">Recipe Gearset Optimization</h3>
+                    ">Recipe Gear Set Optimization</h3>
                     <p style="
                         color: var(--text-secondary);
                         font-size: 0.9em;
@@ -383,9 +503,8 @@ class SettingsModal extends Component {
                         </label>
                     </div>
                     
-                    <div class="sort-list recipe-sort-list">
-                        ${recipeItems}
-                    </div>
+                    ${this.renderPresetBar('recipe')}
+                    ${renderSortList(this.recipeSorting, this.sortingOptions.recipe, 'recipe-sort-list')}
                 </div>
             </div>
         `;
@@ -635,6 +754,256 @@ class SettingsModal extends Component {
         this.attachDragAndDrop('.activity-sort-list');
         this.attachDragAndDrop('.recipe-sort-list');
 
+        // Preset dropdown toggle
+        this.$element.on('click', '.preset-dropdown-toggle', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const presetType = $(e.currentTarget).data('preset-type');
+            if (presetType === 'activity') {
+                this._activityPresetDropdownOpen = !this._activityPresetDropdownOpen;
+            } else {
+                this._recipePresetDropdownOpen = !this._recipePresetDropdownOpen;
+            }
+            this._rerenderOptimizationTab();
+            this.attachEvents();
+        });
+
+        // Preset name input
+        this.$element.on('input', '.preset-name-input', (e) => {
+            const presetType = $(e.target).data('preset-type');
+            const name = $(e.target).val();
+            if (presetType === 'activity') {
+                this._activityPresetName = name;
+            } else {
+                this._recipePresetName = name;
+            }
+            // Update save button state without full re-render
+            const $saveBtn = $(e.target).closest('.preset-bar').find('.preset-save-btn');
+            const hasName = name.trim().length > 0;
+            $saveBtn.prop('disabled', !hasName);
+            $saveBtn.css({
+                'background': hasName ? 'var(--accent-color)' : 'var(--bg-tertiary)',
+                'color': hasName ? 'white' : 'var(--text-muted)',
+                'border-color': hasName ? 'var(--accent-color)' : 'var(--border-color)',
+                'cursor': hasName ? 'pointer' : 'default'
+            });
+        });
+
+        // Preset save button
+        this.$element.on('click', '.preset-save-btn', (e) => {
+            e.preventDefault();
+            const presetType = $(e.currentTarget).data('preset-type');
+            this.savePreset(presetType);
+        });
+
+        // Preset item click (load)
+        this.$element.on('click', '.preset-item:not(.new-preset)', (e) => {
+            if ($(e.target).hasClass('preset-item-delete')) return;
+            const presetType = $(e.currentTarget).data('preset-type');
+            const presetId = $(e.currentTarget).data('id');
+            // Close dropdown
+            if (presetType === 'activity') {
+                this._activityPresetDropdownOpen = false;
+            } else {
+                this._recipePresetDropdownOpen = false;
+            }
+            this.loadPreset(presetType, presetId);
+        });
+
+        // New preset click
+        this.$element.on('click', '.preset-item.new-preset', (e) => {
+            const presetType = $(e.currentTarget).data('preset-type');
+            if (presetType === 'activity') {
+                this.selectedActivityPresetId = null;
+                this._activityPresetName = '';
+                this._activityPresetDropdownOpen = false;
+            } else {
+                this.selectedRecipePresetId = null;
+                this._recipePresetName = '';
+                this._recipePresetDropdownOpen = false;
+            }
+            this._rerenderOptimizationTab();
+            this.attachEvents();
+            // Focus the name input
+            this.$element.find(`.preset-name-input[data-preset-type="${presetType}"]`).focus();
+        });
+
+        // Preset item delete
+        this.$element.on('click', '.preset-item-delete', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const presetType = $(e.currentTarget).data('preset-type');
+            const presetId = $(e.currentTarget).data('id');
+            const pendingKey = presetType === 'activity' ? '_activityPendingDelete' : '_recipePendingDelete';
+
+            if (this[pendingKey] === presetId) {
+                // Second click — confirm delete
+                this[pendingKey] = null;
+                this.deletePreset(presetType, presetId);
+            } else {
+                // First click — show confirm
+                this[pendingKey] = presetId;
+                this._rerenderOptimizationTab();
+                this.attachEvents();
+                // Auto-clear after 3 seconds
+                setTimeout(() => {
+                    if (this[pendingKey] === presetId) {
+                        this[pendingKey] = null;
+                        this._rerenderOptimizationTab();
+                        this.attachEvents();
+                    }
+                }, 3000);
+            }
+        });
+
+        // Preset export button
+        this.$element.on('click', '.preset-export-btn', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const presetType = $(e.currentTarget).data('preset-type');
+            const encoded = this.encodePreset(presetType);
+
+            // Show the import input field with the encoded string for easy copying
+            const $input = this.$element.find(`.preset-import-input[data-preset-type="${presetType}"]`);
+            $input.show().val(encoded).select();
+
+            // Try to copy to clipboard
+            try {
+                document.execCommand('copy');
+                const $btn = $(e.currentTarget);
+                const original = $btn.text();
+                $btn.text('Copied!');
+                setTimeout(() => $btn.text(original), 1500);
+            } catch (err) {
+                // Input is shown and selected, user can copy manually
+            }
+        });
+
+        // Preset import button — toggle input visibility
+        this.$element.on('click', '.preset-import-btn', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const presetType = $(e.currentTarget).data('preset-type');
+            const $input = this.$element.find(`.preset-import-input[data-preset-type="${presetType}"]`);
+            $input.toggle().val('').focus();
+        });
+
+        // Preset import input — apply on Enter
+        this.$element.on('keydown', '.preset-import-input', (e) => {
+            if (e.key === 'Enter') {
+                const presetType = $(e.target).data('preset-type');
+                const encoded = $(e.target).val();
+                if (encoded.trim()) {
+                    this.decodeAndApplyPreset(presetType, encoded);
+                }
+            } else if (e.key === 'Escape') {
+                $(e.target).hide().val('');
+            }
+        });
+
+        // Weight slider ↔ numeric input bidirectional sync
+        this.$element.on('input', '.weight-slider', (e) => {
+            const $slider = $(e.target);
+            const val = parseInt($slider.val(), 10);
+            $slider.closest('.sort-item').find('.weight-input').val(val);
+            this._updateSliderTrack($slider[0]);
+            this._updateWeightFromDOM($slider.closest('.sort-item'));
+        });
+
+        this.$element.on('change', '.weight-input', (e) => {
+            const $input = $(e.target);
+            let val = parseInt($input.val(), 10);
+            if (isNaN(val)) val = 100;
+            val = Math.max(0, Math.min(100, val));
+            $input.val(val);
+            const $slider = $input.closest('.sort-item').find('.weight-slider');
+            $slider.val(val);
+            this._updateSliderTrack($slider[0]);
+            this._updateWeightFromDOM($input.closest('.sort-item'));
+        });
+
+        // Initialize slider track fills on render
+        this.$element.find('.weight-slider').each((_, el) => {
+            this._updateSliderTrack(el);
+        });
+
+        // Remove button
+        this.$element.on('click', '.sort-remove-btn', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const $btn = $(e.currentTarget);
+            if ($btn.prop('disabled')) return;
+
+            const $item = $btn.closest('.sort-item');
+            const key = $item.data('key');
+            const isActivity = $item.closest('.sort-list').hasClass('activity-sort-list');
+
+            if (isActivity) {
+                this.activitySorting = this.activitySorting.filter(entry => entry[0] !== key);
+            } else {
+                this.recipeSorting = this.recipeSorting.filter(entry => entry[0] !== key);
+            }
+
+            this._clearPresetSelection(isActivity ? 'activity' : 'recipe');
+            this.saveOptimizationSettings();
+            this._rerenderOptimizationTab();
+            return false;
+        });
+
+        // Add button → show dropdown
+        this.$element.on('click', '.sort-add-btn', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const $wrapper = $(e.currentTarget).closest('.sort-add-wrapper');
+            const $dropdown = $wrapper.find('.sort-add-dropdown');
+            $dropdown.val('');
+            $dropdown.toggle();
+            return false;
+        });
+
+        // Add dropdown selection
+        this.$element.on('change', '.sort-add-dropdown', (e) => {
+            const $dropdown = $(e.target);
+            const key = $dropdown.val();
+            if (!key) return;
+
+            const $wrapper = $dropdown.closest('.sort-add-wrapper');
+            const $list = $wrapper.next('.sort-list');
+            const isActivity = $list.hasClass('activity-sort-list');
+
+            if (isActivity) {
+                this.activitySorting.push([key, 100]);
+            } else {
+                this.recipeSorting.push([key, 100]);
+            }
+
+            $dropdown.hide();
+            this._clearPresetSelection(isActivity ? 'activity' : 'recipe');
+            this.saveOptimizationSettings();
+            this._rerenderOptimizationTab();
+        });
+
+        // Reset to default button
+        this.$element.on('click', '.sort-reset-btn', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const listClass = $(e.currentTarget).data('list');
+            const isActivity = listClass === 'activity-sort-list';
+            const options = isActivity ? this.sortingOptions.activity : this.sortingOptions.recipe;
+
+            // Reset to all options in default order with weight 100
+            const defaultSorting = options.map(opt => [opt.key, 100]);
+            if (isActivity) {
+                this.activitySorting = defaultSorting;
+            } else {
+                this.recipeSorting = defaultSorting;
+            }
+
+            this.saveOptimizationSettings();
+            this._clearPresetSelection(isActivity ? 'activity' : 'recipe');
+            this._rerenderOptimizationTab();
+        });
+
         // Include consumables checkboxes
         this.$element.on('change', '.include-consumables-activity-checkbox', (e) => {
             this.includeConsumablesActivity = e.target.checked;
@@ -829,10 +1198,26 @@ class SettingsModal extends Component {
             $(this).attr('draggable', 'true');
         });
 
+        // Prevent drag when interacting with slider, input, or remove button
+        $list.on('mousedown', '.weight-slider, .weight-input, .sort-remove-btn', (e) => {
+            // Temporarily disable draggable on the parent sort-item
+            const $item = $(e.target).closest('.sort-item');
+            $item.attr('draggable', 'false');
+            $(document).one('mouseup', () => {
+                $item.attr('draggable', 'true');
+            });
+        });
+
         // ===== DESKTOP DRAG AND DROP =====
 
         // Drag start
         $list.on('dragstart', '.sort-item', (e) => {
+            // Don't start drag if it originated from slider/input/button
+            const tag = e.target.tagName.toLowerCase();
+            if (tag === 'input' || tag === 'button') {
+                e.preventDefault();
+                return;
+            }
             draggedElement = e.currentTarget;
             draggedIndex = parseInt($(draggedElement).data('index'));
             $(draggedElement).addClass('dragging');
@@ -870,14 +1255,16 @@ class SettingsModal extends Component {
         $list.on('drop', '.sort-item', (e) => {
             e.preventDefault();
 
-            // Update the order in our data
+            // Update the order in our data, preserving weights
             const isActivity = $list.hasClass('activity-sort-list');
+            const sorting = isActivity ? this.activitySorting : this.recipeSorting;
             const newOrder = [];
 
             $list.find('.sort-item').each(function (index) {
                 const key = $(this).data('key');
+                const weight = parseInt($(this).data('weight'), 10) || 100;
                 $(this).data('index', index);
-                newOrder.push(key);
+                newOrder.push([key, weight]);
             });
 
             if (isActivity) {
@@ -887,6 +1274,7 @@ class SettingsModal extends Component {
             }
 
             // Auto-save immediately after drop
+            this._clearPresetSelection(isActivity ? 'activity' : 'recipe');
             this.saveOptimizationSettings();
         });
 
@@ -894,6 +1282,11 @@ class SettingsModal extends Component {
 
         // Touch start
         $list.on('touchstart', '.sort-item', (e) => {
+            // Don't start drag if touching slider, input, or remove button
+            const tag = e.target.tagName.toLowerCase();
+            if (tag === 'input' || tag === 'button') {
+                return;
+            }
             draggedElement = e.currentTarget;
             draggedIndex = parseInt($(draggedElement).data('index'));
             touchStartY = e.originalEvent.touches[0].clientY;
@@ -945,14 +1338,15 @@ class SettingsModal extends Component {
 
             $(draggedElement).removeClass('dragging');
 
-            // Update the order in our data
+            // Update the order in our data, preserving weights
             const isActivity = $list.hasClass('activity-sort-list');
             const newOrder = [];
 
             $list.find('.sort-item').each(function (index) {
                 const key = $(this).data('key');
+                const weight = parseInt($(this).data('weight'), 10) || 100;
                 $(this).data('index', index);
-                newOrder.push(key);
+                newOrder.push([key, weight]);
             });
 
             if (isActivity) {
@@ -962,6 +1356,7 @@ class SettingsModal extends Component {
             }
 
             // Auto-save immediately after drop
+            this._clearPresetSelection(isActivity ? 'activity' : 'recipe');
             this.saveOptimizationSettings();
 
             // Reset state
@@ -1039,6 +1434,301 @@ class SettingsModal extends Component {
         } catch (error) {
             console.error('Failed to save optimization settings:', error);
             api.showError('Failed to save optimization settings');
+        }
+    }
+
+    // ========================================================================
+    // OPTIMIZATION PRESETS
+    // ========================================================================
+
+    async loadOptimizationPresets() {
+        try {
+            const [activityPresets, recipePresets] = await Promise.all([
+                $.get('/api/optimization-presets/activity'),
+                $.get('/api/optimization-presets/recipe')
+            ]);
+            this.activityPresets = activityPresets || [];
+            this.recipePresets = recipePresets || [];
+            console.log('Loaded presets:', { activity: this.activityPresets.length, recipe: this.recipePresets.length });
+            if (this.activeTab === 'optimization' && this.visible) {
+                this._rerenderOptimizationTab();
+            }
+        } catch (error) {
+            console.error('Failed to load optimization presets:', error);
+        }
+    }
+
+    async savePreset(presetType) {
+        const name = (presetType === 'activity' ? this._activityPresetName : this._recipePresetName) || '';
+        if (!name.trim()) {
+            api.showError('Enter a preset name first');
+            return;
+        }
+
+        const sorting = presetType === 'activity' ? this.activitySorting : this.recipeSorting;
+        const includeConsumables = presetType === 'activity' ? this.includeConsumablesActivity : this.includeConsumablesRecipe;
+        const selectedId = presetType === 'activity' ? this.selectedActivityPresetId : this.selectedRecipePresetId;
+
+        try {
+            const preset = await $.ajax({
+                url: `/api/optimization-presets/${presetType}`,
+                method: 'POST',
+                contentType: 'application/json',
+                data: JSON.stringify({
+                    name: name.trim(),
+                    sorting: sorting,
+                    include_consumables: includeConsumables,
+                    id: selectedId  // Update existing if selected
+                })
+            });
+            console.log('Preset saved:', preset);
+            await this.loadOptimizationPresets();
+            if (presetType === 'activity') {
+                this.selectedActivityPresetId = preset.id;
+                this._activityPresetName = preset.name;
+            } else {
+                this.selectedRecipePresetId = preset.id;
+                this._recipePresetName = preset.name;
+            }
+            this._rerenderOptimizationTab();
+            this.attachEvents();
+        } catch (error) {
+            const msg = error.responseJSON?.detail || 'Failed to save preset';
+            api.showError(msg);
+        }
+    }
+
+    async loadPreset(presetType, presetId) {
+        const presets = presetType === 'activity' ? this.activityPresets : this.recipePresets;
+        const preset = presets.find(p => p.id === presetId);
+        if (!preset) return;
+
+        if (presetType === 'activity') {
+            this.activitySorting = this._normalizeSortingTuples(preset.sorting);
+            this.includeConsumablesActivity = preset.include_consumables;
+            this.selectedActivityPresetId = presetId;
+            this._activityPresetName = preset.name;
+        } else {
+            this.recipeSorting = this._normalizeSortingTuples(preset.sorting);
+            this.includeConsumablesRecipe = preset.include_consumables;
+            this.selectedRecipePresetId = presetId;
+            this._recipePresetName = preset.name;
+        }
+
+        // Save to current settings too
+        await this.saveOptimizationSettings();
+        this._rerenderOptimizationTab();
+        this.attachEvents();
+    }
+
+    async deletePreset(presetType, presetId) {
+        try {
+            await $.ajax({
+                url: `/api/optimization-presets/${presetType}/${presetId}`,
+                method: 'DELETE'
+            });
+            // Clear selection if deleted preset was selected
+            if (presetType === 'activity' && this.selectedActivityPresetId === presetId) {
+                this.selectedActivityPresetId = null;
+                this._activityPresetName = '';
+            } else if (presetType === 'recipe' && this.selectedRecipePresetId === presetId) {
+                this.selectedRecipePresetId = null;
+                this._recipePresetName = '';
+            }
+            await this.loadOptimizationPresets();
+            this._rerenderOptimizationTab();
+            this.attachEvents();
+        } catch (error) {
+            api.showError('Failed to delete preset');
+        }
+    }
+
+
+    renderPresetBar(presetType) {
+        const presets = presetType === 'activity' ? this.activityPresets : this.recipePresets;
+        const selectedId = presetType === 'activity' ? this.selectedActivityPresetId : this.selectedRecipePresetId;
+        const selectedPreset = presets.find(p => p.id === selectedId);
+        const currentName = presetType === 'activity'
+            ? (this._activityPresetName ?? (selectedPreset ? selectedPreset.name : ''))
+            : (this._recipePresetName ?? (selectedPreset ? selectedPreset.name : ''));
+        const dropdownOpen = presetType === 'activity' ? this._activityPresetDropdownOpen : this._recipePresetDropdownOpen;
+
+        const hasName = currentName.trim().length > 0;
+        const hasChanges = hasName; // Can save if there's a name
+
+        const presetItems = presets.map(p => {
+            const isSelected = p.id === selectedId;
+            const pendingDelete = (presetType === 'activity' ? this._activityPendingDelete : this._recipePendingDelete) === p.id;
+            return `
+                <div class="preset-item ${isSelected ? 'selected' : ''}" data-id="${p.id}" data-preset-type="${presetType}">
+                    <span class="preset-item-name">${p.name}</span>
+                    <button class="preset-item-delete ${pendingDelete ? 'confirm' : ''}" data-id="${p.id}" data-preset-type="${presetType}">${pendingDelete ? 'Delete?' : '×'}</button>
+                </div>
+            `;
+        }).join('');
+
+        const dropdownContent = dropdownOpen ? `
+            <div class="preset-dropdown" data-preset-type="${presetType}">
+                <div class="preset-list">
+                    <div class="preset-item new-preset" data-preset-type="${presetType}">
+                        <span class="preset-item-name">+ New Preset</span>
+                    </div>
+                    ${presetItems}
+                </div>
+            </div>
+        ` : '<div class="preset-dropdown" style="display:none;"></div>';
+
+        return `
+            <div class="preset-bar" data-preset-type="${presetType}" style="
+                margin-bottom: var(--spacing-md);
+            ">
+                <div style="
+                    display: flex;
+                    align-items: center;
+                    gap: var(--spacing-xs);
+                ">
+                    <button class="preset-save-btn" data-preset-type="${presetType}" ${hasChanges ? '' : 'disabled'} style="
+                        padding: 5px 12px;
+                        font-size: 0.85em;
+                        background: ${hasChanges ? 'var(--accent-color)' : 'var(--bg-tertiary)'};
+                        color: ${hasChanges ? 'white' : 'var(--text-muted)'};
+                        border: 1px solid ${hasChanges ? 'var(--accent-color)' : 'var(--border-color)'};
+                        border-radius: 3px 0 0 3px;
+                        cursor: ${hasChanges ? 'pointer' : 'default'};
+                        white-space: nowrap;
+                    ">Save</button>
+                    <div style="
+                        display: flex;
+                        flex: 1;
+                        position: relative;
+                    ">
+                        <input type="text"
+                            class="preset-name-input"
+                            data-preset-type="${presetType}"
+                            placeholder="Preset Name"
+                            value="${currentName}"
+                            maxlength="100"
+                            style="
+                                flex: 1;
+                                padding: 5px 8px;
+                                background: var(--bg-primary);
+                                color: var(--text-primary);
+                                border: 1px solid var(--border-color);
+                                border-right: none;
+                                border-radius: 0;
+                                font-size: 0.9em;
+                                outline: none;
+                            "
+                        />
+                        <button class="preset-dropdown-toggle" data-preset-type="${presetType}" style="
+                            padding: 5px 8px;
+                            background: var(--bg-secondary);
+                            color: var(--text-secondary);
+                            border: 1px solid var(--border-color);
+                            border-radius: 0 3px 3px 0;
+                            cursor: pointer;
+                            font-size: 0.75em;
+                        "><span class="expand-arrow ${dropdownOpen ? 'expanded' : ''}">▼</span></button>
+                    </div>
+                </div>
+                ${dropdownContent}
+                <div class="preset-import-export" style="
+                    display: flex;
+                    align-items: center;
+                    gap: var(--spacing-xs);
+                    margin-top: var(--spacing-xs);
+                ">
+                    <button class="preset-export-btn" data-preset-type="${presetType}" style="
+                        padding: 3px 10px;
+                        font-size: 0.8em;
+                        background: var(--bg-secondary);
+                        color: var(--text-secondary);
+                        border: 1px solid var(--border-color);
+                        border-radius: 3px;
+                        cursor: pointer;
+                    ">Export</button>
+                    <button class="preset-import-btn" data-preset-type="${presetType}" style="
+                        padding: 3px 10px;
+                        font-size: 0.8em;
+                        background: var(--bg-secondary);
+                        color: var(--text-secondary);
+                        border: 1px solid var(--border-color);
+                        border-radius: 3px;
+                        cursor: pointer;
+                    ">Import</button>
+                    <input type="text" class="preset-import-input" data-preset-type="${presetType}" placeholder="Paste preset string..." style="
+                        display: none;
+                        flex: 1;
+                        padding: 3px 8px;
+                        font-size: 0.8em;
+                        background: var(--bg-primary);
+                        color: var(--text-primary);
+                        border: 1px solid var(--border-color);
+                        border-radius: 3px;
+                        font-family: monospace;
+                    " />
+                </div>
+            </div>
+        `;
+    }
+
+    /**
+     * Encode current sorting settings to a shareable string (gzip + base64).
+     */
+    encodePreset(presetType) {
+        const sorting = presetType === 'activity' ? this.activitySorting : this.recipeSorting;
+        const includeConsumables = presetType === 'activity' ? this.includeConsumablesActivity : this.includeConsumablesRecipe;
+        const data = { sorting, include_consumables: includeConsumables };
+        const jsonStr = JSON.stringify(data);
+        const compressed = window.pako.gzip(jsonStr);
+        let binary = '';
+        const bytes = new Uint8Array(compressed);
+        for (let i = 0; i < bytes.length; i++) {
+            binary += String.fromCharCode(bytes[i]);
+        }
+        return btoa(binary);
+    }
+
+    /**
+     * Decode a preset string and apply it.
+     */
+    decodeAndApplyPreset(presetType, encoded) {
+        try {
+            const binaryString = atob(encoded.trim());
+            const bytes = new Uint8Array(binaryString.length);
+            for (let i = 0; i < binaryString.length; i++) {
+                bytes[i] = binaryString.charCodeAt(i);
+            }
+            const decompressed = window.pako.ungzip(bytes, { to: 'string' });
+            const data = JSON.parse(decompressed);
+
+            if (!data.sorting || !Array.isArray(data.sorting)) {
+                throw new Error('Invalid preset format');
+            }
+
+            const sorting = this._normalizeSortingTuples(data.sorting);
+            const includeConsumables = data.include_consumables || false;
+
+            if (presetType === 'activity') {
+                this.activitySorting = sorting;
+                this.includeConsumablesActivity = includeConsumables;
+                this.selectedActivityPresetId = null;
+                this._activityPresetName = '';
+            } else {
+                this.recipeSorting = sorting;
+                this.includeConsumablesRecipe = includeConsumables;
+                this.selectedRecipePresetId = null;
+                this._recipePresetName = '';
+            }
+
+            this.saveOptimizationSettings();
+            this._rerenderOptimizationTab();
+            this.attachEvents();
+            return true;
+        } catch (e) {
+            console.error('Failed to decode preset:', e);
+            api.showError('Invalid preset string');
+            return false;
         }
     }
 

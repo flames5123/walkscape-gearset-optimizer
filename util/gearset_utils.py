@@ -297,13 +297,26 @@ def aggregate_gearset_stats(
     
     # Add level bonus WE (capped at 20 levels ABOVE activity level)
     if include_level_bonus:
-        skill_level = character.get_skill_level(skill.lower())
-        levels_above = max(0, skill_level - activity_level)  # Levels above activity requirement
-        level_bonus_we = min(levels_above, 20) * 0.0125  # 1.25% per level, capped at 20 levels
+        # For travel skill, use agility level (travel isn't a real skill)
+        level_skill = skill.lower()
+        is_travel = level_skill == 'travel'
+        if is_travel:
+            level_skill = 'agility'
+        skill_level = character.get_skill_level(level_skill)
+        
+        if is_travel:
+            # Travel: 0.5% per agility level (no cap)
+            level_bonus_we = (skill_level - 1) * 0.005
+        else:
+            # Activities: 1.25% per level above requirement (capped at 20 levels)
+            levels_above = max(0, skill_level - activity_level)
+            level_bonus_we = min(levels_above, 20) * 0.0125
+        
         total_stats['work_efficiency'] = total_stats.get('work_efficiency', 0.0) + level_bonus_we
-        # Add level bonus QO
-        level_bonus_qo = max(0, skill_level - activity_level)
-        total_stats['quality_outcome'] = total_stats.get('quality_outcome', 0.0) + level_bonus_qo
+        # Add level bonus QO (not applicable to travel)
+        if not is_travel:
+            level_bonus_qo = max(0, skill_level - activity_level)
+            total_stats['quality_outcome'] = total_stats.get('quality_outcome', 0.0) + level_bonus_qo
     
     # Add collectible stats
     if include_collectibles:

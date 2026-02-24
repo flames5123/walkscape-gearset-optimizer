@@ -258,6 +258,14 @@ class ActivityInfo:
         for stat_name, stat_value in collectible_stats.items():
             details[f"collectible_{stat_name}_pct"] = stat_value * 100
         
+        # Track aggregate steps for finding metrics (average across all drops of each type)
+        total_steps_chest = 0.0
+        count_chest = 0
+        total_steps_fine = 0.0
+        count_fine = 0
+        total_steps_collectible = 0.0
+        count_collectible = 0
+        
         # For level-based drops, calculate total weight at current level
         has_level_based = any(drop.is_level_based for drop in all_drops)
         total_weight = 0.0
@@ -315,6 +323,7 @@ class ActivityInfo:
                 # Apply find bonuses based on item type
                 base_chance = drop_chance_percent / 100.0
                 find_bonus = 0.0
+                drop_category = None  # Track category for aggregate metrics
                 
                 # Check actual item type if item_object is available
                 try:
@@ -324,9 +333,11 @@ class ActivityInfo:
                         # Check if item is a Collectible
                         if isinstance(drop.item_object, CollectibleInstance):
                             find_bonus = find_collectibles
+                            drop_category = "collectible"
                         # Check if item is a Container (chest) - exclude bird nests
                         elif drop.item_ref and "Container." in drop.item_ref and "BIRD_NEST" not in drop.item_ref:
                             find_bonus = chest_finding
+                            drop_category = "chest"
                         # Check if item has gem or rough gem keyword
                         elif hasattr(drop.item_object, "keywords") and any(kw.lower() in ["gem", "rough gem"] for kw in drop.item_object.keywords):
                             find_bonus = find_gems
@@ -337,8 +348,10 @@ class ActivityInfo:
                     # Fallback to string-based detection if item_object check fails
                     if drop.item_ref and "Collectible." in drop.item_ref:
                         find_bonus = find_collectibles
+                        drop_category = "collectible"
                     elif drop.item_ref and "Container." in drop.item_ref and "BIRD_NEST" not in drop.item_ref:
                         find_bonus = chest_finding
+                        drop_category = "chest"
                     elif "bird nest" in drop.item_name.lower() or "nest" in drop.item_name.lower():
                         find_bonus = find_bird_nests
                 
@@ -354,6 +367,14 @@ class ActivityInfo:
                 
                 # Add regular material to results
                 results[drop.item_name] = steps_per_item
+                
+                # Track steps for aggregate finding metrics
+                if drop_category == "chest":
+                    total_steps_chest += steps_per_item
+                    count_chest += 1
+                elif drop_category == "collectible":
+                    total_steps_collectible += steps_per_item
+                    count_collectible += 1
                 
                 # Check if this material has a fine counterpart - if so, add it too
                 has_fine = False
@@ -376,9 +397,18 @@ class ActivityInfo:
                     
                     # Add fine material with " (Fine)" suffix
                     results[f"{drop.item_name} (Fine)"] = steps_per_fine
+                    total_steps_fine += steps_per_fine
+                    count_fine += 1
         
         # Update details with final primary_xp_per_step (after bonus XP additions)
         details["primary_xp_per_step"] = primary_xp_per_step
+        
+        # Add aggregate finding metrics (average steps per chest/fine/collectible)
+        # Use inf when activity has no drops of that type (ignored as tiebreaker)
+        details["steps_for_chest"] = (total_steps_chest / count_chest) if count_chest > 0 else float("inf")
+        details["steps_for_fine_material"] = (total_steps_fine / count_fine) if count_fine > 0 else float("inf")
+        details["steps_for_collectible"] = (total_steps_collectible / count_collectible) if count_collectible > 0 else float("inf")
+        details["chest_finding_pct"] = chest_finding * 100
         
         if verbose:
             return results, details
@@ -3059,6 +3089,57 @@ class Activity:
         description='You dive deep into the shipwreck that is Casbrant\'s grave, hoping to find treasure.',
     )
 
+    BOG_FISHING_SPEAR = ActivityInfo(
+        name='Bog Fishing (Spear)',
+        primary_skill='Fishing',
+        locations=[Location.BOG_BOTTOM],
+        skill_requirements={'Fishing': 50},
+        requirements={'keyword_counts': {'fishing spear': 1, 'light source': 2, 'advanced diving gear': 3}, 'achievement_points': 0, 'reputation': {}, 'activity_completions': {}},
+        drop_table=[
+            DropEntry(item_name='Raw largemouth bass', item_ref="Material.RAW_LARGEMOUTH_BASS", quantity=Quantity(min_qty=1, max_qty=1), chance_percent=22.222),
+            DropEntry(item_name='Raw perch', item_ref="Material.RAW_PERCH", quantity=Quantity(min_qty=1, max_qty=1), chance_percent=22.222),
+            DropEntry(item_name='Raw trout', item_ref="Material.RAW_TROUT", quantity=Quantity(min_qty=1, max_qty=1), chance_percent=22.222),
+            DropEntry(item_name='Mud', item_ref="Material.MUD", quantity=Quantity(min_qty=1, max_qty=1), chance_percent=11.111),
+            DropEntry(item_name='Sea shell', item_ref="Material.SEA_SHELL", quantity=Quantity(min_qty=1, max_qty=1), chance_percent=11.111),
+            DropEntry(item_name='Sweet kelp', item_ref="Material.SWEET_KELP", quantity=Quantity(min_qty=1, max_qty=1), chance_percent=11.111),
+        ],
+        secondary_drop_table=[
+            DropEntry(item_name='Fishing chest', item_ref="Container.FISHING_CHEST", quantity=Quantity(min_qty=1, max_qty=1), chance_percent=0.4),
+        ],
+        base_steps=135,
+        base_xp=150,
+        max_efficiency=1.0,
+        description='While under the waters of the bog, you ready your fishing spear, primed to strike any fish that comes close enough. The murky water makes it difficult to see, but you are determined to catch something.',
+    )
+
+    ANTIQUE_MARKET_ASSESSOR = ActivityInfo(
+        name='Antique Market Assessor',
+        primary_skill='Trinketry',
+        locations=[Location.BLACKSPELL_PORT],
+        skill_requirements={'Trinketry': 40},
+        requirements={},
+        drop_table=[
+            DropEntry(item_name='Nothing', item_ref=None, quantity=Quantity(is_na=True), chance_percent=25.0),
+            DropEntry(item_name='Coins', item_ref="Currency.COIN", quantity=Quantity(min_qty=10, max_qty=100), chance_percent=12.736),
+            DropEntry(item_name='Rough opal', item_ref="Material.ROUGH_OPAL", quantity=Quantity(min_qty=1, max_qty=1), chance_percent=28.302),
+            DropEntry(item_name='Rough star pearl', item_ref="Material.ROUGH_STAR_PEARL", quantity=Quantity(min_qty=1, max_qty=1), chance_percent=21.226),
+            DropEntry(item_name='Rough wrentmarine', item_ref="Material.ROUGH_WRENTMARINE", quantity=Quantity(min_qty=1, max_qty=1), chance_percent=7.075),
+            DropEntry(item_name='Rough jade', item_ref="Material.ROUGH_JADE", quantity=Quantity(min_qty=1, max_qty=1), chance_percent=2.83),
+            DropEntry(item_name='Rough topaz', item_ref="Material.ROUGH_TOPAZ", quantity=Quantity(min_qty=1, max_qty=1), chance_percent=2.83),
+        ],
+        secondary_drop_table=[
+            DropEntry(item_name='Coin pouch', item_ref="Container.COIN_POUCH", quantity=Quantity(min_qty=1, max_qty=1), chance_percent=0.4),
+            DropEntry(item_name='Gem pouch', item_ref="Container.GEM_POUCH", quantity=Quantity(min_qty=1, max_qty=1), chance_percent=0.4),
+            DropEntry(item_name='Trinketry chest', item_ref="Container.TRINKETRY_CHEST", quantity=Quantity(min_qty=1, max_qty=1), chance_percent=0.4),
+            DropEntry(item_name='Meteorite fragment', item_ref="Collectible.METEORITE_FRAGMENT", quantity=Quantity(min_qty=1, max_qty=1), chance_percent=0.1),
+        ],
+        base_steps=600,
+        base_xp=225,
+        max_efficiency=0.9,
+        faction_reputation_reward=FactionReward(name='Erdwise', value=0.01),
+        description='The antique market in Blackspell Port is hectic, and it takes time to find buyers and sellers for various goods. You occasionally find a profitable transaction with a gem or rare item.',
+    )
+
 
 
 # Lookup dictionaries
@@ -3178,6 +3259,8 @@ ACTIVITIES_BY_NAME: Dict[str, ActivityInfo] = {
     'Wine grape stomping': Activity.WINE_GRAPE_STOMPING,
     'Wood carving': Activity.WOOD_CARVING,
     'Wreck diving': Activity.WRECK_DIVING,
+    'Bog Fishing (Spear)': Activity.BOG_FISHING_SPEAR,
+    'Antique Market Assessor': Activity.ANTIQUE_MARKET_ASSESSOR,
 }
 
 ACTIVITIES_BY_LOCATION: Dict[str, List[ActivityInfo]] = {}

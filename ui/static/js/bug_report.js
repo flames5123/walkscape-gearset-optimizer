@@ -5,7 +5,10 @@
  * - Screenshot capture of all tabs
  * - Session state snapshot
  * - Browser and app version detection
+ * - Debug log attachment when debug mode is active
  */
+
+import { getDebugLog, isDebugEnabled } from './debug-console.js';
 
 // We'll use html2canvas from CDN
 const html2canvas = window.html2canvas;
@@ -57,12 +60,38 @@ async function captureScreenshot(element) {
             return null;
         }
 
+        // Resolve CSS custom properties that html2canvas can't handle
+        // by temporarily inlining computed sizes on gear slots
+        const gearSlots = element.querySelectorAll('.gear-slot');
+        const slotIcons = element.querySelectorAll('.gear-slot .slot-icon');
+        const savedStyles = [];
+
+        gearSlots.forEach(slot => {
+            const computed = getComputedStyle(slot);
+            savedStyles.push({ el: slot, width: slot.style.width, height: slot.style.height });
+            slot.style.width = computed.width;
+            slot.style.height = computed.height;
+        });
+
+        slotIcons.forEach(icon => {
+            const computed = getComputedStyle(icon);
+            savedStyles.push({ el: icon, width: icon.style.width, height: icon.style.height });
+            icon.style.width = computed.width;
+            icon.style.height = computed.height;
+        });
+
         const canvas = await window.html2canvas(element, {
             backgroundColor: '#1a1a1a',
-            scale: 1,
+            scale: window.devicePixelRatio || 2,
             logging: false,
             useCORS: true,
             allowTaint: true
+        });
+
+        // Restore original styles
+        savedStyles.forEach(({ el, width, height }) => {
+            el.style.width = width;
+            el.style.height = height;
         });
 
         return canvas.toDataURL('image/png');
@@ -163,17 +192,31 @@ async function submitBugReport(description, includeScreenshots = true) {
 
         // Submit to API
         console.log('Submitting to /api/bug-reports...');
+
+        // Build request body
+        const requestBody = {
+            description: description,
+            app_version: APP_VERSION,
+            browser_info: JSON.stringify(browserInfo),
+            screenshots: screenshots
+        };
+
+        // Always include JS console log in bug reports
+        const debugLog = getDebugLog();
+        if (debugLog && debugLog.length > 0) {
+            const formatted = debugLog.map(e =>
+                `${e.timestamp} [${e.level.toUpperCase()}] ${e.message}`
+            ).join('\n');
+            requestBody.debug_log = formatted;
+            console.log(`Including debug log (${debugLog.length} entries)`);
+        }
+
         const response = await fetch('/api/bug-reports', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
             },
-            body: JSON.stringify({
-                description: description,
-                app_version: APP_VERSION,
-                browser_info: JSON.stringify(browserInfo),
-                screenshots: screenshots
-            })
+            body: JSON.stringify(requestBody)
         });
 
         console.log('Response status:', response.status);

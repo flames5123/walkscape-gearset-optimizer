@@ -121,6 +121,7 @@ class SortingType(Enum):
     """Types for Sorting"""
     RECIPE = "recipe"
     ACTIVITY = "activity"
+    TRAVEL = "travel"
 
 # Sorting enum for optimizers
 class Sorting(Enum):
@@ -149,12 +150,15 @@ class Sorting(Enum):
     STEPS_PER_CRAFT = ("-current_steps", "current_steps", "Steps/Craft", [SortingType.RECIPE])
     MATERIALS_PER_CRAFT = ("-materials_per_craft", "materials_per_craft", "Materials/Craft", [SortingType.RECIPE])
     TOTAL_XP_PER_STEP = ("+total_xp_per_step", "total_xp_per_step", "Total XP/Step (of all skills)", [SortingType.ACTIVITY])
-    XP_PER_STEP = ("+primary_xp_per_step", "primary_xp_per_step", "Primary XP/Step", [SortingType.ACTIVITY, SortingType.RECIPE])
+    XP_PER_STEP = ("+primary_xp_per_step", "primary_xp_per_step", "Primary XP/Step", [SortingType.ACTIVITY, SortingType.RECIPE, SortingType.TRAVEL])
     TOTAL_XP = ("+total_xp_for_action", "total_xp_for_action", "Total XP per Action (of all skills)", [SortingType.ACTIVITY])
     EXPECTED_STEPS_PER_ACTION = ("-expected_steps_per_action", "expected_steps_per_action", "Steps/Action", [SortingType.ACTIVITY])
     TOTAL_STEPS = ("-steps_for_target", "steps_for_target", "Total Steps for X Quality", [SortingType.RECIPE])
     PRIMARY_XP = ("+primary_xp_per_action", "primary_xp_per_action", "Primary XP per Action", [SortingType.ACTIVITY, SortingType.RECIPE])
-    STEPS_PER_CHEST = ("-steps_for_chest", "steps_for_chest", "Minimize Steps/Chest", [SortingType.RECIPE])
+    STEPS_PER_CHEST = ("-steps_for_chest", "steps_for_chest", "Average Steps/Chest", [SortingType.RECIPE, SortingType.TRAVEL, SortingType.ACTIVITY])
+    STEPS_PER_FINE_MATERIAL = ("-steps_for_fine_material", "steps_for_fine_material", "Average Steps/Fine Material", [SortingType.ACTIVITY])
+    STEPS_PER_COLLECTIBLE = ("-steps_for_collectible", "steps_for_collectible", "Average Steps/Collectible", [SortingType.ACTIVITY])
+    AVG_TRAVEL_STEPS = ("-avg_travel_steps", "avg_travel_steps", "Average Steps", [SortingType.TRAVEL])
 
     @property
     def is_reverse(self):
@@ -234,6 +238,145 @@ class Sorting(Enum):
             return True  # First valid result is always "better"
         
         return Sorting.compare_by_priority(metrics_new, metrics_old, priority_list)
+
+    @staticmethod
+    def calculate_floors(priority_list, weights, baseline_metrics, max_metrics):
+        """
+        Calculate floor values for each metric based on weights.
+        
+        Floor = baseline + (max_achievable - baseline) × (weight / 100)
+        
+        For metrics with weight=100%, returns None (they use dynamic floors
+        tracked during local search, identical to current is_better behavior).
+        
+        Args:
+            priority_list: List of Sorting enums
+            weights: Dict mapping Sorting enum → int (0-100). Missing keys default to 100.
+            baseline_metrics: Dict of metric values with no gear
+            max_metrics: Dict of best metric values from greedy passes
+        
+        Returns:
+            Dict mapping metric_key → floor value (None for 100% weight metrics)
+        """
+        floors = {}
+        for sorting in priority_list:
+            weight = weights.get(sorting, 100)
+            key = sorting.metric_key
+            baseline = baseline_metrics.get(key, 0.0)
+            max_val = max_metrics.get(key, 0.0)
+            
+            if weight >= 100:
+                floors[key] = None  # Dynamic floor (strict no-regression)
+            else:
+                # Handle inf/nan: if both are inf or equal, floor = baseline (unconstrained)
+                import math
+                if math.isinf(baseline) and math.isinf(max_val):
+                    floors[key] = baseline  # Both inf — metric is unconstrained
+                elif math.isinf(baseline) or math.isinf(max_val):
+                    floors[key] = baseline  # One is inf — use baseline as safe default
+                else:
+                    floor_val = baseline + (max_val - baseline) * (weight / 100.0)
+                    floors[key] = floor_val if not math.isnan(floor_val) else baseline
+        
+        return floors
+
+    @staticmethod
+    def is_better_with_floors(metrics_new, metrics_old, priority_list, weights, static_floors):
+        """
+        Compare gearsets respecting floor constraints.
+        
+        When all weights are 100%, produces identical results to is_better().
+        
+        Algorithm:
+        1. If metrics_old is None, return True (first valid result)
+        2. Reject if new drops any <100% metric below its static floor
+           when old was above
+        3. For 100% weight metrics: strict no-regression (dynamic floor)
+        4. For <100% weight metrics within floor bounds: allow regression
+           if a lower-priority metric improves
+        5. Composite tiebreaker when all priority comparisons are equal
+        
+        Args:
+            metrics_new: New metrics dict
+            metrics_old: Old metrics dict (can be None)
+            priority_list: List of Sorting enums
+            weights: Dict mapping Sorting enum → int (0-100). Missing keys default to 100.
+            static_floors: Dict mapping metric_key → floor value (None for 100% metrics)
+        
+        Returns:
+            True if new is better
+        """
+        if metrics_old is None:
+            return True
+        
+        # Step 1: Reject if new drops any <100% metric below its static floor
+        # when old was above that floor
+        import math
+        for sorting in priority_list:
+            weight = weights.get(sorting, 100)
+            if weight >= 100:
+                continue  # 100% metrics use dynamic floors (step 2)
+            
+            key = sorting.metric_key
+            floor = static_floors.get(key)
+            if floor is None:
+                continue
+            
+            new_sort = sorting.get_sort_value(metrics_new)
+            old_sort = sorting.get_sort_value(metrics_old)
+            
+            # Skip comparison if any value is nan or inf
+            if not math.isfinite(new_sort) or not math.isfinite(old_sort) or not math.isfinite(floor):
+                continue
+            
+            # get_sort_value negates maximize metrics, so lower = better
+            # For floor: convert floor to sort-space too
+            floor_sort = -floor if sorting.is_reverse else floor
+            
+            # Reject if new is below floor AND old was at or above floor
+            if new_sort > floor_sort and old_sort <= floor_sort:
+                return False
+        
+        # Step 2 & 3: Priority-order comparison
+        # For 100% metrics: strict no-regression (like current is_better)
+        # For <100% metrics: allow regression if a lower-priority metric improves
+        for sorting in priority_list:
+            weight = weights.get(sorting, 100)
+            new_sort = sorting.get_sort_value(metrics_new)
+            old_sort = sorting.get_sort_value(metrics_old)
+            
+            # Skip non-finite values (inf/nan metrics are unconstrained)
+            if not math.isfinite(new_sort) or not math.isfinite(old_sort):
+                continue
+            
+            if weight >= 100:
+                # Strict: no regression allowed (dynamic floor behavior)
+                if new_sort < old_sort:
+                    return True   # New is strictly better on this metric
+                elif new_sort > old_sort:
+                    return False  # New regressed on a 100% metric — reject
+                # Equal: continue to next priority
+            else:
+                # Flexible: allow regression within floor bounds
+                if new_sort < old_sort:
+                    return True   # New is better on this metric — accept
+                elif new_sort > old_sort:
+                    # Regression on a <100% metric — allowed if floor is satisfied
+                    # (floor violation already checked in step 1)
+                    # Continue to check if a lower-priority metric improves
+                    continue
+                # Equal: continue to next priority
+        
+        # Step 4: Composite tiebreaker — sum of all sort values (skip inf/nan)
+        import math
+        composite_new = sum(s.get_sort_value(metrics_new) for s in priority_list 
+                          if math.isfinite(s.get_sort_value(metrics_new)))
+        composite_old = sum(s.get_sort_value(metrics_old) for s in priority_list
+                          if math.isfinite(s.get_sort_value(metrics_old)))
+        if composite_new < composite_old:
+            return True
+        
+        return False
 
 # Region enum
 class Region(Enum):
@@ -451,76 +594,6 @@ def smitha(location: Union[Location, str]) -> str:
 def crafta(location: Union[Location, str]) -> str:
     """Advanced crafting service."""
     return craft(location, ServiceTier.ADVANCED)
-
-
-
-# Region mappings for location-based equipment requirements
-LOCATION_REGIONS = {
-    # Jarvonia
-    Location.AZURAZERA: Region.JARVONIA,
-    Location.BARBANTOK: Region.JARVONIA,
-    Location.BEACH_OF_WOES: Region.JARVONIA,
-    Location.BLACK_EYE_PEAK: Region.JARVONIA,
-    Location.CASBRANT_FIELDS: Region.JARVONIA,
-    Location.CENTAHAM: Region.JARVONIA,
-    Location.COLDINGTON: Region.JARVONIA,
-    Location.DISENCHANTED_FOREST: Region.JARVONIA,
-    Location.FORT_OF_PERMAFROST: Region.JARVONIA,
-    Location.FROSTBITE_MOUNTAIN: Region.JARVONIA,
-    Location.FRUSENHOLM: Region.JARVONIA,
-    Location.HORN_OF_RESPITE: Region.JARVONIA,
-    Location.KALLAHEIM: Region.JARVONIA,
-    Location.NOMAD_WOODS: Region.JARVONIA,
-    Location.NOISELESS_PASS: Region.JARVONIA,
-    Location.NORSACK_PLAINS: Region.JARVONIA,
-    Location.NURTURING_NOOK_SPRINGS: Region.JARVONIA,
-    Location.PIT_OF_PITTANCE: Region.JARVONIA,
-    Location.PORT_SKILDAR: Region.JARVONIA,
-    Location.SANGUINE_HILLS: Region.JARVONIA,
-    Location.WINTER_WAVES_GLACIER: Region.JARVONIA,
-    Location.WINTERS_END: Region.JARVONIA,
-    
-    # Trellin (GDTE)
-    Location.MANGROVE_FOREST: Region.TRELLIN,
-    Location.FARSAND_COAST: Region.TRELLIN,
-    Location.SALSFIRTH: Region.TRELLIN,
-    Location.GRANFIDDICH_SHORES: Region.TRELLIN,
-    Location.GRANFIDDICH: Region.TRELLIN,
-    Location.WARRENFIELD: Region.TRELLIN,
-    
-    # Erdwise (GDTE)
-    Location.OLD_ARENA_RUINS: Region.ERDWISE,
-    Location.BLACKSPELL_PORT: Region.ERDWISE,
-    Location.EVERHAVEN: Region.ERDWISE,
-    Location.BILGEMONT_PORT: Region.ERDWISE,
-    Location.RED_COAST: Region.ERDWISE,
-    
-    # Halfling Rebels (GDTE - swamp areas)
-    Location.WITCHED_WOODS: Region.HALFLING_REBELS,
-    Location.HALFLING_CAMPGROUNDS: Region.HALFLING_REBELS,
-    Location.HALFMAW_HIDEOUT: Region.HALFLING_REBELS,
-    Location.BOG_TOP: Region.HALFLING_REBELS,
-    Location.BOG_BOTTOM: Region.HALFLING_REBELS,
-    
-    # Syrenthia (underwater)
-    Location.CASBRANTS_GRAVE: Region.SYRENTHIA,
-    Location.DARKTIDE_TRENCH: Region.SYRENTHIA,
-    Location.ELARAS_LAGOON: Region.SYRENTHIA,
-    Location.KELP_FOREST: Region.SYRENTHIA,
-    Location.UNDERWATER_CAVE: Region.SYRENTHIA,
-    Location.VASTALUME: Region.SYRENTHIA,
-}
-
-
-def get_location_region(location: Union[Location, str]) -> Optional[Region]:
-    """Get the region for a location"""
-    if isinstance(location, str):
-        # Try to find matching Location enum
-        for loc_enum in Location:
-            if loc_enum.value == location:
-                return LOCATION_REGIONS.get(loc_enum)
-        return None
-    return LOCATION_REGIONS.get(location)
 
 
 # ============================================================================

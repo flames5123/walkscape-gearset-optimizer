@@ -64,7 +64,8 @@ class OptimizeButton extends Component {
             }
         });
 
-        this.render();
+        // Initialize from current store state (session may already be loaded)
+        this.onSelectionChange();
     }
 
     /**
@@ -323,10 +324,21 @@ class OptimizeButton extends Component {
 
         this.isOptimizing = true;
 
-        // Store optimization start time for polling
-        this.optimizationStartTime = new Date().toISOString();
-
-        this.render();
+        // Slide up equip button if visible, then re-render
+        const $equipBtn = this.$element.find('.equip-gearset-btn');
+        if ($equipBtn.length && this.showEquipButton) {
+            this.showEquipButton = false;
+            this.optimizedGearsetId = null;
+            $equipBtn.slideUp(300, () => {
+                this.optimizationStartTime = new Date().toISOString();
+                this.render();
+            });
+        } else {
+            this.showEquipButton = false;
+            this.optimizedGearsetId = null;
+            this.optimizationStartTime = new Date().toISOString();
+            this.render();
+        }
 
         try {
             // Determine optimization type and ID
@@ -514,8 +526,13 @@ class OptimizeButton extends Component {
                     this.optimizedGearsetId = newOptimizedGearset.id;
                     this.showEquipButton = true;
 
-                    // Show notification
-                    api.showSuccess(`Optimization complete! Saved: ${newOptimizedGearset.name}`);
+                    // Show notification with equip action
+                    const toastHtml = `Optimization complete! Saved: ${newOptimizedGearset.name}<br><span style="opacity:0.8;font-size:0.9em;">Click to equip optimized gear set</span>`;
+                    api.showSuccess(null, {
+                        html: toastHtml,
+                        duration: 10000,
+                        onClick: () => this.equipOptimizedGearset()
+                    });
 
                     // Reload gearsets from API
                     store._loadGearSets(store.state.session.uuid);
@@ -855,7 +872,7 @@ class OptimizeButton extends Component {
                 <!-- Equip Button (shown after optimization completes) -->
                 ${this.showEquipButton ? `
                     <button class="equip-gearset-btn">
-                        Equip Gear Set
+                        Equip Optimized Gear Set
                     </button>
                 ` : ''}
             </div>

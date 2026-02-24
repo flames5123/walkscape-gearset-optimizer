@@ -54,6 +54,21 @@ class ImportModal extends Component {
                         <p style="margin-bottom: var(--spacing-md); color: var(--text-secondary);">
                             ${description}
                         </p>
+                        <div class="import-instructions" style="margin-bottom: var(--spacing-md);">
+                            <a href="#" class="import-instructions-toggle" style="color: var(--text-link, var(--accent-primary)); font-size: 0.9em; text-decoration: none; display: inline-block; cursor: pointer;">
+                                <span class="toggle-arrow" style="display: inline-block; font-size: 0.7em; vertical-align: middle; margin-right: 4px;">▶</span>
+                                How to export your character data from the game
+                            </a>
+                            <div class="import-instructions-content" style="display: none;">
+                                <ol style="margin: var(--spacing-sm) 0 0 var(--spacing-md); padding-left: var(--spacing-sm); color: var(--text-secondary); font-size: 0.9em; line-height: 1.6;">
+                                    <li>Tap the <strong>☰ menu</strong> (three lines icon)</li>
+                                    <li>Tap <strong>Settings</strong></li>
+                                    <li>Scroll all the way to the bottom</li>
+                                    <li>Tap <strong>Export character data to clipboard</strong></li>
+                                    <li>Copy the exported text and paste it below</li>
+                                </ol>
+                            </div>
+                        </div>
                         <textarea 
                             class="import-textarea" 
                             placeholder="Paste your character export JSON here..."
@@ -99,7 +114,8 @@ class ImportModal extends Component {
      * Attach jQuery event handlers
      */
     attachEvents() {
-        // Cancel button
+        // Remove previous handlers to prevent stacking on re-render
+        this.$element.off();
         this.$element.on('click', '.cancel-btn', () => {
             this.handleCancel();
         });
@@ -114,6 +130,17 @@ class ImportModal extends Component {
             if ($(e.target).hasClass('modal-overlay')) {
                 this.handleCancel();
             }
+        });
+
+        // Toggle import instructions slide-down
+        this.$element.on('click', '.import-instructions-toggle', (e) => {
+            e.preventDefault();
+            const $content = this.$element.find('.import-instructions-content');
+            const $arrow = this.$element.find('.toggle-arrow');
+
+            $content.slideToggle(250, () => {
+                $arrow.text($content.is(':visible') ? '▼' : '▶');
+            });
         });
 
         // Clear error when user starts typing

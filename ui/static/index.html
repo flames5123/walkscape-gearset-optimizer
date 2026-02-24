@@ -6,6 +6,13 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Walkscape Optimizer</title>
 
+    <!-- Favicon & Home Screen Icons -->
+    <link rel="icon" type="image/svg+xml" href="/assets/icons/favicon.svg">
+    <link rel="icon" type="image/png" sizes="32x32" href="/assets/icons/favicon-32.png">
+    <link rel="icon" type="image/png" sizes="16x16" href="/assets/icons/favicon-16.png">
+    <link rel="apple-touch-icon" sizes="180x180" href="/assets/icons/apple-touch-icon.png">
+    <link rel="manifest" href="/static/manifest.json">
+
     <!-- jQuery 3.7.1 from official CDN -->
     <script src="https://code.jquery.com/jquery-3.7.1.min.js"
         integrity="sha256-/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=" crossorigin="anonymous"></script>
@@ -19,19 +26,28 @@
     <script src="/static/js/pako.min.js"></script>
 
     <!-- Styles -->
-    <link rel="stylesheet" href="/static/css/styles.css?v=3">
+    <link rel="stylesheet" href="/static/css/styles.css?v=4">
 </head>
 
 <body>
     <!-- Header Bar -->
     <header class="header-bar">
         <div class="header-content">
-            <button class="help-btn" id="help-btn" aria-label="Help & Tutorial" title="Help & Tutorial">
-                <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
-                    <path
-                        d="M10,19H13V22H10V19M12,2C17.35,2.22 19.68,7.62 16.5,11.67C15.67,12.67 14.33,13.33 13.67,14.17C13,15 13,16 13,17H10C10,15.33 10,13.92 10.67,12.92C11.33,11.92 12.67,11.33 13.5,10.67C15.92,8.43 15.32,5.26 12,5A3,3 0 0,0 9,8H6A6,6 0 0,1 12,2Z" />
-                </svg>
-            </button>
+            <div class="header-left-buttons">
+                <button class="help-btn" id="help-btn" aria-label="Help & Tutorial" title="Help & Tutorial">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
+                        <path
+                            d="M10,19H13V22H10V19M12,2C17.35,2.22 19.68,7.62 16.5,11.67C15.67,12.67 14.33,13.33 13.67,14.17C13,15 13,16 13,17H10C10,15.33 10,13.92 10.67,12.92C11.33,11.92 12.67,11.33 13.5,10.67C15.92,8.43 15.32,5.26 12,5A3,3 0 0,0 9,8H6A6,6 0 0,1 12,2Z" />
+                    </svg>
+                </button>
+                <button class="announcements-btn" id="announcements-btn" aria-label="Announcements"
+                    title="Announcements">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
+                        <path
+                            d="M12,8H4A2,2 0 0,0 2,10V14A2,2 0 0,0 4,16H5V20A1,1 0 0,0 6,21H8A1,1 0 0,0 9,20V16H12L17,20V4L12,8M21.5,12C21.5,13.71 20.54,15.26 19,16V8C20.54,8.75 21.5,10.3 21.5,12Z" />
+                    </svg>
+                </button>
+            </div>
             <h1>Walkscape Optimizer</h1>
             <div class="header-buttons">
                 <button class="about-btn" id="about-btn" aria-label="About" title="About this tool">
@@ -43,7 +59,7 @@
                 <button class="report-btn" id="report-btn" aria-label="Report Bug" title="Report a bug">
                     <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
                         <path
-                            d="M12,8H4A2,2 0 0,0 2,10V14A2,2 0 0,0 4,16H5V20A1,1 0 0,0 6,21H8A1,1 0 0,0 9,20V16H12L17,20V4L12,8M21.5,12C21.5,13.71 20.54,15.26 19,16V8C20.54,8.75 21.5,10.3 21.5,12Z" />
+                            d="M14,12H10V10H14M14,16H10V14H14M20,8H17.19C16.74,7.22 16.12,6.55 15.37,6.04L17,4.41L15.59,3L13.42,5.17C12.96,5.06 12.5,5 12,5C11.5,5 11.04,5.06 10.59,5.17L8.41,3L7,4.41L8.62,6.04C7.88,6.55 7.26,7.22 6.81,8H4V10H6.09C6.04,10.33 6,10.66 6,11V12H4V14H6V15C6,15.34 6.04,15.67 6.09,16H4V18H6.81C7.85,19.79 9.78,21 12,21C14.22,21 16.15,19.79 17.19,18H20V16H17.91C17.96,15.67 18,15.34 18,15V14H20V12H18V11C18,10.66 17.96,10.33 17.91,10H20V8M16,15A4,4 0 0,1 12,19A4,4 0 0,1 8,15V11A4,4 0 0,1 12,7A4,4 0 0,1 16,11V15Z" />
                     </svg>
                 </button>
                 <button class="settings-gear" id="settings-btn" aria-label="Settings">
@@ -288,6 +304,31 @@
             </div>
         </div>
     </div>
+
+    <!-- Announcements Modal -->
+    <div id="announcements-modal" class="modal-overlay" style="display: none;">
+        <div class="modal announcements-modal-content">
+            <div class="modal-header">
+                <h2>Announcements</h2>
+                <button class="close-btn" id="announcements-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div id="announcements-list" class="announcements-list">
+                    <p class="announcements-loading">Loading announcements...</p>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-primary" id="announcements-ok">OK</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Service Worker Registration (for PWA installability) -->
+    <script>
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('/sw.js').catch(() => { });
+        }
+    </script>
 
     <!-- JavaScript Modules -->
     <script type="module" src="/static/js/main.js"></script>

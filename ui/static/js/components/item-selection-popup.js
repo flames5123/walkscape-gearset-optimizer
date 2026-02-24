@@ -19,6 +19,7 @@ import Component from './base.js';
 import store from '../state.js';
 import api from '../api.js';
 import KeyboardNavigator from '../utils/keyboard-navigation.js';
+import { GearSlotGrid } from './gear-slot-grid.js';
 
 /**
  * Format condition text for stat display
@@ -147,6 +148,9 @@ class ItemSelectionPopup extends Component {
         // Keyboard navigation
         this.keyboardNav = null;
 
+        // Tool slot swipe navigation state
+        this._slotSwipe = { startX: 0, startY: 0, tracking: false };
+
         // Subscribe to Column 1 state changes
         this.subscribe('items', () => {
             if (this.visible) {
@@ -165,6 +169,83 @@ class ItemSelectionPopup extends Component {
 
         this.render();
         this.attachEvents();
+    }
+
+    /**
+     * Get the ordered list of all navigable slots, skipping locked tool slots.
+     * Order matches the UI grid: gear rows → tool rows → special slots.
+     * @returns {string[]}
+     */
+    getNavigableSlots() {
+        const level = window.calculateCharacterLevel
+            ? window.calculateCharacterLevel(store.state.character)
+            : 1;
+        const unlockedCount = GearSlotGrid.getUnlockedToolSlots(level);
+
+        const slots = [];
+        // Gear slots (row by row, left to right)
+        for (const row of GearSlotGrid.GEAR_SLOTS) {
+            for (const s of row) slots.push(s);
+        }
+        // Tool slots (only unlocked)
+        for (let i = 0; i < unlockedCount; i++) {
+            slots.push(GearSlotGrid.TOOL_SLOTS[i]);
+        }
+        // Special slots
+        for (const s of GearSlotGrid.SPECIAL_SLOTS) {
+            slots.push(s);
+        }
+        return slots;
+    }
+
+    /**
+     * Navigate to an adjacent slot with a slide animation.
+     * @param {number} direction  -1 = previous, +1 = next
+     */
+    navigateSlot(direction) {
+        const navigable = this.getNavigableSlots();
+        const curIdx = navigable.indexOf(this.slot);
+        if (curIdx < 0) return;
+
+        const nextIdx = curIdx + direction;
+        if (nextIdx < 0 || nextIdx >= navigable.length) return;
+
+        const nextSlot = navigable[nextIdx];
+        const slideOut = direction > 0 ? 'slide-out-left' : 'slide-out-right';
+        const slideIn = direction > 0 ? 'slide-in-right' : 'slide-in-left';
+
+        const $content = this.$element.find('.item-selection-popup .modal-content');
+
+        // Slide current content out
+        $content.addClass(slideOut);
+
+        setTimeout(() => {
+            // Switch slot and reload
+            this.slot = nextSlot;
+            this.searchText = '';
+            this.expandedItemId = null;
+
+            this.loadItemsForSlot(nextSlot).then(() => {
+                this.render();
+
+                // Keep overlay visible
+                const $overlay = this.$element.find('.modal-overlay');
+                $overlay.css('display', 'flex').addClass('show');
+
+                // Trigger slide-in on new content
+                const $newContent = this.$element.find('.item-selection-popup .modal-content');
+                $newContent.addClass(slideIn);
+
+                requestAnimationFrame(() => {
+                    requestAnimationFrame(() => {
+                        $newContent.removeClass(slideIn);
+                    });
+                });
+
+                this.attachEvents();
+                this.initKeyboardNav();
+            });
+        }, 150); // match CSS transition duration
     }
 
     /**
@@ -296,6 +377,15 @@ class ItemSelectionPopup extends Component {
         if (this.keyboardNav) {
             this.keyboardNav.detach();
             this.keyboardNav = null;
+        }
+
+        // Clean up swipe listeners
+        const overlay = $overlay[0];
+        if (overlay && this._swipeStartHandler) {
+            overlay.removeEventListener('touchstart', this._swipeStartHandler);
+            overlay.removeEventListener('touchend', this._swipeEndHandler);
+            this._swipeStartHandler = null;
+            this._swipeEndHandler = null;
         }
 
         // Remove show class to trigger fade-out animation
@@ -624,12 +714,72 @@ class ItemSelectionPopup extends Component {
 
         // For crafted items, use quality from state
         if (item.type === 'crafted_item') {
+            // For ring slots, check if the same item is already equipped in the other ring slot
+            // If so, use the next-best available quality
+            if (item.slot === 'ring' && this.slot && this.slot.startsWith('ring')) {
+                const quality = this.getAvailableRingQuality(item, itemState);
+                return ItemSelectionPopup.QUALITY_TO_RARITY[quality.toLowerCase()] || 'common';
+            }
             const quality = itemState.quality || 'Normal';
             return ItemSelectionPopup.QUALITY_TO_RARITY[quality.toLowerCase()] || 'common';
         }
 
         // For non-crafted items, use rarity
         return (item.rarity || 'common').toLowerCase();
+    }
+
+    /**
+     * Get the best available quality for a ring item, considering what's already equipped
+     * in the other ring slot.
+     * 
+     * @param {Object} item - Ring item
+     * @param {Object} itemState - Item state from store
+     * @returns {string} Quality name (e.g., 'Excellent', 'Good')
+     */
+    getAvailableRingQuality(item, itemState) {
+        const otherSlot = this.slot === 'ring1' ? 'ring2' : 'ring1';
+        const currentGear = store.state.gearsets?.current || {};
+        const otherRingItem = currentGear[otherSlot];
+
+        // If the other ring slot has the same item equipped, we need to use a different quality
+        if (otherRingItem && otherRingItem.itemId === item.id && item.type === 'crafted_item') {
+            const otherQuality = otherRingItem.quality;
+            const ring1Quality = itemState.ring1_quality || itemState.quality || 'Normal';
+            const ring2Quality = itemState.ring2_quality || 'None';
+
+            // Quality hierarchy (best to worst)
+            const qualityHierarchy = ['Eternal', 'Perfect', 'Excellent', 'Great', 'Good', 'Normal'];
+
+            // Collect all available qualities with their counts
+            const availableQualities = {};
+            if (ring1Quality && ring1Quality !== 'None') {
+                availableQualities[ring1Quality] = (availableQualities[ring1Quality] || 0) + 1;
+            }
+            if (ring2Quality && ring2Quality !== 'None') {
+                availableQualities[ring2Quality] = (availableQualities[ring2Quality] || 0) + 1;
+            }
+
+            // The other slot is using one of these qualities - subtract it
+            if (otherQuality && availableQualities[otherQuality]) {
+                availableQualities[otherQuality]--;
+                if (availableQualities[otherQuality] <= 0) {
+                    delete availableQualities[otherQuality];
+                }
+            }
+
+            // Return the best remaining quality
+            for (const q of qualityHierarchy) {
+                if (availableQualities[q] && availableQualities[q] > 0) {
+                    return q;
+                }
+            }
+
+            // No quality left - this item shouldn't be shown, but return Normal as fallback
+            return 'Normal';
+        }
+
+        // No conflict - use the best available quality
+        return itemState.quality || 'Normal';
     }
 
     /**
@@ -682,6 +832,12 @@ class ItemSelectionPopup extends Component {
         filtered = this.applyStatFilter(filtered);
         filtered = this.applySearchFilter(filtered);
 
+        // For ring slots, filter out crafted ring items that have no available quality
+        // (i.e., the other ring slot already uses all owned copies)
+        if (this.slot && this.slot.startsWith('ring')) {
+            filtered = this.filterUnavailableRings(filtered);
+        }
+
         // Deduplicate by quality (keep highest)
         filtered = this.deduplicateByQuality(filtered);
 
@@ -689,6 +845,62 @@ class ItemSelectionPopup extends Component {
         filtered = this.sortItems(filtered);
 
         return filtered;
+    }
+
+    /**
+     * Filter out ring items that are no longer available because the other ring slot
+     * already uses all owned copies.
+     * 
+     * @param {Array} items - Items to filter
+     * @returns {Array} Filtered items
+     */
+    filterUnavailableRings(items) {
+        const otherSlot = this.slot === 'ring1' ? 'ring2' : 'ring1';
+        const currentGear = store.state.gearsets?.current || {};
+        const otherRingItem = currentGear[otherSlot];
+
+        if (!otherRingItem) {
+            return items;
+        }
+
+        return items.filter(item => {
+            // Only check ring items that match the other slot's item
+            if (item.slot !== 'ring' || item.id !== otherRingItem.itemId) {
+                return true;
+            }
+
+            const itemState = this.getItemState(item.id);
+
+            if (item.type === 'crafted_item') {
+                // For crafted rings, check if any quality remains after the other slot uses one
+                const ring1Quality = itemState.ring1_quality || itemState.quality || 'Normal';
+                const ring2Quality = itemState.ring2_quality || 'None';
+
+                // Count total available qualities
+                const availableQualities = {};
+                if (ring1Quality && ring1Quality !== 'None') {
+                    availableQualities[ring1Quality] = (availableQualities[ring1Quality] || 0) + 1;
+                }
+                if (ring2Quality && ring2Quality !== 'None') {
+                    availableQualities[ring2Quality] = (availableQualities[ring2Quality] || 0) + 1;
+                }
+
+                // Subtract the quality used by the other slot
+                const otherQuality = otherRingItem.quality;
+                if (otherQuality && availableQualities[otherQuality]) {
+                    availableQualities[otherQuality]--;
+                }
+
+                // Check if any quality remains
+                const totalRemaining = Object.values(availableQualities).reduce((sum, count) => sum + count, 0);
+                return totalRemaining > 0;
+            } else {
+                // For non-crafted rings, check quantity
+                const ringQuantity = itemState.ring_quantity || 1;
+                // Other slot already uses 1, so we need at least 2
+                return ringQuantity >= 2;
+            }
+        });
     }
 
     /**
@@ -710,7 +922,8 @@ class ItemSelectionPopup extends Component {
             hide_fine: overrideItemState.hide_fine !== undefined ? overrideItemState.hide_fine : baseItemState.hide_fine,
             quality: overrideItemState.quality !== undefined ? overrideItemState.quality : baseItemState.quality,
             ring1_quality: overrideItemState.ring1_quality !== undefined ? overrideItemState.ring1_quality : baseItemState.ring1_quality,
-            ring2_quality: overrideItemState.ring2_quality !== undefined ? overrideItemState.ring2_quality : baseItemState.ring2_quality
+            ring2_quality: overrideItemState.ring2_quality !== undefined ? overrideItemState.ring2_quality : baseItemState.ring2_quality,
+            ring_quantity: overrideItemState.ring_quantity !== undefined ? overrideItemState.ring_quantity : baseItemState.ring_quantity
         };
     }
 
@@ -881,7 +1094,13 @@ class ItemSelectionPopup extends Component {
 
         // For crafted items, get stats for selected quality
         if (item.type === 'crafted_item' && item.stats_by_quality) {
-            const quality = itemState.quality || 'Normal';
+            let quality;
+            // For ring slots, use the available quality (accounting for other ring slot)
+            if (item.slot === 'ring' && this.slot && this.slot.startsWith('ring')) {
+                quality = this.getAvailableRingQuality(item, itemState);
+            } else {
+                quality = itemState.quality || 'Normal';
+            }
             stats = item.stats_by_quality[quality] || {};
         }
 
@@ -1363,17 +1582,31 @@ class ItemSelectionPopup extends Component {
             `;
         }
 
-        // Get rarity class
-        const rarityClass = this.getRarityClass(fullItem);
+        // Get rarity class - use the equipped quality, not the base item quality
+        let rarityClass;
+        if (fullItem.type === 'crafted_item' && currentSlotItem.quality) {
+            const qualityToRarity = {
+                'Eternal': 'ethereal', 'Perfect': 'legendary', 'Excellent': 'epic',
+                'Great': 'rare', 'Good': 'uncommon', 'Normal': 'common'
+            };
+            const rarity = qualityToRarity[currentSlotItem.quality] || 'common';
+            const rarityMap = {
+                'common': 'rarity-common', 'uncommon': 'rarity-uncommon', 'rare': 'rarity-rare',
+                'epic': 'rarity-epic', 'legendary': 'rarity-legendary', 'ethereal': 'rarity-ethereal'
+            };
+            rarityClass = rarityMap[rarity] || '';
+        } else {
+            rarityClass = this.getRarityClass(fullItem);
+        }
         const iconPath = fullItem.icon_path || '/assets/icons/items/equipment/placeholder.svg';
 
         // Render stats for the current item
         const itemState = this.getItemState(fullItem.id);
         let stats = fullItem.stats || {};
 
-        // For crafted items, get stats for selected quality
+        // For crafted items, get stats for the equipped quality (from the slot item, not the base state)
         if (fullItem.type === 'crafted_item' && fullItem.stats_by_quality) {
-            const quality = itemState.quality || 'Normal';
+            const quality = currentSlotItem.quality || itemState.quality || 'Normal';
             stats = fullItem.stats_by_quality[quality] || {};
         }
 
@@ -1423,8 +1656,33 @@ class ItemSelectionPopup extends Component {
             ? filteredItems.map(item => this.renderItemRow(item)).join('')
             : '<div class="no-items">No items found</div>';
 
+        // Build slot navigation arrows (mobile only)
+        let navArrows = '';
+        if (this.slot) {
+            const navigable = this.getNavigableSlots();
+            const curIdx = navigable.indexOf(this.slot);
+            const hasPrev = curIdx > 0;
+            const hasNext = curIdx >= 0 && curIdx < navigable.length - 1;
+
+            navArrows = `
+                <button class="slot-nav-arrow slot-nav-prev ${hasPrev ? '' : 'disabled'}" 
+                        aria-label="Previous slot" ${hasPrev ? '' : 'disabled'}>
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z"/>
+                    </svg>
+                </button>
+                <button class="slot-nav-arrow slot-nav-next ${hasNext ? '' : 'disabled'}" 
+                        aria-label="Next slot" ${hasNext ? '' : 'disabled'}>
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/>
+                    </svg>
+                </button>
+            `;
+        }
+
         const html = `
             <div class="modal-overlay item-selection-modal-overlay" style="display: none;">
+                ${navArrows}
                 <div class="modal item-selection-popup">
                     <div class="modal-header">
                         <h2>${slotName}</h2>
@@ -1463,6 +1721,50 @@ class ItemSelectionPopup extends Component {
         this.$element.off('change', '.stat-filter-dropdown');
         this.$element.off('click', '.unequip-btn');
         this.$element.off('click', '.current-item-expand');
+        this.$element.off('click', '.slot-nav-prev');
+        this.$element.off('click', '.slot-nav-next');
+
+        // Tool slot navigation arrows
+        this.$element.on('click', '.slot-nav-prev', (e) => {
+            e.stopPropagation();
+            this.navigateSlot(-1);
+        });
+        this.$element.on('click', '.slot-nav-next', (e) => {
+            e.stopPropagation();
+            this.navigateSlot(1);
+        });
+
+        // Swipe navigation within the popup (all slots)
+        const overlay = this.$element.find('.item-selection-modal-overlay')[0];
+        if (overlay) {
+            // Remove old listeners if any
+            if (this._swipeStartHandler) {
+                overlay.removeEventListener('touchstart', this._swipeStartHandler);
+                overlay.removeEventListener('touchend', this._swipeEndHandler);
+            }
+            this._swipeStartHandler = (e) => {
+                this._slotSwipe.startX = e.touches[0].clientX;
+                this._slotSwipe.startY = e.touches[0].clientY;
+                this._slotSwipe.tracking = true;
+            };
+            this._swipeEndHandler = (e) => {
+                if (!this._slotSwipe.tracking) return;
+                this._slotSwipe.tracking = false;
+                const touch = e.changedTouches[0];
+                const dx = touch.clientX - this._slotSwipe.startX;
+                const dy = touch.clientY - this._slotSwipe.startY;
+                // Must be mostly horizontal
+                if (Math.abs(dy) > 80) return;
+                if (Math.abs(dx) < 60) return;
+                if (dx < 0) {
+                    this.navigateSlot(1);  // swipe left = next
+                } else {
+                    this.navigateSlot(-1); // swipe right = prev
+                }
+            };
+            overlay.addEventListener('touchstart', this._swipeStartHandler, { passive: true });
+            overlay.addEventListener('touchend', this._swipeEndHandler, { passive: true });
+        }
 
         // Close button
         this.$element.on('click', '.close-btn', () => {
@@ -1559,8 +1861,16 @@ class ItemSelectionPopup extends Component {
 
         // For crafted items, convert quality to rarity
         let rarity = item.rarity;
+        let selectedQuality = null;
         if (item.type === 'crafted_item') {
-            const quality = itemState.quality || 'Normal';
+            // For ring slots, use the available quality (accounting for other ring slot)
+            let quality;
+            if (item.slot === 'ring' && this.slot && this.slot.startsWith('ring')) {
+                quality = this.getAvailableRingQuality(item, itemState);
+            } else {
+                quality = itemState.quality || 'Normal';
+            }
+            selectedQuality = quality;
             const qualityToRarity = {
                 'Eternal': 'ethereal',
                 'Perfect': 'legendary',
@@ -1580,7 +1890,7 @@ class ItemSelectionPopup extends Component {
             name: item.name,
             icon_path: item.icon_path,
             rarity: rarity,
-            quality: itemState.quality || (item.type === 'crafted_item' ? 'Normal' : null),
+            quality: selectedQuality || (item.type === 'crafted_item' ? 'Normal' : null),
             keywords: item.keywords || [],
             is_fine: item.is_fine || false  // Add is_fine flag for drop shadow
         };

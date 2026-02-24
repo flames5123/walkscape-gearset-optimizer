@@ -46,6 +46,10 @@ SORTING_PRIORITY = [
     # Sorting.XP_PER_STEP,
 ]
 
+# Dict mapping Sorting enum → int weight (0-100). Set by UI/worker.
+# When empty or all weights are 100, optimizer uses strict lexicographic comparison.
+SORTING_WEIGHTS = {}
+
 ACTIVITY = Activity.TREASURE_HUNT
 
 # Target a specific item drop (None = optimize for general activity efficiency)
@@ -68,6 +72,38 @@ DEBUG_ITEMS = {
     'head': ['Hydrilium Diving Helm', 'Mosquito'],  # Items to watch in head slot
     'legs': ['Wilderness Pants', 'Merfolk']  # Items to watch in legs slot
 }
+
+# ============================================================================
+# ACTIVITY-RELEVANT STAT FILTERING
+# ============================================================================
+
+# Stats that matter for activities (affect steps, XP, or loot)
+ACTIVITY_RELEVANT_STATS = {
+    'work_efficiency', 'double_action', 'double_rewards',
+    'steps_add', 'steps_percent',
+    'chest_finding', 'fine_material_finding', 'find_collectibles',
+    'find_bird_nests', 'find_gems',
+    'bonus_xp_add', 'bonus_xp_percent',
+    'inventory_space',
+    'item_finding',
+}
+
+# Stats that ONLY matter for crafting (useless for activities)
+CRAFTING_ONLY_STATS = {
+    'quality_outcome', 'no_materials_consumed',
+}
+
+
+def has_activity_relevant_stats(item, skill, location, character) -> bool:
+    """Check if item has any stats that matter for activities (not just crafting stats)."""
+    item_stats = item.get_stats_for_skill(skill, location=location, character=character)
+    if not item_stats:
+        return False
+    return any(
+        v != 0 and k in ACTIVITY_RELEVANT_STATS
+        for k, v in item_stats.items()
+    )
+
 
 # ============================================================================
 # HELPER FUNCTIONS
@@ -171,6 +207,130 @@ def calculate_gearset_metrics(gearset_dict: dict, activity, character, final: bo
     return metrics, total_stats
 
 # ============================================================================
+# FLOOR CALCULATION FOR WEIGHT SLIDERS
+# ============================================================================
+
+def calculate_optimization_floors(activity, character, consumable=None):
+    """
+    Calculate baseline and max_achievable for each metric, then compute floors.
+    
+    1. Baseline: calculate_gearset_metrics with empty gearset (ignore_requirements=True)
+    2. Max per metric: run quick greedy optimizing for each metric individually
+    3. Update baseline to worst seen across all greedy results and original baseline
+    4. Floor = baseline + (max - baseline) * (weight / 100)
+    
+    Args:
+        activity: Activity to optimize for
+        character: Character object
+        consumable: Optional consumable item
+    
+    Returns:
+        (static_floors, baseline_metrics, max_metrics)
+    """
+    global SORTING_PRIORITY
+    
+    print(f"\n{'='*70}")
+    print(f"CALCULATING OPTIMIZATION FLOORS")
+    print(f"{'='*70}")
+    
+    skill = activity.primary_skill.lower()
+    location = activity.locations[0] if activity.locations else None
+    
+    # Step 1: Calculate baseline with empty gearset
+    # Build empty gearset with all slots set to None
+    gear_slots = ['head', 'cape', 'back', 'chest', 'primary', 'secondary',
+                  'hands', 'legs', 'neck', 'feet', 'ring1', 'ring2']
+    tool_slots = character.get_tool_slots()
+    
+    empty_gearset = {slot: None for slot in gear_slots}
+    for i in range(tool_slots):
+        empty_gearset[f'tool{i}'] = None
+    if CONSUMABLE_ITEMS:
+        empty_gearset['consumable'] = None
+    
+    baseline_metrics, _ = calculate_gearset_metrics(
+        empty_gearset, activity, character, consumable=consumable
+    )
+    
+    print(f"\nBaseline metrics (empty gearset):")
+    for sorting in SORTING_PRIORITY:
+        key = sorting.metric_key
+        print(f"  {sorting.display_name}: {baseline_metrics.get(key, 0.0):.4f}")
+    
+    # Step 2: Run a quick greedy pass per metric to find max_achievable
+    max_metrics = {}
+    all_greedy_metrics = []  # Collect all greedy results for baseline adjustment
+    
+    original_priority = list(SORTING_PRIORITY)
+    
+    for sorting in SORTING_PRIORITY:
+        weight = SORTING_WEIGHTS.get(sorting, 100)
+        if weight >= 100:
+            # 100% weight metrics use dynamic floors, but we still need max_achievable
+            # for informational purposes. Skip the greedy pass — it's not needed.
+            max_metrics[sorting.metric_key] = baseline_metrics.get(sorting.metric_key, 0.0)
+            continue
+        
+        # Temporarily set this metric as the sole priority for greedy
+        SORTING_PRIORITY = [sorting]
+        
+        try:
+            greedy_gearset = get_greedy_initial_solution(activity, character, consumable=consumable)
+            greedy_metrics, _ = calculate_gearset_metrics(
+                greedy_gearset, activity, character, consumable=consumable
+            )
+            max_metrics[sorting.metric_key] = greedy_metrics.get(sorting.metric_key, 0.0)
+            all_greedy_metrics.append(greedy_metrics)
+            
+            print(f"\nMax achievable for {sorting.display_name}: {max_metrics[sorting.metric_key]:.4f}")
+        except Exception as e:
+            print(f"\nWarning: Greedy pass failed for {sorting.display_name}: {e}")
+            max_metrics[sorting.metric_key] = baseline_metrics.get(sorting.metric_key, 0.0)
+        
+    # Restore original priority
+    SORTING_PRIORITY = original_priority
+    
+    # Step 3: Update baseline to worst seen across all greedy results and original baseline
+    # This ensures the floor formula uses the true worst case as its 0% reference point
+    for greedy_result in all_greedy_metrics:
+        for sorting in SORTING_PRIORITY:
+            key = sorting.metric_key
+            greedy_val = greedy_result.get(key, 0.0)
+            baseline_val = baseline_metrics.get(key, 0.0)
+            
+            # "Worst" depends on metric direction
+            if sorting.is_reverse:
+                # Maximize metric: worst = lowest value
+                baseline_metrics[key] = min(baseline_val, greedy_val)
+            else:
+                # Minimize metric: worst = highest value
+                baseline_metrics[key] = max(baseline_val, greedy_val)
+    
+    print(f"\nAdjusted baseline metrics (worst seen):")
+    for sorting in SORTING_PRIORITY:
+        key = sorting.metric_key
+        print(f"  {sorting.display_name}: {baseline_metrics.get(key, 0.0):.4f}")
+    
+    # Step 4: Calculate floors
+    static_floors = Sorting.calculate_floors(
+        SORTING_PRIORITY, SORTING_WEIGHTS, baseline_metrics, max_metrics
+    )
+    
+    print(f"\nStatic floors:")
+    for sorting in SORTING_PRIORITY:
+        key = sorting.metric_key
+        floor = static_floors.get(key)
+        weight = SORTING_WEIGHTS.get(sorting, 100)
+        if floor is None:
+            print(f"  {sorting.display_name}: dynamic (100% weight)")
+        else:
+            print(f"  {sorting.display_name}: {floor:.4f} ({weight}% weight)")
+    
+    print(f"{'='*70}\n")
+    
+    return static_floors, baseline_metrics, max_metrics
+
+# ============================================================================
 # GREEDY INITIAL SOLUTION (from V9)
 # ============================================================================
 
@@ -191,9 +351,13 @@ def get_greedy_initial_solution(activity, character, consumable=None) -> dict:
     skill = activity.primary_skill.lower()
     location = activity.locations[0] if activity.locations else None
     
-    # Get all items (filter by unlock status)
+    # Get all items (filter by unlock status and activity-irrelevant items)
     all_items = []
     excluded_count = 0
+    irrelevant_stat_count = 0
+    required_keywords = activity.requirements.get('keyword_counts', {})
+    required_keyword_set = set(required_keywords.keys())
+    
     for item, qty in character.items.items():
         if qty > 0 and hasattr(item, 'get_stats_for_skill'):
             # Check if item is unlocked using the item's built-in method
@@ -202,9 +366,17 @@ def get_greedy_initial_solution(activity, character, consumable=None) -> dict:
                     excluded_count += 1
                     continue
             
+            # Skip items with no activity-relevant stats UNLESS they satisfy a required keyword
+            has_relevant = has_activity_relevant_stats(item, skill, location, character)
+            has_required_keyword = required_keyword_set and item_has_any_keyword(item, required_keyword_set)
+            
+            if not has_relevant and not has_required_keyword:
+                irrelevant_stat_count += 1
+                continue
+            
             all_items.append(item)
     
-    print(f"Found {len(all_items)} items to choose from ({excluded_count} locked)")
+    print(f"Found {len(all_items)} items to choose from ({excluded_count} locked, {irrelevant_stat_count} activity-irrelevant filtered)")
     
     # For each slot, pick best item
     gear_slots = ['head', 'cape', 'back', 'chest', 'primary', 'secondary',
@@ -224,19 +396,13 @@ def get_greedy_initial_solution(activity, character, consumable=None) -> dict:
         needed_keywords = {kw for kw, required in required_keywords.items() 
                           if current_keyword_counts[kw] < required}
         
-        best_item = None
-        best_metric = float('inf') if not SORTING_PRIORITY[0].is_reverse else float('-inf')
-        fallback_item = None  # Track first valid item as fallback
+        best_keyword_item = None  # Best item that has a needed keyword
+        best_keyword_metric = float('inf') if not SORTING_PRIORITY[0].is_reverse else float('-inf')
+        best_free_item = None  # Best item regardless of keywords
+        best_free_metric = float('inf') if not SORTING_PRIORITY[0].is_reverse else float('-inf')
         
         for item in all_items:
             if not hasattr(item, 'slot') or item.slot != item_slot:
-                continue
-            
-            # Check which needed keywords this item has
-            item_keywords = {kw for kw in needed_keywords if item_has_keyword(item, kw)}
-            
-            # Skip if we need keywords but this item doesn't have any
-            if needed_keywords and not item_keywords:
                 continue
             
             # Test this item in the slot
@@ -247,31 +413,41 @@ def get_greedy_initial_solution(activity, character, consumable=None) -> dict:
             if not is_gearset_valid(test_gearset, character, activity=None, check_requirements=False):
                 continue
             
-            # Track first valid item as fallback (for slots with no stat items like weapons)
-            if fallback_item is None:
-                fallback_item = item
-            
             metrics, _ = calculate_gearset_metrics(test_gearset, activity, character, consumable=consumable)
             metric_value = metrics[SORTING_PRIORITY[0].metric_key]
             
-            # Boost items that have needed keywords
+            # Check which needed keywords this item has
+            item_keywords = {kw for kw in needed_keywords if item_has_keyword(item, kw)}
+            
+            # Track best keyword item separately from best overall item
             if item_keywords:
                 if SORTING_PRIORITY[0].is_reverse:
-                    metric_value = metric_value * 1.5  # Boost for maximize metrics
+                    if metric_value > best_keyword_metric:
+                        best_keyword_metric = metric_value
+                        best_keyword_item = item
                 else:
-                    metric_value = metric_value * 0.5  # Boost for minimize metrics (lower is better)
+                    if metric_value < best_keyword_metric:
+                        best_keyword_metric = metric_value
+                        best_keyword_item = item
             
+            # Always track best overall item (keyword or not)
             if SORTING_PRIORITY[0].is_reverse:
-                if metric_value > best_metric:
-                    best_metric = metric_value
-                    best_item = item
+                if metric_value > best_free_metric:
+                    best_free_metric = metric_value
+                    best_free_item = item
             else:
-                if metric_value < best_metric:
-                    best_metric = metric_value
-                    best_item = item
+                if metric_value < best_free_metric:
+                    best_free_metric = metric_value
+                    best_free_item = item
         
-        # Use best item if found, otherwise use fallback (first valid item)
-        gearset[slot] = best_item if best_item else fallback_item
+        # Decision: if we still need keywords, prefer keyword item; otherwise pick best overall
+        if needed_keywords and best_keyword_item:
+            best_item = best_keyword_item
+        else:
+            best_item = best_free_item
+        
+        # Use best item if found
+        gearset[slot] = best_item
         
         # Update keyword counts
         if best_item:
@@ -300,18 +476,13 @@ def get_greedy_initial_solution(activity, character, consumable=None) -> dict:
         needed_keywords = {kw for kw, required in required_keywords.items() 
                           if current_keyword_counts[kw] < required}
         
-        best_tool = None
-        best_metric = float('inf') if not SORTING_PRIORITY[0].is_reverse else float('-inf')
+        best_keyword_tool = None
+        best_keyword_metric = float('inf') if not SORTING_PRIORITY[0].is_reverse else float('-inf')
+        best_free_tool = None
+        best_free_metric = float('inf') if not SORTING_PRIORITY[0].is_reverse else float('-inf')
         
         for item in all_items:
             if not hasattr(item, 'slot') or item.slot != 'tools':
-                continue
-            
-            # Check which needed keywords this item has
-            item_keywords = {kw for kw in needed_keywords if item_has_keyword(item, kw)}
-            
-            # Skip if we need keywords but this item doesn't have any
-            if needed_keywords and not item_keywords:
                 continue
             
             # Test this tool
@@ -325,32 +496,46 @@ def get_greedy_initial_solution(activity, character, consumable=None) -> dict:
             metrics, _ = calculate_gearset_metrics(test_gearset, activity, character, consumable=consumable)
             metric_value = metrics[SORTING_PRIORITY[0].metric_key]
             
-            # Boost items that have needed keywords
+            # Check which needed keywords this item has
+            item_keywords = {kw for kw in needed_keywords if item_has_keyword(item, kw)}
+            
+            # Track best keyword tool separately
             if item_keywords:
                 if SORTING_PRIORITY[0].is_reverse:
-                    metric_value = metric_value * 1.5  # Boost for maximize metrics
+                    if metric_value > best_keyword_metric:
+                        best_keyword_metric = metric_value
+                        best_keyword_tool = item
                 else:
-                    metric_value = metric_value * 0.5  # Boost for minimize metrics (lower is better)
+                    if metric_value < best_keyword_metric:
+                        best_keyword_metric = metric_value
+                        best_keyword_tool = item
             
+            # Always track best overall tool
             if SORTING_PRIORITY[0].is_reverse:
-                if metric_value > best_metric:
-                    best_metric = metric_value
-                    best_tool = item
+                if metric_value > best_free_metric:
+                    best_free_metric = metric_value
+                    best_free_tool = item
             else:
-                if metric_value < best_metric:
-                    best_metric = metric_value
-                    best_tool = item
+                if metric_value < best_free_metric:
+                    best_free_metric = metric_value
+                    best_free_tool = item
         
-        gearset[slot] = best_tool
+        # Decision: if we still need keywords, prefer keyword tool; otherwise pick best overall
+        if needed_keywords and best_keyword_tool:
+            selected_tool = best_keyword_tool
+        else:
+            selected_tool = best_free_tool
+        
+        gearset[slot] = selected_tool
         
         # Update keyword counts
-        if best_tool:
+        if selected_tool:
             for kw in required_keywords.keys():
-                if item_has_keyword(best_tool, kw):
+                if item_has_keyword(selected_tool, kw):
                     current_keyword_counts[kw] += 1
         
-        if best_tool:
-            print(f"  {slot}: {best_tool.name}")
+        if selected_tool:
+            print(f"  {slot}: {selected_tool.name}")
         else:
             print(f"  {slot}: None (no valid tools found)")
     
@@ -430,13 +615,26 @@ def local_search_refine(initial_gearset: dict, activity, character, max_iteratio
     current_gearset = initial_gearset.copy()
     metric_key = SORTING_PRIORITY[0].metric_key
     
+    # Calculate floors if any weight < 100%
+    use_floors = SORTING_WEIGHTS and any(
+        SORTING_WEIGHTS.get(s, 100) < 100 for s in SORTING_PRIORITY
+    )
+    static_floors = {}
+    if use_floors:
+        static_floors, _, _ = calculate_optimization_floors(activity, character, consumable=consumable)
+    
     # Calculate initial metrics
     current_metrics, current_stats = calculate_gearset_metrics(current_gearset, activity, character, consumable=consumable)
     current_value = current_metrics[metric_key]
     
     print(f"Initial {metric_key}: {current_value:.4f}")
     
-    # Get all items (filter by unlock status)
+    # Get all items (filter by unlock status and activity-irrelevant items)
+    skill = activity.primary_skill.lower()
+    location = activity.locations[0] if activity.locations else None
+    required_keywords = activity.requirements.get('keyword_counts', {})
+    required_keyword_set = set(required_keywords.keys())
+    
     all_items = []
     for item, qty in character.items.items():
         if qty > 0 and hasattr(item, 'get_stats_for_skill'):
@@ -444,6 +642,13 @@ def local_search_refine(initial_gearset: dict, activity, character, max_iteratio
             if hasattr(item, 'is_unlocked'):
                 if not item.is_unlocked(character, ignore_gear_requirements=True):
                     continue
+            
+            # Skip items with no activity-relevant stats UNLESS they satisfy a required keyword
+            has_relevant = has_activity_relevant_stats(item, skill, location, character)
+            has_required_keyword = required_keyword_set and item_has_any_keyword(item, required_keyword_set)
+            
+            if not has_relevant and not has_required_keyword:
+                continue
             
             all_items.append(item)
     
@@ -527,8 +732,14 @@ def local_search_refine(initial_gearset: dict, activity, character, max_iteratio
                         test_value = test_metrics[metric_key]
                         print(f"      -> Valid! Metric: {test_value:.4f} (current: {current_value:.4f})")
                     
-                    # Multi-level comparison
-                    is_better = Sorting.is_better(test_metrics, current_metrics, SORTING_PRIORITY)
+                    # Multi-level comparison (use floors if weights are configured)
+                    if use_floors:
+                        is_better = Sorting.is_better_with_floors(
+                            test_metrics, current_metrics, SORTING_PRIORITY,
+                            SORTING_WEIGHTS, static_floors
+                        )
+                    else:
+                        is_better = Sorting.is_better(test_metrics, current_metrics, SORTING_PRIORITY)
                     
                     if is_better:
                         # Take first improvement immediately (greedy)
@@ -660,8 +871,14 @@ def local_search_refine(initial_gearset: dict, activity, character, max_iteratio
                                         val_test = test_metrics[metric_key_display]
                                         print(f"        {sorting.display_name}: {val_current:.4f} → {val_test:.4f} (Δ {val_test - val_current:+.4f})")
                                 
-                                # Multi-level comparison
-                                is_better_result = Sorting.is_better(test_metrics, current_metrics, SORTING_PRIORITY)
+                                # Multi-level comparison (use floors if weights are configured)
+                                if use_floors:
+                                    is_better_result = Sorting.is_better_with_floors(
+                                        test_metrics, current_metrics, SORTING_PRIORITY,
+                                        SORTING_WEIGHTS, static_floors
+                                    )
+                                else:
+                                    is_better_result = Sorting.is_better(test_metrics, current_metrics, SORTING_PRIORITY)
                                 
                                 if is_debug_combo:
                                     print(f"      Is better: {is_better_result}")

@@ -38,6 +38,9 @@ import undoRedoManager from './undo-redo.js';
 import { initBugReport } from './bug_report.js';
 import { initAboutModal } from './about.js';
 import { initHelpModal, showHelpModal } from './help.js';
+import { initAnnouncementsModal } from './announcements.js';
+import { initDebugConsole } from './debug-console.js';
+import { initPullToRefresh, switchToTab, TAB_ORDER } from './pull-to-refresh.js';
 
 /**
  * Get session UUID from cookie or generate new one
@@ -402,6 +405,9 @@ function calculateCharacterLevel(character) {
     return 1;
 }
 
+// Expose globally so components (GearSlotGrid, ItemSelectionPopup) can use it
+window.calculateCharacterLevel = calculateCharacterLevel;
+
 /**
  * Initialize modals and attach to buttons
  */
@@ -452,6 +458,12 @@ function initializeModals() {
 
     // Initialize help modal
     initHelpModal();
+
+    // Initialize announcements modal
+    initAnnouncementsModal();
+
+    // Initialize debug console (checks API, only activates if enabled)
+    initDebugConsole();
 
     // Randomize gear button
     $('#randomize-gear-btn').on('click', () => {
@@ -607,6 +619,7 @@ $(document).ready(() => {
 
     initializeApp();
     initializeMobileTabs();
+    initPullToRefresh();
 });
 
 /**
@@ -614,20 +627,13 @@ $(document).ready(() => {
  */
 function initializeMobileTabs() {
     const $tabs = $('.mobile-tab');
-    const $columns = $('.column');
 
     $tabs.on('click', function () {
         const targetColumn = $(this).data('column');
-
-        // Update active tab
-        $tabs.removeClass('active');
-        $(this).addClass('active');
-
-        // Update active column
-        $columns.removeClass('active-mobile-column');
-        $(`#${targetColumn}`).addClass('active-mobile-column');
-
-        console.log('Switched to column:', targetColumn);
+        const targetIndex = TAB_ORDER.indexOf(targetColumn);
+        if (targetIndex >= 0) {
+            switchToTab(targetIndex);
+        }
     });
 }
 
@@ -784,10 +790,14 @@ async function randomizeActivityOrRecipe() {
             }
             store.state.column3.selectedActivity = randomActivity.id;
             store.state.column3.selectedRecipe = null;
+            store.state.column3.useFine = false;
 
             // Notify subscribers
             store._notifySubscribers('column3.selectedActivity');
             store._notifySubscribers('column3.selectedRecipe');
+
+            // Auto-save selection to session
+            store._saveColumn3Selection();
 
             console.log('Random activity selected:', randomActivity.name);
         } else {
@@ -813,10 +823,14 @@ async function randomizeActivityOrRecipe() {
             }
             store.state.column3.selectedRecipe = randomRecipe.id;
             store.state.column3.selectedActivity = null;
+            store.state.column3.useFine = false;
 
             // Notify subscribers
             store._notifySubscribers('column3.selectedRecipe');
             store._notifySubscribers('column3.selectedActivity');
+
+            // Auto-save selection to session
+            store._saveColumn3Selection();
 
             console.log('Random recipe selected:', randomRecipe.name);
         }

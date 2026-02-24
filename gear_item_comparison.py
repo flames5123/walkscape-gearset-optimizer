@@ -40,13 +40,13 @@ def calc_steps(base: int, gear: dict) -> float:
     flat = gear.get('steps_add', 0)
     pct = gear.get('steps_percent', 0.0)
     
-    eff = 1.00 + LEVEL_WE + we
-    adj = (base / eff) * (1 - pct)
-    rounded_total = math.ceil(adj)
-    steps_per_node = rounded_total / 10 + flat
-    steps_per_node = max(10, math.ceil(steps_per_node))
-    expected_paid_nodes = 10 / (1 + da)
-    return math.ceil(expected_paid_nodes * steps_per_node)
+    # Travel formula: base efficiency is 200% (2.0), NO WE cap
+    eff = 2.00 + LEVEL_WE + we
+    per_action = base / eff / 10.0
+    per_action = per_action * (1.0 + pct) + flat
+    per_action = max(10, math.ceil(per_action))
+    expected_paid_nodes = 10.0 / (1 + da)
+    return math.ceil(expected_paid_nodes * per_action)
 
 
 def format_stats(stats: dict) -> str:

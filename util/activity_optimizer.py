@@ -90,6 +90,7 @@ def is_gearset_complete(gearset_dict: dict, character) -> bool:
 def is_gearset_valid(gearset_dict: dict, character, activity=None, check_requirements=True) -> bool:
     """Check if gearset respects all constraints."""
     used_uuids = {}
+    used_items = {}  # Track specific item objects for quantity validation
     used_keywords = set()
     excluded_keywords = ['regional', 'tool', 'light source', 'achievement reward', 'faction reward', 'activity tool']
     
@@ -102,7 +103,22 @@ def is_gearset_valid(gearset_dict: dict, character, activity=None, check_require
             uuid = item.uuid
             used_uuids[uuid] = used_uuids.get(uuid, 0) + 1
             
+            # Track specific item identity (id(item)) for per-quality validation
+            item_id = id(item)
+            used_items[item_id] = used_items.get(item_id, 0) + 1
+            
             if slot.startswith('ring'):
+                # Check per-item-object quantity (handles crafted items with same UUID but different qualities)
+                # Each specific item object (e.g., Gold Ruby Ring Excellent vs Good) has its own owned quantity
+                item_owned = 0
+                for inv_item, qty in character.items.items():
+                    if inv_item is item:
+                        item_owned = qty
+                        break
+                if used_items[item_id] > max(item_owned, 1):
+                    return False
+                
+                # Also check total UUID count doesn't exceed total owned across all qualities
                 total_owned = sum(qty for inv_item, qty in character.items.items() 
                                  if hasattr(inv_item, 'uuid') and inv_item.uuid == uuid)
                 if used_uuids[uuid] > total_owned:

@@ -18,6 +18,7 @@
 import Component from './base.js';
 import store from '../state.js';
 import api from '../api.js';
+import TravelInfoSection from './travel-info-section.js';
 
 class ActivityInfoSection extends Component {
     /**
@@ -33,6 +34,9 @@ class ActivityInfoSection extends Component {
         this.selectedLocation = null;
         this.isExpanded = true;
         this.useFine = store.state.column3?.useFine || false;
+
+        // Travel info section (rendered when activity is Traveling)
+        this.travelInfoSection = null;
 
         // Subscribe to state changes
         this.subscribe('column3.selectedActivity', () => this.onActivityChange());
@@ -87,10 +91,20 @@ class ActivityInfoSection extends Component {
                     // Initialize useFine from state
                     this.useFine = store.state.column3?.useFine || false;
 
-                    // Auto-select first location
-                    if (activity.locations && activity.locations.length > 0) {
-                        const firstLocation = activity.locations[0];
-                        this.selectedLocation = firstLocation.id;
+                    // Try to restore saved location, otherwise auto-select first
+                    const savedLocation = store.state.column3?.selectedLocation;
+                    let selectedLoc = null;
+
+                    if (savedLocation && activity.locations) {
+                        selectedLoc = activity.locations.find(loc => loc.id === savedLocation);
+                    }
+
+                    if (!selectedLoc && activity.locations && activity.locations.length > 0) {
+                        selectedLoc = activity.locations[0];
+                    }
+
+                    if (selectedLoc) {
+                        this.selectedLocation = selectedLoc.id;
 
                         // Update state
                         if (!store.state.column3) {
@@ -99,18 +113,16 @@ class ActivityInfoSection extends Component {
                         store.state.column3.selectedLocation = this.selectedLocation;
 
                         // Notify Column 2 of both activity and location together (single render)
-                        // This ensures location-aware stats work immediately without duplicate renders
-                        const locationRegions = firstLocation.regions && firstLocation.regions.length > 0
-                            ? firstLocation.regions
-                            : [firstLocation.id];
-                        console.log('Auto-selected first location with regions:', locationRegions);
+                        const locationRegions = selectedLoc.regions && selectedLoc.regions.length > 0
+                            ? selectedLoc.regions
+                            : [selectedLoc.id];
+                        console.log('Selected location:', this.selectedLocation, 'regions:', locationRegions,
+                            savedLocation === selectedLoc.id ? '(restored)' : '(auto-selected)');
 
-                        // Use batched update if available, otherwise fall back to separate calls
                         const combinedStatsSection = window.combinedStatsSection;
                         if (combinedStatsSection && typeof combinedStatsSection.setActivityAndLocation === 'function') {
                             await combinedStatsSection.setActivityAndLocation(activity.id, locationRegions);
                         } else {
-                            // Fallback to separate calls
                             await this.notifyColumn2ActivityChange(activity);
                             await this.notifyColumn2LocationChange(locationRegions);
                         }
@@ -118,6 +130,10 @@ class ActivityInfoSection extends Component {
                         // No locations, just notify activity change
                         await this.notifyColumn2ActivityChange(activity);
                     }
+
+                    // Save the auto-selected/restored location to session
+                    // (the dropdown's save fires before these async calls complete)
+                    store._saveColumn3Selection();
 
                     // Column 3 will re-render when Column 2 calls onStatsCalculated callback
                     return;
@@ -258,6 +274,9 @@ class ActivityInfoSection extends Component {
         // Notify Column 2 of location change with regions
         // Requirements: 7.4
         this.notifyColumn2LocationChange(locationRegions || [locationId]);
+
+        // Auto-save selection to session
+        store._saveColumn3Selection();
 
         // Don't call render() here - Column 2 callback will handle it
     }
@@ -585,13 +604,15 @@ class ActivityInfoSection extends Component {
         const weClass = weExceedsMax ? 'stat-value-positive' : 'stat-value';
         const weRowClass = weExceedsMax ? 'we-maxed' : '';
 
-        // Format WE - show 2 decimals if needed, otherwise 1 or 0
-        const currentWEFormatted = (currentWEPercent % 1 === 0)
-            ? currentWEPercent.toFixed(0)
-            : (currentWEPercent % 0.1 < 0.01)
-                ? currentWEPercent.toFixed(1)
-                : currentWEPercent.toFixed(2);
-        const maxWEFormatted = (maxWEPercent % 1 === 0) ? maxWEPercent.toFixed(0) : maxWEPercent.toFixed(1);
+        // Format WE for display - offset by 100 to match in-game display (100% = no bonus)
+        const currentWEDisplay = currentWEPercent + 100;
+        const maxWEDisplay = maxWEPercent + 100;
+        const currentWEFormatted = (currentWEDisplay % 1 === 0)
+            ? currentWEDisplay.toFixed(0)
+            : (currentWEDisplay % 0.1 < 0.01)
+                ? currentWEDisplay.toFixed(1)
+                : currentWEDisplay.toFixed(2);
+        const maxWEFormatted = (maxWEDisplay % 1 === 0) ? maxWEDisplay.toFixed(0) : maxWEDisplay.toFixed(1);
 
         return `
             <div class="activity-section">
@@ -692,7 +713,8 @@ class ActivityInfoSection extends Component {
 
             html += `
                 <div class="requirement-item ${borderClass}">
-                    <span class="requirement-value">${req.required} AP</span>
+                    <span class="requirement-value">${req.required}</span>
+                    <img src="/assets/icons/text/general_icons/achievement_points.svg" alt="AP" class="requirement-icon" title="Achievement Points" />
                 </div>
             `;
         }
@@ -728,6 +750,9 @@ class ActivityInfoSection extends Component {
 
         // Notify subscribers
         store._notifySubscribers('column3.useFine');
+
+        // Auto-save selection to session
+        store._saveColumn3Selection();
 
         this.render();
         console.log('[ActivityInfo] Render complete');
@@ -900,8 +925,37 @@ class ActivityInfoSection extends Component {
         console.log('[ActivityInfo] render() called, useFine:', this.useFine);
 
         if (!this.activity) {
+            // Destroy travel section if it exists
+            if (this.travelInfoSection) {
+                this.travelInfoSection.destroy();
+                this.travelInfoSection = null;
+            }
             this.$element.html('');
             return;
+        }
+
+        // If this is a travel activity, render TravelInfoSection instead
+        if (this.activity.is_travel) {
+            if (!this.travelInfoSection) {
+                this.$element.html('<div id="travel-info-section-container"></div>');
+                this.travelInfoSection = new TravelInfoSection(
+                    this.$element.find('#travel-info-section-container'),
+                    {
+                        onRouteChange: (routeData) => {
+                            // Store route data for optimize button access
+                            window.currentTravelRoute = routeData;
+                        }
+                    }
+                );
+            }
+            return;
+        }
+
+        // Not a travel activity - destroy travel section if it exists
+        if (this.travelInfoSection) {
+            this.travelInfoSection.destroy();
+            this.travelInfoSection = null;
+            window.currentTravelRoute = null;
         }
 
         const skillColor = this.getSkillColor(this.activity.primary_skill);

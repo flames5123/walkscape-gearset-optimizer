@@ -31,7 +31,7 @@ class DropsSection extends Component {
         // State
         this.dropSource = null;  // Activity or recipe object
         this.sourceType = null;  // 'activity' or 'recipe'
-        this.hideOwnedCollectibles = true;  // Default to true
+        this.hideOwnedCollectibles = store.state.column3?.hideOwnedCollectibles ?? true;
         this.isExpanded = true;
 
         // Subscribe to state changes
@@ -51,8 +51,12 @@ class DropsSection extends Component {
             });
         }
 
-        // Initial render
-        this.onActivityChange();
+        // Initial render - check both activity and recipe (session may already be loaded)
+        if (store.state.column3?.selectedRecipe) {
+            this.onRecipeChange();
+        } else {
+            this.onActivityChange();
+        }
     }
 
     /**
@@ -194,6 +198,9 @@ class DropsSection extends Component {
         // Notify subscribers
         store._notifySubscribers('column3.hideOwnedCollectibles');
 
+        // Auto-save selection to session
+        store._saveColumn3Selection();
+
         this.render();
     }
 
@@ -279,6 +286,9 @@ class DropsSection extends Component {
                     fine_drop_percent: augmentedFineDropPercent,  // For fine materials
                     is_fine: isFine,
                     is_collectible: drop.item_ref && drop.item_ref.startsWith('Collectible.'),
+                    coin_value: drop.coin_value || 0,
+                    fine_coin_value: drop.fine_coin_value || 0,
+                    special_sell: drop.special_sell || null,
                     source: 'primary'
                 });
             }
@@ -335,6 +345,9 @@ class DropsSection extends Component {
                     fine_drop_percent: augmentedFineDropPercent,  // For fine materials
                     is_fine: isFine,
                     is_collectible: drop.item_ref && drop.item_ref.startsWith('Collectible.'),
+                    coin_value: drop.coin_value || 0,
+                    fine_coin_value: drop.fine_coin_value || 0,
+                    special_sell: drop.special_sell || null,
                     source: 'secondary'
                 });
             }
@@ -454,6 +467,8 @@ class DropsSection extends Component {
                     fine_drop_percent: augmentedFineDropPercent,
                     is_fine: false,
                     is_collectible: false,
+                    coin_value: eqDrop.coin_value || 0,
+                    special_sell: eqDrop.special_sell || null,
                     source: 'equipment'
                 });
             }
@@ -645,6 +660,87 @@ class DropsSection extends Component {
      * Requirements: 4.2
      * @returns {string} HTML for filter checkboxes
      */
+    /**
+     * Calculate currency earned per 1000 steps from all drops.
+     * Coins: sum of (items_per_1k_steps * coin_value) for all sellable drops
+     * AG Tokens: sum of (items_per_1k_steps * ag_token_quantity) for drops with AG token special_sell or direct AG token drops
+     */
+    calculateCurrencyPer1kSteps(drops) {
+        let coinsPer1k = 0;
+        let agTokensPer1k = 0;
+
+        for (const drop of drops) {
+            if (!drop.steps_per_item || drop.steps_per_item <= 0) continue;
+            // Skip fine items to avoid double-counting
+            if (drop.is_fine) continue;
+
+            const itemsPer1kSteps = 1000.0 / drop.steps_per_item;
+
+            // Coins from selling base item
+            if (drop.coin_value && drop.coin_value > 0) {
+                coinsPer1k += itemsPer1kSteps * drop.coin_value;
+            }
+
+            // Coins from selling fine version (if this drop has a fine variant)
+            if (drop.fine_coin_value && drop.fine_coin_value > 0 && drop.steps_per_fine_item && drop.steps_per_fine_item > 0) {
+                const fineItemsPer1kSteps = 1000.0 / drop.steps_per_fine_item;
+                coinsPer1k += fineItemsPer1kSteps * drop.fine_coin_value;
+            }
+
+            // AG tokens - either direct drop or special_sell
+            if (drop.special_sell && drop.special_sell.currency === 'ag_token') {
+                agTokensPer1k += itemsPer1kSteps * drop.special_sell.quantity;
+            }
+        }
+
+        return { coinsPer1k, agTokensPer1k };
+    }
+
+    /**
+     * Format a currency value: 2 decimal places, truncate trailing zeros and decimal
+     */
+    formatCurrencyValue(value) {
+        return value.toFixed(2).replace(/\.?0+$/, '');
+    }
+
+    /**
+     * Render the currency summary row (coins and AG tokens per 1k steps)
+     */
+    renderCurrencySummary(drops) {
+        const { coinsPer1k, agTokensPer1k } = this.calculateCurrencyPer1kSteps(drops);
+
+        // Only show if there's something to display
+        if (coinsPer1k <= 0 && agTokensPer1k <= 0) return '';
+
+        let pills = '';
+
+        if (coinsPer1k > 0) {
+            pills += `
+                <div class="currency-pill">
+                    <img src="/assets/icons/items/coins.svg" alt="Coins" class="currency-pill-icon" title="Coins per 1k steps (selling all drops)" />
+                    <span class="currency-pill-value">${this.formatCurrencyValue(coinsPer1k)}</span>
+                </div>
+            `;
+        }
+
+        if (agTokensPer1k > 0) {
+            pills += `
+                <div class="currency-pill">
+                    <img src="/assets/icons/items/adventurers'_guild_token.svg" alt="AG Tokens" class="currency-pill-icon" title="Adventurers' Guild Tokens per 1k steps" />
+                    <span class="currency-pill-value">${this.formatCurrencyValue(agTokensPer1k)}</span>
+                </div>
+            `;
+        }
+
+        return `
+            <div class="currency-summary">
+                ${pills}
+                <span class="currency-per-label">/1k</span>
+                <img src="/assets/icons/attributes/steps_required.svg" alt="Steps" class="currency-steps-icon" />
+            </div>
+        `;
+    }
+
     renderFilterCheckboxes() {
         return `
             <div class="drops-filters">
@@ -780,6 +876,7 @@ class DropsSection extends Component {
         const drops = await this.calculateDropRates();
 
         const contentHtml = `
+            ${this.renderCurrencySummary(drops)}
             ${this.renderFilterCheckboxes()}
             <div class="drops-list">
                 ${drops.map(drop => this.renderDropItem(drop)).join('')}

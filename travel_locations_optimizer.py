@@ -22,7 +22,7 @@ from util.my_config_helpers import (
 # Or use helper functions: b(), t(), cook(), carp(), smith(), craft() - all take optional tier parameter
 # Or use advanced shortcuts: ta(), cooka(), carpa(), smitha(), crafta()
 # Services can be chained: b(t(Location.X)) means visit bank, then trinketry, then location X
-test_route = [Location.EVERHAVEN, Location.BILGEMONT_PORT]
+test_route = [Location.MANGROVE_FOREST, Location.CASBRANT_FIELDS]
 # test_route = ['Blackspell Port', 'B:Blackspell Port', 'B:Everhaven', 'B:Halfling Campgrounds', 'B:Granfiddich']
 ending = Location.GRANFIDDICH_SHORES
 ending = None # Comment this out if you want to use the ending above
@@ -211,14 +211,15 @@ def calc_steps(base: int, gear: str, location: str = None) -> int:
             # For shortcuts like 'Ring', return base steps
             return base
     
-    eff = 1.00 + LEVEL_WE + g.get('work_efficiency', 0.0)
-    # steps_percent is stored as negative, so we add it (1 + (-0.01) = 0.99)
-    adj = (base / eff) * (1 + g.get('steps_percent', 0.0))
-    rounded_total = math.ceil(adj)
-    steps_per_node = rounded_total / 10 + g.get('steps_add', 0)
-    steps_per_node = max(10, math.ceil(steps_per_node))
-    expected_paid_nodes = 10 / (1 + g.get('double_action', 0.0))
-    return math.ceil(expected_paid_nodes * steps_per_node)
+    # Travel formula confirmed against official Walkscape tool:
+    # Base efficiency is 200% (2.0) for traveling, NO WE cap
+    eff = 2.00 + LEVEL_WE + g.get('work_efficiency', 0.0)
+    adjusted = base / eff
+    per_action = adjusted / 10.0
+    per_action = per_action * (1 + g.get('steps_percent', 0.0)) + g.get('steps_add', 0)
+    per_action = max(10, math.ceil(per_action))
+    expected_paid_nodes = 10.0 / (1 + g.get('double_action', 0.0))
+    return math.ceil(expected_paid_nodes * per_action)
 
 def find_breakpoint(normal: str, short: str) -> int:
     """Binary search for gear breakpoint.

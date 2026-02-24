@@ -36,6 +36,26 @@ ICONS = [
         'https://wiki.walkscape.app/images/e/e5/Skills.svg',
         'assets/icons/character.svg'
     ),
+    (
+        'https://wiki.walkscape.app/images/5/5e/Traveling.svg',
+        'assets/icons/activities/agility/traveling.svg'
+    ),
+    (
+        'https://wiki.walkscape.app/images/d/d4/Locations.svg',
+        'assets/icons/favicon.svg'
+    ),
+    (
+        'https://wiki.walkscape.app/images/d/d4/Locations.svg',
+        'testicons/locations.svg'
+    ),
+    (
+        'https://wiki.walkscape.app/images/4/48/Keyword_Light_source.svg',
+        'testicons/light_source.svg'
+    ),
+    (
+        'https://wiki.walkscape.app/images/d/df/Recipes.svg',
+        'assets/icons/wiki.svg'
+    ),
 ]
 
 # ============================================================================

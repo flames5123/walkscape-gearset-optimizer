@@ -56,6 +56,13 @@ class ActivitySelectorDropdown extends Component {
             const response = await $.get('/api/activities');
             this.activitiesData = response;
             console.log('Activities loaded:', this.activitiesData);
+
+            // Restore selection from store state (e.g., after session load)
+            const savedActivity = store.state.column3?.selectedActivity;
+            if (savedActivity) {
+                this.selectedActivity = savedActivity;
+            }
+
             this.render();
         } catch (error) {
             console.error('Failed to load activities:', error);
@@ -344,10 +351,15 @@ class ActivitySelectorDropdown extends Component {
 
         store.state.column3.selectedActivity = activityId;
         store.state.column3.selectedRecipe = null;  // Clear recipe (mutual exclusion)
+        store.state.column3.useFine = false;  // Reset fine materials on selection change
 
         // Notify subscribers
         store._notifySubscribers('column3.selectedActivity');
         store._notifySubscribers('column3.selectedRecipe');
+        store._notifySubscribers('column3.useFine');
+
+        // Auto-save selection to session
+        store._saveColumn3Selection();
 
         // Close dropdown
         this.isOpen = false;
@@ -363,9 +375,13 @@ class ActivitySelectorDropdown extends Component {
         }
 
         store.state.column3.selectedActivity = null;
+        store.state.column3.useFine = false;  // Reset fine materials on clear
 
         // Notify subscribers
         store._notifySubscribers('column3.selectedActivity');
+
+        // Auto-save selection to session
+        store._saveColumn3Selection();
 
         // Close dropdown
         this.isOpen = false;

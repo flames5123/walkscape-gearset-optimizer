@@ -184,7 +184,8 @@ def validate_uuid_uniqueness(items: list, character, allow_ring_duplicates: bool
     Validate that items don't exceed owned quantities.
     
     For tools: Each UUID can only be used once (strict uniqueness)
-    For rings: Can use same UUID multiple times if owned quantity permits
+    For rings: Can use same UUID multiple times if owned quantity permits,
+               but each specific item object (quality variant) can't exceed its own quantity
     For gear: Each UUID can only be used once (strict uniqueness)
     
     Args:
@@ -195,9 +196,10 @@ def validate_uuid_uniqueness(items: list, character, allow_ring_duplicates: bool
     Returns:
         True if valid (within owned quantities), False otherwise
     """
-    # Count UUIDs used
+    # Count UUIDs used and specific item objects used
     uuid_counts = {}
     uuid_to_item = {}  # Track which item each UUID belongs to
+    item_identity_counts = {}  # Track specific item objects (by identity) for quality-aware validation
     
     for item in items:
         if item is None:
@@ -209,6 +211,10 @@ def validate_uuid_uniqueness(items: list, character, allow_ring_duplicates: bool
         uuid = item.uuid
         uuid_counts[uuid] = uuid_counts.get(uuid, 0) + 1
         uuid_to_item[uuid] = item
+        
+        # Track by item identity (different quality variants are different objects)
+        item_id = id(item)
+        item_identity_counts[item_id] = item_identity_counts.get(item_id, 0) + 1
     
     # Build UUID cache if not already cached on character (performance optimization)
     if not hasattr(character, '_uuid_cache'):
@@ -235,6 +241,29 @@ def validate_uuid_uniqueness(items: list, character, allow_ring_duplicates: bool
         else:
             if count_used > 1:
                 return False
+    
+    # Additional check: verify per-item-object counts don't exceed per-object owned quantities
+    # This prevents using 2x Excellent when you only own 1 Excellent + 1 Good
+    for item in items:
+        if item is None or not hasattr(item, 'uuid'):
+            continue
+        if not (hasattr(item, 'slot') and item.slot == 'ring' and allow_ring_duplicates):
+            continue
+        
+        item_id = id(item)
+        count_used = item_identity_counts.get(item_id, 0)
+        if count_used <= 1:
+            continue
+        
+        # Check how many of this specific item object the character owns
+        item_owned = 0
+        for inv_item, qty in character.items.items():
+            if inv_item is item:
+                item_owned = qty
+                break
+        
+        if count_used > max(item_owned, 1):
+            return False
     
     return True
 

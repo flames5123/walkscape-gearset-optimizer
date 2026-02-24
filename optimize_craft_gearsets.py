@@ -53,6 +53,10 @@ SORTING_PRIORITY = [
     Sorting.STEPS_PER_CRAFT,        # Tiebreaker 2: minimize steps per craft
 ]
 
+# Dict mapping Sorting enum → int weight (0-100). Set by UI/worker.
+# When empty or all weights are 100, optimizer uses strict lexicographic comparison.
+SORTING_WEIGHTS = {}
+
 # Display options
 VERBOSE = False
 MAX_ITERATIONS = 100
@@ -149,6 +153,129 @@ def calculate_craft_metrics(
     metrics['perfect_percentage'] = quality_weights['percentages'].get('Perfect', 0.0)
     
     return metrics, total_stats
+
+# ============================================================================
+# FLOOR CALCULATION
+# ============================================================================
+
+def calculate_optimization_floors(recipe, service, character, consumable=None):
+    """
+    Calculate baseline and max_achievable for each metric, then compute floors.
+    
+    1. Baseline: calculate_craft_metrics with empty gearset (no gear/consumables)
+    2. Max per metric: run quick greedy optimizing for each metric individually
+    3. Update baseline to worst seen across all greedy results and original baseline
+    4. Floor = baseline + (max - baseline) * (weight / 100)
+    
+    Args:
+        recipe: Recipe to optimize for
+        service: Service to use
+        character: Character object
+        consumable: Optional consumable item
+    
+    Returns:
+        (static_floors, baseline_metrics, max_metrics)
+    """
+    print(f"\n{'='*70}")
+    print(f"CALCULATING OPTIMIZATION FLOORS")
+    print(f"{'='*70}")
+    
+    global SORTING_PRIORITY
+    
+    skill = recipe.skill.lower()
+    location = service.location if service else None
+    
+    # Step 1: Calculate baseline with empty gearset
+    from util.walkscape_constants import character_level_from_steps, tool_slots_for_level
+    total_steps = sum(character.skills.values())
+    char_level = character_level_from_steps(total_steps)
+    max_tool_slots = tool_slots_for_level(char_level)
+    
+    gear_slots = ['head', 'cape', 'neck', 'chest', 'hands', 'legs', 'feet',
+                  'ring1', 'ring2', 'back', 'primary', 'secondary']
+    tool_slots = [f'tool{i}' for i in range(max_tool_slots)]
+    
+    empty_gearset = {slot: None for slot in gear_slots + tool_slots}
+    
+    baseline_metrics, _ = calculate_craft_metrics(
+        empty_gearset, recipe, service, character,
+        TARGET_QUALITY, TARGET_QUALITY_QUANTITY, consumable
+    )
+    
+    print(f"\nBaseline metrics (empty gearset):")
+    for sorting in SORTING_PRIORITY:
+        key = sorting.metric_key
+        print(f"  {sorting.display_name}: {baseline_metrics.get(key, 0.0):.4f}")
+    
+    # Step 2: Run a quick greedy pass per metric to find max_achievable
+    max_metrics = {}
+    all_greedy_metrics = []
+    
+    original_priority = list(SORTING_PRIORITY)
+    
+    for sorting in SORTING_PRIORITY:
+        weight = SORTING_WEIGHTS.get(sorting, 100)
+        if weight >= 100:
+            # 100% weight metrics use dynamic floors, skip greedy pass
+            max_metrics[sorting.metric_key] = baseline_metrics.get(sorting.metric_key, 0.0)
+            continue
+        
+        # Temporarily set this metric as the sole priority for greedy
+        SORTING_PRIORITY = [sorting]
+        
+        try:
+            greedy_gearset, greedy_metrics, _ = optimize_for_service(
+                recipe, service, character, consumable
+            )
+            max_metrics[sorting.metric_key] = greedy_metrics.get(sorting.metric_key, 0.0)
+            all_greedy_metrics.append(greedy_metrics)
+            
+            print(f"\nMax achievable for {sorting.display_name}: {max_metrics[sorting.metric_key]:.4f}")
+        except Exception as e:
+            print(f"\nWarning: Greedy pass failed for {sorting.display_name}: {e}")
+            max_metrics[sorting.metric_key] = baseline_metrics.get(sorting.metric_key, 0.0)
+    
+    # Restore original priority
+    SORTING_PRIORITY = original_priority
+    
+    # Step 3: Update baseline to worst seen across all greedy results and original baseline
+    for greedy_result in all_greedy_metrics:
+        for sorting in SORTING_PRIORITY:
+            key = sorting.metric_key
+            greedy_val = greedy_result.get(key, 0.0)
+            baseline_val = baseline_metrics.get(key, 0.0)
+            
+            # "Worst" depends on metric direction
+            if sorting.is_reverse:
+                # Maximize metric: worst = lowest value
+                baseline_metrics[key] = min(baseline_val, greedy_val)
+            else:
+                # Minimize metric: worst = highest value
+                baseline_metrics[key] = max(baseline_val, greedy_val)
+    
+    print(f"\nAdjusted baseline metrics (worst seen):")
+    for sorting in SORTING_PRIORITY:
+        key = sorting.metric_key
+        print(f"  {sorting.display_name}: {baseline_metrics.get(key, 0.0):.4f}")
+    
+    # Step 4: Calculate floors
+    static_floors = Sorting.calculate_floors(
+        SORTING_PRIORITY, SORTING_WEIGHTS, baseline_metrics, max_metrics
+    )
+    
+    print(f"\nStatic floors:")
+    for sorting in SORTING_PRIORITY:
+        key = sorting.metric_key
+        floor = static_floors.get(key)
+        weight = SORTING_WEIGHTS.get(sorting, 100)
+        if floor is None:
+            print(f"  {sorting.display_name}: dynamic (100% weight)")
+        else:
+            print(f"  {sorting.display_name}: {floor:.4f} ({weight}% weight)")
+    
+    print(f"{'='*70}\n")
+    
+    return static_floors, baseline_metrics, max_metrics
 
 # ============================================================================
 # MAIN OPTIMIZATION
@@ -361,6 +488,14 @@ def optimize_for_service(recipe, service, character, consumable=None):
     iteration = 0
     improved = True
     
+    # Calculate floors if any weight < 100%
+    use_floors = SORTING_WEIGHTS and any(
+        SORTING_WEIGHTS.get(s, 100) < 100 for s in SORTING_PRIORITY
+    )
+    static_floors = {}
+    if use_floors:
+        static_floors, _, _ = calculate_optimization_floors(recipe, service, character, consumable)
+    
     while improved and iteration < MAX_ITERATIONS:
         improved = False
         iteration += 1
@@ -400,7 +535,16 @@ def optimize_for_service(recipe, service, character, consumable=None):
                     test_metrics = score_function(test_gearset)
                     
                     # Track best swap across ALL slots (don't break early!)
-                    if Sorting.is_better(test_metrics, best_gearset_metrics, SORTING_PRIORITY):
+                    # Use floors if weights are configured
+                    if use_floors:
+                        is_better = Sorting.is_better_with_floors(
+                            test_metrics, best_gearset_metrics, SORTING_PRIORITY,
+                            SORTING_WEIGHTS, static_floors
+                        )
+                    else:
+                        is_better = Sorting.is_better(test_metrics, best_gearset_metrics, SORTING_PRIORITY)
+                    
+                    if is_better:
                         best_swap = (slot, current_item, item)
                         best_swap_gearset = test_gearset.copy()
                         best_swap_metrics = test_metrics
@@ -454,7 +598,16 @@ def optimize_for_service(recipe, service, character, consumable=None):
                             try:
                                 test_metrics = score_function(test_gearset)
                                 
-                                if Sorting.is_better(test_metrics, best_gearset_metrics, SORTING_PRIORITY):
+                                # Use floors if weights are configured
+                                if use_floors:
+                                    is_better_result = Sorting.is_better_with_floors(
+                                        test_metrics, best_gearset_metrics, SORTING_PRIORITY,
+                                        SORTING_WEIGHTS, static_floors
+                                    )
+                                else:
+                                    is_better_result = Sorting.is_better(test_metrics, best_gearset_metrics, SORTING_PRIORITY)
+                                
+                                if is_better_result:
                                     gearset = test_gearset
                                     current_metrics = test_metrics
                                     current_value = test_metrics[SORTING_PRIORITY[0].metric_key]
@@ -693,7 +846,8 @@ def main():
                 metric_value = metrics[SORTING_PRIORITY[0].metric_key]
                 print(f"  ✓ Success! {SORTING_PRIORITY[0].display_name}: {metric_value:.2f}, Iterations: {iterations}")
                 
-                # Compare with best overall
+                # Compare with best overall (use simple comparison across services;
+                # floor-based comparison is used within each service's local search)
                 if best_overall_metrics is None or Sorting.is_better(metrics, best_overall_metrics, SORTING_PRIORITY):
                     best_overall = gearset
                     best_overall_metrics = metrics

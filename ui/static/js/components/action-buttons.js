@@ -293,6 +293,11 @@ class ActionButtons extends Component {
             'feet': 'feet'
         };
 
+        // Helper: get the rarity code for gearset export encoding.
+        // Crafted items store quality="Good" (display) and rarity="uncommon" (code).
+        // The backend expects the rarity code.
+        const getExportQuality = (item) => item?.rarity || 'common';
+
         // Add gear slots
         for (const [slotName, slotType] of Object.entries(slotTypeMap)) {
             const item = gearset[slotName];
@@ -302,7 +307,7 @@ class ActionButtons extends Component {
                     index: 0,
                     item: JSON.stringify({
                         id: item.uuid,
-                        quality: item.quality || 'common',
+                        quality: getExportQuality(item),
                         tag: null
                     }),
                     errors: []
@@ -327,7 +332,7 @@ class ActionButtons extends Component {
                     index: ringNum - 1,
                     item: JSON.stringify({
                         id: item.uuid,
-                        quality: item.quality || 'common',
+                        quality: getExportQuality(item),
                         tag: null
                     }),
                     errors: []
@@ -352,7 +357,7 @@ class ActionButtons extends Component {
                     index: toolNum,
                     item: JSON.stringify({
                         id: item.uuid,
-                        quality: item.quality || 'common',
+                        quality: getExportQuality(item),
                         tag: null
                     }),
                     errors: []
@@ -375,7 +380,7 @@ class ActionButtons extends Component {
                 index: 0,
                 item: JSON.stringify({
                     id: petItem.uuid,
-                    quality: petItem.quality || 'common',
+                    quality: getExportQuality(petItem),
                     tag: null
                 }),
                 errors: []

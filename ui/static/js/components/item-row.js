@@ -305,8 +305,15 @@ class ItemRow extends Component {
             `;
         }
 
+        // Generate wiki URL from item name
+        const wikiName = this.props.item.name.replace(/ /g, '_');
+        const wikiUrl = `https://wiki.walkscape.app/wiki/${encodeURIComponent(wikiName).replace(/%2F/g, '/').replace(/%5F/g, '_')}`;
+
         return `
             <div class="item-details">
+                <a href="${wikiUrl}" target="_blank" rel="noopener noreferrer" class="wiki-link">
+                    Wiki
+                </a>
                 ${hideCheckboxesHtml}
                 <div class="keywords">${this.renderKeywords()}</div>
                 <div class="stats">${this.renderStats()}</div>

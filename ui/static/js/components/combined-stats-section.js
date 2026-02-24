@@ -55,6 +55,8 @@ class CombinedStatsSection extends CollapsibleSection {
         // Requirements: 6.12
         this.currentActivity = null;  // Will be set by Column 3
         this.currentActivitySkill = null;  // Primary skill of current activity
+        this.currentActivityComponentSkills = null;  // Component skills for travel (e.g., ['agility', 'traveling'])
+        this.isTravel = false;  // Whether current activity is traveling
         this.currentRecipe = null;  // Will be set by Column 3
         this.currentRecipeSkill = null;  // Skill of current recipe
         this.currentLocation = null;  // Will be set by Column 3
@@ -224,7 +226,9 @@ class CombinedStatsSection extends CollapsibleSection {
                         this.currentRecipeSkill = null;
                         this.currentActivity = activityId;
                         this.currentActivitySkill = activity.primary_skill;
-                        console.log('Set activity skill:', this.currentActivitySkill);
+                        this.currentActivityComponentSkills = activity.component_skills || [activity.primary_skill.toLowerCase()];
+                        this.isTravel = !!activity.is_travel;
+                        console.log('Set activity skill:', this.currentActivitySkill, 'components:', this.currentActivityComponentSkills, 'isTravel:', this.isTravel);
                         break;
                     }
                 }
@@ -259,6 +263,8 @@ class CombinedStatsSection extends CollapsibleSection {
             if (!selectedActivity && selectedRecipe) {
                 this.currentActivity = null;
                 this.currentActivitySkill = null;
+                this.currentActivityComponentSkills = null;
+                this.isTravel = false;
                 // Keep recipe state intact
             }
             // If recipe is null in store but activity is set, clear only recipe
@@ -271,6 +277,8 @@ class CombinedStatsSection extends CollapsibleSection {
             else {
                 this.currentActivity = null;
                 this.currentActivitySkill = null;
+                this.currentActivityComponentSkills = null;
+                this.isTravel = false;
                 this.currentRecipe = null;
                 this.currentRecipeSkill = null;
             }
@@ -316,6 +324,8 @@ class CombinedStatsSection extends CollapsibleSection {
                             this.currentRecipeSkill = null;
                             this.currentActivity = activityId;
                             this.currentActivitySkill = activity.primary_skill;
+                            this.currentActivityComponentSkills = activity.component_skills || [activity.primary_skill.toLowerCase()];
+                            this.isTravel = !!activity.is_travel;
                             found = true;
                             break;
                         }
@@ -323,6 +333,8 @@ class CombinedStatsSection extends CollapsibleSection {
 
                     // If not found in activities, try recipes
                     if (!found) {
+                        this.isTravel = false;
+                        this.currentActivityComponentSkills = null;
                         const recResponse = await $.get('/api/recipes');
                         for (const recipes of Object.values(recResponse.by_skill)) {
                             const recipe = recipes.find(r => r.id === activityId);
@@ -564,8 +576,21 @@ class CombinedStatsSection extends CollapsibleSection {
 
                 // For crafted items, use quality-specific stats and rarity
                 if (fullItem.type === 'crafted_item' && fullItem.stats_by_quality) {
-                    const quality = slotItem.quality || 'Normal';
+                    let quality = slotItem.quality || 'Normal';
+                    // If quality is a rarity name, convert to quality name
+                    const rarityToQuality = {
+                        'common': 'Normal',
+                        'uncommon': 'Good',
+                        'rare': 'Great',
+                        'epic': 'Excellent',
+                        'legendary': 'Perfect',
+                        'ethereal': 'Eternal'
+                    };
+                    if (rarityToQuality[quality.toLowerCase()]) {
+                        quality = rarityToQuality[quality.toLowerCase()];
+                    }
                     itemStats = fullItem.stats_by_quality[quality] || {};
+                    console.log(`  Crafted item quality: ${quality}, stats keys:`, Object.keys(itemStats));
                     // Map quality to rarity for crafted items
                     const qualityToRarity = {
                         'Normal': 'common',
@@ -966,10 +991,13 @@ class CombinedStatsSection extends CollapsibleSection {
                 if (!this.contributorsByStat.work_efficiency) {
                     this.contributorsByStat.work_efficiency = [];
                 }
+                const levelBonusLabel = this.isTravel
+                    ? 'From agility level (0.5% per level)'
+                    : 'From levels above requirement';
                 this.contributorsByStat.work_efficiency.push({
                     source: 'Level Bonus',
                     item: {
-                        name: 'From levels above requirement',
+                        name: levelBonusLabel,
                         icon_path: '/assets/icons/attributes/work_efficiency.svg',
                         rarity: 'common'
                     },
@@ -1071,21 +1099,39 @@ class CombinedStatsSection extends CollapsibleSection {
 
                 if (activity) {
                     const primarySkill = activity.primary_skill.toLowerCase();
-                    const charLevel = character.skills?.[primarySkill] || 0;
-                    const requirements = activity.requirements?.skill_requirements || {};
-                    const requiredLevel = requirements[activity.primary_skill] || 1;
 
-                    const levelsAbove = Math.max(0, charLevel - requiredLevel);
-                    // WE bonus: 1.25% per level, capped at 25% (20 levels)
-                    bonuses.work_efficiency = Math.min(levelsAbove * 1.25, 25);
+                    // Get skill level - check override first, then character
+                    const overrideLevel = overrides.skills?.[primarySkill];
+                    const characterLevel = character.skills?.[primarySkill];
+                    const charLevel = overrideLevel !== undefined ? overrideLevel : (characterLevel || 0);
 
-                    console.log(`Level bonus calculation for ${activity.name}:`, {
-                        primarySkill,
-                        charLevel,
-                        requiredLevel,
-                        levelsAbove,
-                        bonus: bonuses.work_efficiency
-                    });
+                    if (activity.is_travel) {
+                        // Travel: 0.5% per agility level (no cap)
+                        // Formula matches Python: (skill_level - 1) * 0.005 → displayed as percentage
+                        bonuses.work_efficiency = (charLevel - 1) * 0.5;
+
+                        console.log(`Level bonus calculation for ${activity.name} (TRAVEL):`, {
+                            primarySkill,
+                            charLevel,
+                            bonus: bonuses.work_efficiency,
+                            formula: '(level - 1) * 0.5%'
+                        });
+                    } else {
+                        // Regular activities: 1.25% per level above requirement, capped at 25% (20 levels)
+                        const requirements = activity.requirements?.skill_requirements || {};
+                        const requiredLevel = requirements[activity.primary_skill] || 1;
+
+                        const levelsAbove = Math.max(0, charLevel - requiredLevel);
+                        bonuses.work_efficiency = Math.min(levelsAbove * 1.25, 25);
+
+                        console.log(`Level bonus calculation for ${activity.name}:`, {
+                            primarySkill,
+                            charLevel,
+                            requiredLevel,
+                            levelsAbove,
+                            bonus: bonuses.work_efficiency
+                        });
+                    }
                 }
             } else if (selectedRecipe && isRecipe) {
                 // It's a recipe
@@ -1742,11 +1788,19 @@ class CombinedStatsSection extends CollapsibleSection {
                         // Skill matches if:
                         // - skill is 'global' (always applies)
                         // - OR skill matches the current activity/recipe's primary skill
+                        // - OR skill matches one of the activity's component skills (e.g., traveling for travel)
                         let skillMatches = skillLower === 'global';
 
                         if (!skillMatches && this.currentActivitySkill) {
                             // Check if skill matches activity's primary skill
                             skillMatches = (skillLower === this.currentActivitySkill.toLowerCase());
+
+                            // Also check component skills (e.g., for traveling: ['agility', 'traveling'])
+                            if (!skillMatches && this.currentActivityComponentSkills) {
+                                skillMatches = this.currentActivityComponentSkills.some(cs =>
+                                    skillLower === cs.toLowerCase()
+                                );
+                            }
                         } else if (!skillMatches && this.currentRecipeSkill) {
                             // Check if skill matches recipe's skill
                             skillMatches = (skillLower === this.currentRecipeSkill.toLowerCase());
