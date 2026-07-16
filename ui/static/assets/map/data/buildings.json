@@ -1,0 +1,472 @@
+[
+  {
+    "id": "building-temple_of_azurazera-127f2eba-0e5b-4622-aea6-396ae6c1ecf7",
+    "name": "Temple of Azurazera",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Temple_of_Azurazera",
+    "icon": {
+      "url": "buildings/temple_of_azurazera.png"
+    },
+    "type": "temple",
+    "shop": null
+  },
+  {
+    "id": "building-frosthook_emporium-01ead99d-4e1e-4a12-b6ff-bcf8fc54ff67",
+    "name": "Frosthook Emporium",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Frosthook_Emporium",
+    "icon": {
+      "url": "buildings/fishing_shop.png"
+    },
+    "type": "fishingStore",
+    "shop": "shop-frosthook_emporium-1eac9755-8093-4514-9bd8-03f916a90c45"
+  },
+  {
+    "id": "building-kallaheim's_frosty_finds-71388909-1af6-47dc-8558-86236d0d03b8",
+    "name": "Kallaheim's Frosty Finds",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Kallaheim's_Frosty_Finds",
+    "icon": {
+      "url": "buildings/general_store.png"
+    },
+    "type": "generalStore",
+    "shop": "shop-kallaheim_general_store-be97b3b7-a813-49e8-88dc-1f5db0fc5c23"
+  },
+  {
+    "id": "building-frozen_capital_bank-4e697937-2df0-4fab-b09d-9512240e3d63",
+    "name": "Frozen Capital Bank",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Frozen_Capital_Bank",
+    "icon": {
+      "url": "buildings/bank.png"
+    },
+    "type": "bank",
+    "shop": null
+  },
+  {
+    "id": "building-the_icy_goblet-7d3ca75d-e0b5-44b3-a7f4-f0b17cea8dad",
+    "name": "The Icy Goblet",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/The_Icy_Goblet",
+    "icon": {
+      "url": "buildings/tavern.png"
+    },
+    "type": "tavern",
+    "shop": "shop-kallaheim_tavern-49a28c48-5615-41be-9752-06e219ea7bf7"
+  },
+  {
+    "id": "building-helpful_herbert's_hut-0ed43eaa-cf25-4452-b915-c07e4f4eac86",
+    "name": "Helpful Herbert's Hut",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Helpful_Herbert's_Hut",
+    "icon": {
+      "url": "buildings/cabin.png"
+    },
+    "type": "house",
+    "shop": "shop-tutorial_cabin-ee8e4358-170b-46a8-a199-abc869429835"
+  },
+  {
+    "id": "building-woodcutter's_cabin-fee965c9-41d4-458a-9e06-09813a610ee4",
+    "name": "Woodcutter's Cabin",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Woodcutter's_Cabin",
+    "icon": {
+      "url": "buildings/cabin.png"
+    },
+    "type": "house",
+    "shop": "shop-woodcutters_cabin-0308708b-6775-4380-be69-7fd4c381a0b2"
+  },
+  {
+    "id": "building-northstar_mercantile-e8b93e0c-50d9-4a57-9882-6cc53899e156",
+    "name": "Northstar Mercantile",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Northstar_Mercantile",
+    "icon": {
+      "url": "buildings/general_store.png"
+    },
+    "type": "generalStore",
+    "shop": "shop-northstar_mercantile-459b28d0-c00c-40ee-92f5-68d7514fe1f6"
+  },
+  {
+    "id": "building-jarvojoy-7046d172-c527-453e-ab11-15c831c7d158",
+    "name": "JarvoJoy",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/JarvoJoy",
+    "icon": {
+      "url": "buildings/general_store.png"
+    },
+    "type": "activityShop",
+    "shop": "shop-jarvojoy-a388a4c1-d12e-49c7-8f29-c27cb6766e5f"
+  },
+  {
+    "id": "building-fort_of_permafrost-d17d446e-c176-442b-ac47-a5490bfa0f26",
+    "name": "Fort of Permafrost",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Fort_of_Permafrost",
+    "icon": {
+      "url": "buildings/castle.png"
+    },
+    "type": "castle",
+    "shop": "shop-fort_of_permafrost-522a21c2-a921-48da-9867-87e884cdddc0"
+  },
+  {
+    "id": "building-bilgemont_castle-0eab0540-f6fd-4c46-86f5-f02f92b377f3",
+    "name": "Bilgemont Castle",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Bilgemont_Castle",
+    "icon": {
+      "url": "buildings/castle.png"
+    },
+    "type": "castle",
+    "shop": null
+  },
+  {
+    "id": "building-bureau_of_moss-69287433-a3f7-443f-b844-a455cdcc6f83",
+    "name": "Bureau of Moss",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Bureau_of_Moss",
+    "icon": {
+      "url": "buildings/tavern.png"
+    },
+    "type": "tavern",
+    "shop": "shop-bureau_of_moss-24de289b-c72c-4b28-9878-e9408ce5850f"
+  },
+  {
+    "id": "building-paws_are_us-61e1d784-d7a7-4684-a195-0fe608288018",
+    "name": "Paws are Us",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Paws_are_Us",
+    "icon": {
+      "url": "buildings/animal_shelter.png"
+    },
+    "type": "animalShelter",
+    "shop": "shop-animal_shelter-81db8898-a9c6-4eeb-9d0f-52ab636c7e23"
+  },
+  {
+    "id": "building-fish_market_stall-a566cbe4-a93a-4ae5-aaa2-40dadecea8eb",
+    "name": "Fish Market Stall",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Fish_Market_Stall",
+    "icon": {
+      "url": "buildings/market_stall.png"
+    },
+    "type": "marketStall",
+    "shop": "shop-granfiddich_fish_stall-d5d9af6c-5ea3-4cf9-a758-e2000cdba2bf"
+  },
+  {
+    "id": "building-food_market_stall-38b7f92b-4236-4cc2-8f4c-70c0caafb83a",
+    "name": "Food Market Stall",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Food_Market_Stall",
+    "icon": {
+      "url": "buildings/market_stall.png"
+    },
+    "type": "marketStall",
+    "shop": "shop-granfiddich_food_stall-37604e80-883c-4dbe-b48f-baa0eadd778f"
+  },
+  {
+    "id": "building-tool_market_stall-b269d7bb-1c71-4406-b926-cbf4f3825dbe",
+    "name": "Tool Market Stall",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Tool_Market_Stall",
+    "icon": {
+      "url": "buildings/market_stall.png"
+    },
+    "type": "marketStall",
+    "shop": "shop-granfiddich_tool_stall-09015d18-09ff-4227-96ba-7fb7b47417ac"
+  },
+  {
+    "id": "building-mossy_merchant's_breeze_mart-4357aac1-9fd0-4a0b-96a7-d65bbb70e00c",
+    "name": "Mossy Merchant's Breeze Mart",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Mossy_Merchant's_Breeze_Mart",
+    "icon": {
+      "url": "buildings/general_store.png"
+    },
+    "type": "generalStore",
+    "shop": "shop-mossy_merchants_breeze_mart-8810d523-f461-444f-8bb7-e78e5b487c25"
+  },
+  {
+    "id": "building-bogside_bank_of_prosperity-e18e2916-d399-4054-a7e8-e9838e53834c",
+    "name": "Bogside Bank of Prosperity",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Bogside_Bank_of_Prosperity",
+    "icon": {
+      "url": "buildings/bank.png"
+    },
+    "type": "bank",
+    "shop": null
+  },
+  {
+    "id": "building-maritime_fortune_bank-40ecf29a-039f-4338-a420-20b79f65a289",
+    "name": "Maritime Fortune Bank",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Maritime_Fortune_Bank",
+    "icon": {
+      "url": "buildings/bank.png"
+    },
+    "type": "bank",
+    "shop": null
+  },
+  {
+    "id": "building-bigloo-2990bbbc-b4a0-41e2-a0a0-0ef8089c44b4",
+    "name": "Bigloo",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Bigloo",
+    "icon": {
+      "url": "buildings/igloo.png"
+    },
+    "type": "fishingStore",
+    "shop": "shop-bigloo-b8f583ce-34cf-49b7-92a2-49230271b128"
+  },
+  {
+    "id": "building-polar_pruning-4a0c2993-94f3-4bcf-bd49-6855a3b77db1",
+    "name": "Polar Pruning",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Polar_Pruning",
+    "icon": {
+      "url": "buildings/barber.png"
+    },
+    "type": "barber",
+    "shop": null
+  },
+  {
+    "id": "building-tundra_trends-25aa74db-271b-4dc3-ac09-d45b99206515",
+    "name": "Tundra Trends",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Tundra_Trends",
+    "icon": {
+      "url": "buildings/clothing_shop.png"
+    },
+    "type": "clothingShop",
+    "shop": "shop-tundra_trends-c508a2d7-0779-47ca-bbba-af3a2b5a15f1"
+  },
+  {
+    "id": "building-horn_of_respite_adventurer's_guild_outpost-6e9349e7-116a-4da0-a21b-80a30d575490",
+    "name": "Adventurers' Guild Outpost",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Adventurers'_Guild_Outpost",
+    "icon": {
+      "url": "buildings/adventure_guild_outpost_cabin.png"
+    },
+    "type": "outpost",
+    "shop": "shop-adventurers_guild_cabin_outpost-14cdfaf1-8932-4156-ae79-ce6f73d4160e"
+  },
+  {
+    "id": "building-bog_&_blade-20f27322-3d2e-46bd-ad64-5e6172595b9f",
+    "name": "Bog & Blade",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Bog_&_Blade",
+    "icon": {
+      "url": "buildings/barber.png"
+    },
+    "type": "barber",
+    "shop": null
+  },
+  {
+    "id": "building-quagmire_couture-88c90344-a8a8-4ba4-b1b7-85fd18b4a4da",
+    "name": "Quagmire Couture",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Quagmire_Couture",
+    "icon": {
+      "url": "buildings/clothing_shop.png"
+    },
+    "type": "clothingShop",
+    "shop": "shop-quagmire_coutur-8d60cb2f-9c4d-4756-a399-5af1ae45dd56"
+  },
+  {
+    "id": "building-casbrants_sunken_ship-7aeeff93-b694-468a-b02d-5ba1faafba25",
+    "name": "Casbrant's Sunken Ship",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Casbrant's_Sunken_Ship",
+    "icon": {
+      "url": "buildings/fishing_shop.png"
+    },
+    "type": "fishingStore",
+    "shop": "shop-casbrants_sunken_ship-a755126e-8728-4773-a196-14329544c85e"
+  },
+  {
+    "id": "building-vastalume_bank-30257108-66e0-4f25-9906-76f6e0a41d03",
+    "name": "Thalassa Wave Bank",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Thalassa_Wave_Bank",
+    "icon": {
+      "url": "buildings/bank.png"
+    },
+    "type": "bank",
+    "shop": "shop-kallaheim_general_store-be97b3b7-a813-49e8-88dc-1f5db0fc5c23"
+  },
+  {
+    "id": "building-vastalume_tavern-a15607bf-cf03-4fce-bdf1-867c5608a5f5",
+    "name": "Pearl of the Sea",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Pearl_of_the_Sea",
+    "icon": {
+      "url": "buildings/tavern.png"
+    },
+    "type": "tavern",
+    "shop": "shop-vastalume_tavern-bb09cd2a-f5cb-45f9-85ed-e89b7a503f79"
+  },
+  {
+    "id": "building-vastalume_general_store-b36ce620-fe5a-46be-9b2e-ed7b47b52c7e",
+    "name": "Sunken Anchor",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Sunken_Anchor",
+    "icon": {
+      "url": "buildings/general_store.png"
+    },
+    "type": "generalStore",
+    "shop": "shop-vastalume_general_store-82b37639-35bf-4403-a640-01f62469180a"
+  },
+  {
+    "id": "building-vastalume_tavern-0fb9b8b4-4a09-4da7-8a27-1880e96f259b",
+    "name": "Go with the Flow Barbershop",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Go_with_the_Flow_Barbershop",
+    "icon": {
+      "url": "buildings/barber.png"
+    },
+    "type": "barber",
+    "shop": null
+  },
+  {
+    "id": "building-vastalume_specialized_store-9e67b8d2-ec5d-484d-93d7-72f5bafe1e42",
+    "name": "Undercurrent",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Undercurrent",
+    "icon": {
+      "url": "buildings/general_store.png"
+    },
+    "type": "generalStore",
+    "shop": "shop-vastalume_specialized_shop-e579a000-b108-40df-9e7e-1947ed059407"
+  },
+  {
+    "id": "building-vastalume_clothing_shop-3b023cc3-fa43-4800-858b-16fbffcab6cb",
+    "name": "Fin-tastic Fashion",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Fin-tastic_Fashion",
+    "icon": {
+      "url": "buildings/clothing_shop.png"
+    },
+    "type": "clothingShop",
+    "shop": "shop-fintastic_fashion-9c569f0b-80de-4e98-a7a3-9a582068c536"
+  },
+  {
+    "id": "building-throne_of_the_neverdrown-53518f64-3c36-4363-88e7-59ebdf195f38",
+    "name": "Throne of the Neverdrown",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Throne_of_the_Neverdrown",
+    "icon": {
+      "url": "buildings/castle.png"
+    },
+    "type": "castle",
+    "shop": null
+  },
+  {
+    "id": "building-not_a_shop-09c14f32-e283-43e0-8626-91be697fd489",
+    "name": "Not a Shop",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Not_a_Shop",
+    "icon": {
+      "url": "buildings/nac_shop.png"
+    },
+    "type": "clothingShop",
+    "shop": "shop-not_a_shop-be00090c-f3ea-4121-8df3-4229f80facd3"
+  },
+  {
+    "id": "building-halfmaw_hideout_adventurer's_guild_outpost-6e9349e7-asw2-4da0-ge42-80a30d575490",
+    "name": "Adventurers' Guild Swampost",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Adventurers'_Guild_Swampost",
+    "icon": {
+      "url": "buildings/adventure_guild_outpost_cabin.png"
+    },
+    "type": "outpost",
+    "shop": "shop-halfmaw_hideout_adventurers_guild_cabin_swampost-14cdfaf1-8932-4156-3qw2-ce6f73d4160e"
+  },
+  {
+    "id": "building-witch's_hut-fee965c9-q3eu-458a-qwe2-09813a610ee4",
+    "name": "Witch's Hut",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Witch's_Hut",
+    "icon": {
+      "url": "buildings/witchs_hut.png"
+    },
+    "type": "house",
+    "shop": "shop-witchs_hut-14cdfaf1-8932-t4e2-kur5-ce6f73d4160e"
+  },
+  {
+    "id": "building-gold'n_grail_everhaven-or808dc9-239s-458a-er63-09813a610ee4",
+    "name": "Gold'n Grail Everhaven",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Gold'n_Grail_Everhaven",
+    "icon": {
+      "url": "buildings/tavern.png"
+    },
+    "type": "tavern",
+    "shop": "shop-gold'n_grail_everhaven-49a28c48-5615-dqw1-9752-06e219ea7bf7"
+  },
+  {
+    "id": "building-gold'n_grail_bilgemont-king8dc9-239s-23aa-7ygr-09813a610ee4",
+    "name": "Gold'n Grail Bilgemont",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Gold'n_Grail_Bilgemont",
+    "icon": {
+      "url": "buildings/tavern.png"
+    },
+    "type": "tavern",
+    "shop": "shop-gold'n_grail_bilgemont_tavern-vrf38c48-5615-75u6-gfd3-06e219ea7bf7"
+  },
+  {
+    "id": "building-gold'n_grail_blackspell-eqw38dc9-239s-rwe3-4h6s-09813a610ee4",
+    "name": "Gold'n Grail Blackspell",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Gold'n_Grail_Blackspell",
+    "icon": {
+      "url": "buildings/tavern.png"
+    },
+    "type": "tavern",
+    "shop": "shop-gold'n_grail_blackspell_tavern-e1328c48-23ae-qd13-9752-06e219ea7bf7"
+  },
+  {
+    "id": "e637450e-9c7c-4b33-9919-6ea77e75f63e",
+    "name": "Cold Storage of Commitment",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Cold_Storage_of_Commitment",
+    "icon": {
+      "url": "buildings/bank.png"
+    },
+    "type": "bank",
+    "shop": null
+  },
+  {
+    "id": "6ebead70-4d59-4c06-8e9b-e597824d0d55",
+    "name": "Lost Soulsourcing",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Lost_Soulsourcing",
+    "icon": {
+      "url": "buildings/general_store.png"
+    },
+    "type": "generalStore",
+    "shop": "9ed28207-5dfd-4696-a625-8b2bceda3fb9"
+  },
+  {
+    "id": "86ca7a7e-c22c-4b24-9c7e-7b9c78e6c66f",
+    "name": "Broken Spirit Savings",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Broken_Spirit_Savings",
+    "icon": {
+      "url": "buildings/bank.png"
+    },
+    "type": "bank",
+    "shop": null
+  },
+  {
+    "id": "2d52fa57-3c71-4faa-8f42-4fc2a2ebda00",
+    "name": "Restored Spirit Savings",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Restored_Spirit_Savings",
+    "icon": {
+      "url": "buildings/bank.png"
+    },
+    "type": "bank",
+    "shop": null
+  },
+  {
+    "id": "e429fa8b-77bf-461c-94e4-2b6702b3ff84",
+    "name": "Inner Peace Eats",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Inner_Peace_Eats",
+    "icon": {
+      "url": "buildings/tavern.png"
+    },
+    "type": "tavern",
+    "shop": "49a1704f-ad77-41a1-9b6c-3425acf564d9"
+  },
+  {
+    "id": "140c8866-5d62-4405-9a7e-c6a407df8c72",
+    "name": "The Final Deposit",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/The_Final_Deposit",
+    "icon": {
+      "url": "buildings/bank.png"
+    },
+    "type": "bank",
+    "shop": null
+  },
+  {
+    "id": "2a101b9f-511c-434d-94ad-143ec0610b4e",
+    "name": "Jeweled Oasis Bank",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Jeweled_Oasis_Bank",
+    "icon": {
+      "url": "buildings/bank.png"
+    },
+    "type": "bank",
+    "shop": null
+  },
+  {
+    "id": "7a194964-cdac-4809-b3d1-cb4cadc6e84f",
+    "name": "Southern Gem",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Southern_Gem",
+    "icon": {
+      "url": "buildings/general_store.png"
+    },
+    "type": "generalStore",
+    "shop": "f3f4ebb3-b6d0-4af5-a921-4313eb464e38"
+  }
+]

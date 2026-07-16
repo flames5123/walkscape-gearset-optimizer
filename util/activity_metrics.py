@@ -31,7 +31,8 @@ def calculate_activity_metrics(
     steps_add: Optional[int] = None,
     steps_percent: Optional[float] = None,
     bonus_xp_percent: float = 0.0,
-    bonus_xp_add: float = 0.0
+    bonus_xp_add: float = 0.0,
+    instant_actions: bool = False,
 ) -> Dict[str, float]:
     """
     Calculate all activity efficiency metrics from base stats and gear bonuses.
@@ -85,19 +86,32 @@ def calculate_activity_metrics(
         if steps_percent is None:
             steps_percent = 0.0
     
-    # Apply work efficiency (capped at max)
+    # Instant-actions mode: zero out all step-influencing stats.
+    # When actions complete instantly, WE/flat/pct are irrelevant — they neither
+    # help nor hurt. DA and DR are NOT zeroed; they remain beneficial.
+    if instant_actions:
+        work_efficiency = 0.0
+        steps_add = 0
+        steps_percent = 0.0
     capped_we = min(work_efficiency, max_efficiency)
     total_efficiency = 1.0 + capped_we
-    steps_with_efficiency = math.ceil(base_steps / total_efficiency)
-    
-    # Enforce minimum steps (at max efficiency)
-    min_steps = math.ceil(base_steps / (1 + max_efficiency))
-    steps_after_min = max(steps_with_efficiency, min_steps)
-    
-    # Apply percentage and flat modifiers
+    # Match the game's formula (per KamiTzayig reference): single ceil at the END
+    # of the chain. Applying ceil before the pct multiplier introduces off-by-one
+    # errors (e.g. Flowing pocketwatch -5% on Lizard Hunting reads 105.86 with an
+    # early ceil versus the real 105.14).
+    base_over_eff = base_steps / total_efficiency
+
+    # Enforce minimum steps (at max efficiency) as a safety net in case the WE
+    # cap was bypassed upstream. Uses the same float-before-ceil approach.
+    min_steps = base_steps / (1 + max_efficiency)
+    steps_after_min = max(base_over_eff, min_steps)
+
+    # Apply percentage and flat modifiers (no intermediate ceil).
     steps_with_pct = steps_after_min * (1 + steps_percent)
     steps_with_flat = steps_with_pct + steps_add
-    steps_per_single_action = max(steps_with_flat, 10)  # Minimum 10 steps
+    # Single ceil at the end. Apply the minimum-10 floor before the ceil so the
+    # result is always an integer >= 10.
+    steps_per_single_action = max(math.ceil(steps_with_flat), 10)
     
     # Calculate expected steps with double action
     expected_paid_actions = 1.0 / (1 + double_action)
@@ -108,12 +122,22 @@ def calculate_activity_metrics(
     steps_per_reward_roll = steps_per_single_action / rewards_per_completion
     
     # Calculate XP efficiency
-    total_xp = base_xp * (1 + bonus_xp_percent) + bonus_xp_add
+    # Calculate XP efficiency. Match the UI display formula in
+    # ui/static/js/components/activity-info-section.js:
+    #   primaryXP = (base * (1 + fineBonus) + add) * (1 + percent)
+    # bonus_xp_add is part of the base that percent multiplies — not a flat
+    # post-multiplier. Bug: bog_fishing_net showed 3.20 in stats report but
+    # 3.254 when equipped — gap was bonus_xp_add * bonus_xp_percent
+    # (2 * 15% = 0.3 XP/action). Activities don't consume Fine materials,
+    # so fineBonus is 0 here.
+    total_xp = (base_xp + bonus_xp_add) * (1 + bonus_xp_percent)
     primary_xp_per_step = total_xp / expected_steps_per_action if expected_steps_per_action > 0 else 0
     
     return {
+        'displayed_steps_per_action': steps_per_single_action,
         'expected_steps_per_action': expected_steps_per_action,
         'steps_per_reward_roll': steps_per_reward_roll,
+        'primary_xp_per_action': total_xp,
         'primary_xp_per_step': primary_xp_per_step,
         'reward_rolls_per_step': 1.0 / steps_per_reward_roll if steps_per_reward_roll > 0 else 0,
     }
@@ -136,7 +160,8 @@ def calculate_crafting_metrics(
     steps_add: Optional[int] = None,
     steps_percent: Optional[float] = None,
     bonus_xp_percent: float = 0.0,
-    bonus_xp_add: float = 0.0
+    bonus_xp_add: float = 0.0,
+    instant_actions: bool = False,
 ) -> Dict[str, float]:
     """
     Calculate all crafting efficiency metrics from base stats and gear bonuses.
@@ -183,19 +208,31 @@ def calculate_crafting_metrics(
         bonus_xp_percent = total_stats.get('bonus_xp_percent', 0.0)
         bonus_xp_add = total_stats.get('bonus_xp_add', 0.0)
     
+    # Instant-actions mode: zero out all step-influencing stats.
+    # WE, flat steps, and pct steps are irrelevant when actions complete instantly.
+    # DA, DR, NMC, QO and all other non-step stats are NOT zeroed.
+    if instant_actions:
+        work_efficiency = 0.0
+        steps_add = 0
+        steps_percent = 0.0
+    
     # Apply work efficiency (capped at max)
     capped_we = min(work_efficiency, max_efficiency)
     total_efficiency = 1.0 + capped_we
-    steps_with_efficiency = math.ceil(base_steps / total_efficiency)
-    
-    # Apply percentage and flat modifiers
-    steps_with_pct = steps_with_efficiency * (1 + steps_percent)
+    # Match the game's formula (per KamiTzayig reference): single ceil at the END
+    # of the chain. Applying ceil before the pct multiplier introduces off-by-one
+    # errors whenever a steps_percent modifier is present.
+    base_over_eff = base_steps / total_efficiency
+
+    # Apply percentage and flat modifiers (no intermediate ceil).
+    steps_with_pct = base_over_eff * (1 + steps_percent)
     steps_with_flat = steps_with_pct + steps_add
-    current_steps = max(math.ceil(steps_with_flat), 1)  # Minimum 1 step
+    # Single ceil at the end. Minimum of 1 step (crafting has lower floor than activities).
+    current_steps = max(math.ceil(steps_with_flat), 1)
     
-    # Calculate expected steps with double action
+    # Calculate expected steps with double action (no ceil - keep as float for accurate XP/step)
     expected_paid_actions = 1.0 / (1 + double_action)
-    expected_steps_per_action = math.ceil(expected_paid_actions * current_steps)
+    expected_steps_per_action = expected_paid_actions * current_steps
     
     # Calculate material efficiency
     # DR gives extra crafts, NMC reduces material consumption
@@ -207,19 +244,42 @@ def calculate_crafting_metrics(
     # DR gives bonus items per action
     expected_steps_per_item = expected_steps_per_action / (1 + double_rewards) if double_rewards > 0 else expected_steps_per_action
     
-    # Calculate XP efficiency
-    total_xp = base_xp * (1 + bonus_xp_percent) + bonus_xp_add
+    # Calculate XP efficiency. Match the UI display formula in
+    # ui/static/js/components/activity-info-section.js:
+    #   primaryXP = (base * (1 + fineBonus) + add) * (1 + percent)
+    # See activity-path comment above for context. This is the craft path,
+    # which CAN consume Fine materials — but fineBonus is applied
+    # elsewhere when this function is called for a Fine recipe (caller
+    # multiplies base_xp by 1.75 before passing in). Either way, the order
+    # `(base + add) * (1 + percent)` matches the UI exactly.
+    total_xp = (base_xp + bonus_xp_add) * (1 + bonus_xp_percent)
     primary_xp_per_step = total_xp / expected_steps_per_action if expected_steps_per_action > 0 else 0
+    
+    # Calculate XP per material consumed (ignores DR — only NMC and bonus XP matter)
+    # Each craft action consumes (1 - NMC) materials on average and gives total_xp XP.
+    # DR gives extra items but doesn't change XP or material consumption per action.
+    materials_consumed_per_action = (1 - no_materials_consumed) if no_materials_consumed < 1.0 else 0.001
+    xp_per_material = total_xp / materials_consumed_per_action if materials_consumed_per_action > 0 else 0
     
     # Calculate chest finding efficiency
     # Chest finding works like other finding bonuses - increases drop rate
     chest_finding = total_stats.get('chest_finding', 0.0) if total_stats else 0.0
-    # Base chest drop rate is typically 1% (0.01), modified by chest_finding
-    base_chest_rate = 0.01
+    # Base chest drop rate is 0.4% (1/250) per reward roll, modified by chest_finding
+    base_chest_rate = 0.004
     chest_rate_with_bonus = base_chest_rate * (1 + chest_finding)
     # Steps per chest = steps per action / (chest rate * (1 + DR))
     # DR affects all drops including chests
     steps_per_chest = expected_steps_per_action / (chest_rate_with_bonus * (1 + double_rewards)) if chest_rate_with_bonus > 0 else 999999
+    # Materials per chest = materials consumed per craft * crafts per chest
+    # crafts_per_chest = 1 / chest_rate  (per-action: chests = chest_rate × (1+DR),
+    #   primary items = (1+DR), so items_per_chest = 1/chest_rate)
+    # materials_per_craft already has /(1+DR) baked in (it's materials per
+    # primary item), so materials_per_chest = materials_per_craft / chest_rate
+    # — NOT materials_per_craft / (chest_rate × (1+DR)). The earlier
+    # formula double-counted DR (wiki mechanics: chests, primary items,
+    # and all finding-stat drops share the same (1+DR) reward-roll factor,
+    # which cancels with the (1+DR) in materials_per_craft).
+    materials_per_chest = materials_per_craft / chest_rate_with_bonus if chest_rate_with_bonus > 0 else 999999
     
     return {
         'current_steps': current_steps,
@@ -228,8 +288,10 @@ def calculate_crafting_metrics(
         'materials_per_craft': materials_per_craft,
         'crafts_per_material': crafts_per_material,
         'primary_xp_per_step': primary_xp_per_step,
+        'xp_per_material': xp_per_material,
         'quality_outcome': quality_outcome,
         'steps_for_chest': steps_per_chest,
+        'materials_per_chest': materials_per_chest,
     }
 
 # ============================================================================

@@ -62,7 +62,7 @@ class CustomStatsPopup extends Component {
             <div class="modal-overlay" style="display: none;">
                 <div class="modal custom-stats-popup">
                     <div class="modal-header">
-                        <h2>Custom Stats (TODO still lacking)</h2>
+                        <h2>Custom Stats</h2>
                         <button class="close-btn">&times;</button>
                     </div>
                     <div class="modal-content">
@@ -92,6 +92,38 @@ class CustomStatsPopup extends Component {
                                 Toggle custom stat options that apply to your character. 
                                 These settings persist across character imports.
                             </p>
+                            <div style="
+                                padding: var(--spacing-md);
+                                margin-bottom: var(--spacing-md);
+                                background-color: var(--bg-secondary);
+                                border: 1px solid var(--border-color);
+                                border-radius: 4px;
+                            ">
+                                <label style="
+                                    display: flex;
+                                    align-items: center;
+                                    cursor: pointer;
+                                    user-select: none;
+                                ">
+                                    <input 
+                                        type="checkbox" 
+                                        id="custom-stats-notification-toggle"
+                                        ${(store.state.ui.custom_stats?.show_notification !== false) ? 'checked' : ''}
+                                        style="margin-right: var(--spacing-md); cursor: pointer;"
+                                    >
+                                    <span style="color: var(--text-primary); font-weight: 500;">
+                                        Show custom stats notification after optimization
+                                    </span>
+                                </label>
+                                <div style="
+                                    margin-top: var(--spacing-xs);
+                                    margin-left: 28px;
+                                    font-size: 0.85em;
+                                    color: var(--text-secondary);
+                                ">
+                                    When enabled, a notification will appear after optimization if you own gear that would be better but is locked behind a custom stat toggle below.
+                                </div>
+                            </div>
                             <div class="custom-stats-list">
                                 ${this.renderCustomStatsList()}
                             </div>
@@ -182,6 +214,7 @@ class CustomStatsPopup extends Component {
         this.$element.off('click', '.close-btn');
         this.$element.off('click', '.modal-overlay');
         this.$element.off('change', '.custom-stat-checkbox');
+        this.$element.off('change', '#custom-stats-notification-toggle');
 
         // Close button
         this.$element.on('click', '.close-btn', () => {
@@ -193,6 +226,16 @@ class CustomStatsPopup extends Component {
             if ($(e.target).hasClass('modal-overlay')) {
                 this.hide();
             }
+        });
+
+        // Notification toggle
+        this.$element.on('change', '#custom-stats-notification-toggle', (e) => {
+            const isChecked = $(e.target).prop('checked');
+            if (!store.state.ui.custom_stats) {
+                store.state.ui.custom_stats = {};
+            }
+            store.state.ui.custom_stats.show_notification = isChecked;
+            store.update('ui.custom_stats.show_notification', isChecked);
         });
 
         // Checkbox toggle

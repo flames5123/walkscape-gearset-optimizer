@@ -1,0 +1,1499 @@
+[
+  {
+    "name": "Factions",
+    "minZoom": 0,
+    "maxZoom": 0,
+    "markers": [
+      {
+        "coords": [
+          630,
+          750
+        ],
+        "id": "jarvonia",
+        "name": "Jarvonia",
+        "icon": {
+          "url": "coatofarms/jarvonia.png",
+          "width": 48,
+          "height": 48
+        },
+        "motto": "Throught the cold,\n our hearts burn bright",
+        "lore": "Jarvonia, a land of ice and darkness, ruled by a powerful religious brotherhood, is an independent realm of hardy people united by their unwavering faith and fierce determination to survive. Despite the harsh winters and isolation, they find strength and protection through their religion, their hearts burning bright against the cold.",
+        "info": [
+          "Starting region of the game",
+          "Many woodcutting and fishing activities",
+          "Good for low level players"
+        ],
+        "wordsToHighLight": [
+          "Jarvonia",
+          "ice",
+          "darkness",
+          "independent realm",
+          "against the cold",
+          "Starting region",
+          "woodcutting",
+          "fishing",
+          "low level"
+        ]
+      },
+      {
+        "coords": [
+          540,
+          1840
+        ],
+        "id": "gdte",
+        "name": "GDTE",
+        "icon": {
+          "url": "coatofarms/gdte.png",
+          "width": 48,
+          "height": 48
+        },
+        "fullName": "Grand Duchy of Trellin-Erdwise",
+        "motto": "Bound by the tides and the reeds",
+        "lore": "The Grand Duchy of Trellin-Erdwise, divided in facing a current crisis, is a land of diverse natural beauty and challenges. The marshlands of Trellin and the coastal ports in Erdwise, are both sources of beauty and danger. The people of Trellin-Erdwise are defined by their pride and greed.",
+        "info": [
+          "Connects the continent to Ewerethien",
+          "Old arena ruins has PvE content",
+          "Has a large variety of activities"
+        ],
+        "wordsToHighLight": [
+          "Grand Duchy",
+          "Trellin-Erdwise",
+          "Trellin",
+          "Erdwise",
+          "pride",
+          "greed",
+          "Ewerethien",
+          "Old arena",
+          "activities"
+        ]
+      },
+      {
+        "coords": [
+          1320,
+          1700
+        ],
+        "id": "wallisia",
+        "name": "Wallisia",
+        "icon": {
+          "url": "coatofarms/wallisia.png",
+          "width": 48,
+          "height": 48
+        },
+        "fullName": "Empire of Wallisia",
+        "motto": "Where the crops grow tall, so do we",
+        "lore": "Wallisia, a land of abundance and power. The Empress, a descendant of a great warrior, commands an army that has conquered the continent, leaving only Jarvonia untouched. The green grasslands are the heart of the whole continent, providing bountiful harvests as well as resources that fuel the empire's industrial and military capacities. The empire boasts the largest population in the continent, and the people are proud of their strength and power.",
+        "info": [
+          "Has a Player-vs-Player arena",
+          "Contains good farming opportunities",
+          "Works as the main hub of the game"
+        ],
+        "wordsToHighLight": [
+          "Wallisia",
+          "green grasslands",
+          "industrial",
+          "military",
+          "Player-vs-Player",
+          "farming opportunities",
+          "main hub"
+        ]
+      },
+      {
+        "coords": [
+          2265,
+          2175
+        ],
+        "id": "galeforge",
+        "name": "Galeforge",
+        "icon": {
+          "url": "coatofarms/galeforge.png",
+          "width": 48,
+          "height": 48
+        },
+        "motto": "Forge the future, and fear nothing",
+        "lore": "Galeforge is a city of innovation and progress, conquered by the might Empire of Wallisia. Nestled between Wallisia and the archipelago, it is a place where technology and industry flourish. The people of Galeforge are ambitious and driven, constantly pushing boundaries of what's possible. The city is a bustling metropolis, where factories hum with activity and the streets are lined with merchants selling the latest innovations.",
+        "info": [
+          "You can explore the Archipelago",
+          "Some high tech innovations to purchase",
+          "Has a lot of crafting opportunities"
+        ],
+        "wordsToHighLight": [
+          "Galeforge",
+          "Wallisia",
+          "archipelago",
+          "bustrling metropolis",
+          "innovation",
+          "the Archipelago",
+          "high tech",
+          "crafting"
+        ]
+      },
+      {
+        "coords": [
+          2120,
+          890
+        ],
+        "id": "wrentmark",
+        "name": "Wrentmark",
+        "icon": {
+          "url": "coatofarms/wrentmark.png",
+          "width": 48,
+          "height": 48
+        },
+        "motto": "Our gold burns brighter than the sun",
+        "lore": "Wrentmark is a realm forged by fire, where the scorching sun beats down upon the desert sands. The people of Wrentmark are a proud and hardy lot, who have thrived in this harsh environment for ages. Wrentmark is a land of untold riches, where precious gems and minerals are mined from the earth and traded across the land. The people of Wrentmark are master merchants, their skills honed through centuries of commerce.",
+        "info": [
+          "Great place to mine minerals and gems",
+          "Has a big variety of NPC shops",
+          "Has multiple NPC guilds with quests"
+        ],
+        "wordsToHighLight": [
+          "Wrentmark",
+          "fire",
+          "proud",
+          "hardy",
+          "master merchants",
+          "minerals",
+          "gems",
+          "NPC shops",
+          "NPC guilds"
+        ]
+      },
+      {
+        "coords": [
+          555,
+          3915
+        ],
+        "id": "painful_islands",
+        "name": "Painful Islands",
+        "icon": {
+          "url": "coatofarms/painful_islands.png",
+          "width": 48,
+          "height": 48
+        },
+        "motto": "Bring her back",
+        "lore": "The Painful Islands, a realm born out of tragedy and love. Created from the shattered remains of the Mana Deep Mountain, these desolate islands are home to monsters. But in the midst of this chaos lies a glimmer of hope. The Painful Islands may be a realm of terror, but is also a realm of determination and the relentless pursuit of redemption.",
+        "info": [
+          "Filled with PvE content and dungeons",
+          "Home to grotesque special resources",
+          "Great for combat focused players"
+        ],
+        "wordsToHighLight": [
+          "Painful Islands",
+          "tragedy",
+          "love",
+          "Mana Deep Mountain",
+          "glimmer of hope",
+          "redemption",
+          "PvE content",
+          "dungeons",
+          "grotesque",
+          "combat focused"
+        ]
+      },
+      {
+        "coords": [
+          860,
+          2910
+        ],
+        "id": "ewerethien",
+        "name": "Ewerethien",
+        "icon": {
+          "url": "coatofarms/ewerethien.png",
+          "width": 48,
+          "height": 48
+        },
+        "motto": "The arcane is the essence of existence",
+        "lore": "Ewerthein, a realm of mystic wonder and arcane power. The land is blessed with magic, teeming with enchanted flora and fauna. The city of Academica stands tall, a beacon of knowledge and mastery of the arcane arts. A council of powerful mages, chosen for their skill and wisdom, rule from the heights of Whitescar Tower and drive forward their pursuit of greatness, enlightenment and research.",
+        "info": [
+          "Home to the mages, has Mage's Guild",
+          "Good place to learn to use magic",
+          "Lots of magical things to gather"
+        ],
+        "wordsToHighLight": [
+          "Ewerethien",
+          "enchanted",
+          "powerful mages",
+          "greatness",
+          "enlightenment",
+          "research",
+          "Mage's Guild",
+          "learn",
+          "magical things"
+        ]
+      },
+      {
+        "coords": [
+          1800,
+          3270
+        ],
+        "id": "braemercia",
+        "name": "Braemercia",
+        "icon": {
+          "url": "coatofarms/braemercia.png",
+          "width": 48,
+          "height": 48
+        },
+        "motto": "Even the toughest of rocks can't stand our wrath",
+        "lore": "The rocky isle of Braemercia, home of the dwarves, rises from the tumultuous seas. For eons, the dwarves have delved deep into the earth, unearthing treasures untold from the Ironmouth Mine. But even the dwarves' unbroken spirit could not withstand the mages, who in their thirst for magrium, enslaved Bramercia's people and plundered the Ironmouth Mine.",
+        "info": [
+          "Deep mines that contain high-end ores",
+          "Has a NPC guild for miners",
+          "Dwarven smiths sell special items"
+        ],
+        "wordsToHighLight": [
+          "Braemercia",
+          "dwarves",
+          "treasures untold",
+          "Ironmouth-Mine",
+          "magrium",
+          "high-end ores",
+          "NPC guild",
+          "special items"
+        ]
+      },
+      {
+        "coords": [
+          1625,
+          4120
+        ],
+        "id": "rid_raddak",
+        "name": "Rid Raddak",
+        "icon": {
+          "url": "coatofarms/rid_raddak.png",
+          "width": 48,
+          "height": 48
+        },
+        "motto": "Our stars are never fading",
+        "lore": "The lush jungles of Rid Raddak, the land of the elves, give way to the warm sands of the south. Once conquerors of the land, they now defend it against the monstrous hordes that threaten to overrun their realm. Though their cities may be in ruins, the spirit of the elves remains unbroken. The elves protect their home at all costs.",
+        "info": [
+          "Huge continent with lots of content",
+          "Twilight Keep is a great place for PvE",
+          "Good for high level players"
+        ],
+        "wordsToHighLight": [
+          "Rid Raddak",
+          "monstrous hordes",
+          "at all costs",
+          "lots of content",
+          "Twilight Keep",
+          "PvE",
+          "high level players"
+        ]
+      },
+      {
+        "coords": [
+          850,
+          1350
+        ],
+        "id": "syrenthia",
+        "name": "Syrenthia",
+        "icon": {
+          "url": "coatofarms/syrenthia.png",
+          "width": 48,
+          "height": 48
+        },
+        "hiddenText": "???",
+        "motto": "",
+        "lore": "",
+        "info": [],
+        "wordsToHighLight": []
+      }
+    ]
+  },
+  {
+    "name": "Locations",
+    "minZoom": 1,
+    "maxZoom": 4,
+    "labelMinZoom": 2,
+    "markers": [
+      {
+        "id": "location-disenchanted_forest-bbaede29-74fb-4536-9c08-0693ffb0267d",
+        "name": "Disenchanted Forest",
+        "faction": "jarvonia",
+        "wikiUrl": "https://wiki.walkscape.app/wiki/Disenchanted_Forest",
+        "coords": [
+          369.0,
+          537.0
+        ],
+        "icon": {
+          "url": "locations/forest_white.png"
+        },
+        "activities": [
+          "activity-cut_pine_trees-53a11a23-24d6-4d5c-9dc8-28c702189a29",
+          "activity-cut_birch_trees-b3fda01f-6d26-41ff-8374-311de159b0f8",
+          "activity-dobby_is..._free-7a57ddaf-4970-4f88-bcb2-09d4a7fca50f"
+        ],
+        "services": [
+          "jobboard-tutorial_area-43c4e231-2f03-4acb-b976-e4a239ad3cf9"
+        ],
+        "buildings": [
+          "building-helpful_herbert's_hut-0ed43eaa-cf25-4452-b915-c07e4f4eac86"
+        ]
+      },
+      {
+        "id": "location-azurazera-698f223b-498f-4cc6-9998-59840aaaa31c",
+        "name": "Azurazera",
+        "faction": "jarvonia",
+        "wikiUrl": "https://wiki.walkscape.app/wiki/Azurazera",
+        "coords": [
+          1065.0,
+          827.0
+        ],
+        "icon": {
+          "url": "locations/castle_white.png"
+        },
+        "activities": [
+          "activity-lake_fishing-4fc334f3-1bfd-48a0-bad2-803fb73fa743",
+          "activity-soup_kitchen_volunteering-013f92cc-ee30-42c5-9f57-436bb57cb76a",
+          "b6ac3245-e72a-4565-a6ea-21f20ea6ff32"
+        ],
+        "services": [
+          "jobboard-azurazera_job_board-fdca07c9-3cdb-44a0-aed7-53b22678d8bf",
+          "3fbb5e79-cfb0-4395-9401-071c6544be68",
+          "service-wardrobe-9fae8878-1963-4425-a273-fc08b8890b14"
+        ],
+        "buildings": [
+          "e637450e-9c7c-4b33-9919-6ea77e75f63e",
+          "building-temple_of_azurazera-127f2eba-0e5b-4622-aea6-396ae6c1ecf7",
+          "building-polar_pruning-4a0c2993-94f3-4bcf-bd49-6855a3b77db1",
+          "building-tundra_trends-25aa74db-271b-4dc3-ac09-d45b99206515"
+        ]
+      },
+      {
+        "id": "location-kallaheim-094c9ec8-fdd2-4471-bacc-fabb71e6d654",
+        "name": "Kallaheim",
+        "faction": "jarvonia",
+        "wikiUrl": "https://wiki.walkscape.app/wiki/Kallaheim",
+        "coords": [
+          408.0,
+          619.0
+        ],
+        "icon": {
+          "url": "locations/castle_white.png"
+        },
+        "activities": [
+          "activity-litter_looting-41fbf4b2-2e61-405e-beb1-c223d22ac156",
+          "745d4e6f-5c6a-45a3-a98d-fc88f63bbb25",
+          "a34e2643-5c41-4d15-94de-8df53d3d4c19",
+          "c0fdb8dd-09f1-40a8-ab49-a673d9cccae1"
+        ],
+        "services": [
+          "jobboard-kallaheim_job_board-170b68d2-5d0f-4378-a8f0-b86112a5d60b",
+          "service-basic_forge-0eeda0aa-614d-4ce9-a5b4-0e5c4ea17d33",
+          "service-basic_kitchen-084de2eb-c5ce-4c05-8958-9817def4975c",
+          "service-basic_sawmill-55763e83-972b-4964-a169-8b53beb8b507",
+          "service-wardrobe-9fae8878-1963-4425-a273-fc08b8890b14"
+        ],
+        "buildings": [
+          "building-the_icy_goblet-7d3ca75d-e0b5-44b3-a7f4-f0b17cea8dad",
+          "building-kallaheim's_frosty_finds-71388909-1af6-47dc-8558-86236d0d03b8",
+          "building-frozen_capital_bank-4e697937-2df0-4fab-b09d-9512240e3d63"
+        ]
+      },
+      {
+        "id": "location-frusenholm-5ddb0735-4582-4858-80a0-7489f1b043a2",
+        "name": "Frusenholm",
+        "faction": "jarvonia",
+        "wikiUrl": "https://wiki.walkscape.app/wiki/Frusenholm",
+        "coords": [
+          463.0,
+          954.0
+        ],
+        "icon": {
+          "url": "locations/town_white.png"
+        },
+        "activities": [
+          "activity-lake_fishing-4fc334f3-1bfd-48a0-bad2-803fb73fa743",
+          "activity-ice_sculpting-2b0be0f5-69d5-4205-922d-c5a02c056cab",
+          "36bb5e0a-f840-4109-b92f-9a2e06c3a502"
+        ],
+        "services": [
+          "service-basic_workshop-56b7523f-2fa3-48e4-9ec9-3906baca7125",
+          "service-wardrobe-9fae8878-1963-4425-a273-fc08b8890b14"
+        ],
+        "buildings": [
+          "building-jarvojoy-7046d172-c527-453e-ab11-15c831c7d158"
+        ]
+      },
+      {
+        "id": "location-barbantok-018aaeeb-5b51-4043-94b7-28fa7dcb7b7a",
+        "name": "Barbantok",
+        "faction": "jarvonia",
+        "wikiUrl": "https://wiki.walkscape.app/wiki/Barbantok",
+        "coords": [
+          795.0,
+          592.0
+        ],
+        "icon": {
+          "url": "locations/town_white.png"
+        },
+        "activities": [
+          "activity-frisbee_golfing_(beginner)-0fb41f4d-f46b-4a6d-acdf-f2525654c714",
+          "activity-wood_carving-af675674-c972-4e2e-80fe-1501b972e353",
+          "activity-tinkering-cb2a8773-06d0-4661-9708-2bef5768119e"
+        ],
+        "services": [
+          "service-sawmill_of_barbantok-bcf66d09-179f-4979-90d3-65333a263ad6",
+          "service-wardrobe-9fae8878-1963-4425-a273-fc08b8890b14"
+        ],
+        "buildings": []
+      },
+      {
+        "id": "location-centaham-a8ab1866-41bc-4dc0-9294-c7c0e3928fc8",
+        "name": "Centaham",
+        "faction": "jarvonia",
+        "wikiUrl": "https://wiki.walkscape.app/wiki/Centaham",
+        "coords": [
+          678.0,
+          928.0
+        ],
+        "icon": {
+          "url": "locations/city_white.png"
+        },
+        "activities": [],
+        "services": [
+          "service-basic_kitchen-084de2eb-c5ce-4c05-8958-9817def4975c",
+          "service-wardrobe-9fae8878-1963-4425-a273-fc08b8890b14"
+        ],
+        "buildings": [
+          "building-northstar_mercantile-e8b93e0c-50d9-4a57-9882-6cc53899e156"
+        ]
+      },
+      {
+        "id": "location-port_skildar-2b12283e-6309-45af-8332-fb470267f510",
+        "name": "Port Skildar",
+        "faction": "jarvonia",
+        "wikiUrl": "https://wiki.walkscape.app/wiki/Port_Skildar",
+        "coords": [
+          946.0,
+          1135.0
+        ],
+        "icon": {
+          "url": "locations/port_white.png"
+        },
+        "activities": [
+          "activity-sea_fishing_(rod)-e6b9acb3-6450-499d-80ac-3a8153351ac6",
+          "activity-horseshoe_making-c4b0dda4-2f2a-4aea-989a-144d0b738f10",
+          "activity-ship_repair_(beginner)-0870997e-fee1-465b-ab4a-a9f668bd16b0"
+        ],
+        "services": [
+          "service-wardrobe-9fae8878-1963-4425-a273-fc08b8890b14"
+        ],
+        "buildings": [
+          "building-frosthook_emporium-01ead99d-4e1e-4a12-b6ff-bcf8fc54ff67"
+        ]
+      },
+      {
+        "id": "location-coldington-71a5ef7d-1d2e-4cec-89f2-cef5f72614e8",
+        "name": "Coldington",
+        "faction": "jarvonia",
+        "wikiUrl": "https://wiki.walkscape.app/wiki/Coldington",
+        "coords": [
+          1003.0,
+          1013.0
+        ],
+        "icon": {
+          "url": "locations/city_white.png"
+        },
+        "activities": [
+          "activity-firewood_making-407263a4-4ee1-4383-a624-2a7ed70c4b10",
+          "activity-rooftop_jumping-ebf1dd67-a070-40ad-87cf-608a1857fabc",
+          "activity-branch_trimming-dfd57187-c791-47ae-9e74-dc4acb9b7952"
+        ],
+        "services": [
+          "service-basic_kitchen-084de2eb-c5ce-4c05-8958-9817def4975c",
+          "service-wardrobe-9fae8878-1963-4425-a273-fc08b8890b14"
+        ],
+        "buildings": [
+          "building-not_a_shop-09c14f32-e283-43e0-8626-91be697fd489"
+        ]
+      },
+      {
+        "id": "location-sanguine_hills-94af86cb-3542-4054-b759-be3dae7fc9e9",
+        "name": "Sanguine Hills",
+        "faction": "jarvonia",
+        "wikiUrl": "https://wiki.walkscape.app/wiki/Sanguine_Hills",
+        "coords": [
+          1278.0,
+          906.0
+        ],
+        "icon": {
+          "url": "locations/hills_white.png"
+        },
+        "activities": [
+          "activity-mine_coal-766ceeb7-30f2-4e41-b487-a89345273413",
+          "activity-mine_tarsilium_ore-03bf04ba-e66c-4f80-9068-0cfa24533ca6",
+          "activity-cliff_foraging-38b1ebbe-c54a-452f-b2ab-b06db196fd34",
+          "activity-stone_quarrying-4bc45151-91d0-44fd-8839-ef418eafe876"
+        ],
+        "services": [],
+        "buildings": []
+      },
+      {
+        "id": "location-nomad_woods-83e51420-654a-41f7-be07-476f7de266f1",
+        "name": "Nomad Woods",
+        "faction": "jarvonia",
+        "wikiUrl": "https://wiki.walkscape.app/wiki/Nomad_Woods",
+        "coords": [
+          712.0,
+          480.0
+        ],
+        "icon": {
+          "url": "locations/forest_white.png"
+        },
+        "activities": [
+          "activity-cut_birch_trees-b3fda01f-6d26-41ff-8374-311de159b0f8",
+          "activity-cut_spruce_trees-f20dc34f-580d-49cf-b2e2-c27a204e04f5",
+          "activity-cut_oak_trees-5dc3bb43-4600-45ed-ad5f-a99f8a68248b"
+        ],
+        "services": [],
+        "buildings": [
+          "building-woodcutter's_cabin-fee965c9-41d4-458a-9e06-09813a610ee4"
+        ]
+      },
+      {
+        "id": "location-casbrant_fields-6f038903-6682-4113-b4e8-dbb7be8e3c60",
+        "name": "Casbrant Fields",
+        "faction": "jarvonia",
+        "wikiUrl": "https://wiki.walkscape.app/wiki/Casbrant_Fields",
+        "coords": [
+          752.0,
+          821.0
+        ],
+        "icon": {
+          "url": "locations/plains_white.png"
+        },
+        "activities": [
+          "activity-plains_foraging-8e8e3d96-8428-4f0f-9397-a4261426325c",
+          "activity-cut_spruce_trees-f20dc34f-580d-49cf-b2e2-c27a204e04f5",
+          "activity-cross-country_skiing_(beginner)-fc421940-d63a-402f-aa50-26cc2efea4d3"
+        ],
+        "services": [],
+        "buildings": []
+      },
+      {
+        "id": "location-norsack_plains-2d865c4b-425e-4a6f-9c40-0539b5e62b06",
+        "name": "Norsack Plains",
+        "faction": "jarvonia",
+        "wikiUrl": "https://wiki.walkscape.app/wiki/Norsack_Plains",
+        "coords": [
+          247.0,
+          851.0
+        ],
+        "icon": {
+          "url": "locations/plains_white.png"
+        },
+        "activities": [
+          "activity-plains_foraging-8e8e3d96-8428-4f0f-9397-a4261426325c",
+          "activity-gold_panning-86072e6b-4e46-413f-9407-caf0ca8b077f"
+        ],
+        "services": [],
+        "buildings": []
+      },
+      {
+        "id": "location-frostbite_mountain-0dc3b06f-c24c-4c5a-98d8-bb58606d9c8b",
+        "name": "Frostbite Mountain",
+        "faction": "jarvonia",
+        "wikiUrl": "https://wiki.walkscape.app/wiki/Frostbite_Mountain",
+        "coords": [
+          202.0,
+          729.0
+        ],
+        "icon": {
+          "url": "locations/mountains.png"
+        },
+        "activities": [
+          "activity-mine_copper_ore-cc886e82-54a0-4b04-b822-3ce79f00ae2d",
+          "activity-mine_tin_ore-2e1a6c3e-f46e-4fdf-97d8-be6eec6944a8",
+          "activity-mine_iron_ore-60e5869c-dfde-448b-8ec7-b546dfd9b3be",
+          "activity-cliff_foraging-38b1ebbe-c54a-452f-b2ab-b06db196fd34",
+          "activity-mine_coal-766ceeb7-30f2-4e41-b487-a89345273413",
+          "activity-mountain_climbing_(beginner)-2020f2b7-5365-4f5c-8b17-3d8164a13643"
+        ],
+        "services": [],
+        "buildings": []
+      },
+      {
+        "id": "location-noiseless_pass-e081df71-97eb-4708-90b0-f33e61b2a0c7",
+        "name": "Noiseless Pass",
+        "faction": "jarvonia",
+        "wikiUrl": "https://wiki.walkscape.app/wiki/Noiseless_Pass",
+        "coords": [
+          499.0,
+          1347.0
+        ],
+        "icon": {
+          "url": "locations/plains_white.png"
+        },
+        "activities": [
+          "activity-cut_spruce_trees-f20dc34f-580d-49cf-b2e2-c27a204e04f5",
+          "activity-cut_oak_trees-5dc3bb43-4600-45ed-ad5f-a99f8a68248b",
+          "activity-cross-country_skiing_(intermediate)-42788047-6cc3-4711-88be-999e9504fc2a"
+        ],
+        "services": [],
+        "buildings": []
+      },
+      {
+        "id": "location-fort_of_permafrost-f3f04128-5635-45c0-b415-69dd03feac39",
+        "name": "Fort of Permafrost",
+        "faction": "jarvonia",
+        "wikiUrl": "https://wiki.walkscape.app/wiki/Fort_of_Permafrost",
+        "coords": [
+          578.3,
+          1167.5932288753793
+        ],
+        "icon": {
+          "url": "locations/castle_white.png"
+        },
+        "activities": [],
+        "services": [],
+        "buildings": [
+          "building-fort_of_permafrost-d17d446e-c176-442b-ac47-a5490bfa0f26"
+        ]
+      },
+      {
+        "id": "location-farsand_coast-319361a9-602e-46ef-beb2-529a5a514c23",
+        "name": "Farsand Coast",
+        "faction": "gdte",
+        "wikiUrl": "https://wiki.walkscape.app/wiki/Farsand_Coast",
+        "coords": [
+          210.0,
+          1631.0
+        ],
+        "icon": {
+          "url": "locations/coast_green.png"
+        },
+        "activities": [
+          "activity-teak_logs-a8011147-3b4b-4e3f-ae4e-5a12db5d92b4",
+          "activity-seashell_searching-b260fba2-9d78-4550-9e1b-22611be6fa79",
+          "activity-swimming_(beginner)-1ccee641-01d9-4bcb-8dd7-9df9c61142f2"
+        ],
+        "services": [],
+        "buildings": []
+      },
+      {
+        "id": "location-salsfirth-f8333fe2-6fc1-4c15-ade8-5869ffd35051",
+        "name": "Salsfirth",
+        "faction": "gdte",
+        "wikiUrl": "https://wiki.walkscape.app/wiki/Salsfirth",
+        "coords": [
+          369.0,
+          1670.0
+        ],
+        "icon": {
+          "url": "locations/city_green.png"
+        },
+        "activities": [
+          "6c70f4e7-a31c-49c7-8e12-e9df8c5d00aa"
+        ],
+        "services": [
+          "service-basic_kitchen-084de2eb-c5ce-4c05-8958-9817def4975c",
+          "service-basic_workshop-56b7523f-2fa3-48e4-9ec9-3906baca7125",
+          "service-wardrobe-9fae8878-1963-4425-a273-fc08b8890b14",
+          "2c212f40-90db-4977-8955-82dd14ab0231"
+        ],
+        "buildings": [
+          "building-bogside_bank_of_prosperity-e18e2916-d399-4054-a7e8-e9838e53834c",
+          "building-paws_are_us-61e1d784-d7a7-4684-a195-0fe608288018",
+          "building-bog_&_blade-20f27322-3d2e-46bd-ad64-5e6172595b9f",
+          "building-quagmire_couture-88c90344-a8a8-4ba4-b1b7-85fd18b4a4da"
+        ]
+      },
+      {
+        "id": "location-everhaven-609377ac-b6b6-4c63-95c2-6abc2f9a19af",
+        "name": "Everhaven",
+        "faction": "gdte",
+        "wikiUrl": "https://wiki.walkscape.app/wiki/Everhaven",
+        "coords": [
+          306.0,
+          2024.0
+        ],
+        "icon": {
+          "url": "locations/castle_green.png"
+        },
+        "activities": [
+          "activity-rooftop_jumping_(intermediate)-d0178a77-1163-4ae1-af09-c5314ef3427d",
+          "ff3aeb85-7c07-41bf-a16d-89e3e60b365f"
+        ],
+        "services": [
+          "521b90e7-0974-4ce0-94d6-71b841afe5f5",
+          "service-basic_sawmill-55763e83-972b-4964-a169-8b53beb8b507",
+          "service-basic_kitchen-084de2eb-c5ce-4c05-8958-9817def4975c",
+          "service-wardrobe-9fae8878-1963-4425-a273-fc08b8890b14"
+        ],
+        "buildings": [
+          "building-mossy_merchant's_breeze_mart-4357aac1-9fd0-4a0b-96a7-d65bbb70e00c",
+          "building-gold'n_grail_everhaven-or808dc9-239s-458a-er63-09813a610ee4"
+        ]
+      },
+      {
+        "id": "location-bilgemont_port-3487fbca-62e3-4a6c-8f91-ceacdc6ea382",
+        "name": "Bilgemont Port",
+        "faction": "gdte",
+        "wikiUrl": "https://wiki.walkscape.app/wiki/Bilgemont_Port",
+        "coords": [
+          437.0,
+          2286.0
+        ],
+        "icon": {
+          "url": "locations/port_green.png"
+        },
+        "activities": [
+          "activity-frisbee_golfing_(intermediate)-ecbf8887-6555-4d43-b044-e8e05eac556c",
+          "ff3aeb85-7c07-41bf-a16d-89e3e60b365f"
+        ],
+        "services": [
+          "service-basic_forge-0eeda0aa-614d-4ce9-a5b4-0e5c4ea17d33",
+          "service-wardrobe-9fae8878-1963-4425-a273-fc08b8890b14",
+          "2c212f40-90db-4977-8955-82dd14ab0231"
+        ],
+        "buildings": [
+          "building-bilgemont_castle-0eab0540-f6fd-4c46-86f5-f02f92b377f3",
+          "building-maritime_fortune_bank-40ecf29a-039f-4338-a420-20b79f65a289",
+          "building-gold'n_grail_bilgemont-king8dc9-239s-23aa-7ygr-09813a610ee4"
+        ]
+      },
+      {
+        "id": "location-granfiddich-d5d6c8bd-b38c-404a-bd75-b7432de3c0a3",
+        "name": "Granfiddich",
+        "faction": "gdte",
+        "wikiUrl": "https://wiki.walkscape.app/wiki/Granfiddich",
+        "coords": [
+          753.0,
+          1718.0
+        ],
+        "icon": {
+          "url": "locations/city_green.png"
+        },
+        "activities": [
+          "activity-litter_looting-41fbf4b2-2e61-405e-beb1-c223d22ac156",
+          "activity-soup_kitchen_volunteering-013f92cc-ee30-42c5-9f57-436bb57cb76a",
+          "activity-wine_grape_stomping-d86f36a3-e612-48b8-825d-17a885e9b3f1",
+          "activity-dumpster_diving-d087c88a-d857-4d91-83ac-fc77e3956886",
+          "1c3c733a-b349-438c-b541-c244b06c5107"
+        ],
+        "services": [
+          "jobboard-granfiddich_job_board-4b949f54-7c9a-44e2-97a8-5f0499882358",
+          "service-basic_forge-0eeda0aa-614d-4ce9-a5b4-0e5c4ea17d33",
+          "service-wardrobe-9fae8878-1963-4425-a273-fc08b8890b14",
+          "service-eberhart_mansion_kitchen-d83a009b-5975-4a6d-8a64-6b73bc99a538",
+          "service-mysterious-merchant"
+        ],
+        "buildings": [
+          "building-fish_market_stall-a566cbe4-a93a-4ae5-aaa2-40dadecea8eb",
+          "building-food_market_stall-38b7f92b-4236-4cc2-8f4c-70c0caafb83a",
+          "building-tool_market_stall-b269d7bb-1c71-4406-b926-cbf4f3825dbe",
+          "building-bureau_of_moss-69287433-a3f7-443f-b844-a455cdcc6f83"
+        ]
+      },
+      {
+        "id": "location-blackspell_harbour-c03285fc-37a1-4b06-ba76-45e91948b3aa",
+        "name": "Blackspell Harbour",
+        "faction": "gdte",
+        "wikiUrl": "https://wiki.walkscape.app/wiki/Blackspell_Port",
+        "coords": [
+          786.0,
+          2199.0
+        ],
+        "icon": {
+          "url": "locations/port_green.png"
+        },
+        "activities": [
+          "activity-dumpster_diving-ec967851-8cee-44a6-bf25-1e70be61fda7",
+          "activity-ship_repair_(intermediate)-44f2f2e7-bef1-437f-ac35-bf64b97cc249",
+          "8512e656-ae65-4e42-979f-8e9a7b9ee099",
+          "ff3aeb85-7c07-41bf-a16d-89e3e60b365f",
+          "36cb0325-c006-4ef6-98fa-ae4ac028b4e8"
+        ],
+        "services": [
+          "jobboard-blackspell_port_job_board-edd9ced4-d6ee-469d-bd75-cbbb41667492",
+          "service-basic_kitchen-084de2eb-c5ce-4c05-8958-9817def4975c",
+          "service-wardrobe-9fae8878-1963-4425-a273-fc08b8890b14",
+          "f3f5e3e3-7dfd-4752-9e57-145c67827ffb"
+        ],
+        "buildings": [
+          "building-gold'n_grail_blackspell-eqw38dc9-239s-rwe3-4h6s-09813a610ee4"
+        ]
+      },
+      {
+        "id": "location-old_arena_ruins-0f86b9e3-d5b9-4255-b541-b4db5fa93af2",
+        "name": "Old Arena Ruins",
+        "faction": "gdte",
+        "wikiUrl": "https://wiki.walkscape.app/wiki/Old_Arena_Ruins",
+        "coords": [
+          913.0,
+          2086.0
+        ],
+        "icon": {
+          "url": "locations/arena_green.png"
+        },
+        "activities": [
+          "activity-magnet_fishing-abeba70d-d8f6-48cc-8161-f9dea7a49d44",
+          "activity-kayaking-72c1d122-8796-40c0-bbbb-32fdd741e528"
+        ],
+        "services": [],
+        "buildings": []
+      },
+      {
+        "id": "location-mangrove_forest-4a794a97-2174-4933-8b23-4be670b8791f",
+        "name": "Mangrove Forest",
+        "faction": "gdte",
+        "wikiUrl": "https://wiki.walkscape.app/wiki/Mangrove_Forest",
+        "coords": [
+          398.0,
+          1563.0
+        ],
+        "icon": {
+          "url": "locations/forest_green.png"
+        },
+        "activities": [
+          "activity-cut_maple_trees-de7a517e-98e7-4ddc-8a05-aa841ec7e67e",
+          "activity-cut_mangrove_trees-8a4cf464-0574-408b-9263-43df9cb0fefc",
+          "activity-branch_trimming-dfd57187-c791-47ae-9e74-dc4acb9b7952"
+        ],
+        "services": [],
+        "buildings": []
+      },
+      {
+        "id": "location-red_coast-2e988edb-141d-4f3e-b06f-0eb7a88aef4b",
+        "name": "Red Coast",
+        "faction": "gdte",
+        "wikiUrl": "https://wiki.walkscape.app/wiki/Red_Coast",
+        "coords": [
+          912.0,
+          2228.0
+        ],
+        "icon": {
+          "url": "locations/coast_green.png"
+        },
+        "activities": [
+          "activity-swimming_(intermediate)-37f761f4-f6fd-49a5-8389-5816388e0cf9"
+        ],
+        "services": [],
+        "buildings": []
+      },
+      {
+        "id": "location-warrenfield-74631484-e2ab-472c-8697-d3d4a1d91b8e",
+        "name": "Warrenfield",
+        "faction": "gdte",
+        "wikiUrl": "https://wiki.walkscape.app/wiki/Warrenfield",
+        "coords": [
+          939.0,
+          1916.0
+        ],
+        "icon": {
+          "url": "locations/plains_green.png"
+        },
+        "activities": [
+          "activity-cut_willow_trees-0e66e2f0-fd3d-40d8-9050-b4e5c1b24357",
+          "activity-butterfly_catching-ddef8fc5-a61e-4689-bacb-e49ee89f09c8",
+          "ff3aeb85-7c07-41bf-a16d-89e3e60b365f"
+        ],
+        "services": [],
+        "buildings": []
+      },
+      {
+        "id": "location-beach_of_woes-f579ee16-e016-4c73-bf54-81947ff034ee",
+        "name": "Beach of Woes",
+        "faction": "jarvonia",
+        "wikiUrl": "https://wiki.walkscape.app/wiki/Beach_of_Woes",
+        "coords": [
+          405.543212890625,
+          451.25
+        ],
+        "icon": {
+          "url": "locations/coast_white.png"
+        },
+        "activities": [
+          "activity-sea_fishing-3a8d6c40-e6f0-4127-a4df-a4d4ff148d50",
+          "activity-sandcastle_building-3273bc4a-f394-423f-96f9-3fcc93d1f44d",
+          "activity-seashell_searching-b260fba2-9d78-4550-9e1b-22611be6fa79"
+        ],
+        "services": [],
+        "buildings": []
+      },
+      {
+        "id": "location-winter_waves_glacier-6ad1bf37-ca87-4e51-8340-19c6c31303a1",
+        "name": "Winter Waves Glacier",
+        "faction": "jarvonia",
+        "wikiUrl": "https://wiki.walkscape.app/wiki/Winter_Waves_Glacier",
+        "coords": [
+          131.33333333303992,
+          879.5341621359416
+        ],
+        "icon": {
+          "url": "locations/glacier.png"
+        },
+        "activities": [
+          "activity-glacier_foraging-dfdd59cc-e38b-48fc-9a0e-439163abac12"
+        ],
+        "services": [
+          "service-frozen_forge-2d87bb03-7676-4317-97e5-a52a046f04a0"
+        ],
+        "buildings": [
+          "building-bigloo-2990bbbc-b4a0-41e2-a0a0-0ef8089c44b4"
+        ]
+      },
+      {
+        "id": "location-horn_of_respite-1661d247-11f1-49eb-b927-6e59c8fd7774",
+        "name": "Horn of Respite",
+        "faction": "jarvonia",
+        "wikiUrl": "https://wiki.walkscape.app/wiki/Horn_of_Respite",
+        "coords": [
+          1193.3434455860745,
+          1056.0262755912097
+        ],
+        "icon": {
+          "url": "locations/horn_of_respite.png"
+        },
+        "activities": [
+          "activity-dobby_is..._free-7a57ddaf-4970-4f88-bcb2-09d4a7fca50f",
+          "activity-cut_pine_trees-53a11a23-24d6-4d5c-9dc8-28c702189a29",
+          "activity-horn_of_respite_treasure_hunt-5e83ae40-970b-491b-9474-134a180bdd49",
+          "activity-black_eye_peak_search_team-d1ad835f-0898-4fc7-8f0a-4b0626d95306",
+          "activity-black_eye_peak_rescue_team-a2a57ab7-ae6b-427c-9983-197b5480d457",
+          "activity-branch_trimming-dfd57187-c791-47ae-9e74-dc4acb9b7952"
+        ],
+        "services": [
+          "service-wardrobe-9fae8878-1963-4425-a273-fc08b8890b14"
+        ],
+        "buildings": [
+          "building-horn_of_respite_adventurer's_guild_outpost-6e9349e7-116a-4da0-a21b-80a30d575490"
+        ]
+      },
+      {
+        "id": "location-black_eye_peak-8761f944-595a-4d1c-9e5d-af90952abde6",
+        "name": "Black Eye Peak",
+        "faction": "jarvonia",
+        "wikiUrl": "https://wiki.walkscape.app/wiki/Black_Eye_Peak",
+        "coords": [
+          1419.015064680928,
+          920.0486527612546
+        ],
+        "icon": {
+          "url": "locations/mountains.png"
+        },
+        "activities": [
+          "activity-mountain_climbing_(intermediate)-812aa739-645f-4ff3-ac6e-61b0153b9351",
+          "activity-mine_farganite_ore-a41979f2-c46f-4b84-ad50-01a5f90d38de",
+          "activity-spelunking-45b8d041-f27e-434e-8bdc-bbd6d5c9eec8"
+        ],
+        "services": [],
+        "buildings": []
+      },
+      {
+        "id": "location-winter's_end-282b80c4-de7a-4624-a6a8-773d1d201eac",
+        "name": "Winter's End",
+        "faction": "jarvonia",
+        "wikiUrl": "https://wiki.walkscape.app/wiki/Winter's_End",
+        "coords": [
+          1519.9461850186772,
+          966.58800649401
+        ],
+        "icon": {
+          "url": "locations/winters_end.png"
+        },
+        "activities": [
+          "activity-cave_foraging-c6030aeb-c9b9-45ef-a470-411f7654c210",
+          "activity-sea_fishing_(cage)-e12c5bb4-85d8-4a8f-855e-534b256e90b9",
+          "814d4b4d-4b80-461b-8866-48c5d2695241"
+        ],
+        "services": [
+          "ef87710d-69bd-4b04-9357-7f28120124fa"
+        ],
+        "buildings": []
+      },
+      {
+        "id": "location-casbrants_grave-7349647f-c680-444c-819d-1beeb695306b",
+        "name": "Casbrant's Grave",
+        "faction": "syrenthia",
+        "wikiUrl": "https://wiki.walkscape.app/wiki/Casbrant's_Grave",
+        "coords": [
+          879.0,
+          1194.0
+        ],
+        "icon": {
+          "url": "locations/casbrants_grave.png"
+        },
+        "activities": [
+          "activity-wreck_diving-12e980cd-058a-42c4-8358-ba7afe1c319c",
+          "activity-sea_fishing_(spear)-6009b27e-0508-4612-a742-ca6da67cc4a5",
+          "activity-emergency_swim_escape-769b2bb5-a526-467d-9ba7-b3e59dfb30dc"
+        ],
+        "services": [],
+        "buildings": [
+          "building-casbrants_sunken_ship-7aeeff93-b694-468a-b02d-5ba1faafba25"
+        ]
+      },
+      {
+        "id": "location-vastalume-cf2f38ec-88d4-4129-a164-4deb5f0955d5",
+        "name": "Vastalume",
+        "faction": "syrenthia",
+        "wikiUrl": "https://wiki.walkscape.app/wiki/Vastalume",
+        "coords": [
+          856.0,
+          1334.0
+        ],
+        "icon": {
+          "url": "locations/Vastalume.png"
+        },
+        "activities": [
+          "activity-merfolk_dancing-7973376d-80f3-4680-aca6-14cc0d1873c3",
+          "activity-emergency_swim_escape-769b2bb5-a526-467d-9ba7-b3e59dfb30dc"
+        ],
+        "services": [
+          "jobboard-vastalume_job_board-c5108b92-e057-4327-9c07-944aa2dbdb70",
+          "service-tidal_workshop-75f6cf9e-a64b-499d-84e5-5a560d63bbd7",
+          "service-underwater_kitchen-a4a2f23f-d7e5-4283-b5c5-0dc226de01ff",
+          "service-underwater_forge-cee810ee-6291-47b4-b34f-9a9df7afe183",
+          "service-underwater_sawmill-cb68e480-845e-40ae-9e8d-3053091287fe",
+          "service-wardrobe-9fae8878-1963-4425-a273-fc08b8890b14"
+        ],
+        "buildings": [
+          "building-vastalume_bank-30257108-66e0-4f25-9906-76f6e0a41d03",
+          "building-vastalume_tavern-a15607bf-cf03-4fce-bdf1-867c5608a5f5",
+          "building-vastalume_general_store-b36ce620-fe5a-46be-9b2e-ed7b47b52c7e",
+          "building-vastalume_tavern-0fb9b8b4-4a09-4da7-8a27-1880e96f259b",
+          "building-vastalume_specialized_store-9e67b8d2-ec5d-484d-93d7-72f5bafe1e42",
+          "building-vastalume_clothing_shop-3b023cc3-fa43-4800-858b-16fbffcab6cb",
+          "building-throne_of_the_neverdrown-53518f64-3c36-4363-88e7-59ebdf195f38"
+        ]
+      },
+      {
+        "id": "location-kelp_forest-2f3842c6-11b0-4b3c-be4b-bdbcf58dc0a6",
+        "name": "Kelp Forest",
+        "faction": "syrenthia",
+        "wikiUrl": "https://wiki.walkscape.app/wiki/Kelp_Forest",
+        "coords": [
+          826.0,
+          1477.0
+        ],
+        "icon": {
+          "url": "locations/kelp_firest.png"
+        },
+        "activities": [
+          "activity-kelp_foraging-c10960b3-e454-4ecf-8841-04762073b7e5",
+          "activity-coral_cutting-c0579ce9-a26d-47b6-8db3-26c88f0501ce",
+          "activity-emergency_swim_escape-769b2bb5-a526-467d-9ba7-b3e59dfb30dc"
+        ],
+        "services": [],
+        "buildings": []
+      },
+      {
+        "id": "location-underwater_cave-bf790ee1-9f85-44a2-ab5f-8f15c4e3ba85",
+        "name": "Underwater Cave",
+        "faction": "syrenthia",
+        "wikiUrl": "https://wiki.walkscape.app/wiki/Underwater_Cave",
+        "coords": [
+          722.0,
+          1345.0
+        ],
+        "icon": {
+          "url": "locations/underwater_cave.png"
+        },
+        "activities": [
+          "activity-cave_diving-b5adce12-f5aa-4393-8613-42c64faf8de3",
+          "activity-mine_volcanic_rock-41892e21-7851-4f19-9992-e45902bcde3a",
+          "activity-emergency_swim_escape-769b2bb5-a526-467d-9ba7-b3e59dfb30dc",
+          "activity-mine_tarsilium_ore_(underwater)-29586a9a-6e73-4998-a6aa-ac3d5e310456",
+          "acitivity-explore_underwater_cave-3ea73f48-f20c-4f1b-bf3d-53574c1e9aec"
+        ],
+        "services": [],
+        "buildings": []
+      },
+      {
+        "id": "location-darkdepths-385aa267-b46d-47b8-b124-aa3827c39fef",
+        "name": "Darktide Trench",
+        "faction": "syrenthia",
+        "wikiUrl": "https://wiki.walkscape.app/wiki/Darktide_Trench",
+        "coords": [
+          779.6145581712263,
+          1246.5189119443678
+        ],
+        "icon": {
+          "url": "locations/darktide_trench.png"
+        },
+        "activities": [
+          "activity-fossil_mining-f0cbd3f2-8ec3-4df9-8ead-931c2e1de2e1",
+          "activity-predator_hunting_(spear)-377098e8-6c9c-45f7-b48a-407577e699d0",
+          "activity-emergency_swim_escape-769b2bb5-a526-467d-9ba7-b3e59dfb30dc"
+        ],
+        "services": [],
+        "buildings": []
+      },
+      {
+        "id": "location-fertile_shallows-6561e4b5-fce3-4307-a641-86ca5aee36d6",
+        "name": "Elara's Lagoon",
+        "faction": "syrenthia",
+        "wikiUrl": "https://wiki.walkscape.app/wiki/Elara's_Lagoon",
+        "coords": [
+          1019.0,
+          1334.0
+        ],
+        "icon": {
+          "url": "locations/elaras_lagoon.png"
+        },
+        "activities": [
+          "activity-merfolk_farm_foraging-26387cae-10c8-46e1-918c-2b5fd163797a",
+          "activity-swimming_(expert)-95a78afb-79f0-431c-b7aa-062659d9ec87",
+          "activity-underwater_basket_weaving-7ba725a2-d147-437c-98bf-5a9f58d68b65",
+          "activity-emergency_swim_escape-769b2bb5-a526-467d-9ba7-b3e59dfb30dc"
+        ],
+        "services": [],
+        "buildings": []
+      },
+      {
+        "id": "location-granfiddich_shores-26b16ceb-d45f-45f3-a165-0ca3407068e4",
+        "name": "Granfiddich Shores",
+        "faction": "gdte",
+        "wikiUrl": "https://wiki.walkscape.app/wiki/Granfiddich_Shores",
+        "coords": [
+          767.0,
+          1559.0
+        ],
+        "icon": {
+          "url": "locations/coast_green.png"
+        },
+        "activities": [
+          "activity-swimming_(beginner)-1ccee641-01d9-4bcb-8dd7-9df9c61142f2",
+          "activity-sea_fishing-3a8d6c40-e6f0-4127-a4df-a4d4ff148d50",
+          "activity-seashell_searching-b260fba2-9d78-4550-9e1b-22611be6fa79",
+          "activity-sea_fishing_(rod)-e6b9acb3-6450-499d-80ac-3a8153351ac6"
+        ],
+        "services": [],
+        "buildings": []
+      },
+      {
+        "id": "location-nurturing_nook_springs-ebef46ee-5d6d-42bb-a46f-f66d86163d0",
+        "name": "Nurturing Nook Springs",
+        "faction": "jarvonia",
+        "wikiUrl": "https://wiki.walkscape.app/wiki/Nurturing_Nook_Springs",
+        "coords": [
+          636.3911682376737,
+          714.5767809329855
+        ],
+        "icon": {
+          "url": "locations/hot_springs.png"
+        },
+        "activities": [
+          "activity-sledding-290bfd6c-3bb1-47c6-bf60-880c1d4a5148"
+        ],
+        "services": [
+          "service-basic_kitchen-084de2eb-c5ce-4c05-8958-9817def4975c"
+        ],
+        "buildings": []
+      },
+      {
+        "id": "location-bog_top-cc54735e-42e0-4d32-9f26-de0e5e63979b",
+        "name": "Bog Top",
+        "faction": "gdte",
+        "wikiUrl": "https://wiki.walkscape.app/wiki/Bog_Top",
+        "coords": [
+          631.0,
+          1872.0
+        ],
+        "icon": {
+          "url": "locations/river_green.png"
+        },
+        "activities": [
+          "activity-emergency_swamp_escape-70e69c3c-cc8e-4d14-a08a-3950a005b84c",
+          "b57b5fcf-906b-4ecb-b759-ed3547ea2738",
+          "c91a82fb-4fc6-41fe-8c07-7e37f71b64a6",
+          "f8ee448a-368b-402b-ae99-9dace6c9890f",
+          "44f2997a-b8d9-4786-8f21-9dd7dd028c44"
+        ],
+        "services": [],
+        "buildings": []
+      },
+      {
+        "id": "location-bog_bottom-1532ca82-3608-4a2f-8e54-fc3d8f449f9c",
+        "name": "Bog Bottom",
+        "faction": "gdte",
+        "wikiUrl": "https://wiki.walkscape.app/wiki/Bog_Bottom",
+        "coords": [
+          699.0,
+          1888.0
+        ],
+        "icon": {
+          "url": "locations/marsh_green.png"
+        },
+        "activities": [
+          "activity-emergency_swamp_escape-70e69c3c-cc8e-4d14-a08a-3950a005b84c",
+          "activity-swamp-emergency_swim_escape-769b2bb5-1234-467d-9ba7-b3e59dfb30dc",
+          "fa22909d-1d13-4d1f-b3bb-17a9a697a00d",
+          "activity-explore_bog_bottom-56393973-4658-4dc8-8fe2-683f6821435e",
+          "1c72c577-95ca-4cf4-b0e8-975b63ff3cd9",
+          "da5990d5-d5ee-434e-9dba-655c7aba03e8"
+        ],
+        "services": [],
+        "buildings": []
+      },
+      {
+        "id": "location-witches_woods-ef7e2f92-46ba-48e2-8f82-a9887fcec517",
+        "name": "Witched Woods",
+        "faction": "gdte",
+        "wikiUrl": "https://wiki.walkscape.app/wiki/Witched_Woods",
+        "coords": [
+          471.0,
+          1791.0
+        ],
+        "icon": {
+          "url": "locations/witch_forest.png"
+        },
+        "activities": [
+          "activity-emergency_swamp_escape-70e69c3c-cc8e-4d14-a08a-3950a005b84c",
+          "44f2997a-b8d9-4786-8f21-9dd7dd028c44",
+          "68e209ea-5add-4e7c-b044-9cccad1254a3",
+          "activity-cut_willow_trees-0e66e2f0-fd3d-40d8-9050-b4e5c1b24357"
+        ],
+        "services": [],
+        "buildings": [
+          "building-witch's_hut-fee965c9-q3eu-458a-qwe2-09813a610ee4"
+        ]
+      },
+      {
+        "id": "location-halfling_campgrounds-4326bafb-9918-4120-8bd3-d39a394b686a",
+        "name": "Halfling Campgrounds",
+        "faction": "gdte",
+        "wikiUrl": "https://wiki.walkscape.app/wiki/Halfling_Campgrounds",
+        "coords": [
+          604.0,
+          1992.0
+        ],
+        "icon": {
+          "url": "locations/campgrounds.png"
+        },
+        "activities": [
+          "activity-emergency_swamp_escape-70e69c3c-cc8e-4d14-a08a-3950a005b84c",
+          "44f2997a-b8d9-4786-8f21-9dd7dd028c44"
+        ],
+        "services": [
+          "1cb05d71-0033-4222-8bc8-f4cf8436e2c3",
+          "service-basic_workshop-56b7523f-2fa3-48e4-9ec9-3906baca7125",
+          "service-basic_kitchen-084de2eb-c5ce-4c05-8958-9817def4975c",
+          "847bffa4-79c9-4e0e-b43e-e63185d9d669",
+          "service-wardrobe-9fae8878-1963-4425-a273-fc08b8890b14"
+        ],
+        "buildings": []
+      },
+      {
+        "id": "location-halfmaw_hideout-4326bafb-9918-12ea-grsd-d39a394b686a",
+        "name": "Halfmaw Hideout",
+        "faction": "gdte",
+        "wikiUrl": "https://wiki.walkscape.app/wiki/Halfmaw_Hideout",
+        "coords": [
+          775.0,
+          2016.0
+        ],
+        "icon": {
+          "url": "locations/halfmaw_hideout.png"
+        },
+        "activities": [
+          "activity-emergency_swamp_escape-70e69c3c-cc8e-4d14-a08a-3950a005b84c",
+          "44f2997a-b8d9-4786-8f21-9dd7dd028c44"
+        ],
+        "services": [],
+        "buildings": [
+          "building-halfmaw_hideout_adventurer's_guild_outpost-6e9349e7-asw2-4da0-ge42-80a30d575490"
+        ]
+      },
+      {
+        "id": "location-pit_of_pittance-49a851b8-0a55-4857-9492-907958733b09",
+        "name": "Pit of Pittance",
+        "faction": "jarvonia",
+        "wikiUrl": "https://wiki.walkscape.app/wiki/Pit_of_Pittance",
+        "coords": [
+          481.0,
+          540.0
+        ],
+        "icon": {
+          "url": "locations/quarry.png"
+        },
+        "activities": [
+          "060e6d39-4fa1-404f-b2e2-3bcc0e4ec2cd",
+          "80faf391-f031-4ed3-b51a-22e6083fe603",
+          "activity-surface_salt_mining-2210ab8b-4c54-47ed-a7a4-ae0d62328c30"
+        ],
+        "services": [],
+        "buildings": []
+      },
+      {
+        "id": "103cc02f-1513-42a4-a0b5-612e2978f46f",
+        "name": "Tendon Wet Fields",
+        "faction": "wallisia",
+        "wikiUrl": "https://wiki.walkscape.app/wiki/Tendon_Wet_Fields",
+        "coords": [
+          1010.0,
+          1717.0
+        ],
+        "icon": {
+          "url": "locations/marsh_green.png"
+        },
+        "activities": [
+          "dd2bcd84-70ba-47ab-bd15-ba042d4e4cb3",
+          "e8217e95-90ba-4112-a03d-8e6ede21ba0f"
+        ],
+        "services": [],
+        "buildings": []
+      },
+      {
+        "id": "2a967deb-0ca3-47a2-a149-0d01f94416c2",
+        "name": "Stalking Yew Woods",
+        "faction": "wallisia",
+        "wikiUrl": "https://wiki.walkscape.app/wiki/Stalking_Yew_Woods",
+        "coords": [
+          1307.0,
+          1550.0
+        ],
+        "icon": {
+          "url": "locations/forest_green.png"
+        },
+        "activities": [
+          "643cb0c6-212d-40e1-9a98-1a31b25688db"
+        ],
+        "services": [],
+        "buildings": []
+      },
+      {
+        "id": "0373817e-c825-4b2c-85bf-1e37e651c3b4",
+        "name": "Blackwater Fields",
+        "faction": "wallisia",
+        "wikiUrl": "https://wiki.walkscape.app/wiki/Blackwater_Fields",
+        "coords": [
+          1476.0,
+          1372.0
+        ],
+        "icon": {
+          "url": "locations/blackwater_fields.png"
+        },
+        "activities": [
+          "23f7de02-9493-4520-b0ee-4efddbfc2f48"
+        ],
+        "services": [],
+        "buildings": []
+      },
+      {
+        "id": "9c246f2d-f598-4205-9215-7223b29dd267",
+        "name": "Blackrane",
+        "faction": "wallisia",
+        "wikiUrl": "https://wiki.walkscape.app/wiki/Blackrane",
+        "coords": [
+          1710.0,
+          1207.0
+        ],
+        "icon": {
+          "url": "locations/town_yellow.png"
+        },
+        "activities": [],
+        "services": [
+          "service-wardrobe-9fae8878-1963-4425-a273-fc08b8890b14"
+        ],
+        "buildings": [
+          "140c8866-5d62-4405-9a7e-c6a407df8c72",
+          "e429fa8b-77bf-461c-94e4-2b6702b3ff84"
+        ]
+      },
+      {
+        "id": "2d3ee700-c07d-4e82-bde0-2663a1c3a18c",
+        "name": "Kildome Cross",
+        "faction": "wallisia",
+        "wikiUrl": "https://wiki.walkscape.app/wiki/Kildome_Cross",
+        "coords": [
+          1980.0,
+          1122.0
+        ],
+        "icon": {
+          "url": "locations/kildome_cross.png"
+        },
+        "activities": [
+          "5dc904ce-6f5a-4860-8e08-51c58f17eea3",
+          "cdb44f0a-40c6-4502-bfc9-fd32d6ef550b"
+        ],
+        "services": [],
+        "buildings": []
+      },
+      {
+        "id": "ed6a76d4-5135-459e-a6d7-bbd7cb1af1b6",
+        "name": "Myriadian Arc",
+        "faction": "wrentmark",
+        "wikiUrl": "https://wiki.walkscape.app/wiki/Myriadian_Arc",
+        "coords": [
+          2025.0,
+          750.0
+        ],
+        "icon": {
+          "url": "locations/myridian_arc.png"
+        },
+        "activities": [
+          "cb2105a5-7a34-4a73-8388-e1236716b30e"
+        ],
+        "services": [
+          "ce184133-01de-41c5-b3f6-d58402fcbe4a",
+          "ddd8bffb-0967-46d0-93bb-2f37b0bb459d",
+          "service-wardrobe-9fae8878-1963-4425-a273-fc08b8890b14",
+          "service-mysterious-merchant"
+        ],
+        "buildings": [
+          "2a101b9f-511c-434d-94ad-143ec0610b4e",
+          "7a194964-cdac-4809-b3d1-cb4cadc6e84f"
+        ]
+      },
+      {
+        "id": "bf79e592-d295-47ec-8263-4bb9217fa6f1",
+        "name": "Crown of Cinders",
+        "faction": "wrentmark",
+        "wikiUrl": "https://wiki.walkscape.app/wiki/Crown_of_Cinders",
+        "coords": [
+          1950.0,
+          779.0
+        ],
+        "icon": {
+          "url": "locations/crown_of_cinders.png"
+        },
+        "activities": [
+          "ed332dec-2db4-416d-a343-6fe8f56773ad",
+          "9ac5926c-fef2-4b63-84bb-b2ea40c4ea3d",
+          "69238287-b3cb-4a01-a047-b125e569fde8",
+          "72b255c5-6c06-42a8-a1c5-03dd3b4b8dcb",
+          "24c57d0c-9c78-4dc5-91b4-6b30d4ffb212",
+          "cb2105a5-7a34-4a73-8388-e1236716b30e"
+        ],
+        "services": [],
+        "buildings": []
+      },
+      {
+        "id": "b1f0e251-ad0c-4be8-bb9b-7e5449dfc221",
+        "name": "Wraithwater",
+        "faction": "wallisia",
+        "wikiUrl": "https://wiki.walkscape.app/wiki/Wraithwater",
+        "coords": [
+          1156.0,
+          1464.0
+        ],
+        "icon": {
+          "url": "locations/wraithwater.png"
+        },
+        "activities": [
+          "9d7336d9-6416-4a6f-b75e-4f68f8619bbc",
+          "7c7b994e-6cb4-4286-8b2b-99cebc43695d",
+          "6e629d67-ee71-4e28-bf62-200a8a3393e3",
+          "ff2d6c54-038d-4126-acd5-45a667cfbd0f",
+          "a08c5a61-dc42-40b1-bf27-38cde21dc2e9",
+          "2808f754-9d31-4243-a711-7214a2a1c7b7"
+        ],
+        "services": [
+          "80e8be26-cae3-4f4c-b345-ec9af8904c91",
+          "e5e5ab14-04f1-4460-a4fe-a75e0bc5b18e",
+          "2b7b18b4-f28a-4fff-9d94-de26aa2adfd1",
+          "7b6761a1-9867-4f9a-bd0e-b0387e9906c3",
+          "service-wardrobe-9fae8878-1963-4425-a273-fc08b8890b14"
+        ],
+        "buildings": [
+          "6ebead70-4d59-4c06-8e9b-e597824d0d55",
+          "86ca7a7e-c22c-4b24-9c7e-7b9c78e6c66f",
+          "2d52fa57-3c71-4faa-8f42-4fc2a2ebda00"
+        ]
+      }
+    ]
+  }
+]

@@ -1,0 +1,179 @@
+#!/usr/bin/env python3
+"""
+Populate Hunting Chest and Tailoring Chest contents in containers.py
+using data from the gear.walkscape.app API.
+"""
+import json, subprocess
+from pathlib import Path
+
+data = json.loads(Path('/tmp/chest_tables.json').read_text())
+
+def calc_chances(table):
+    """Convert API table data to chance_percent per roll for each item."""
+    main_rows = table['tableRows']
+    sub_tables = table.get('subTables', [])
+
+    # Main table: total weight
+    main_total = sum(r['rowWeight'] for r in main_rows)
+
+    main_entries = []
+    for r in main_rows:
+        chance = (r['rowWeight'] / main_total) * 100
+        main_entries.append({
+            'name': r['name'],
+            'id': r['rowItemID'],
+            'min': r['rowMinimumAmount'],
+            'max': r['rowMaximumAmount'],
+            'chance': round(chance, 4),
+            'is_money': r['isMoney'],
+        })
+
+    # Sub tables by type
+    by_type = {}
+    for st in sub_tables:
+        t = st['type']
+        weight = st['weight']
+        rows = st['tableRows']
+        total = sum(r['rowWeight'] for r in rows)
+        entries = []
+        for r in rows:
+            if total == 0:
+                continue
+            chance = weight * (r['rowWeight'] / total) * 100
+            entries.append({
+                'name': r['name'],
+                'id': r['rowItemID'],
+                'min': r['rowMinimumAmount'],
+                'max': r['rowMaximumAmount'],
+                'chance': round(chance, 4),
+                'is_money': r['isMoney'],
+            })
+        if entries:
+            by_type[t] = entries
+
+    return main_entries, by_type
+
+
+def format_drop(e, ref_prefix='Material'):
+    """Format a DropEntry line."""
+    name = e['name'] or 'Coins'
+    if e['is_money']:
+        ref = 'None'
+        name = 'Coins'
+    else:
+        item_id = e['id'] or ''
+        enum = item_id.upper().replace('-', '_')
+        ref = f'"{ref_prefix}.{enum}"'
+
+    qty = f"Quantity(min_qty={e['min']}, max_qty={e['max']})"
+    return f"            DropEntry(item_name={fmt_name(name)}, item_ref={ref}, quantity={qty}, chance_percent={e['chance']}),"
+
+
+def esc(s):
+    """Escape apostrophes for Python string literals."""
+    if not s:
+        return s
+    if "'" in s:
+        return s  # Will use double quotes instead
+    return s
+
+
+def fmt_name(name):
+    """Format item name for Python string, using double quotes if needed."""
+    if "'" in name:
+        return f'"{name}"'
+    return f"'{name}'"
+
+
+def build_chest_code(table, chest_name):
+    main_entries, by_type = calc_chances(table)
+
+    lines = [f"    {chest_name} = ContainerInfo("]
+    lines.append(f"        name='{chest_name.replace('_', ' ').title()}',")
+    lines.append(f"        container_type='skill_chest',")
+
+    # Main table
+    lines.append(f"        main_table=[")
+    for e in main_entries:
+        if e['is_money']:
+            qty = f"Quantity(min_qty={e['min']}, max_qty={e['max']})"
+            lines.append(f"            DropEntry(item_name='Coins', item_ref=None, quantity={qty}, chance_percent={e['chance']}),")
+        else:
+            name = esc(e['name'])
+            qty = f"Quantity(min_qty={e['min']}, max_qty={e['max']})"
+            lines.append(f"            DropEntry(item_name={fmt_name(name)}, item_ref=None, quantity={qty}, chance_percent={e['chance']}),")
+    lines.append(f"        ],")
+
+    # Valuables (money subtable)
+    if 'money' in by_type:
+        lines.append(f"        valuables_table=[")
+        for e in by_type['money']:
+            qty = f"Quantity(min_qty={e['min']}, max_qty={e['max']})"
+            if e['is_money']:
+                lines.append(f"            DropEntry(item_name='Coins', item_ref=None, quantity={qty}, chance_percent={e['chance']}),")
+            else:
+                name = esc(e['name'])
+                lines.append(f"            DropEntry(item_name={fmt_name(name)}, item_ref=None, quantity={qty}, chance_percent={e['chance']}),")
+        lines.append(f"        ],")
+
+    for tier in ['common', 'uncommon', 'rare', 'epic', 'legendary', 'ethereal']:
+        if tier not in by_type:
+            continue
+        lines.append(f"        {tier}_table=[")
+        for e in by_type[tier]:
+            name = esc(e['name'] or 'Coins')
+            qty = f"Quantity(min_qty={e['min']}, max_qty={e['max']})"
+            lines.append(f"            DropEntry(item_name={fmt_name(name)}, item_ref=None, quantity={qty}, chance_percent={e['chance']}),")
+        lines.append(f"        ],")
+
+    lines.append(f"    )")
+    return '\n'.join(lines)
+
+
+# Build code for both chests
+hunting_table = next(t for t in data if t['id'] == 'hunting_chest_table')
+tailoring_table = next(t for t in data if t['id'] == 'tailoring_chest_table')
+
+hunting_code = build_chest_code(hunting_table, 'HUNTING_CHEST')
+tailoring_code = build_chest_code(tailoring_table, 'TAILORING_CHEST')
+
+# Replace in containers.py
+content = Path('util/autogenerated/containers.py').read_text()
+
+old_hunting = """    HUNTING_CHEST = ContainerInfo(
+        name='Hunting Chest',
+        container_type='skill_chest',
+        main_table=[],
+    )"""
+
+old_tailoring = """    TAILORING_CHEST = ContainerInfo(
+        name='Tailoring Chest',
+        container_type='skill_chest',
+        main_table=[],
+    )"""
+
+content = content.replace(old_hunting, hunting_code)
+content = content.replace(old_tailoring, tailoring_code)
+
+Path('util/autogenerated/containers.py').write_text(content)
+print("Updated containers.py")
+
+r = subprocess.run(['python3', '-m', 'py_compile', 'util/autogenerated/containers.py'], capture_output=True)
+print("✓ Compiles OK" if r.returncode == 0 else f"✗ {r.stderr.decode()[:300]}")
+
+# Print summary
+print("\nHunting Chest contents:")
+main, by_type = calc_chances(hunting_table)
+for e in main:
+    print(f"  {e['name']}: {e['chance']:.2f}% ({e['min']}-{e['max']})")
+for tier, entries in by_type.items():
+    for e in entries:
+        print(f"  [{tier}] {e['name'] or 'Coins'}: {e['chance']:.4f}%")
+
+print("\nTailoring Chest contents:")
+main, by_type = calc_chances(tailoring_table)
+for e in main:
+    print(f"  {e['name']}: {e['chance']:.2f}% ({e['min']}-{e['max']})")
+for tier, entries in by_type.items():
+    for e in entries:
+        print(f"  [{tier}] {e['name'] or 'Coins'}: {e['chance']:.4f}%")

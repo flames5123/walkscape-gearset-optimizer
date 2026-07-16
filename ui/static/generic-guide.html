@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Generic Definitions Guide — Walkscape Optimizer</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: #060c0f;
+            color: #e0e0e0;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            line-height: 1.7;
+            padding: 40px 20px 80px;
+        }
+
+        .page-wrap {
+            max-width: 760px;
+            margin: 0 auto;
+        }
+
+        .back-link {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            color: #4a9eff;
+            text-decoration: none;
+            font-size: 14px;
+            margin-bottom: 32px;
+            opacity: 0.85;
+            transition: opacity 0.15s;
+        }
+
+        .back-link:hover {
+            opacity: 1;
+        }
+
+        .back-link svg {
+            flex-shrink: 0;
+        }
+
+        h1 {
+            font-size: 28px;
+            font-weight: 700;
+            color: #fff;
+            margin-bottom: 8px;
+        }
+
+        .subtitle {
+            color: #90b0c8;
+            font-size: 15px;
+            margin-bottom: 40px;
+        }
+
+        .section {
+            background: #0d191f;
+            border: 1px solid #2a3a44;
+            border-radius: 10px;
+            padding: 24px 28px;
+            margin-bottom: 20px;
+        }
+
+        .section-header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 16px;
+        }
+
+        .section-icon {
+            font-size: 22px;
+            line-height: 1;
+        }
+
+        h2 {
+            font-size: 18px;
+            font-weight: 600;
+            color: #fff;
+        }
+
+        p {
+            color: #c0d0dc;
+            font-size: 14px;
+            margin-bottom: 12px;
+        }
+
+        p:last-child {
+            margin-bottom: 0;
+        }
+
+        ul {
+            list-style: none;
+            padding: 0;
+            margin: 0 0 12px 0;
+        }
+
+        ul:last-child {
+            margin-bottom: 0;
+        }
+
+        li {
+            color: #c0d0dc;
+            font-size: 14px;
+            padding: 4px 0 4px 20px;
+            position: relative;
+        }
+
+        li::before {
+            content: '›';
+            position: absolute;
+            left: 6px;
+            color: #4a9eff;
+            font-weight: bold;
+        }
+
+        .tip {
+            background: #0a1f2e;
+            border-left: 3px solid #4a9eff;
+            border-radius: 0 6px 6px 0;
+            padding: 10px 14px;
+            margin-top: 14px;
+            font-size: 13px;
+            color: #90b0c8;
+        }
+
+        .tip strong {
+            color: #c0d0dc;
+        }
+
+        .badge {
+            display: inline-block;
+            background: #1a3a50;
+            border: 1px solid #2a5a7a;
+            color: #4a9eff;
+            font-size: 11px;
+            font-weight: 600;
+            padding: 2px 8px;
+            border-radius: 4px;
+            vertical-align: middle;
+            margin-left: 6px;
+        }
+
+        .mode-row {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 12px;
+            flex-wrap: wrap;
+        }
+
+        .mode-card {
+            flex: 1;
+            min-width: 200px;
+            background: #0a1520;
+            border: 1px solid #2a3a44;
+            border-radius: 8px;
+            padding: 14px 16px;
+        }
+
+        .mode-card h3 {
+            font-size: 13px;
+            font-weight: 600;
+            color: #fff;
+            margin-bottom: 6px;
+        }
+
+        .mode-card p {
+            font-size: 13px;
+            margin-bottom: 0;
+        }
+
+        .divider {
+            border: none;
+            border-top: 1px solid #1a2a34;
+            margin: 16px 0;
+        }
+
+        code {
+            background: #0a1520;
+            border: 1px solid #2a3a44;
+            border-radius: 4px;
+            padding: 1px 6px;
+            font-size: 12px;
+            color: #7dd3fc;
+            font-family: 'SF Mono', 'Fira Code', monospace;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="page-wrap">
+
+        <a href="/" class="back-link">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M20,11V13H8L13.5,18.5L12.08,19.92L4.16,12L12.08,4.08L13.5,5.5L8,11H20Z" />
+            </svg>
+            Back to Optimizer
+        </a>
+
+        <h1>Generic Definitions Guide</h1>
+        <p class="subtitle">How to add custom activities, recipes, services, and items before the wiki catches up with
+            new game content.</p>
+
+        <!-- Activities -->
+        <div class="section">
+            <div class="section-header">
+                <span class="section-icon">🏃</span>
+                <h2>Activities</h2>
+            </div>
+            <p>Select <strong>Generic</strong> from the activity dropdown in Column 3 to open the activity form. Fill in
+                the name, skill, location, max efficiency (copy the number shown in-game — if it says "180%", enter
+                180), and required skill level.</p>
+            <p>Then choose how you want to enter the steps:</p>
+            <div class="mode-row">
+                <div class="mode-card">
+                    <h3>Observed mode</h3>
+                    <p>Enter the steps shown in-game with no gear equipped. The tool reverse-calculates the true base
+                        steps, accounting for your character level and collectibles.</p>
+                </div>
+                <div class="mode-card">
+                    <h3>Known Base mode</h3>
+                    <p>Enter the true base steps directly if you already know them (e.g. copied from another player or
+                        the patch notes).</p>
+                </div>
+            </div>
+            <div class="tip">
+                <strong>Ambiguous result?</strong> If the reverse calculation can't pin down a unique value, you'll see
+                a <strong>Calibrate</strong> button. It suggests a specific gearset to equip in-game — enter the steps
+                you see with that gear and the tool will solve for the exact base value.
+            </div>
+        </div>
+
+        <!-- Recipes -->
+        <div class="section">
+            <div class="section-header">
+                <span class="section-icon">⚒️</span>
+                <h2>Recipes</h2>
+            </div>
+            <p>Same as activities — select <strong>Generic</strong> from the recipe dropdown. You also pick a service
+                (use an existing wiki service, or create a generic one — see below). The reverse calculator accounts for
+                service bonuses automatically.</p>
+            <p>The XP input follows the same Observed / Known Base toggle as steps.</p>
+        </div>
+
+        <!-- Services -->
+        <div class="section">
+            <div class="section-header">
+                <span class="section-icon">🏭</span>
+                <h2>Services</h2>
+            </div>
+            <p>Inside the recipe form, choose <strong>Generic Service</strong> from the service dropdown. Give it a
+                name, pick the skill category and location, then add stat rows (WE, DA, DR, etc.) with their values.</p>
+            <p>Generic services can be saved and reused across multiple recipes.</p>
+        </div>
+
+        <!-- Items -->
+        <div class="section">
+            <div class="section-header">
+                <span class="section-icon">🔧</span>
+                <h2>Custom Items <span class="badge">Equipment</span></h2>
+            </div>
+            <p>Click <strong>🔧 Create Generic Item</strong> in any gear slot popup, or find the <strong>Generic
+                    Items</strong> section at the bottom of Column 1. The form lets you configure:</p>
+            <ul>
+                <li><strong>Icon</strong> — pick any emoji, with an optional color tint</li>
+                <li><strong>Slot</strong> — head, chest, tool, ring, and all other equipment slots</li>
+                <li><strong>Keywords</strong> — for uniqueness rules like <code>map</code> or <code>light source</code>
+                </li>
+                <li><strong>Stats</strong> — add rows with skill, location, stat type, and value</li>
+                <li><strong>Crafted toggle</strong> — enables quality tabs (Normal → Eternal) so each tier can have
+                    different stats</li>
+                <li><strong>Rarity</strong> — sets the color border on the item icon</li>
+            </ul>
+            <p>Generic items appear in gear slot pickers filtered by slot, show up in Column 1 with checkboxes, and are
+                included in optimizer runs just like wiki items.</p>
+        </div>
+
+        <!-- Consumables & Collectibles -->
+        <div class="section">
+            <div class="section-header">
+                <span class="section-icon">🧪</span>
+                <h2>Consumables &amp; Collectibles</h2>
+            </div>
+            <p>In the item form, selecting the <strong>Consumable</strong> slot switches to Normal/Fine quality tabs.
+                Selecting <strong>Collectible</strong> strips the form down to just name, icon, and stats — no slot or
+                rarity needed.</p>
+        </div>
+
+        <!-- Saving & Sharing -->
+        <div class="section">
+            <div class="section-header">
+                <span class="section-icon">💾</span>
+                <h2>Saving &amp; Sharing</h2>
+            </div>
+            <p>Every form has a <strong>Name</strong> field and a <strong>Save</strong> button. Saved definitions appear
+                in a <em>Custom</em> group at the top of their respective dropdowns.</p>
+            <p>Check <strong>Share with community</strong> to make a definition visible to other users — they can clone
+                it to their own session. You can edit or delete your saved definitions at any time.</p>
+            <div class="tip">
+                <strong>Community definitions</strong> show up in a separate group in the dropdown. Cloning one creates
+                a private copy under your session that you can freely edit.
+            </div>
+        </div>
+
+    </div>
+</body>
+
+</html>

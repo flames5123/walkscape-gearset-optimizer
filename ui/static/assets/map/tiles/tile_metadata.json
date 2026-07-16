@@ -1,0 +1,31 @@
+{
+  "source": "https://map.walkscape.app/tiles/main",
+  "zoom_levels": {
+    "0": {
+      "max_x": 2,
+      "max_y": 1,
+      "tile_count": 6
+    },
+    "1": {
+      "max_x": 5,
+      "max_y": 3,
+      "tile_count": 24
+    },
+    "2": {
+      "max_x": 11,
+      "max_y": 7,
+      "tile_count": 96
+    },
+    "3": {
+      "max_x": 23,
+      "max_y": 15,
+      "tile_count": 384
+    },
+    "4": {
+      "max_x": 19,
+      "max_y": 31,
+      "tile_count": 621
+    }
+  },
+  "total_tiles": 1131
+}

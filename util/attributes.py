@@ -33,6 +33,14 @@ class Attribute(Enum):
         'Changes the percentage of experience rewarded on action completion.'
     )
     
+    # 1b. Base XP (flat XP for a specific skill on any action, e.g., "+1 Foraging experience on any action")
+    # Stored as {skill}_base_xp (e.g., foraging_base_xp) under the global skill key
+    # since it applies regardless of what activity you're doing
+    FORAGING_BASE_XP = AttributeInfo(
+        'foraging_base_xp', 'FBX', 'Foraging XP', False,
+        'Adds flat Foraging experience on any action completion.'
+    )
+    
     # 2. Chest Finding
     CHEST_FINDING = AttributeInfo(
         'chest_finding', 'CF', 'Chest Finding', True,
@@ -67,6 +75,13 @@ class Attribute(Enum):
     FIND_GEMS = AttributeInfo(
         'find_gems', 'FG', 'Find Gems', True,
         'Changes the chance to find gems on action completion.'
+    )
+
+    # 7b. Find Linens ("That's A Wrap" pet passive: chance to roll the linens
+    #     table an extra time; modeled as an EV multiplier like Find Gems).
+    FIND_LINENS = AttributeInfo(
+        'find_linens', 'FL', 'Find Linens', True,
+        'Changes the chance to roll the linens loot table an extra time on action completion.'
     )
     
     # 8. Fine Material Finding

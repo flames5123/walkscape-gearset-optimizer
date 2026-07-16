@@ -24,6 +24,7 @@ class KeyboardNavigator {
      */
     constructor($container, options = {}) {
         this.$container = $container;
+        this.$scrollContainer = options.$scrollContainer || $container;
         this.itemSelector = options.itemSelector || '.item';
         this.categorySelector = options.categorySelector || null;
         this.onSelect = options.onSelect || (() => { });
@@ -194,7 +195,7 @@ class KeyboardNavigator {
     scrollIntoView($item) {
         if (!$item.length) return;
 
-        const container = this.$container[0];
+        const container = this.$scrollContainer[0];
         const item = $item[0];
 
         if (!container || !item) return;

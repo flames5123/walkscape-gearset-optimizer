@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Generic Activity/Recipe Requirements</title>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: #060c0f;
+            color: #e0e0e0;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            line-height: 1.7;
+            padding: 40px 20px 80px;
+        }
+
+        #toolbar {
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            background: #060c0f;
+            padding: 12px 0 8px;
+            margin: 0 auto 8px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+
+        #toolbar-inner {
+            max-width: 820px;
+            margin: 0 auto;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex-wrap: wrap;
+            width: 100%;
+            padding: 0 20px;
+        }
+
+        #toolbar button {
+            background: #0d191f;
+            border: 1px solid #2a3a44;
+            color: #e0e0e0;
+            padding: 6px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-family: inherit;
+            font-size: 13px;
+            transition: border-color 0.15s;
+        }
+
+        #toolbar button.active {
+            background: #1a3a50;
+            border-color: #4a9eff;
+            color: #4a9eff;
+        }
+
+        #toolbar button:hover {
+            border-color: #4a9eff;
+        }
+
+        #diff-badge {
+            font-size: 12px;
+            color: #90b0c8;
+        }
+
+        #content {
+            max-width: 820px;
+            margin: 0 auto;
+            background: #0d191f;
+            border: 1px solid #2a3a44;
+            border-radius: 8px;
+            padding: 48px 56px;
+            box-shadow: 0 2px 20px rgba(0, 0, 0, 0.4);
+        }
+
+        h1 {
+            font-size: 2em;
+            margin-bottom: 0.4em;
+            color: #e8d8b0;
+            border-bottom: 2px solid #4a9eff;
+            padding-bottom: 0.3em;
+        }
+
+        h2 {
+            font-size: 1.4em;
+            margin: 1.8em 0 0.5em;
+            color: #c8b890;
+            border-bottom: 1px solid #2a3a44;
+            padding-bottom: 0.2em;
+        }
+
+        h3 {
+            font-size: 1.15em;
+            margin: 1.4em 0 0.4em;
+            color: #a0c8e0;
+        }
+
+        h4 {
+            font-size: 1em;
+            margin: 1.2em 0 0.3em;
+            color: #b0b0b0;
+            font-style: italic;
+        }
+
+        p {
+            margin: 0.6em 0;
+        }
+
+        ul,
+        ol {
+            margin: 0.5em 0 0.5em 1.8em;
+        }
+
+        li {
+            margin: 0.3em 0;
+        }
+
+        code {
+            background: #0f2030;
+            border: 1px solid #2a3a44;
+            border-radius: 3px;
+            padding: 1px 5px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.88em;
+            color: #4a9eff;
+        }
+
+        pre {
+            background: #091116;
+            border: 1px solid #2a3a44;
+            border-radius: 6px;
+            padding: 16px;
+            overflow-x: auto;
+            margin: 1em 0;
+        }
+
+        pre code {
+            background: none;
+            border: none;
+            padding: 0;
+            color: #c0d8e8;
+        }
+
+        strong {
+            color: #f0e0c0;
+        }
+
+        em {
+            color: #90b8d0;
+        }
+
+        hr {
+            border: none;
+            border-top: 1px solid #2a3a44;
+            margin: 2em 0;
+        }
+
+        blockquote {
+            border-left: 4px solid #4a9eff;
+            margin: 1em 0;
+            padding: 0.5em 1em;
+            background: #091116;
+            color: #90b0c8;
+        }
+
+        .diff-added {
+            background: rgba(40, 160, 40, 0.35);
+            border-radius: 3px;
+            padding: 0 2px;
+            color: #fff;
+        }
+
+        .diff-removed {
+            background: rgba(180, 40, 40, 0.35);
+            border-radius: 3px;
+            padding: 0 2px;
+            text-decoration: line-through;
+            color: #e08080;
+        }
+
+        .line-added {
+            background: rgba(40, 160, 40, 0.12);
+            border-left: 3px solid #40c040;
+            padding-left: 6px;
+            margin: 1px 0;
+            border-radius: 0 3px 3px 0;
+        }
+
+        .line-removed {
+            background: rgba(180, 40, 40, 0.12);
+            border-left: 3px solid #c04040;
+            padding-left: 6px;
+            margin: 1px 0;
+            border-radius: 0 3px 3px 0;
+            text-decoration: line-through;
+            color: #e08080;
+        }
+
+        li.line-added,
+        li.line-removed {
+            display: list-item;
+        }
+
+        p.line-added,
+        p.line-removed,
+        h1.line-added,
+        h2.line-added,
+        h3.line-added,
+        h4.line-added,
+        h1.line-removed,
+        h2.line-removed,
+        h3.line-removed,
+        h4.line-removed {
+            display: block;
+        }
+
+        @media (max-width: 600px) {
+            #content {
+                padding: 24px 20px;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div id="toolbar">
+        <div id="toolbar-inner">
+            <button id="btn-rendered" class="active" onclick="showMode('rendered')">Rendered</button>
+            <button id="btn-diff" onclick="showMode('diff')">Changes Since Last Commit</button>
+            <span id="diff-badge"></span>
+        </div>
+    </div>
+    <div id="content">Loading...</div>
+
+    <script>
+        let _old = '', _new = '', _hasDiff = false;
+
+        async function load() {
+            const resp = await fetch('/api/generic-activity-recipe-requirements/diff');
+            const data = await resp.json();
+            _old = data.old || '';
+            _new = data.new || '';
+            _hasDiff = data.has_diff;
+            const badge = document.getElementById('diff-badge');
+            const diffBtn = document.getElementById('btn-diff');
+            if (_hasDiff) {
+                badge.textContent = '● Changes detected';
+                badge.style.color = '#50c850';
+                diffBtn.style.borderColor = '#50c850';
+                diffBtn.style.color = '#50c850';
+            } else {
+                badge.textContent = 'No changes since last commit';
+                badge.style.color = '#606060';
+            }
+            showMode('rendered');
+        }
+
+        function showMode(mode) {
+            const scrollY = window.scrollY;
+            document.getElementById('btn-rendered').classList.toggle('active', mode === 'rendered');
+            document.getElementById('btn-diff').classList.toggle('active', mode === 'diff');
+            if (mode === 'rendered') {
+                document.getElementById('content').innerHTML = marked.parse(_new);
+            } else {
+                document.getElementById('content').innerHTML = (!_hasDiff || !_old)
+                    ? marked.parse(_new) + '<p style="color:#606060;font-style:italic;margin-top:2em">No changes since last commit.</p>'
+                    : renderInlineDiff(_old, _new);
+            }
+            window.scrollTo(0, scrollY);
+        }
+
+        // ── DIFF ENGINE ──────────────────────────────────────────────────────────
+
+        function renderInlineDiff(oldText, newText) {
+            const ops = diffLines(oldText.split('\n'), newText.split('\n'));
+
+            // Best-match pairing: for each remove, find the most similar add nearby
+            function lineSim(a, b) {
+                const wa = new Set((a.match(/[\w_]+/g) || []));
+                const wb = new Set((b.match(/[\w_]+/g) || []));
+                if (!wa.size) return 0;
+                const shared = [...wa].filter(w => wb.has(w)).length;
+                const union = wa.size + wb.size - shared;
+                return Math.max(shared / wa.size, union > 0 ? shared / union : 0);
+            }
+
+            const usedAdds = new Set(), pairMap = new Map();
+            for (let ri = 0; ri < ops.length; ri++) {
+                if (ops[ri].type !== 'remove') continue;
+                let best = 0.29, bestAi = -1;
+                for (let ai = Math.max(0, ri - 2); ai < Math.min(ops.length, ri + 9); ai++) {
+                    if (ops[ai].type !== 'add' || usedAdds.has(ai)) continue;
+                    const s = lineSim(ops[ri].line, ops[ai].line);
+                    if (s > best) { best = s; bestAi = ai; }
+                }
+                if (bestAi >= 0) { pairMap.set(ri, bestAi); usedAdds.add(bestAi); }
+            }
+
+            const skipAdds = new Set(pairMap.values());
+            const paired = [];
+            for (let i = 0; i < ops.length; i++) {
+                if (pairMap.has(i)) paired.push({ type: 'modify', oldLine: ops[i].line, newLine: ops[pairMap.get(i)].line });
+                else if (!skipAdds.has(i)) paired.push(ops[i]);
+            }
+
+            // Build markdown from new-side lines, tracking annotations
+            const mdLines = [], annotations = [];
+            for (const op of paired) {
+                if (op.type === 'equal') { mdLines.push(op.line); annotations.push(null); }
+                else if (op.type === 'add') { mdLines.push(op.line); annotations.push('add'); }
+                else if (op.type === 'remove') { mdLines.push(op.line); annotations.push('remove'); }
+                else { mdLines.push(op.newLine); annotations.push({ type: 'modify', oldLine: op.oldLine, newLine: op.newLine }); }
+            }
+
+            const container = document.createElement('div');
+            container.innerHTML = marked.parse(mdLines.join('\n'));
+
+            const annotationMap = [];
+            for (let j = 0; j < mdLines.length; j++) {
+                if (annotations[j] === null) continue;
+                const stripped = stripMd(mdLines[j]);
+                if (stripped.trim()) annotationMap.push({ stripped, annotation: annotations[j] });
+            }
+
+            applyAnnotations(container, annotationMap);
+            return container.innerHTML;
+        }
+
+        function stripMd(md) {
+            return md
+                .replace(/^#{1,6}\s+/, '').replace(/^[-*+]\s+/, '').replace(/^\d+\.\s+/, '')
+                .replace(/\*\*(.+?)\*\*/g, '$1').replace(/\*(.+?)\*/g, '$1')
+                .replace(/`(.+?)`/g, '$1').replace(/\[(.+?)\]\(.+?\)/g, '$1').trim();
+        }
+
+        function wordSim(a, b) {
+            const wa = new Set((a.match(/[\w_]+/g) || []).map(s => s.toLowerCase()));
+            const wb = new Set((b.match(/[\w_]+/g) || []).map(s => s.toLowerCase()));
+            if (!wa.size && !wb.size) return 1;
+            if (!wa.size || !wb.size) return 0;
+            const inter = [...wa].filter(w => wb.has(w)).length;
+            return inter / new Set([...wa, ...wb]).size;
+        }
+
+        function applyAnnotations(container, annotationMap) {
+            const blocks = container.querySelectorAll('p, li, h1, h2, h3, h4, h5, h6, td, th');
+            const used = new Set();
+            for (const block of blocks) {
+                const blockText = block.textContent.trim();
+                if (!blockText) continue;
+                let bestIdx = -1, bestScore = 0;
+                for (let i = 0; i < annotationMap.length; i++) {
+                    if (used.has(i)) continue;
+                    const s = wordSim(blockText, annotationMap[i].stripped);
+                    if (s > bestScore && s > 0.5) { bestScore = s; bestIdx = i; }
+                }
+                if (bestIdx === -1) continue;
+                used.add(bestIdx);
+
+                const ann = annotationMap[bestIdx].annotation;
+                if (ann === 'add') {
+                    block.classList.add('line-added');
+                } else if (ann === 'remove') {
+                    block.classList.add('line-removed');
+                } else if (ann.type === 'modify') {
+                    const oldPlain = stripMd(ann.oldLine);
+                    const wordOps = diffWords(oldPlain, block.textContent);
+                    const total = wordOps.length;
+                    const eq = wordOps.filter(w => w.type === 'equal').length;
+                    if (total > 0 && eq / total < 0.25) {
+                        // Too different — full remove + full add
+                        block.classList.add('line-added');
+                        const oldRaw = ann.oldLine.replace(/^[-*+]\s+/, '').replace(/^\d+\.\s+/, '').replace(/^#{1,6}\s+/, '');
+                        const rem = document.createElement(block.tagName.toLowerCase());
+                        rem.classList.add('line-removed');
+                        rem.innerHTML = marked.parseInline(oldRaw);
+                        block.parentNode.insertBefore(rem, block);
+                    } else {
+                        // Strip list/heading prefix from source line for inline rendering
+                        const srcLine = ann.newLine
+                            .replace(/^[-*+]\s+/, '').replace(/^\d+\.\s+/, '').replace(/^#{1,6}\s+/, '');
+                        block.innerHTML = buildDiffHtml(wordOps, srcLine);
+                    }
+                }
+            }
+        }
+
+        // Build diff HTML by injecting sentinel chars into the source markdown line,
+        // then rendering through marked.parseInline to preserve **bold**, `code`, etc.
+        //
+        // Key insight: we find each changed word in srcLine using a regex that matches
+        // the bare word stem (ignoring surrounding ** ` etc.), then place the sentinel
+        // OUTSIDE the markdown syntax so marked can still parse bold/code correctly.
+        function buildDiffHtml(wordOps, srcLine) {
+            // Merge consecutive same-type ops
+            const merged = [];
+            for (const op of wordOps) {
+                const last = merged[merged.length - 1];
+                if (last && last.type === op.type) last.text += ' ' + op.text;
+                else merged.push({ type: op.type, text: op.text });
+            }
+
+            // Absorb short equal runs (< 3 words) between changes into 'both'
+            const ops = [];
+            for (let k = 0; k < merged.length; k++) {
+                const op = merged[k];
+                if (op.type === 'equal') {
+                    const wc = op.text.split(/\s+/).filter(Boolean).length;
+                    const prevC = k > 0 && merged[k - 1].type !== 'equal';
+                    const nextC = k < merged.length - 1 && merged[k + 1].type !== 'equal';
+                    if (prevC && nextC && wc < 3) { ops.push({ type: 'both', text: op.text }); continue; }
+                }
+                ops.push(op);
+            }
+
+            // Walk srcLine left-to-right. For each new-side word (equal/add/both),
+            // find it in src and consume it. Place sentinels around changed regions.
+            // Sentinels: \x02=open-add \x03=close-add \x04=open-remove \x05=close-remove
+            let src = srcLine;
+            let out = '';
+            let removeAccum = '';
+
+            // Find the next occurrence of a plain word in src.
+            // Returns { pre, token, rest } where:
+            //   pre   = everything in src before the word (whitespace, markdown syntax like **)
+            //   token = the word as it appears in src (bare stem only, no surrounding **)
+            //   rest  = remainder of src after the token
+            const findWord = (plainWord) => {
+                const stem = plainWord.replace(/[^\w_]+$/, '') || plainWord; // strip trailing punct
+                const esc = stem.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                // Match: anything before, then the stem as a whole word
+                const m = src.match(new RegExp('^([\\s\\S]*?)\\b(' + esc + ')\\b'));
+                if (!m) return null;
+                return { pre: m[1], token: m[2], rest: src.slice(m[1].length + m[2].length) };
+            };
+
+            const flushRemove = () => {
+                if (removeAccum) { out += '\x04' + removeAccum.trim() + '\x05'; removeAccum = ''; }
+            };
+
+            for (const op of ops) {
+                const words = op.text.split(/\s+/).filter(Boolean);
+
+                if (op.type === 'equal') {
+                    flushRemove();
+                    for (const w of words) {
+                        const f = findWord(w);
+                        if (f) { out += f.pre + f.token; src = f.rest; }
+                        else out += w;
+                    }
+                } else if (op.type === 'add') {
+                    flushRemove();
+                    // Collect all words for this add group, keeping their surrounding markdown
+                    let pre0 = '', chunk = '';
+                    for (let i = 0; i < words.length; i++) {
+                        const f = findWord(words[i]);
+                        if (f) {
+                            if (i === 0) pre0 = f.pre; else chunk += f.pre;
+                            chunk += f.token;
+                            src = f.rest;
+                        } else {
+                            chunk += words[i];
+                        }
+                    }
+                    // pre0 goes BEFORE the sentinel so ** stays outside
+                    out += pre0 + '\x02' + chunk + '\x03';
+                } else if (op.type === 'remove') {
+                    removeAccum += op.text + ' ';
+                } else if (op.type === 'both') {
+                    // 'both' words appear in both old and new — include in both red and green spans
+                    removeAccum += op.text + ' ';
+                    let pre0 = '', chunk = '';
+                    for (let i = 0; i < words.length; i++) {
+                        const f = findWord(words[i]);
+                        if (f) {
+                            if (i === 0) pre0 = f.pre; else chunk += f.pre;
+                            chunk += f.token;
+                            src = f.rest;
+                        } else {
+                            chunk += words[i];
+                        }
+                    }
+                    // Flush remove (which now includes the 'both' words), then open add
+                    flushRemove();
+                    out += pre0 + '\x02' + chunk + '\x03';
+                }
+            }
+            flushRemove();
+            out += src; // remaining src (trailing chars, closing **)
+
+            return marked.parseInline(out)
+                .replace(/\x02([\s\S]*?)\x03/g, '<mark class="diff-added">$1</mark>')
+                .replace(/\x04([\s\S]*?)\x05/g, '<mark class="diff-removed">$1</mark>');
+        }
+
+        // Word-level LCS diff. Tokenizes as bare words only (no trailing punctuation)
+        // so "green)," and "green" match as equal tokens.
+        function diffWords(oldStr, newStr) {
+            const tok = s => s.match(/[\w_]+/g) || [];
+            const a = tok(oldStr), b = tok(newStr);
+            const m = a.length, n = b.length;
+            const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+            for (let r = 1; r <= m; r++)
+                for (let c = 1; c <= n; c++)
+                    dp[r][c] = a[r - 1] === b[c - 1] ? dp[r - 1][c - 1] + 1 : Math.max(dp[r - 1][c], dp[r][c - 1]);
+            const ops = [];
+            let r = m, c = n;
+            while (r > 0 || c > 0) {
+                if (r > 0 && c > 0 && a[r - 1] === b[c - 1]) { ops.push({ type: 'equal', text: a[r - 1] }); r--; c--; }
+                else if (c > 0 && (r === 0 || dp[r][c - 1] >= dp[r - 1][c])) { ops.push({ type: 'add', text: b[c - 1] }); c--; }
+                else { ops.push({ type: 'remove', text: a[r - 1] }); r--; }
+            }
+            return ops.reverse();
+        }
+
+        // Line-level LCS diff
+        function diffLines(oldLines, newLines) {
+            const m = oldLines.length, n = newLines.length;
+            const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+            for (let r = 1; r <= m; r++)
+                for (let c = 1; c <= n; c++)
+                    dp[r][c] = oldLines[r - 1] === newLines[c - 1] ? dp[r - 1][c - 1] + 1 : Math.max(dp[r - 1][c], dp[r][c - 1]);
+            const ops = [];
+            let r = m, c = n;
+            while (r > 0 || c > 0) {
+                if (r > 0 && c > 0 && oldLines[r - 1] === newLines[c - 1]) { ops.push({ type: 'equal', line: newLines[c - 1] }); r--; c--; }
+                else if (c > 0 && (r === 0 || dp[r][c - 1] >= dp[r - 1][c])) { ops.push({ type: 'add', line: newLines[c - 1] }); c--; }
+                else { ops.push({ type: 'remove', line: oldLines[r - 1] }); r--; }
+            }
+            return ops.reverse();
+        }
+
+        load().catch(() => {
+            document.getElementById('content').innerHTML = '<p>Failed to load.</p>';
+        });
+    </script>
+</body>
+
+</html>

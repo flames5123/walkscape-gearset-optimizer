@@ -10,7 +10,7 @@
 
 import { getDebugLog, isDebugEnabled } from './debug-console.js';
 
-// We'll use html2canvas from CDN
+// We'll use html2canvas-pro from CDN (drop-in replacement for html2canvas)
 const html2canvas = window.html2canvas;
 
 const APP_VERSION = '1.0.0';
@@ -53,51 +53,73 @@ function getBrowserInfo() {
  * Capture screenshot of a specific element
  */
 async function captureScreenshot(element) {
+    const elementId = element.id || element.className || 'unknown';
+    console.log(`[BugReport] captureScreenshot start: ${elementId}`);
+    const startTime = performance.now();
+
+    // Resolve CSS custom properties that html2canvas can't handle
+    // by temporarily inlining computed sizes on gear slots
+    const gearSlots = element.querySelectorAll('.gear-slot');
+    const slotIcons = element.querySelectorAll('.gear-slot .slot-icon');
+    const savedStyles = [];
+
+    gearSlots.forEach(slot => {
+        const computed = getComputedStyle(slot);
+        savedStyles.push({ el: slot, width: slot.style.width, height: slot.style.height });
+        slot.style.width = computed.width;
+        slot.style.height = computed.height;
+    });
+
+    slotIcons.forEach(icon => {
+        const computed = getComputedStyle(icon);
+        savedStyles.push({ el: icon, width: icon.style.width, height: icon.style.height });
+        icon.style.width = computed.width;
+        icon.style.height = computed.height;
+    });
+
     try {
         // Check if html2canvas is available
         if (!window.html2canvas) {
-            console.error('html2canvas not loaded');
+            console.error('[BugReport] html2canvas / html2canvas-pro not loaded');
             return null;
         }
 
-        // Resolve CSS custom properties that html2canvas can't handle
-        // by temporarily inlining computed sizes on gear slots
-        const gearSlots = element.querySelectorAll('.gear-slot');
-        const slotIcons = element.querySelectorAll('.gear-slot .slot-icon');
-        const savedStyles = [];
+        // Constrain capture to visible area — prevents capturing full scroll height
+        // which produces absurdly tall images on mobile
+        const rect = element.getBoundingClientRect();
+        const captureHeight = Math.min(element.scrollHeight, rect.height || window.innerHeight);
 
-        gearSlots.forEach(slot => {
-            const computed = getComputedStyle(slot);
-            savedStyles.push({ el: slot, width: slot.style.width, height: slot.style.height });
-            slot.style.width = computed.width;
-            slot.style.height = computed.height;
-        });
+        // Wrap html2canvas in a timeout — it can hang indefinitely on Safari
+        const CAPTURE_TIMEOUT_MS = 5000;
+        console.log(`[BugReport] calling html2canvas for ${elementId} (timeout: ${CAPTURE_TIMEOUT_MS}ms, h: ${Math.round(captureHeight)})`);
+        const canvas = await Promise.race([
+            window.html2canvas(element, {
+                backgroundColor: '#1a1a1a',
+                scale: window.devicePixelRatio || 2,
+                logging: false,
+                useCORS: true,
+                allowTaint: true,
+                height: captureHeight,
+                windowHeight: captureHeight
+            }),
+            new Promise((_, reject) =>
+                setTimeout(() => reject(new Error('Screenshot capture timed out')), CAPTURE_TIMEOUT_MS)
+            )
+        ]);
 
-        slotIcons.forEach(icon => {
-            const computed = getComputedStyle(icon);
-            savedStyles.push({ el: icon, width: icon.style.width, height: icon.style.height });
-            icon.style.width = computed.width;
-            icon.style.height = computed.height;
-        });
-
-        const canvas = await window.html2canvas(element, {
-            backgroundColor: '#1a1a1a',
-            scale: window.devicePixelRatio || 2,
-            logging: false,
-            useCORS: true,
-            allowTaint: true
-        });
-
-        // Restore original styles
+        const elapsed = Math.round(performance.now() - startTime);
+        console.log(`[BugReport] captureScreenshot success: ${elementId} (${elapsed}ms)`);
+        return canvas.toDataURL('image/png');
+    } catch (error) {
+        const elapsed = Math.round(performance.now() - startTime);
+        console.warn(`[BugReport] captureScreenshot failed: ${elementId} after ${elapsed}ms — ${error.message}`);
+        return null;
+    } finally {
+        // Always restore original styles, even on timeout
         savedStyles.forEach(({ el, width, height }) => {
             el.style.width = width;
             el.style.height = height;
         });
-
-        return canvas.toDataURL('image/png');
-    } catch (error) {
-        console.error('Screenshot capture failed:', error);
-        return null;
     }
 }
 
@@ -106,34 +128,82 @@ async function captureScreenshot(element) {
  */
 async function captureAllScreenshots() {
     const screenshots = {};
+    const startTime = performance.now();
+    console.log('[BugReport] captureAllScreenshots start');
 
-    // Get all columns
-    const columns = document.querySelectorAll('.column');
+    // Check if the crafting tree overlay is open
+    const craftingTreeContainer = document.getElementById('crafting-tree-container');
+    const isCraftingTreeOpen = craftingTreeContainer
+        && craftingTreeContainer.style.display !== 'none'
+        && !craftingTreeContainer.classList.contains('closing');
 
-    for (const column of columns) {
-        const columnId = column.id;
-        const columnName = column.querySelector('.column-header h2')?.textContent || columnId;
+    // Check if the stats report page is open
+    const statsReportPage = document.getElementById('stats-report-page');
+    const isStatsReportOpen = statsReportPage
+        && statsReportPage.style.display !== 'none'
+        && !statsReportPage.classList.contains('closing');
 
-        // Make column visible temporarily if hidden (mobile)
-        const wasHidden = !column.classList.contains('active-mobile-column');
-        if (wasHidden) {
-            column.classList.add('active-mobile-column');
-            // Wait for render
-            await new Promise(resolve => setTimeout(resolve, 100));
-        }
+    // Check if we're on the travel-config page
+    const travelPage = document.getElementById('travel-config-page');
+    const isOnTravelPage = travelPage && travelPage.style.display !== 'none';
 
-        // Capture screenshot
-        const screenshot = await captureScreenshot(column);
+    if (isCraftingTreeOpen) {
+        console.log('[BugReport] crafting tree overlay open, capturing it');
+        const screenshot = await captureScreenshot(craftingTreeContainer);
         if (screenshot) {
-            screenshots[columnName] = screenshot;
-        }
-
-        // Restore visibility
-        if (wasHidden) {
-            column.classList.remove('active-mobile-column');
+            screenshots['Crafting Tree'] = screenshot;
         }
     }
 
+    if (isStatsReportOpen) {
+        console.log('[BugReport] stats report page open, capturing it');
+        const screenshot = await captureScreenshot(statsReportPage);
+        if (screenshot) {
+            screenshots['Stats Report'] = screenshot;
+        }
+    }
+
+    if (isOnTravelPage) {
+        console.log('[BugReport] on travel-config page, capturing single screenshot');
+        // Capture the travel config page content
+        const screenshot = await captureScreenshot(travelPage);
+        if (screenshot) {
+            screenshots['Travel Config'] = screenshot;
+        }
+    } else if (!isCraftingTreeOpen && !isStatsReportOpen) {
+        // Capture the standard 3-column layout
+        const columns = document.querySelectorAll('.column');
+        console.log(`[BugReport] capturing ${columns.length} columns`);
+
+        for (const column of columns) {
+            const columnId = column.id;
+            const columnName = column.querySelector('.column-header h2')?.textContent || columnId;
+
+            // Make column visible temporarily if hidden (mobile)
+            const wasHidden = !column.classList.contains('active-mobile-column');
+            if (wasHidden) {
+                column.classList.add('active-mobile-column');
+                // Wait for render
+                await new Promise(resolve => setTimeout(resolve, 100));
+            }
+
+            // Capture screenshot
+            const screenshot = await captureScreenshot(column);
+            if (screenshot) {
+                screenshots[columnName] = screenshot;
+            } else {
+                console.warn(`[BugReport] no screenshot returned for column: ${columnName}`);
+            }
+
+            // Restore visibility
+            if (wasHidden) {
+                column.classList.remove('active-mobile-column');
+            }
+        }
+    }
+
+    const elapsed = Math.round(performance.now() - startTime);
+    console.log(`[BugReport] captureAllScreenshots done: ${Object.keys(screenshots).length} captured in ${elapsed}ms`);
     return screenshots;
 }
 
@@ -173,11 +243,19 @@ async function submitBugReport(description, includeScreenshots = true) {
         let screenshots = {};
         if (includeScreenshots) {
             showStatus('Capturing screenshots...', 'info');
+            console.log('[BugReport] starting screenshot capture (include=true)');
             try {
-                screenshots = await captureAllScreenshots();
+                // Total timeout for all screenshots — prevents infinite hang
+                const ALL_SCREENSHOTS_TIMEOUT_MS = 10000;
+                screenshots = await Promise.race([
+                    captureAllScreenshots(),
+                    new Promise((_, reject) =>
+                        setTimeout(() => reject(new Error('Screenshot capture timed out')), ALL_SCREENSHOTS_TIMEOUT_MS)
+                    )
+                ]);
                 console.log('Screenshots captured:', Object.keys(screenshots).length);
             } catch (screenshotError) {
-                console.warn('Screenshot capture failed, continuing without screenshots:', screenshotError);
+                console.warn('[BugReport] screenshot capture failed, submitting without:', screenshotError.message);
                 screenshots = {};
             }
         } else {
@@ -256,6 +334,111 @@ async function submitBugReport(description, includeScreenshots = true) {
 }
 
 /**
+ * Check if push notifications are supported on this browser/context.
+ */
+function pushSupported() {
+    return 'serviceWorker' in navigator && 'PushManager' in window;
+}
+
+/**
+ * Check if we're on iOS outside a PWA (push requires home-screen install).
+ */
+function isIosNonPwa() {
+    const ua = navigator.userAgent || '';
+    const isIos = /iPad|iPhone|iPod/.test(ua) && !window.MSStream;
+    const isPwa = window.navigator.standalone === true
+        || window.matchMedia('(display-mode: standalone)').matches;
+    return isIos && !isPwa;
+}
+
+/**
+ * Check if the user has permanently dismissed the notifications prompt.
+ * Reads from the state store (which is hydrated from the server's ui_config).
+ */
+function isNotifyDismissed() {
+    try {
+        if (window.store?.state?.ui?.bugReportNotifyDismissed) return true;
+    } catch (_) { /* noop */ }
+    // Fallback for before-session-load case
+    return localStorage.getItem('bugReportNotifyDismissed') === '1';
+}
+
+/**
+ * Persist dismissal both locally (instant) and to the server (per-session).
+ */
+function persistNotifyDismissed() {
+    try {
+        localStorage.setItem('bugReportNotifyDismissed', '1');
+    } catch (_) { /* noop */ }
+    if (window.store?.state?.ui) {
+        window.store.state.ui.bugReportNotifyDismissed = true;
+    }
+    const uuid = window.store?.state?.session?.uuid;
+    if (uuid && window.api?.updateConfig) {
+        // Path prefix "ui." routes the value into ui_config on the backend.
+        window.api.updateConfig(uuid, 'ui.bugReportNotifyDismissed', true);
+    }
+}
+
+/**
+ * Show or hide the "Enable Notifications" block based on current permission state.
+ * Only shown when push is supported and the user hasn't made a decision yet.
+ */
+function updateNotifyBlockVisibility() {
+    const block = document.getElementById('bug-report-notify');
+    if (!block) return;
+
+    if (!pushSupported() || isIosNonPwa() || isNotifyDismissed()) {
+        block.style.display = 'none';
+        return;
+    }
+
+    const permission = (typeof Notification !== 'undefined') ? Notification.permission : 'denied';
+    if (permission === 'default') {
+        block.style.display = '';
+        const btn = document.getElementById('bug-report-enable-notifications');
+        if (btn) {
+            btn.disabled = false;
+            btn.textContent = '🔔 Enable Notifications';
+        }
+    } else {
+        block.style.display = 'none';
+    }
+}
+
+/**
+ * Handle click on the "Enable Notifications" button inside the bug report modal.
+ * Reuses the settings modal's push initialization flow.
+ */
+async function handleEnableNotificationsClick() {
+    const btn = document.getElementById('bug-report-enable-notifications');
+    if (!btn) return;
+
+    btn.disabled = true;
+    btn.textContent = 'Setting up notifications…';
+
+    try {
+        // Prefer the existing settings-modal init path so prefs/subscription
+        // flow stays consistent with the Personalization tab.
+        if (window.settingsModal && typeof window.settingsModal._initPushNotifications === 'function') {
+            window.settingsModal._pushPermission = 'granted';
+            await window.settingsModal._initPushNotifications();
+        } else {
+            // Fallback: request permission directly, then subscribe.
+            const permission = await Notification.requestPermission();
+            if (permission !== 'granted') {
+                updateNotifyBlockVisibility();
+                return;
+            }
+        }
+    } catch (err) {
+        console.error('[BugReport] Failed to enable notifications:', err);
+    }
+
+    updateNotifyBlockVisibility();
+}
+
+/**
  * Open bug report modal
  */
 export function openBugReportModal() {
@@ -266,6 +449,9 @@ export function openBugReportModal() {
     descriptionEl.value = '';
     document.getElementById('bug-description-count').textContent = '0';
     hideStatus();
+
+    // Refresh the "Enable Notifications" block based on current permission state
+    updateNotifyBlockVisibility();
 
     // Use CSS class for animation (consistent with other modals)
     modal.style.display = 'flex';
@@ -336,6 +522,21 @@ export function initBugReport() {
     descriptionEl.addEventListener('input', () => {
         countEl.textContent = descriptionEl.value.length;
     });
+
+    // Enable Notifications button (shown when permission is 'default')
+    const enableNotifBtn = document.getElementById('bug-report-enable-notifications');
+    if (enableNotifBtn) {
+        enableNotifBtn.addEventListener('click', handleEnableNotificationsClick);
+    }
+
+    // Dismiss "x" on the notifications prompt — permanent, saved to session
+    const dismissNotifBtn = document.getElementById('bug-report-notify-dismiss');
+    if (dismissNotifBtn) {
+        dismissNotifBtn.addEventListener('click', () => {
+            persistNotifyDismissed();
+            updateNotifyBlockVisibility();
+        });
+    }
 
     // Close on outside click
     const modal = document.getElementById('bug-report-modal');

@@ -88,28 +88,40 @@ def extract_materials(td):
     if ' or ' in text.lower():
         # Split by " or " to get alternative groups
         alternatives = [alt.strip() for alt in re.split(r'\s+or\s+', text, flags=re.IGNORECASE)]
-        
-        material_groups = []
-        for alt in alternatives:
-            # Find all materials in this alternative
-            matches = re.findall(r'(\d+)x\s+([A-Za-z\s\(\)\']+?)(?=\s*\d+x|$)', alt)
-            
+
+        def parse_group(alt_text):
+            matches = re.findall(r'(\d+)x\s+([A-Za-z\s\(\)\'\-]+?)(?=\s*\d+x|$)', alt_text)
             group = []
             for qty_str, material_name in matches:
                 quantity = int(qty_str)
                 material_name = material_name.strip()
-                
                 material_obj = resolve_material(material_name)
-                if material_obj:
-                    group.append((quantity, material_obj))
-                else:
-                    group.append((quantity, material_name))
-            
+                group.append((quantity, material_obj if material_obj else material_name))
+            return group
+
+        # The first segment may contain shared materials + the first alternative.
+        # e.g. "1x Pants 1x Wrench 2x Twine" → shared=[pants, wrench], first_alt=[twine]
+        # All subsequent segments are just the alternative material.
+        first_group = parse_group(alternatives[0])
+
+        # Shared = everything in the first group except the last item
+        # (the last item is the first alternative)
+        shared_materials = first_group[:-1]
+        first_alternative = first_group[-1:]  # last item only
+
+        material_groups = []
+        # Build group for first alternative
+        if first_alternative:
+            material_groups.append(shared_materials + first_alternative)
+
+        # Build groups for remaining alternatives, prepending shared materials
+        for alt in alternatives[1:]:
+            group = parse_group(alt)
             if group:
-                material_groups.append(group)
+                material_groups.append(shared_materials + group)
     else:
         # No alternatives - all materials are required (one group)
-        matches = re.findall(r'(\d+)x\s+([A-Za-z\s\(\)\']+?)(?=\s*\d+x|$)', text)
+        matches = re.findall(r'(\d+)x\s+([A-Za-z\s\(\)\'\-]+?)(?=\s*\d+x|$)', text)
         
         group = []
         for qty_str, material_name in matches:
@@ -332,6 +344,185 @@ def parse_recipe_experience_from_item_page(item_name, recipe_name, item_url, cac
     return None
 
 
+def parse_additional_recipe_outputs(item_name, recipe_name):
+    """
+    Parse the 'Additional Recipe Outputs' table(s) for a given recipe from its
+    cached item wiki page. Handles single-roll drops (e.g. Smithing chest) and
+    multi-roll drops (e.g. Silver nugget 'Does 2 rolls' on Smelt a copper bar).
+
+    Recipe pages may have multiple variants (Ore vs Scrap); each variant has its
+    own <h3> heading and its own Additional Recipe Outputs table. We walk the
+    DOM in order, tracking the current h3 heading, and only accept rows from
+    the heading that matches the recipe name.
+
+    Columns in the table (9 cols if Note is present, 8 otherwise):
+        0: icon  1: item name  2: item type  3: quantity  4: chance%
+        5: odds  6: base rate  7: W.E.A.R.  8: note (optional — "Does N rolls")
+
+    Returns:
+        List of drop dicts, each with:
+          - item_name (str)
+          - item_type (str, e.g. 'Material', 'Container')
+          - quantity_min (int), quantity_max (int)
+          - chance_percent (float, the wiki's displayed chance — compound for multi-roll)
+          - multi_roll_count (int, only when present and > 1)
+        Returns None if page not found; [] if page found but no additional outputs
+        for this recipe variant.
+    """
+    from pathlib import Path
+
+    # Reuse the same cache search strategy as parse_recipe_experience_from_item_page
+    cache_folders = [
+        get_cache_dir('equipment'),
+        get_cache_dir('materials'),
+        get_cache_dir('consumables'),
+    ]
+
+    cache_path = None
+    for folder in cache_folders:
+        potential_path = folder / (sanitize_filename(item_name) + '.html')
+        if potential_path.exists():
+            cache_path = potential_path
+            break
+        potential_path = folder / (sanitize_filename(item_name).replace(' ', '_') + '.html')
+        if potential_path.exists():
+            cache_path = potential_path
+            break
+
+    if not cache_path:
+        return None
+
+    html = read_cached_html(cache_path)
+    if not html:
+        return None
+
+    soup = BeautifulSoup(html, 'html.parser')
+
+    def _parse_chance_percent(text):
+        """Parse '13.510%' or '0.400%' -> float. Return None on failure."""
+        if not text:
+            return None
+        cleaned = text.strip().rstrip('%').replace(',', '').strip()
+        try:
+            return float(cleaned)
+        except ValueError:
+            return None
+
+    def _parse_quantity_range(text):
+        """Parse '1', '1-3', or '1 or more' -> (min, max)."""
+        if not text:
+            return (1, 1)
+        t = text.strip().lower()
+        # Range like '1-3' or '1 - 3'
+        m = re.search(r'(\d+)\s*[-\u2013]\s*(\d+)', t)
+        if m:
+            return (int(m.group(1)), int(m.group(2)))
+        # '1 or more' — single-roll; the 'more' is produced via multi_roll_count
+        m = re.search(r'(\d+)\s+or\s+more', t)
+        if m:
+            q = int(m.group(1))
+            return (q, q)
+        # Plain number
+        m = re.search(r'(\d+)', t)
+        if m:
+            q = int(m.group(1))
+            return (q, q)
+        return (1, 1)
+
+    drops = []
+    current_h3 = None  # Current recipe variant heading
+
+    # Walk ALL descendants in document order so we can associate each
+    # Additional Recipe Outputs table with its preceding h3 heading.
+    for el in soup.find_all(['h3', 'table']):
+        if el.name == 'h3':
+            current_h3 = clean_text(el.get_text()).strip()
+            continue
+
+        # element is a <table>
+        caption = el.find('caption')
+        if not caption:
+            continue
+        caption_text = clean_text(caption.get_text()).strip()
+        if 'Additional Recipe Outputs' not in caption_text:
+            continue
+
+        # Only accept when this table belongs to the requested recipe variant.
+        # Recipe page h3 headings use the full recipe name (e.g. "Smelt a copper bar",
+        # "Create a copper bar (Scrap)").
+        if current_h3 != recipe_name:
+            continue
+
+        # Parse rows
+        rows = el.find_all('tr')[1:]  # Skip header
+        for row in rows:
+            cols = row.find_all('td')
+            if len(cols) < 5:
+                continue
+            # Columns: 0=icon, 1=item_name, 2=item_type, 3=quantity, 4=chance, 5=odds,
+            # 6=base_rate, 7=WEAR, 8=note (optional)
+            name_link = cols[1].find('a')
+            if name_link:
+                name_text = clean_text(name_link.get_text())
+            else:
+                name_text = clean_text(cols[1].get_text())
+
+            type_link = cols[2].find('a')
+            if type_link:
+                type_text = clean_text(type_link.get_text())
+            else:
+                type_text = clean_text(cols[2].get_text())
+
+            qty_min, qty_max = _parse_quantity_range(clean_text(cols[3].get_text()))
+            chance_pct = _parse_chance_percent(clean_text(cols[4].get_text()))
+            if chance_pct is None or chance_pct <= 0:
+                continue
+
+            multi_roll = None
+            if len(cols) > 8:
+                note_text = clean_text(cols[8].get_text())
+                m = re.search(r'[Dd]oes\s+(\d+)\s+rolls?', note_text)
+                if m:
+                    multi_roll = int(m.group(1))
+
+            # Activity convention: chance_percent is the PER-ROLL probability.
+            # The wiki displays the compound "at least one" probability after N rolls,
+            # so invert it back to per-roll: per_roll = 1 - (1 - compound)^(1/N).
+            # Single-roll drops keep the wiki value as-is.
+            stored_chance = chance_pct
+            if multi_roll and multi_roll > 1:
+                import math as _math
+                compound = max(0.0, min(chance_pct / 100.0, 0.99999999))
+                per_roll = 1.0 - _math.pow(1.0 - compound, 1.0 / multi_roll)
+                # Round to 6 decimals to avoid floating point noise
+                stored_chance = round(per_roll * 100.0, 6)
+
+            # Average quantity per roll (min and max are always equal in observed
+            # recipes; we keep them in metadata but also expose `quantity` as the
+            # per-roll average so existing drop-table consumers keep working).
+            avg_qty = (qty_min + qty_max) / 2.0
+            if avg_qty.is_integer():
+                avg_qty = int(avg_qty)
+
+            drop = {
+                'item_name': name_text,
+                'item_type': type_text,
+                'quantity': avg_qty,
+                'quantity_min': qty_min,
+                'quantity_max': qty_max,
+                'chance_percent': stored_chance,
+            }
+            if multi_roll is not None and multi_roll > 1:
+                drop['multi_roll_count'] = multi_roll
+            drops.append(drop)
+
+        # Don't break — a recipe variant could have multiple tables, but in
+        # practice there is exactly one. Keep accumulating to be safe, but we
+        # only accept tables under the matching h3.
+
+    return drops
+
+
 def extract_max_efficiency(td):
     """Extract max efficiency as decimal from the min steps cell."""
     text = clean_text(td.get_text())
@@ -345,6 +536,82 @@ def extract_max_efficiency(td):
         raw = float(match.group(1))
         return round((raw - 100.0) / 100.0, 4) if raw > 100 else 0.0
     return 0.0
+
+
+def _resolve_drop_item_ref(item_name, item_type=None):
+    """
+    Resolve an Additional Recipe Output item name to a string reference like
+    'Material.SILVER_NUGGET' or 'Container.SMITHING_CHEST'. Returns None if the
+    item can't be resolved against any known class.
+
+    Prefers a class hinted by `item_type` (wiki column 'Item Type'), then falls
+    back to searching Material, Container, Consumable, Collectible, Item,
+    Currency in that order.
+    """
+    try:
+        from util.walkscape_constants import Material, Item, Consumable
+    except Exception:
+        return None
+
+    try:
+        from util.autogenerated.containers import Container
+    except Exception:
+        Container = None
+    try:
+        from util.autogenerated.collectibles import Collectible
+    except Exception:
+        Collectible = None
+    try:
+        from util.autogenerated.currency import Currency
+    except Exception:
+        Currency = None
+
+    # Candidates in priority order
+    if item_type:
+        type_lower = item_type.strip().lower()
+    else:
+        type_lower = ''
+
+    priority = []
+    if 'container' in type_lower and Container is not None:
+        priority.append(('Container', Container))
+    elif 'collectible' in type_lower and Collectible is not None:
+        priority.append(('Collectible', Collectible))
+    elif 'consumable' in type_lower:
+        priority.append(('Consumable', Consumable))
+    elif 'material' in type_lower:
+        priority.append(('Material', Material))
+
+    # Fallback search order
+    fallback = [
+        ('Material', Material),
+        ('Container', Container),
+        ('Consumable', Consumable),
+        ('Collectible', Collectible),
+        ('Item', Item),
+        ('Currency', Currency),
+    ]
+    for cls_name, cls_obj in fallback:
+        if cls_obj is not None and (cls_name, cls_obj) not in priority:
+            priority.append((cls_name, cls_obj))
+
+    target = item_name.strip()
+    target_lower = target.lower()
+    for cls_name, cls_obj in priority:
+        if cls_obj is None:
+            continue
+        for attr_name in dir(cls_obj):
+            if attr_name.startswith('_'):
+                continue
+            value = getattr(cls_obj, attr_name, None)
+            if value is None:
+                continue
+            # Match by .name attribute (string or enum-ish)
+            vname = getattr(value, 'name', None)
+            if isinstance(vname, str) and vname.strip().lower() == target_lower:
+                return f'{cls_name}.{attr_name}'
+    return None
+
 
 def parse_recipes():
     """Parse all recipes from the cached HTML file."""
@@ -497,13 +764,39 @@ def parse_recipes():
                 'materials': materials,  # Now array of arrays
                 'base_xp': base_xp,
                 'base_steps': base_steps,
-                'max_efficiency': max_efficiency
+                'max_efficiency': max_efficiency,
+                'drop_table': None,  # Populated below from wiki 'Additional Recipe Outputs' table
             }
             
             # Debug output
             if level is None:
                 print(f"    DEBUG: Recipe dict has level=None for {recipe_name}")
-            
+
+            # Parse the 'Additional Recipe Outputs' table from the cached item page
+            # (e.g. Silver nugget 13.510% 'Does 2 rolls' on Smelt a copper bar).
+            additional_outputs = parse_additional_recipe_outputs(output_item_name, recipe_name)
+            if additional_outputs:
+                # Resolve item_name -> item_ref for each drop so downstream code can
+                # look up material/container/etc. values. Fall back to item_ref=None
+                # when resolution fails (rendering still works off item_name).
+                resolved_drops = []
+                for drop in additional_outputs:
+                    resolved = dict(drop)
+                    resolved['item_ref'] = _resolve_drop_item_ref(
+                        drop['item_name'], drop.get('item_type')
+                    )
+                    resolved_drops.append(resolved)
+                    multi_note = (
+                        f" (multi_roll_count={resolved.get('multi_roll_count')})"
+                        if resolved.get('multi_roll_count')
+                        else ''
+                    )
+                    print(
+                        f"    + drop: {resolved['item_name']} "
+                        f"{resolved['chance_percent']:.3f}%{multi_note}"
+                    )
+                recipe['drop_table'] = resolved_drops
+
             # Validate materials
             for group in materials:
                 missing_materials = [item for qty, item in group if isinstance(item, str)]
@@ -537,7 +830,8 @@ def generate_python_module(recipes):
             'Weave a ', 'Weave an ', 'Weave ',
             'Spin ', 'Assemble ', 'Prepare a ', 'Prepare an ', 'Prepare ',
             'Mix ', 'Harden ', 'Upcycle ',
-            'Forge into ', 'Ferment ', 'Distill '
+            'Forge into ', 'Ferment ', 'Distill ', 'Fletch ', 
+            'Woodwork a '
         ]
         
         cleaned = name
@@ -590,6 +884,7 @@ def generate_python_module(recipes):
         '    base_xp: float  # Can be decimal like 21.5',
         '    base_steps: int',
         '    max_efficiency: float  # Decimal bonus (0.5 = 50%, can be decimal like 0.215 = 21.5%)',
+        '    drop_table: Optional[List] = None  # Secondary drops (e.g., pet eggs) — list of dicts with item_name, chance_percent, quantity',
         '    ',
         '    def get_output_item_object(self):',
         '        """Resolve output_item string reference to actual Item, Material, or Consumable object."""',
@@ -694,6 +989,31 @@ def generate_python_module(recipes):
             output_item_str = repr(recipe['output_item_ref']) if recipe['output_item_ref'] else 'None'
             
             # Direct instantiation
+            drop_table = recipe.get('drop_table')
+            drop_line = ''
+            if drop_table:
+                # Emit as a readable multi-line list of dict literals.
+                _drop_parts = []
+                for _drop in drop_table:
+                    _items = []
+                    # Stable field order for readability
+                    _items.append(f"'item_name': {repr(_drop['item_name'])}")
+                    if 'item_ref' in _drop:
+                        _items.append(f"'item_ref': {repr(_drop['item_ref'])}")
+                    if 'item_type' in _drop:
+                        _items.append(f"'item_type': {repr(_drop['item_type'])}")
+                    if 'quantity' in _drop:
+                        _items.append(f"'quantity': {_drop['quantity']}")
+                    if 'quantity_min' in _drop:
+                        _items.append(f"'quantity_min': {_drop['quantity_min']}")
+                    if 'quantity_max' in _drop:
+                        _items.append(f"'quantity_max': {_drop['quantity_max']}")
+                    if 'chance_percent' in _drop:
+                        _items.append(f"'chance_percent': {_drop['chance_percent']}")
+                    if 'multi_roll_count' in _drop:
+                        _items.append(f"'multi_roll_count': {_drop['multi_roll_count']}")
+                    _drop_parts.append('        {' + ', '.join(_items) + '}')
+                drop_line = ',\n    drop_table=[\n' + ',\n'.join(_drop_parts) + '\n    ]'
             lines.extend([
                 '',
                 f'{enum_name} = RecipeInstance(',
@@ -706,7 +1026,7 @@ def generate_python_module(recipes):
                 f'    materials={materials_str},',
                 f'    base_xp={recipe["base_xp"]},',
                 f'    base_steps={recipe["base_steps"]},',
-                f'    max_efficiency={recipe["max_efficiency"]}',
+                f'    max_efficiency={recipe["max_efficiency"]}{drop_line}',
                 ')'
             ])
         
@@ -719,10 +1039,11 @@ def generate_python_module(recipes):
         '}',
         '',
         'RECIPES_BY_SKILL = {}',
-        'for r in RECIPES_BY_NAME.values():',
-        '    if r.skill not in RECIPES_BY_SKILL:',
-        '        RECIPES_BY_SKILL[r.skill] = []',
-        '    RECIPES_BY_SKILL[r.skill].append(r)',
+        'for _r in RECIPES_BY_NAME.values():',
+        '    if _r.skill not in RECIPES_BY_SKILL:',
+        '        RECIPES_BY_SKILL[_r.skill] = []',
+        '    RECIPES_BY_SKILL[_r.skill].append(_r)',
+        'del _r',
         '',
         '# Enum-style access',
         'class Recipe:',
@@ -771,3 +1092,11 @@ if __name__ == '__main__':
     
     # Report validation issues
     validator.report()
+
+    # Refresh stats_report precomputed tables after scrape completes.
+    # See util/stats_report/ for details. No-op if sessions.db not present.
+    try:
+        from util.stats_report.precompute.scraper_hook import refresh_after_scrape
+        refresh_after_scrape()
+    except Exception as _e:
+        print(f"[stats_report precompute] hook failed: {_e}")

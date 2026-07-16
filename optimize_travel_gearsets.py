@@ -7,6 +7,7 @@ Uses the proven greedy initialization + local search refinement algorithm.
 """
 
 # Standard library imports
+import json
 import math
 import time
 from typing import Dict, List, Optional, Tuple
@@ -22,12 +23,16 @@ from util.greedy_local_search import (
     create_multi_level_comparator,
     prepare_items_by_slot
 )
-from util.optimization_utils import filter_items_by_quality, filter_ignored_items
+from util.optimization_utils import filter_items_by_quality, filter_ignored_items, prune_dominated_items
 from util.walkscape_constants import *
 
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
+
+# Travel optimizer version — increment when algorithm or scoring changes.
+# Used to invalidate per-route caches so stale results aren't reused.
+TRAVEL_OPTIMIZER_VERSION = 43
 
 # Array of sorting priorities (first = primary, second = tiebreaker, etc.)
 SORTING_PRIORITY = [
@@ -55,6 +60,60 @@ IGNORED_ITEMS = {
     Item.HERBERTS_SHIRT, Item.HERBERTS_PANTS,
     Item.RUSTY_DIVING_HELMET, Item.RUSTY_DIVING_LEGGINGS, Item.RUSTY_DIVING_TORSO
 }
+
+# Locked slots: dict of slot_name → Item object. These slots cannot be changed by the optimizer.
+LOCKED_SLOTS = {}  # Set by UI/worker when "Lock current gear set slots" is enabled
+
+# Fixed, non-optimizable travel items (the equipped pet + consumable). These are
+# NOT gear slots the optimizer fills — they are constant contributors that must
+# be counted in EVERY candidate's score (and the empty-gearset baseline) so the
+# optimizer accounts for e.g. Reindeer +4% agility WE and Bagel +5% WE. Set by
+# the worker from the current gearset; defaults to empty for all other callers.
+# Aggregated through the same per-segment aggregate_gearset_stats path, so
+# location-scoped pet stats (e.g. Reindeer traveling/jarvonia) resolve per route.
+FIXED_TRAVEL_ITEMS = []  # list of StatsMixin items (PetInfo / ConsumableItem)
+
+# Optimizable pet / consumable candidate pools. Set by the worker ONLY when the
+# global "Include pets/consumables in optimization" toggles are on. When a pool
+# is non-empty the optimizer picks the best candidate for the route (folded into
+# gearset['pet'] / gearset['consumable']) instead of using the equipped one as a
+# FIXED item. When a pool is empty the equipped pet/consumable (if any) stays in
+# FIXED_TRAVEL_ITEMS and is scored but not changed — the pre-existing behavior.
+OPTIMIZE_PET_CANDIDATES = []         # list of PetLevelInfo (owned, level>0)
+OPTIMIZE_CONSUMABLE_CANDIDATES = []  # list of ConsumableItem (owned)
+
+# Stats that matter for travel optimization
+TRAVEL_RELEVANT_STATS = {
+    'work_efficiency', 'double_action', 'steps_add', 'steps_percent',
+    'inventory_space', 'chest_finding', 'double_rewards', 'bonus_xp_percent',
+}
+
+
+def _travel_relevant_stats_for_priority():
+    """TRAVEL_RELEVANT_STATS plus the item-finding stat keys referenced by the
+    active SORTING_PRIORITY's Steps/Target-Item targets.
+
+    Without this, an item whose ONLY travel contribution is an item-finding
+    stat (e.g. the Adventuring amulet's ItemFindingCategory.ADVENTURERS_GUILD_
+    TOKENS) is filtered out of the candidate pool by _item_has_applicable_stats
+    and/or pruned by prune_dominated_items — so the optimizer can't equip it
+    even when the user targets that drop (bug 0421caa9). chest_finding is
+    already in the base set (covers cat:chests); here we add the specific
+    ItemFindingCategory.<CAT> keys (and fine_material_finding for _fine
+    targets) so those slots get filled and dominance pruning respects them.
+    """
+    stats = set(TRAVEL_RELEVANT_STATS)
+    for entry in SORTING_PRIORITY:
+        target = getattr(entry, 'target', None)
+        if not target or not isinstance(target, str):
+            continue
+        if target.startswith('cat:if:'):
+            cat = target[len('cat:if:'):]
+            if cat.endswith('_fine'):
+                cat = cat[:-len('_fine')]
+                stats.add('fine_material_finding')
+            stats.add(f'ItemFindingCategory.{cat.upper()}')
+    return stats
 
 # Locations to optimize travel for
 # The optimizer will find all routes connecting any of these locations
@@ -101,7 +160,7 @@ TEST_LOCATIONS = [
     # Location.WARRENFIELD,
     
     # # Erdwise
-    # Location.BLACKSPELL_PORT,
+    # Location.BLACKSPELL_HARBOUR,
     # Location.BILGEMONT_PORT,
     # Location.OLD_ARENA_RUINS,
     # Location.RED_COAST,
@@ -136,30 +195,111 @@ def get_test_routes():
 # ============================================================================
 
 def calculate_route_steps(route: Tuple, stats: Dict[str, float], character) -> int:
-    """Calculate steps for a single route with given stats."""
+    """Calculate steps for a single route — MATCHES the UI display.
+
+    The UI's per-segment step count (in `ui/app.py:_get_travel_segment_stats`)
+    rounds in a specific order:
+
+        1. ceil(per_action) — round per-action UP first
+        2. * paid_nodes      — then multiply by the float paid-nodes count
+        3. ceil(...)         — then ceil the product
+
+    The optimizer's score function MUST use the same order so the
+    optimizer's "best" gearset matches the gearset the user sees as
+    lowest in the UI. Pre-fix the optimizer ceiled the PRODUCT
+    `paid_nodes * per_action` directly (skipping step 1), which made
+    items with high per-action and high DA score better than items
+    with floor-clamped per-action and low DA — even when the UI
+    showed the opposite. This caused Mountaineering guidebook to be
+    picked over Walking stick despite the UI showing it as 3 steps
+    worse (bug 1ec8eb98 round 5).
+
+    For sub-integer fractional comparisons in the empty-slot gate,
+    use `_calculate_route_steps_float` instead — that one returns the
+    raw, un-ceiled product so single-Stepring / single-Pocketwatch
+    contributions can register.
+    """
     route_info = RAW_ROUTES.get(route)
     if not route_info:
         return float('inf')
-    
     base_distance = route_info['distance']
-    
-    # Apply travel formula
-    agility_level = character.get_skill_level('agility')
-    level_we = (agility_level - 1) * 0.005
-    total_we = level_we + stats.get('work_efficiency', 0.0)
-    
-    eff = 2.00 + total_we
+
+    eff = 2.00 + stats.get('work_efficiency', 0.0)
     per_action = base_distance / eff / 10.0
     per_action = per_action * (1.0 + stats.get('steps_percent', 0.0)) + stats.get('steps_add', 0)
-    steps_per_node = max(10, math.ceil(per_action))
+
+    # Match UI rounding order: ceil per_action FIRST (with 10 floor),
+    # then multiply by float paid_nodes, then ceil the product.
+    steps_per_action = max(10, math.ceil(per_action))
     expected_paid_nodes = 10.0 / (1 + stats.get('double_action', 0.0))
-    total_steps = math.ceil(expected_paid_nodes * steps_per_node)
-    
-    return total_steps
+    return math.ceil(expected_paid_nodes * steps_per_action)
+
+
+def _calculate_route_steps_float(route: Tuple, stats: Dict[str, float], character) -> float:
+    """Float-precision step count for a single route.
+
+    Used by the optimizer's empty-slot gate so that small fractional WE /
+    steps_percent contributions (e.g. Flowing pocketwatch -5% steps_percent
+    on a route where existing gear already pushed per-action below the
+    ceiling boundary) aren't silently rounded back to the same integer
+    ceiling and rejected as "not strictly better than empty". Bug report
+    1ec8eb98. Display / user-facing code keeps the ceil()'d integer via
+    `calculate_route_steps`.
+
+    Formula (matches the in-game calculation per
+    https://wiki.walkscape.app/wiki/Traveling_(Mechanics)):
+
+        efficiency = 1.0 + (agility_level × 0.005) + item_efficiency
+        per_action = base_distance / efficiency / 10
+        per_action = per_action × (1 + steps_percent) + steps_add
+        per_action = max(10.0, per_action)         # 10-step floor
+        paid_nodes = 10.0 / (1.0 + double_action)
+        total_steps = paid_nodes × per_action
+
+    `stats` MUST be the output of `aggregate_gearset_stats(skill='travel',
+    include_level_bonus=True, ...)` -- the agility level bonus is
+    expected to be ALREADY INCLUDED in `stats['work_efficiency']`. Adding
+    it locally here would double-count it and produce roughly half the
+    in-game step count, which is what was happening before the wiki-
+    formula fix (1ec8eb98 follow-up).
+    """
+    route_info = RAW_ROUTES.get(route)
+    if not route_info:
+        return float('inf')
+
+    base_distance = route_info['distance']
+
+    # Travel formula: efficiency = 2.0 + work_efficiency.
+    # The base traveling efficiency is 200% (2.0), NOT 100% (1.0). This
+    # was confirmed against the official Walkscape tool and matches the
+    # display function at `ui/app.py:_get_travel_segment_stats` (which
+    # also uses `distance / (2.0 + we)`). The wiki's worked example at
+    # https://wiki.walkscape.app/wiki/Traveling_(Mechanics) shows
+    # `1.00 base efficiency` — that's a wiki simplification; in the
+    # actual game the base is 2.0.
+    #
+    # `stats['work_efficiency']` already contains BOTH the agility-level
+    # bonus (from aggregate_gearset_stats with include_level_bonus=True)
+    # AND any equipment bonuses, so we just add the 2.0 base.
+    eff = 2.00 + stats.get('work_efficiency', 0.0)
+
+    per_action = base_distance / eff / 10.0
+    per_action = per_action * (1.0 + stats.get('steps_percent', 0.0)) + stats.get('steps_add', 0)
+    # Keep steps_per_node as a float inside the optimizer. Previously this
+    # was ceil()'d here, which silently hid single-Stepring (-1% steps_percent)
+    # or single steps_add=-1 benefits whenever per_action rounded to the same
+    # integer. That prevented the greedy + 1-swap local search from ever
+    # picking rings like Stepring — two Steprings would be needed to cross
+    # a ceiling boundary, but no single swap can reach that state. Bug
+    # report a78f2b6d. Display code can ceil at the edge if needed.
+    steps_per_node = max(10.0, per_action)
+    expected_paid_nodes = 10.0 / (1 + stats.get('double_action', 0.0))
+    return expected_paid_nodes * steps_per_node
 
 def meets_route_requirements(gearset_dict: dict, route: Tuple, character) -> bool:
     """Check if gearset meets route requirements."""
-    route_info = RAW_ROUTES.get(route)
+    # Check both directions — routes can be stored either way in RAW_ROUTES
+    route_info = RAW_ROUTES.get(route) or RAW_ROUTES.get((route[1], route[0]))
     if not route_info:
         return True
     
@@ -235,19 +375,38 @@ def meets_route_requirements(gearset_dict: dict, route: Tuple, character) -> boo
     return True
 
 def has_travel_stats(item, location, character) -> bool:
-    """Check if item has any travel-relevant stats (or no negative stats)."""
+    """Check if an item should be considered as a travel candidate.
+
+    Filters out items that strictly hurt travel:
+    - positive steps_add or steps_percent: these ADD steps per action,
+      making travel slower — no amount of secondary stats (DA, DR, CF)
+      compensates for a larger primary step count in a route-length
+      metric. Ring of Pandemonium (+2 steps_add) is the poster child
+      for why this filter exists (bug report 4dbabd2b).
+    - negative work_efficiency with no redeeming stats
+
+    Keeps items that have positive travel-relevant stats or no stats at
+    all (neutral items can still fill slots that require specific
+    keywords like "Climbing gear").
+    """
     # Use 'travel' skill which combines both 'agility' and 'traveling' skills
     stats = item.get_stats_for_skill('travel', location=location, character=character)
-    
+
+    # Hard filter: any positive steps_add / steps_percent makes the item
+    # strictly worse for travel. No throughput gain can overcome adding
+    # steps to the primary metric.
+    if stats.get('steps_add', 0) > 0 or stats.get('steps_percent', 0) > 0:
+        return False
+
     travel_stats = {
         'work_efficiency', 'double_action', 'steps_add', 'steps_percent'
     }
-    
+
     # Include items with positive travel stats OR items with no stats at all
     # (items with no stats are neutral and better than items with negative stats)
     has_any_stat = any(stats.get(stat, 0) != 0 for stat in travel_stats)
     has_positive_we = stats.get('work_efficiency', 0) >= 0
-    
+
     # Include if: has positive/neutral WE, or has other travel stats
     return not has_any_stat or has_positive_we or any(stats.get(stat, 0) > 0 for stat in ['double_action', 'steps_percent'] if stat != 'work_efficiency')
 
@@ -258,7 +417,8 @@ def has_travel_stats(item, location, character) -> bool:
 def _resolve_location_from_id(loc_id: str):
     """Resolve a lowercase location ID to a LocationInfo object."""
     from util.autogenerated.locations import Location, LocationInfo
-    attr = loc_id.upper()
+    # Normalize: uppercase, spaces→underscores, remove apostrophes
+    attr = loc_id.upper().replace(' ', '_').replace("'", '').replace('-', '_')
     loc = getattr(Location, attr, None)
     if isinstance(loc, LocationInfo):
         return loc
@@ -309,6 +469,285 @@ def meets_segments_requirements(gearset_dict: dict, segments: List[dict]) -> boo
 # SCORING FUNCTIONS
 # ============================================================================
 
+# Actions completed per route segment. The traveling mechanic divides each
+# route's efficiency-adjusted distance into exactly 10 actions (one per node
+# between the two locations) — see https://wiki.walkscape.app/wiki/Traveling_(Mechanics)
+# step 3 ("divide by 10 to create the individual action"). Item finding rolls
+# once per action completion (https://wiki.walkscape.app/wiki/Item_Finding —
+# "chance for an item to be dropped upon activity completion"). Double action
+# reduces the STEP COST of nodes, not the number of action completions, so the
+# reward-roll count per segment stays at 10.
+TRAVEL_ACTIONS_PER_SEGMENT = 10
+
+# Base chest drop chance per reward roll (percentage points), matching the
+# activity optimizer's primary_chest handling in
+# optimize_activity_gearsets._compute_spr_for_target.
+TRAVEL_BASE_CHEST_RATE_PCT = 0.4
+
+
+def _compute_travel_steps_per_target(target, base_spr: float, stats: dict) -> float:
+    """Expected steps to find one of `target` over the route, given a travel
+    base steps-per-reward-roll.
+
+    Mirrors optimize_activity_gearsets._compute_spr_for_target's chest /
+    item-finding branches so travel and activity optimization agree on the
+    rate math. `target` is the raw UI category string:
+
+      - 'cat:chests'  -> chest_finding-driven skilling-chest yield (0.4% base)
+      - 'cat:if:<CAT>' -> ItemFindingCategory.<CAT> stat (percentage points
+                          per reward roll); the '_fine' suffix layers a 1%
+                          base modified by fine_material_finding.
+
+    Lower is better. Returns a large penalty when the target's finding stat
+    is zero (gear provides no chance) so the optimizer still prefers gear
+    that can actually find the target.
+    """
+    if not target or not isinstance(target, str):
+        return base_spr
+
+    if target == 'cat:chests':
+        cf_pct = stats.get('chest_finding', 0.0)
+        effective_rate = TRAVEL_BASE_CHEST_RATE_PCT * (1 + cf_pct)
+        if effective_rate > 0:
+            return (base_spr * 100) / effective_rate
+        return 999999999.0
+
+    if target.startswith('cat:if:'):
+        cat = target[len('cat:if:'):]
+        is_fine = cat.endswith('_fine')
+        if is_fine:
+            cat = cat[:-len('_fine')]
+        if_stat_percent = stats.get(f'ItemFindingCategory.{cat.upper()}', 0.0)
+        if is_fine:
+            fmf_pct = stats.get('fine_material_finding', 0.0)
+            effective_rate = if_stat_percent * 0.01 * (1 + fmf_pct)
+        else:
+            effective_rate = if_stat_percent
+        if effective_rate > 0:
+            return (base_spr * 100) / effective_rate
+        return 999999999.0
+
+    # Unknown target — no adjustment (falls back to raw steps-per-roll).
+    return base_spr
+
+
+def _travel_target_entries():
+    """Yield (target, composite_key) for every TRAVEL_STEPS_PER_TARGET entry
+    in the current SORTING_PRIORITY that carries a target. Deduplicated by
+    composite key so the same target scored once."""
+    seen = set()
+    for raw in SORTING_PRIORITY:
+        if not isinstance(raw, SortingEntry):
+            continue
+        if raw.sort.metric_key != 'travel_steps_per_target':
+            continue
+        if not raw.target:
+            continue
+        composite = f"travel_steps_per_target::{raw.target}"
+        if composite in seen:
+            continue
+        seen.add(composite)
+        yield raw.target, composite
+
+
+def compute_travel_segment_drops(stats: dict, steps_avg: float) -> list:
+    """Expected steps-to-find for every APPLICABLE travel drop on ONE segment.
+
+    Lists agility (skilling) chests (chest_finding-driven, 0.4% base rate) plus
+    every item-finding category the gear/location provides a non-zero chance for
+    on this segment ("all item finding drops that apply"). Uses the same rate
+    math as the "Steps / Target Item" optimization metric
+    (_compute_travel_steps_per_target) so the display and the optimizer agree.
+
+    Args:
+        stats: aggregated travel stats for the segment's START location
+               (as produced by aggregate_gearset_stats(skill='travel', ...)).
+        steps_avg: the segment's expected step count (what the bubble shows).
+
+    Returns:
+        List of {target, name, steps_per_item, chance_percent} dicts, sorted
+        best (fewest steps/item) first. SKILL_CHEST is folded into the chest
+        entry. chance_percent is the effective per-reward-roll drop chance (so
+        the DROPS card can show a % like activities/recipes).
+    """
+    import math as _math
+    drops = []
+    if not isinstance(stats, dict):
+        return drops
+    dr = stats.get('double_rewards', 0.0) or 0.0
+    rolls = TRAVEL_ACTIONS_PER_SEGMENT * (1.0 + dr)
+    base_spr = (steps_avg / rolls) if rolls > 0 else float('inf')
+
+    def _finish(target, name, raw_spi, chance_percent):
+        # raw_spi is the (pre-ceil) steps per successful trigger. expected_count
+        # over this segment = seg_steps / raw_spi. coin_value / ag_token_value
+        # are the expected currency per trigger (so coins/1k = value * 1000 /
+        # steps_per_item, matching the activity/recipe currency pills).
+        coin, agt = _travel_category_values(target, stats)
+        expected = (steps_avg / raw_spi) if raw_spi and raw_spi > 0 else 0.0
+        return {
+            'target': target,
+            'name': name,
+            'steps_per_item': int(_math.ceil(raw_spi)),
+            'chance_percent': chance_percent,
+            'coin_value': coin,
+            'ag_token_value': agt,
+            'expected_count': expected,
+        }
+
+    # Agility / skilling chests — always applicable (0.4% base + chest_finding).
+    chest_spi = _compute_travel_steps_per_target('cat:chests', base_spr, stats)
+    if chest_spi and chest_spi < 999999999.0:
+        cf = stats.get('chest_finding', 0.0) or 0.0
+        drops.append(_finish('cat:chests', 'Agility Chest', chest_spi,
+                             TRAVEL_BASE_CHEST_RATE_PCT * (1.0 + cf)))
+
+    for stat_key, val in stats.items():
+        if not isinstance(stat_key, str) or not stat_key.startswith('ItemFindingCategory.'):
+            continue
+        if not val or val <= 0:
+            continue
+        cat = stat_key[len('ItemFindingCategory.'):]
+        if cat.upper() == 'SKILL_CHEST':
+            continue  # covered by the chest entry above
+        target = f'cat:if:{cat.lower()}'
+        spi = _compute_travel_steps_per_target(target, base_spr, stats)
+        if spi and spi < 999999999.0:
+            drops.append(_finish(target, cat.replace('_', ' ').title(), spi, float(val)))
+
+    drops.sort(key=lambda d: d['steps_per_item'])
+    return drops
+
+
+# Travel skilling chest = the Agility chest (traveling is agility-skilled).
+_TRAVEL_CHEST_REF = 'Container.AGILITY_CHEST'
+
+
+def _travel_category_values(target, stats):
+    """Expected (coin_value, ag_token_value) per successful trigger of a travel
+    drop target. Chests use the Agility chest's average coin value; item-finding
+    categories sum expected value across their internal drop table (matching the
+    per-trigger convention the steps/item math uses)."""
+    try:
+        if target == 'cat:chests':
+            from util.coin_value import CHEST_COIN_VALUES
+            return float(CHEST_COIN_VALUES.get(_TRAVEL_CHEST_REF, 0.0) or 0.0), 0.0
+        if isinstance(target, str) and target.startswith('cat:if:'):
+            from util.autogenerated.item_finding import ItemFindingCategory
+            from util.coin_value import get_drop_coin_value
+            from util.ag_token_value import get_drop_ag_token_value
+            cat = target[len('cat:if:'):]
+            if cat.endswith('_fine'):
+                cat = cat[:-len('_fine')]
+            category = getattr(ItemFindingCategory, cat.upper(), None)
+            if category is None:
+                return 0.0, 0.0
+            coin = 0.0
+            agt = 0.0
+            for d in (getattr(category, 'drops', None) or []):
+                chance = float(getattr(d, 'chance_percent', 0) or 0) / 100.0
+                q = getattr(d, 'quantity', None)
+                if q is None:
+                    avg_qty = 0.0
+                elif getattr(q, 'is_static', False):
+                    avg_qty = float(getattr(q, 'min_qty', 0) or 0)
+                else:
+                    avg_qty = (float(getattr(q, 'min_qty', 0) or 0) + float(getattr(q, 'max_qty', 0) or 0)) / 2.0
+                if chance <= 0 or avg_qty <= 0:
+                    continue
+                coin += chance * avg_qty * get_drop_coin_value(d)
+                agt += chance * avg_qty * get_drop_ag_token_value(d)
+            return coin, agt
+    except Exception:
+        pass
+    return 0.0, 0.0
+
+
+def compute_travel_drops_summary(segments):
+    """Build per-segment drops + a whole-route Total, each with coins/AGT per
+    1k steps, for the column-3 travel DROPS section.
+
+    Args:
+        segments: list of dicts, each {steps_avg, stats, start_name?, end_name?}.
+
+    Returns:
+        {
+          'segments': [{start_name, end_name, drops, coins_per_1k, agt_per_1k}],
+          'total': {drops, coins_per_1k, agt_per_1k, steps},
+        }
+      Total drops carry whole-route steps_per_item, expected_count, and a
+      whole-route chance_percent (= expected_count * 100, cumulative over the
+      route — NOT per action).
+    """
+    import math as _math
+
+    def _currency_per_1k(drops, steps):
+        if not steps or steps <= 0:
+            return 0.0, 0.0
+        coin_val = sum((d.get('coin_value', 0.0) or 0.0) * (d.get('expected_count', 0.0) or 0.0) for d in drops)
+        agt_val = sum((d.get('ag_token_value', 0.0) or 0.0) * (d.get('expected_count', 0.0) or 0.0) for d in drops)
+        return coin_val * 1000.0 / steps, agt_val * 1000.0 / steps
+
+    seg_out = []
+    total_steps = 0.0
+    agg = {}  # target -> aggregate across segments
+    for seg in segments or []:
+        steps_avg = seg.get('steps_avg', 0) or 0
+        drops = compute_travel_segment_drops(seg.get('stats') or {}, steps_avg)
+        coins_1k, agt_1k = _currency_per_1k(drops, steps_avg)
+        seg_out.append({
+            'start_name': seg.get('start_name', ''),
+            'end_name': seg.get('end_name', ''),
+            'drops': drops,
+            'coins_per_1k': round(coins_1k, 2),
+            'agt_per_1k': round(agt_1k, 4),
+        })
+        total_steps += steps_avg
+        for d in drops:
+            a = agg.setdefault(d['target'], {
+                'target': d['target'], 'name': d['name'],
+                'coin_value': d.get('coin_value', 0.0), 'ag_token_value': d.get('ag_token_value', 0.0),
+                'expected_total': 0.0,
+            })
+            a['expected_total'] += d.get('expected_count', 0.0) or 0.0
+
+    total_drops = []
+    total_coin_val = 0.0
+    total_agt_val = 0.0
+    for a in agg.values():
+        exp = a['expected_total']
+        if exp <= 0:
+            continue
+        spi = (total_steps / exp) if exp > 0 else float('inf')
+        total_drops.append({
+            'target': a['target'],
+            'name': a['name'],
+            'steps_per_item': int(_math.ceil(spi)),
+            'expected_count': exp,
+            'chance_percent': exp * 100.0,  # whole-route cumulative, NOT per action
+            'coin_value': a['coin_value'],
+            'ag_token_value': a['ag_token_value'],
+        })
+        total_coin_val += a['coin_value'] * exp
+        total_agt_val += a['ag_token_value'] * exp
+    total_drops.sort(key=lambda d: d['steps_per_item'])
+
+    total_coins_1k = (total_coin_val * 1000.0 / total_steps) if total_steps > 0 else 0.0
+    total_agt_1k = (total_agt_val * 1000.0 / total_steps) if total_steps > 0 else 0.0
+
+    return {
+        'segments': seg_out,
+        'total': {
+            'drops': total_drops,
+            'coins_per_1k': round(total_coins_1k, 2),
+            'agt_per_1k': round(total_agt_1k, 4),
+            'steps': int(round(total_steps)),
+        },
+    }
+
+
+
+
 def calculate_travel_metrics(
     gearset_dict: dict,
     routes: List[Tuple],
@@ -329,6 +768,7 @@ def calculate_travel_metrics(
             steps_for_target, total_steps
     """
     total_steps = 0
+    total_steps_float = 0.0
     valid_routes = 0
     all_stats = {}
     
@@ -338,6 +778,12 @@ def calculate_travel_metrics(
         route_list = _segments_to_routes(routes)
     
     items = [item for item in gearset_dict.values() if item is not None]
+
+    # Fold in the fixed, non-optimizable travel items (equipped pet + consumable).
+    # Constant across all candidates; counted here so the optimizer scores with
+    # pet/food WE just like the Travel info section displays them.
+    if FIXED_TRAVEL_ITEMS:
+        items = items + [it for it in FIXED_TRAVEL_ITEMS if it is not None]
     
     for route in route_list:
         # Get stats for starting location using 'travel' skill (combines agility + traveling)
@@ -355,7 +801,9 @@ def calculate_travel_metrics(
         
         # Calculate steps for this route
         steps = calculate_route_steps(route, stats, character)
+        steps_float = _calculate_route_steps_float(route, stats, character)
         total_steps += steps
+        total_steps_float += steps_float
         valid_routes += 1
         
         # Store stats from first route for display
@@ -369,6 +817,7 @@ def calculate_travel_metrics(
             'steps_for_chest': float('inf'),
             'steps_for_target': float('inf'),
             'total_steps': float('inf'),
+            'total_steps_float': float('inf'),
         }, {}
     
     avg_steps = total_steps / valid_routes
@@ -379,16 +828,84 @@ def calculate_travel_metrics(
     # Use a simple estimate: ~0.5 XP per step as baseline
     primary_xp_per_step = 0.5 if total_steps > 0 else 0.0
     
+    # Subtract a fraction for secondary stats so items with better stats
+    # win when step count is EXACTLY tied. Stats are in decimal (0.04 = 4%).
+    # Multipliers MUST stay small enough that the total bonus cannot exceed
+    # ~0.5 across any plausible gearset — otherwise the bonus overrides
+    # real 1-step differences in total_steps and the optimizer picks
+    # items with worse steps_add/steps_percent because their DR/CF beat
+    # the whole-step penalty.
+    #
+    # DR and chest_finding are weighted EQUALLY per user preference — both
+    # directly multiply chest yield during travel, so neither should
+    # dominate the tiebreaker (bug reports 1d271940 / d18bb288).
+    #
+    # Max realistic: DR≈0.20, CF≈0.60 → 0.08 + 0.24 = 0.32 units.
+    # WE and bxp excluded — they're already captured in total_steps
+    # (WE reduces per_action, bxp is irrelevant to step count).
+    secondary_bonus = (
+        all_stats.get('double_rewards', 0) * 0.4 +
+        all_stats.get('chest_finding', 0) * 0.4
+    )
+
+    # steps_for_target is the PRIMARY user-facing metric ("Total Steps").
+    # It must reflect RAW total step count exactly so the optimizer never
+    # picks a gearset with more actual steps just because it has more
+    # DR/CF. Previously we set steps_for_target = total_steps - secondary_bonus,
+    # which let CF/DR smuggle into the primary metric and caused the
+    # optimizer to silently swap Stepring / Warm beanie / Medieval sneakers
+    # out for Gold star pearl+Ruby / Running visor / Bert's super-skis
+    # even when raw step count was identical. Bug report 67e1b88b.
+    #
+    # The secondary_bonus now lives as a SEPARATE metric that a future
+    # SORTING_PRIORITY can pick up as a true tie-breaker. Until the
+    # priority list is updated, the raw step count alone decides.
+    adjusted_steps = total_steps
+
     metrics = {
         'avg_travel_steps': avg_steps,
         'primary_xp_per_step': primary_xp_per_step,
-        'steps_for_chest': total_steps,  # Steps to complete the route (chest equivalent)
-        'steps_for_target': total_steps,
-        'total_steps': total_steps,
+        'steps_for_chest': total_steps,
+        'steps_for_target': adjusted_steps,
+        'total_steps': adjusted_steps,
+        'total_steps_float': total_steps_float,
         'avg_steps_per_route': avg_steps,
         'valid_routes': valid_routes,
+        'double_rewards': all_stats.get('double_rewards', 0.0),
+        'chest_finding': all_stats.get('chest_finding', 0.0),
+        'double_action': all_stats.get('double_action', 0.0),
+        'secondary_bonus': secondary_bonus,
     }
-    
+
+    # Per-target "Steps / Target Item" metrics (item finding + chests while
+    # traveling). Only computed for targets actually referenced in
+    # SORTING_PRIORITY so we don't waste work on unused categories.
+    #
+    # base_spr = steps per reward roll over the whole route. Each segment
+    # is 10 action completions (TRAVEL_ACTIONS_PER_SEGMENT); double_rewards
+    # multiplies the loot rolls per completion, so it folds into the roll
+    # count exactly like the activity optimizer's steps_per_reward_roll
+    # (steps ÷ ((1+DA)(1+DR))) — here DA is already reflected in total_steps.
+    total_actions = valid_routes * TRAVEL_ACTIONS_PER_SEGMENT
+    dr = all_stats.get('double_rewards', 0.0)
+    total_reward_rolls = total_actions * (1 + dr)
+    # Use the INTEGER (ceil-per-action) total_steps -- the ACTUAL in-game step
+    # count and exactly what the column-3 drops display uses. A stepring's -1%
+    # that gets absorbed by the per-action ceil yields NO real steps saved, so
+    # it must NOT lower steps-per-target; otherwise the optimizer picks a
+    # stepring over a double-rewards ring (e.g. Gold ruby) whose DR gives real
+    # extra target items -- disagreeing with the display / game (bug 3bc7498d
+    # multi-segment follow-up). Empty slots that would otherwise want a
+    # sub-integer WE item are filled by the dumb pass (skip_empty_slot_fill=
+    # False), so this no longer needs the float total for the e327d90a case.
+    base_spr = (total_steps / total_reward_rolls) if total_reward_rolls > 0 else float('inf')
+    for target, composite_key in _travel_target_entries():
+        metrics[composite_key] = _compute_travel_steps_per_target(target, base_spr, all_stats)
+
+    return metrics, all_stats
+    for target, composite_key in _travel_target_entries():
+        metrics[composite_key] = _compute_travel_steps_per_target(target, base_spr, all_stats)
+
     return metrics, all_stats
 
 # ============================================================================
@@ -441,9 +958,13 @@ def calculate_optimization_floors(routes, character, all_items, items_by_slot, g
     original_priority = list(SORTING_PRIORITY)
     
     for sorting in SORTING_PRIORITY:
-        weight = SORTING_WEIGHTS.get(sorting, 100)
+        weight = sorting.weight if hasattr(sorting, 'weight') else SORTING_WEIGHTS.get(sorting, 100)
         if weight >= 100:
             # 100% weight metrics use dynamic floors, skip greedy pass
+            max_metrics[sorting.metric_key] = baseline_metrics.get(sorting.metric_key, 0.0)
+            continue
+        if weight == 0:
+            # 0% weight metrics are ignored entirely — no floor, no greedy pass.
             max_metrics[sorting.metric_key] = baseline_metrics.get(sorting.metric_key, 0.0)
             continue
         
@@ -501,7 +1022,7 @@ def calculate_optimization_floors(routes, character, all_items, items_by_slot, g
     for sorting in SORTING_PRIORITY:
         key = sorting.metric_key
         floor = static_floors.get(key)
-        weight = SORTING_WEIGHTS.get(sorting, 100)
+        weight = sorting.weight if hasattr(sorting, 'weight') else SORTING_WEIGHTS.get(sorting, 100)
         if floor is None:
             print(f"  {sorting.display_name}: dynamic (100% weight)")
         else:
@@ -516,7 +1037,59 @@ def calculate_optimization_floors(routes, character, all_items, items_by_slot, g
 # MAIN OPTIMIZATION
 # ============================================================================
 
-def optimize_single_route(route, character, all_items, items_by_slot, gear_slots, tool_slots, all_slots, segments=None):
+def _item_value(item) -> int:
+    """Return a numeric "gear quality" signal for tie-breaking, higher = better.
+
+    Used as a greedy/local-search tiebreaker when two items produce an
+    IDENTICAL primary metric (e.g. Rusty diving helmet vs Hydrilium
+    diving helm on a surface route — both satisfy the "diving gear"
+    keyword gate but neither contributes active stats, so their travel
+    metrics tie exactly). Without this tiebreaker the first-seen item
+    wins, which picks the worse gear arbitrarily.
+
+    `value` on ItemInstance/CraftedItem is the per-quality coin value
+    and is monotonically increasing with quality tier (Hydrilium Normal
+    = 25, Perfect = 181) and across tiers (Rusty = 7, Hydrilium Normal
+    = 25), so it's a cheap, reliable "better gear" proxy without
+    introducing a separate rarity model.
+
+    Only used to break exact metric ties — it never overrides a real
+    metric difference.
+    """
+    try:
+        return int(getattr(item, 'value', 0) or 0)
+    except Exception:
+        return 0
+
+
+def _greedy_is_better(cand_metric: float, best_metric, cand_item, best_item, is_reverse: bool) -> bool:
+    """Strict better on metric; on exact ties, prefer higher item value.
+
+    Mirrors the ad-hoc comparison that used to live inline in the greedy
+    pick loops. The new behavior: if two candidates produce the same
+    primary metric, prefer the one with higher `value` (better gear
+    tier). This is specifically to fix the "Rusty picked over Hydrilium
+    on surface routes with a diving-gear keyword gate" class of bug,
+    but generalizes to any keyword-gated route where multiple items
+    tie on active stats.
+    """
+    if best_metric is None:
+        return True
+    if is_reverse:  # maximize
+        if cand_metric > best_metric:
+            return True
+        if cand_metric == best_metric:
+            return _item_value(cand_item) > _item_value(best_item)
+        return False
+    # minimize
+    if cand_metric < best_metric:
+        return True
+    if cand_metric == best_metric:
+        return _item_value(cand_item) > _item_value(best_item)
+    return False
+
+
+def optimize_single_route(route, character, all_items, items_by_slot, gear_slots, tool_slots, all_slots, segments=None, required_keywords_override=None):
     """Optimize gearset for a single route.
     
     Args:
@@ -528,6 +1101,7 @@ def optimize_single_route(route, character, all_items, items_by_slot, gear_slots
         tool_slots: List of tool slot names
         all_slots: Combined gear + tool slots
         segments: Optional list of segment dicts from the API (multi-segment route)
+        required_keywords_override: Optional dict of {keyword: count} to force requirements
     """
     
     # Determine requirements and routes for scoring
@@ -557,6 +1131,19 @@ def optimize_single_route(route, character, all_items, items_by_slot, gear_slots
                         required_keywords['light source'] = 3
         routes_for_scoring = [route]  # Wrap single tuple in list
     
+    # Merge caller-provided requirements (union of all routes in a region)
+    if required_keywords_override:
+        for kw, count in required_keywords_override.items():
+            required_keywords[kw.lower()] = max(required_keywords.get(kw.lower(), 0), count)
+
+    # Normalize all keys to lowercase to avoid duplicate case variants
+    required_keywords = {kw.lower(): count for kw, count in required_keywords.items()}
+    
+    print(f"[optimize_single_route] Final required_keywords: {required_keywords}")
+    print(f"[optimize_single_route] route={route}, segments={'yes' if segments else 'no'}, override={'yes' if required_keywords_override else 'no'}")
+    
+    _opt_start = time.time()
+    
     # Create scoring function for this route
     def score_function(gearset_dict):
         metrics, stats = calculate_travel_metrics(gearset_dict, routes_for_scoring, character)
@@ -579,32 +1166,132 @@ def optimize_single_route(route, character, all_items, items_by_slot, gear_slots
     # Greedy initialization with keyword tracking (like activity optimizer)
     gearset = {}
     
+    # Pre-fill locked slots
+    locked = LOCKED_SLOTS or {}
+    if locked:
+        for slot_name, item in locked.items():
+            gearset[slot_name] = item
+            print(f"[optimize_single_route]   {slot_name}: {item.name} (LOCKED)")
+        print(f"[optimize_single_route] Pre-filled {len(locked)} locked slots")
+    
     # Track how many of each keyword we've added
     current_keyword_counts = {kw: 0 for kw in required_keywords.keys()}
     
+    # Count keywords from locked slots
+    for slot_name, item in locked.items():
+        if item:
+            for kw in required_keywords.keys():
+                if item_has_keyword(item, kw):
+                    current_keyword_counts[kw] += 1
+    
     # Fill gear slots
-    for slot in gear_slots:
-        # Check which keywords we still need
-        needed_keywords = {kw for kw, required in required_keywords.items() 
-                          if current_keyword_counts[kw] < required}
-        
+    # Slot-fill helper: pick best item for one slot, preferring "leave empty"
+    # over a candidate that doesn't strictly improve the primary metric and
+    # doesn't satisfy a needed route-keyword.
+    #
+    # Bug b1e44232: on a long GDTE route that requires NO light sources, the
+    # optimizer was filling ring2 with a Gold sun stone ring (a Light source
+    # ring whose only travel-relevant stat is chest_finding) once ring1 had
+    # taken the player's only Stepring. Sun stone tied with empty on the
+    # primary `total_steps` metric and won the `_greedy_is_better` value
+    # tiebreak (item.value 330 > 0), so the optimizer suggested a useless
+    # ring instead of leaving the slot empty.
+    #
+    # The diving-helmet bug fix (Rusty vs Hydrilium on a route that DOES
+    # require diving gear) still works: there `has_needed_keyword=True`
+    # for both candidates so the strict-improvement gate is bypassed and
+    # the existing item.value tiebreak picks Hydrilium.
+    primary_is_reverse = SORTING_PRIORITY[0].is_reverse
+    primary_key = SORTING_PRIORITY[0].metric_key
+
+    # Base (target-agnostic) key of the active primary metric. The empty-slot
+    # gate below behaves differently by primary:
+    #   - raw-steps metrics (avg_travel_steps / total_steps / steps_for_chest
+    #     / steps_for_target) → float-precision raw-steps gate (+ secondary_bonus
+    #     tiebreak on tool slots). Preserves bug fixes b1e44232 (Sun Stone
+    #     Ring), 1ec8eb98 (tool CF fill), and the two-Stepring float-precision
+    #     fill (both rings).
+    #   - travel_steps_per_target::<target> → gate on that composite metric
+    #     DIRECTLY. Otherwise a chest-finding / DR item that lowers
+    #     steps-per-target but NOT raw steps would be wrongly rejected (it
+    #     doesn't move total_steps_float), so the optimizer would never pick
+    #     chest/DR gear for a "Steps / Target Item" primary.
+    # Only the NEW travel_steps_per_target metric uses the composite-direct
+    # gate; every pre-existing raw-steps primary keeps the float logic.
+    _primary_sort = getattr(SORTING_PRIORITY[0], 'sort', None)
+    _primary_base_key = _primary_sort.metric_key if _primary_sort is not None else primary_key
+    primary_is_raw_steps = (_primary_base_key != 'travel_steps_per_target')
+
+    def _fill_slot(slot, needed_keywords):
+        # Metric of leaving this slot empty given current gearset.
+        # Used as the "must strictly beat this" baseline for candidates
+        # that are NOT contributing a needed keyword.
+        empty_test = gearset.copy()
+        empty_test[slot] = None
+        try:
+            empty_metrics = score_function(empty_test)
+            empty_metric = empty_metrics[primary_key]
+        except Exception:
+            empty_metrics = {}
+            empty_metric = None
+
+        # Float-precision gate for the empty-slot baseline.
+        # Calculate_route_steps now matches the UI display (ceils per_action
+        # before multiplying), so its integer total absorbs sub-integer
+        # improvements like a single Stepring's -1% steps_percent. Without
+        # a float-precision gate, ring/gear slots would never fill items
+        # whose contribution doesn't cross an integer boundary on its
+        # own, even when a 2-Stepring combo would clearly help. We use
+        # the float metric for ALL slots:
+        #
+        #   - Tool slots (1ec8eb98): effective = float - secondary_bonus
+        #     so chest_finding-only items (Pocketwatch, Skydiscs) can
+        #     fill empty tool slots when float is float-equal.
+        #   - Gear / ring slots: effective = float (no secondary), to
+        #     preserve b1e44232 — Sun Stone Rings (CF-only) won't fill
+        #     empty ring slots, but Stepring (sub-integer step reduction)
+        #     will.
+        is_tool_slot = isinstance(slot, str) and slot.startswith('tool')
+        if empty_metrics:
+            if primary_is_raw_steps:
+                empty_steps_float = empty_metrics.get('total_steps_float', empty_metric)
+                if is_tool_slot:
+                    empty_secondary = empty_metrics.get('secondary_bonus', 0.0)
+                    empty_effective = empty_steps_float - empty_secondary
+                else:
+                    empty_secondary = 0.0
+                    empty_effective = empty_steps_float
+            else:
+                # Non-steps primary ("Steps / Target Item"): gate on the active
+                # composite primary metric directly. All travel metrics are
+                # lower-is-better, so the strict-improvement check below still
+                # holds. No total_steps_float / secondary_bonus — a chest/DR
+                # item that lowers steps-per-target must be allowed to fill.
+                empty_steps_float = None
+                empty_secondary = None
+                empty_effective = empty_metrics.get(primary_key, empty_metric)
+        else:
+            empty_steps_float = None
+            empty_secondary = None
+            empty_effective = None
+
         best_item = None
         best_score = None
-        
+
         for item in items_by_slot.get(slot, []):
             if item is None:
                 continue
-            
+
             test_gearset = gearset.copy()
             test_gearset[slot] = item
-            
+
             if not validate_function(test_gearset, check_route_requirements=False):
                 continue
-            
+
             try:
                 metrics = score_function(test_gearset)
-                metric_value = metrics[SORTING_PRIORITY[0].metric_key]
-                
+                metric_value = metrics[primary_key]
+
                 # Boost items with needed keywords (prioritize meeting requirements)
                 has_needed_keyword = False
                 if hasattr(item, 'keywords') and needed_keywords:
@@ -612,92 +1299,176 @@ def optimize_single_route(route, character, all_items, items_by_slot, gear_slots
                         if any(keyword.lower() in kw.lower() for kw in item.keywords):
                             has_needed_keyword = True
                             break
-                
+
+                # Empty-baseline gate: candidate must strictly improve the
+                # active primary metric over leaving the slot empty.
+                #   - raw-steps primary: float-precision steps (+ secondary
+                #     bonus tiebreak on tool slots).
+                #   - Steps/Target Item primary: the composite metric directly.
+                if not has_needed_keyword and empty_effective is not None:
+                    if primary_is_raw_steps:
+                        cand_steps_float = metrics.get('total_steps_float', metric_value)
+                        if is_tool_slot:
+                            cand_secondary = metrics.get('secondary_bonus', 0.0)
+                            cand_effective = cand_steps_float - cand_secondary
+                        else:
+                            cand_effective = cand_steps_float
+                    else:
+                        cand_effective = metrics.get(primary_key, metric_value)
+                    helps = cand_effective < empty_effective - 1e-9
+                    if not helps:
+                        continue
+
                 # Apply strong boost for items with needed keywords
                 if has_needed_keyword:
-                    if SORTING_PRIORITY[0].is_reverse:
+                    if primary_is_reverse:
                         metric_value *= 10000  # Strong boost for maximize
                     else:
                         metric_value /= 10000  # Strong boost for minimize
-                
-                if best_score is None or (SORTING_PRIORITY[0].is_reverse and metric_value > best_score) or (not SORTING_PRIORITY[0].is_reverse and metric_value < best_score):
+
+                if _greedy_is_better(metric_value, best_score, item, best_item, primary_is_reverse):
                     best_item = item
                     best_score = metric_value
             except:
                 continue
-        
+
+        return best_item
+
+    for slot in gear_slots:
+        # Skip locked slots
+        if slot in locked:
+            continue
+        # Check which keywords we still need
+        needed_keywords = {kw for kw, required in required_keywords.items()
+                          if current_keyword_counts[kw] < required}
+
+        best_item = _fill_slot(slot, needed_keywords)
         gearset[slot] = best_item
-        
+
         # Update keyword counts
         if best_item:
             for kw in required_keywords.keys():
                 if item_has_keyword(best_item, kw):
                     current_keyword_counts[kw] += 1
-    
+
     # Fill tool slots
     for slot in tool_slots:
+        # Skip locked slots
+        if slot in locked:
+            continue
+
         # Check which keywords we still need
-        needed_keywords = {kw for kw, required in required_keywords.items() 
+        needed_keywords = {kw for kw, required in required_keywords.items()
                           if current_keyword_counts[kw] < required}
-        
-        best_item = None
-        best_score = None
-        
-        for item in items_by_slot.get(slot, []):
-            if item is None:
-                continue
-            
-            test_gearset = gearset.copy()
-            test_gearset[slot] = item
-            
-            if not validate_function(test_gearset, check_route_requirements=False):
-                continue
-            
-            try:
-                metrics = score_function(test_gearset)
-                metric_value = metrics[SORTING_PRIORITY[0].metric_key]
-                
-                # Boost items with needed keywords
-                has_needed_keyword = False
-                if hasattr(item, 'keywords') and needed_keywords:
-                    for keyword in needed_keywords:
-                        if any(keyword.lower() in kw.lower() for kw in item.keywords):
-                            has_needed_keyword = True
-                            break
-                
-                # Apply strong boost
-                if has_needed_keyword:
-                    if SORTING_PRIORITY[0].is_reverse:
-                        metric_value *= 10000
-                    else:
-                        metric_value /= 10000
-                
-                if best_score is None or (SORTING_PRIORITY[0].is_reverse and metric_value > best_score) or (not SORTING_PRIORITY[0].is_reverse and metric_value < best_score):
-                    best_item = item
-                    best_score = metric_value
-            except:
-                continue
-        
+
+        best_item = _fill_slot(slot, needed_keywords)
         gearset[slot] = best_item
-        
+
         # Update keyword counts
         if best_item:
             for kw in required_keywords.keys():
                 if item_has_keyword(best_item, kw):
                     current_keyword_counts[kw] += 1
     
+    # Post-greedy: force-add required keyword items if greedy missed them
+    for kw, required_count in required_keywords.items():
+        max_force_add_attempts = len(all_slots) * 2  # Safety limit
+        attempt = 0
+        while current_keyword_counts.get(kw, 0) < required_count and attempt < max_force_add_attempts:
+            attempt += 1
+            still_need = required_count - current_keyword_counts.get(kw, 0)
+            print(f"[optimize_single_route] Greedy missed requirement: {kw} (need {required_count}, have {current_keyword_counts.get(kw, 0)}, still need {still_need}). Force-adding (attempt {attempt})...")
+            # Find candidates: slots that DON'T already have a keyword item (to avoid displacing one)
+            candidates = []
+            for slot in all_slots:
+                # Skip locked slots
+                if slot in locked:
+                    continue
+                current_in_slot = gearset.get(slot)
+                # Skip slots that already have a keyword item — don't displace them
+                if current_in_slot and hasattr(current_in_slot, 'keywords') and any(kw.lower() in k.lower() for k in current_in_slot.keywords):
+                    continue
+                for item in items_by_slot.get(slot, []):
+                    if item and hasattr(item, 'keywords') and any(kw.lower() in k.lower() for k in item.keywords):
+                        if item is not current_in_slot:
+                            candidates.append((slot, item))
+            print(f"[optimize_single_route]   Found {len(candidates)} candidates: {[(s, i.name) for s, i in candidates]}")
+            if not candidates:
+                print(f"[optimize_single_route]   No more slots available for '{kw}'!")
+                break
+            # Try each candidate — pick the one that gives the best score
+            best_swap = None
+            best_swap_score = None
+            for slot, item in candidates:
+                test = gearset.copy()
+                test[slot] = item
+                if not validate_function(test, check_route_requirements=False):
+                    continue
+                try:
+                    m = score_function(test)
+                    val = m.get('total_steps', float('inf'))
+                    if best_swap_score is None or val < best_swap_score:
+                        best_swap = (slot, item)
+                        best_swap_score = val
+                except Exception:
+                    continue
+            if best_swap:
+                slot, item = best_swap
+                gearset[slot] = item
+                actual_count = sum(
+                    1 for it in gearset.values()
+                    if it and hasattr(it, 'keywords') and any(kw.lower() in k.lower() for k in it.keywords)
+                )
+                current_keyword_counts[kw] = actual_count
+                print(f"[optimize_single_route]   → Selected {item.name} into {slot} (score={best_swap_score}, {kw} count now {actual_count})")
+            else:
+                print(f"[optimize_single_route]   No valid swap found for {kw}, stopping.")
+                break
+
     # Local search refinement
     current_metrics = score_function(gearset)
+
+    _greedy_time = time.time() - _opt_start
+    print(f"[optimize_single_route] Greedy phase: {_greedy_time:.1f}s")
+
+    # DIAG: show ALL slot picks at the end of greedy, and whether
+    # Trekking poles (or any WE-heavy tool) was available in the pool.
+    # Bug report 56370073 — user claims optimizer gives 319 steps but
+    # Trekking poles would give 312.
+    def _nm(it):
+        try: return it.name
+        except Exception: return None
+    _all_slot_names = list(gearset.keys())
+    print(f"[optimize_single_route] DIAG post-greedy gearset: " +
+          ", ".join(f"{s}={_nm(gearset.get(s))}" for s in _all_slot_names))
+    # Tools pool summary
+    for _ts in ['tool0','tool1','tool2','tool3','tool4','tool5']:
+        _pool = items_by_slot.get(_ts, [])
+        _trek = next((i for i in _pool if _nm(i) == 'Trekking poles'), None)
+        print(f"[optimize_single_route] DIAG {_ts} pool size={len(_pool)} has_trekking={_trek is not None}")
+
+    # Log feet slot items for debugging ski selection
+    feet_items = items_by_slot.get('feet', [])
+    ski_in_pool = [i.name for i in feet_items if hasattr(i, 'keywords') and any('ski' in k.lower() for k in i.keywords)]
+    current_feet = gearset.get('feet')
+    print(f"[optimize_single_route] Pre-local-search: feet={current_feet.name if current_feet else 'None'}, "
+          f"ski items in pool: {ski_in_pool}, total feet items: {len(feet_items)}")
+
     iteration = 0
     improved = True
     
     # Identify diving gear slots for 2-swap optimization
     diving_gear_slots = ['head', 'chest', 'legs', 'back']
     
-    # Calculate floors if any weight < 100%
-    use_floors = SORTING_WEIGHTS and any(
-        SORTING_WEIGHTS.get(s, 100) < 100 for s in SORTING_PRIORITY
-    )
+    # Calculate floors if any entry has weight < 100%.
+    # SORTING_PRIORITY is a list of SortingEntry objects — read .weight directly.
+    # The legacy SORTING_WEIGHTS dict is keyed by Sorting enums and would never
+    # match a SortingEntry key, so we must not use it for this check.
+    def _entry_weight(e):
+        if hasattr(e, 'weight'):
+            return e.weight
+        return SORTING_WEIGHTS.get(e, 100) if SORTING_WEIGHTS else 100
+    use_floors = any(_entry_weight(e) < 100 for e in SORTING_PRIORITY)
     static_floors = {}
     if use_floors:
         routes_for_floors = segments if segments else [route]
@@ -717,6 +1488,10 @@ def optimize_single_route(route, character, all_items, items_by_slot, gear_slots
         
         # Phase 1: Test single-item swaps
         for slot in all_slots:
+            # Skip locked slots
+            if slot in locked:
+                continue
+            
             current_item = gearset.get(slot)
             
             for item in items_by_slot.get(slot, []):
@@ -725,12 +1500,34 @@ def optimize_single_route(route, character, all_items, items_by_slot, gear_slots
                 
                 test_gearset = gearset.copy()
                 
-                # If item is already in another slot, remove it first
+                # If item is already in another slot, handle the conflict:
+                # - For rings: only remove if character doesn't own enough copies
+                # - For other slots: remove from old slot (move the item)
                 if item is not None and hasattr(item, 'uuid'):
                     for other_slot in all_slots:
                         if other_slot != slot:
                             other_item = gearset.get(other_slot)
                             if other_item and hasattr(other_item, 'uuid') and other_item.uuid == item.uuid:
+                                # For rings, check if we own enough to have it in both slots
+                                is_ring = hasattr(item, 'slot') and item.slot == 'ring'
+                                if is_ring:
+                                    needed = 2  # one in slot, one in other_slot
+                                    # Count owned by UUID across ALL quality variants
+                                    # (matches util.validate_uuid_uniqueness). Two rings
+                                    # of the same base but DIFFERENT quality (e.g. Gold
+                                    # ruby ring Excellent + Good) share a uuid and are
+                                    # both equippable — using character.items.get(item)
+                                    # only counted the exact quality (=1), so the good
+                                    # ring was wrongly rejected and never swapped in
+                                    # (bug 3bc7498d). is_gearset_valid still enforces the
+                                    # per-quality cap (no 2x the same quality).
+                                    owned = sum(
+                                        qty for inv_item, qty in character.items.items()
+                                        if getattr(inv_item, 'uuid', None) == item.uuid
+                                    )
+                                    if owned >= needed:
+                                        break  # Don't remove - we own enough copies
+                                # Not a ring or not enough copies: remove from old slot
                                 test_gearset[other_slot] = None
                                 break
                 
@@ -749,6 +1546,15 @@ def optimize_single_route(route, character, all_items, items_by_slot, gear_slots
                         )
                     else:
                         is_better_result = Sorting.is_better(test_metrics, best_gearset_metrics, SORTING_PRIORITY)
+                    
+                    # Log legs slot swaps for debugging diving gear selection
+                    if slot == 'legs' and hasattr(item, 'name') and ('diving' in item.name.lower() or 'merfolk' in item.name.lower() or 'kelp' in item.name.lower()):
+                        current_name = current_item.name if current_item and hasattr(current_item, 'name') else 'None'
+                        print(f"[local-search] Legs swap: {current_name} → {item.name}")
+                        print(f"  current total_steps={best_gearset_metrics.get('total_steps', '?'):.4f}")
+                        print(f"  test    total_steps={test_metrics.get('total_steps', '?'):.4f}")
+                        print(f"  is_better={is_better_result}")
+                        print(f"  test DR={test_metrics.get('double_rewards', 0):.4f}, CF={test_metrics.get('chest_finding', 0):.4f}, WE={test_metrics.get('work_efficiency', 0):.4f}")
                     
                     if is_better_result:
                         best_swap = (slot, current_item, item)
@@ -770,11 +1576,11 @@ def optimize_single_route(route, character, all_items, items_by_slot, gear_slots
             # Test 2-swaps for any combination of slots
             # This allows swapping diving gear item + non-diving gear item
             for slot1 in all_slots:
-                if slot1 not in gearset:
+                if slot1 not in gearset or slot1 in locked:
                     continue
                 
                 for slot2 in all_slots:
-                    if slot2 <= slot1 or slot2 not in gearset:  # Only test each pair once
+                    if slot2 <= slot1 or slot2 not in gearset or slot2 in locked:  # Only test each pair once
                         continue
                     
                     current_item1 = gearset.get(slot1)
@@ -825,7 +1631,1665 @@ def optimize_single_route(route, character, all_items, items_by_slot, gear_slots
                 if improved:
                     break
     
+    _total_time = time.time() - _opt_start
+    _local_time = _total_time - _greedy_time
+    print(f"[optimize_single_route] Local search: {_local_time:.1f}s ({iteration} iterations)")
+    print(f"[optimize_single_route] Total: {_total_time:.1f}s")
+    print(f"[optimize_single_route] DIAG post-local-search gearset: " +
+          ", ".join(f"{s}={_nm(gearset.get(s))}" for s in _all_slot_names))
+
+    # Final "dumb" stat-dominance upgrade pass (bug db0613d9). See
+    # util/dumb_upgrade_pass.py. Must use skill='travel' so items with
+    # traveling-scoped stats (Amulet of finding, etc.) have their stats
+    # resolved correctly. Previously this passed skill='agility', which
+    # caused the pass to see WE=0 for Amulet of finding (whose WE lives
+    # under the 'traveling' scope, not 'agility') and WE=0.05 for Amulet
+    # of beaver (whose base_stats global/global WE matches every skill).
+    # The pass then swapped finding OUT for beaver, a huge regression:
+    # beaver's chest_finding / double_rewards / no_materials_consumed are
+    # carpentry-scoped and contribute nothing to traveling. Bug report
+    # 784c2ac5.
+    #
+    # ALSO must pass a real location so location-gated stats resolve.
+    # When location=None, Medieval sneakers (traveling/!underwater scope)
+    # returned {} while Toe shoes (agility/global scope) returned WE+11
+    # CF+11. The dumb pass thought Toe shoes strictly dominated Medieval
+    # and swapped — but at real travel locations Medieval gives WE+15,
+    # bxp+33, steps_add=-5, which is STRICTLY better. Pass the first
+    # route's starting location so !underwater / jarvonia / etc. scopes
+    # can match. Bug report fb4bb867.
+    try:
+        from util.dumb_upgrade_pass import apply_dumb_stat_upgrade
+        _req_keywords = set(required_keywords.keys()) if isinstance(required_keywords, dict) else set()
+        # Resolve a starting location for stat aggregation during the
+        # dumb pass. Prefer the first segment's start, else the route's
+        # start location.
+        _dumb_location = None
+        if segments:
+            try:
+                _rt = _segments_to_routes(segments)
+                if _rt and _rt[0]:
+                    _dumb_location = _rt[0][0]
+            except Exception:
+                pass
+        if _dumb_location is None and route and isinstance(route, tuple) and route:
+            _dumb_location = route[0]
+        gearset = apply_dumb_stat_upgrade(
+            gearset,
+            character,
+            skill='travel',
+            location=_dumb_location,
+            include_nmc=False,
+            required_keywords=_req_keywords,
+            required_item_names=None,
+            # Bug 0ca4acab: must pass locked_slots so the dumb pass doesn't
+            # swap out user-pinned items (e.g. Primary locked to Farganite
+            # sword Eternal). The greedy + local search already respect
+            # `locked` in this file, but the dumb pass had no awareness.
+            locked_slots=set((LOCKED_SLOTS or {}).keys()),
+            # Fill leftover empty slots with the best PURE-BENEFICIAL item
+            # (dumb pass tiers: WE/DA/DR, then bonus_xp/steps±/chest_finding/
+            # item_finding). _dominates only fills when the candidate beats
+            # "empty" on these stats, so a step-adding or net-negative item is
+            # never added — a truly empty slot just means the player owns no
+            # beneficial item for it. Per user request (2026-07-07): if a slot
+            # would otherwise be left empty, prefer any pure-positive
+            # BonusXP/WE/Steps±/chest-finding item rather than nothing. (This
+            # intentionally supersedes the earlier b1e44232 "never fill" rule.)
+            skip_empty_slot_fill=False,
+            # Bug 0c92a9e8: stats that don't affect travel must NOT block
+            # a chest_finding upgrade. Without this, 2x Silver sun stone
+            # ring (FMF=2 each, no chest_finding) won over 2x Gold sun
+            # stone ring (chest_finding=5) because every gold candidate
+            # dropped the silver's FMF — the dumb pass's "preserve every
+            # stat" rule blocked the swap. FMF, find_collectibles, and
+            # NMC are skill-specific stats with no effect on travel
+            # routes, so they're flagged irrelevant here.
+            irrelevant_stats={
+                'fine_material_finding',
+                'find_collectibles',
+                'no_materials_consumed',
+            },
+        )
+    except Exception as _dumb_exc:
+        import traceback
+        print(f"  [dumb-upgrade-pass] skipped due to error: {_dumb_exc!r}")
+        traceback.print_exc()
+
+    # Final safety net: ensure we haven't ended up with a gearset that
+    # exceeds owned quantities on any slot. Bug 3437535e/c54e2ffb: user
+    # with 1 Simple ring saw the travel optimizer output Simple ring in
+    # BOTH ring1 and ring2. The greedy + local search + dumb pass all call
+    # validate_uuid_uniqueness per candidate, so in theory this should be
+    # unreachable — but this post-hoc scrub guarantees the output respects
+    # ownership constraints regardless of any upstream bug.
+    try:
+        from util.optimization_utils import validate_uuid_uniqueness
+        if not validate_uuid_uniqueness(list(gearset.values()), character):
+            print("  [safety-net] output violated UUID uniqueness; scrubbing duplicates")
+            # Walk slots and clear any that push a UUID over owned quantity.
+            # Rings are the only slot type that legitimately allow duplicates,
+            # so only rings need owned-quantity math; other slots are strictly
+            # unique (count > 1 is always a bug).
+            seen_uuids = {}
+            for slot_name in list(gearset.keys()):
+                item = gearset.get(slot_name)
+                if item is None or not hasattr(item, 'uuid'):
+                    continue
+                uuid = item.uuid
+                seen_uuids[uuid] = seen_uuids.get(uuid, 0) + 1
+                count_so_far = seen_uuids[uuid]
+                # Ring-slot ownership: allow up to owned_qty copies
+                if slot_name.startswith('ring'):
+                    owned_qty = 0
+                    items_iter = getattr(character, 'items', None)
+                    if items_iter is not None:
+                        for inv_item, qty in items_iter.items():
+                            if qty and getattr(inv_item, 'uuid', None) == uuid:
+                                owned_qty += qty
+                    if count_so_far > owned_qty:
+                        print(f"  [safety-net] clearing {slot_name} — "
+                              f"{item.name} would need {count_so_far} but owned={owned_qty}")
+                        gearset[slot_name] = None
+                        seen_uuids[uuid] = count_so_far - 1
+                else:
+                    # Tools / gear: strict uniqueness, count > 1 is a bug
+                    if count_so_far > 1:
+                        print(f"  [safety-net] clearing {slot_name} — "
+                              f"duplicate {item.name}")
+                        gearset[slot_name] = None
+                        seen_uuids[uuid] = count_so_far - 1
+    except Exception as _scrub_exc:
+        print(f"  [safety-net] skipped due to error: {_scrub_exc!r}")
+    # Final DIAG after dumb-upgrade pass so we see exactly what the
+    # optimizer returns for every slot.
+    print(f"[optimize_single_route] DIAG final gearset: " +
+          ", ".join(f"{s}={_nm(gearset.get(s))}" for s in _all_slot_names))
+
+    # Final safety net: ensure we haven't ended up with a gearset that
+    # exceeds owned quantities on any slot. Bug 3437535e/c54e2ffb: user
+    # with 1 Simple ring saw the travel optimizer output Simple ring in
+    # BOTH ring1 and ring2. The greedy + local search + dumb pass all call
+    # validate_uuid_uniqueness per candidate, so in theory this should be
+    # unreachable — but this post-hoc scrub guarantees the output respects
+    # ownership constraints regardless of any upstream bug.
+    try:
+        from util.optimization_utils import validate_uuid_uniqueness
+        if not validate_uuid_uniqueness(list(gearset.values()), character):
+            print("  [safety-net] output violated UUID uniqueness; scrubbing duplicates")
+            seen_uuids = {}
+            for slot_name in list(gearset.keys()):
+                item = gearset.get(slot_name)
+                if item is None or not hasattr(item, 'uuid'):
+                    continue
+                uuid = item.uuid
+                seen_uuids[uuid] = seen_uuids.get(uuid, 0) + 1
+                count_so_far = seen_uuids[uuid]
+                if slot_name.startswith('ring'):
+                    owned_qty = 0
+                    items_iter = getattr(character, 'items', None)
+                    if items_iter is not None:
+                        for inv_item, qty in items_iter.items():
+                            if qty and getattr(inv_item, 'uuid', None) == uuid:
+                                owned_qty += qty
+                    if count_so_far > owned_qty:
+                        print(f"  [safety-net] clearing {slot_name} — "
+                              f"{item.name} would need {count_so_far} but owned={owned_qty}")
+                        gearset[slot_name] = None
+                        seen_uuids[uuid] = count_so_far - 1
+                else:
+                    if count_so_far > 1:
+                        print(f"  [safety-net] clearing {slot_name} — "
+                              f"duplicate {item.name}")
+                        gearset[slot_name] = None
+                        seen_uuids[uuid] = count_so_far - 1
+    except Exception as _scrub_exc:
+        print(f"  [safety-net] skipped due to error: {_scrub_exc!r}")
+
+    # -----------------------------------------------------------------
+    # Pet / consumable selection (Optimize-among-owned).
+    #
+    # When the global "Include pets/consumables in optimization" toggles
+    # are on, the worker populates OPTIMIZE_PET_CANDIDATES /
+    # OPTIMIZE_CONSUMABLE_CANDIDATES with the player's owned pets (at
+    # current level) / consumables and does NOT add the equipped one to
+    # FIXED_TRAVEL_ITEMS. We pick the best candidate for this route using
+    # the SAME metric-aware comparison as the local search (Sorting.is_
+    # better / is_better_with_floors) so a chest-finding / DR pet is chosen
+    # for a Steps/Target-Item primary and a WE pet for a Total Steps
+    # primary. calculate_travel_metrics folds gearset['pet'] /
+    # ['consumable'] into scoring automatically (non-None items), so there
+    # is no double-count with FIXED_TRAVEL_ITEMS.
+    #
+    # Done AFTER gear/tool optimization: pets/consumables add WE/DA/CF, not
+    # route keywords, so their effect on marginal gear value is second-order
+    # for travel. A greedy final pick is a good approximation and keeps this
+    # change isolated from the fragile gear greedy / 2-swap logic.
+    def _select_best_extra(slot_name, candidates):
+        if not candidates:
+            return
+        # Effective primary value used to compare candidates. Mirrors the
+        # empty-slot gate so sub-integer improvements register:
+        #   - raw-steps primary → total_steps_float (integer avg_travel_steps
+        #     would hide a small WE pet like Reindeer +2%).
+        #   - Steps/Target Item primary → the composite metric directly.
+        def _effective(m):
+            if primary_is_raw_steps:
+                return m.get('total_steps_float', m.get(primary_key, float('inf')))
+            return m.get(primary_key, float('inf'))
+
+        base_metrics = score_function(gearset)
+        best_choice = gearset.get(slot_name)
+        best_eff = _effective(base_metrics)
+        for cand in candidates:
+            if cand is None:
+                continue
+            test = gearset.copy()
+            test[slot_name] = cand
+            try:
+                m = score_function(test)
+            except Exception:
+                continue
+            eff = _effective(m)
+            # Strictly beat the current best (which starts at "no candidate")
+            # so a pet/consumable that hurts or doesn't help is never equipped.
+            if eff < best_eff - 1e-9:
+                best_choice = cand
+                best_eff = eff
+        if best_choice is not None and best_choice is not gearset.get(slot_name):
+            gearset[slot_name] = best_choice
+            print(f"[optimize_single_route] Selected best {slot_name}: "
+                  f"{getattr(best_choice, 'name', best_choice)}")
+
+    try:
+        if OPTIMIZE_PET_CANDIDATES:
+            _select_best_extra('pet', OPTIMIZE_PET_CANDIDATES)
+        if OPTIMIZE_CONSUMABLE_CANDIDATES:
+            _select_best_extra('consumable', OPTIMIZE_CONSUMABLE_CANDIDATES)
+        current_metrics = score_function(gearset)
+    except Exception as _extra_exc:
+        print(f"[optimize_single_route] pet/consumable selection skipped: {_extra_exc!r}")
+
     return gearset, current_metrics, iteration
+
+
+# ============================================================================
+# ROUTE ID LOOKUP (for UI-driven optimization using route IDs from routes.json)
+# ============================================================================
+
+_ROUTES_BY_ID = None  # Lazy-loaded cache
+
+def _load_routes_by_id() -> dict:
+    """Load routes.json and build a dict keyed by route ID."""
+    global _ROUTES_BY_ID
+    if _ROUTES_BY_ID is not None:
+        return _ROUTES_BY_ID
+
+    import os
+    routes_json_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        'ui', 'static', 'assets', 'map', 'data', 'routes.json'
+    )
+    with open(routes_json_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+
+    result = {}
+    for layer in data:
+        for marker in layer.get('markers', []):
+            result[marker['id']] = marker
+    _ROUTES_BY_ID = result
+    return result
+
+
+def _route_id_to_tuple(route_id: str):
+    """
+    Convert a route ID string to a (Location, Location) tuple for RAW_ROUTES lookup.
+
+    Route IDs can be:
+    - Full format: route-kallaheim-frusenholm-<uuid>
+    - Bare UUID: 29889cbb-3d49-48af-aedc-a4ac4f27ae8f
+    """
+    from util.autogenerated.locations import Location, LocationInfo
+
+    _LOCATION_ALIASES = {
+        'dark_depths': 'DARKTIDE_TRENCH',
+        'fertile_shallows': 'ELARAS_LAGOON',
+        "winter's_end": 'WINTERS_END',
+        'winters_end': 'WINTERS_END',
+        'witches_woods': 'WITCHED_WOODS',
+        'witched_woods': 'WITCHED_WOODS',
+    }
+
+    def parts_to_location(name_parts):
+        name = '_'.join(name_parts)
+        alias = _LOCATION_ALIASES.get(name)
+        if alias:
+            loc = getattr(Location, alias, None)
+            if isinstance(loc, LocationInfo):
+                return loc
+        loc = getattr(Location, name.upper(), None)
+        if isinstance(loc, LocationInfo):
+            return loc
+        return None
+
+    def try_parse_locations(location_parts):
+        location_parts = [p for p in location_parts if p != 'to']
+        for split in range(1, len(location_parts)):
+            start_loc = parts_to_location(location_parts[:split])
+            end_loc = parts_to_location(location_parts[split:])
+            if start_loc and end_loc:
+                return (start_loc, end_loc)
+        return None
+
+    # Try full format: route-{from}-{to}-{uuid}
+    if route_id.startswith('route-'):
+        body = route_id[len('route-'):]
+        parts = body.split('-')
+        if len(parts) > 5:
+            location_parts = parts[:-5]
+            result = try_parse_locations(location_parts)
+            if result:
+                return result
+
+    # Bare UUID or failed parse — look up in routes.json by ID and parse from name
+    routes_by_id = _load_routes_by_id()
+    marker = routes_by_id.get(route_id)
+    if marker and marker.get('name'):
+        # Name format: "Salsfirth to Witched Woods"
+        name_parts = marker['name'].lower().replace("'", '').replace(' ', '_').split('_')
+        result = try_parse_locations(name_parts)
+        if result:
+            return result
+
+    return None
+
+
+def _route_ids_to_tuples(route_ids: list) -> list:
+    """Convert a list of route ID strings to (Location, Location) tuples."""
+    result = []
+    for rid in route_ids:
+        t = _route_id_to_tuple(rid)
+        if t:
+            result.append(t)
+    return result
+
+
+def _get_route_requirements_from_id(route_id: str) -> dict:
+    """Get keyword_counts requirements for a route by its ID.
+
+    Only returns gearset-equippable requirements (diving gear, skis, light sources).
+    Collectible/ability requirements (letter of passage, wilderness permit,
+    mysterious northern map, etc.) are region-unlock prerequisites and are
+    NOT included — they cannot be satisfied by equipping items.
+    """
+    routes_by_id = _load_routes_by_id()
+    marker = routes_by_id.get(route_id)
+    if not marker:
+        return {}
+
+    # terrainModifiers is a list of {keyword, count} dicts or plain strings
+    terrain = marker.get('terrainModifiers', [])
+    if not terrain:
+        return {}
+
+    # Patterns that indicate a gearset-equippable requirement, with keyword extraction
+    import re
+    GEARSET_EXTRACTORS = [
+        # "Requires 3 diving gear equipped" → keyword='diving gear', count=3
+        (re.compile(r'(\d+)\s+((?:expert |advanced )?diving gear)', re.IGNORECASE), None),
+        # "Requires Level 25 Agility & Skis equipped" → keyword='skis', count=1
+        (re.compile(r'skis equipped', re.IGNORECASE), 'skis'),
+        # "Requires 3 uniquely equipped Light Source" → keyword='light source', count=3
+        (re.compile(r'(\d+)\s+(?:uniquely\s+equipped\s+)?(?:unique\s+)?(?:light\s+source)', re.IGNORECASE), 'light source'),
+        # "light source" without count → count=1
+        (re.compile(r'light source', re.IGNORECASE), 'light source'),
+    ]
+
+    # Build keyword_counts from terrainModifiers, filtering to gearset-only
+    kw_counts = {}
+    for mod in terrain:
+        if isinstance(mod, dict):
+            kw = mod.get('keyword') or mod.get('type', '')
+            count = mod.get('count', 1)
+            if kw:
+                kw_lower = kw.lower()
+                if any(p.search(kw) for p, _ in GEARSET_EXTRACTORS):
+                    kw_counts[kw] = max(kw_counts.get(kw, 0), count)
+        elif isinstance(mod, str):
+            # Try to extract keyword and count from the raw string
+            matched = False
+            for pattern, fixed_kw in GEARSET_EXTRACTORS:
+                m = pattern.search(mod)
+                if m:
+                    if fixed_kw:
+                        # Fixed keyword — extract count from first group if available, else 1
+                        count = int(m.group(1)) if m.lastindex and m.lastindex >= 1 else 1
+                        kw_counts[fixed_kw] = max(kw_counts.get(fixed_kw, 0), count)
+                    elif m.lastindex and m.lastindex >= 2:
+                        # Extracted count + keyword from groups
+                        count = int(m.group(1))
+                        kw = m.group(2).strip()
+                        kw_counts[kw] = max(kw_counts.get(kw, 0), count)
+                    elif m.lastindex and m.lastindex >= 1:
+                        kw = m.group(1).strip()
+                        kw_counts[kw] = max(kw_counts.get(kw, 0), 1)
+                    else:
+                        kw = fixed_kw or m.group(0).strip()
+                        kw_counts[kw] = max(kw_counts.get(kw, 0), 1)
+                    matched = True
+                    break
+
+    return kw_counts
+
+
+def _union_requirements(route_ids: list) -> dict:
+    """Get the union of all keyword requirements across a list of route IDs."""
+    combined = {}
+    from_json_count = 0
+    from_raw_count = 0
+    for rid in route_ids:
+        reqs = _get_route_requirements_from_id(rid)
+        if reqs:
+            from_json_count += 1
+        for kw, count in reqs.items():
+            combined[kw] = max(combined.get(kw, 0), count)
+
+    # Also check RAW_ROUTES for any requirements not in routes.json
+    for rid in route_ids:
+        t = _route_id_to_tuple(rid)
+        if t:
+            route_info = RAW_ROUTES.get(t) or RAW_ROUTES.get((t[1], t[0]), {})
+            kw_counts = route_info.get('keyword_counts', {})
+            if kw_counts:
+                from_raw_count += 1
+            for kw, count in kw_counts.items():
+                combined[kw] = max(combined.get(kw, 0), count)
+
+    print(f"[_union_requirements] {len(route_ids)} routes → {len(combined)} unique requirements "
+          f"(from routes.json: {from_json_count}, from RAW_ROUTES: {from_raw_count})")
+
+    # Normalize keys to lowercase to avoid duplicates like 'Expert diving gear' and 'expert diving gear'
+    normalized = {}
+    for kw, count in combined.items():
+        normalized[kw.lower()] = max(normalized.get(kw.lower(), 0), count)
+    combined = normalized
+
+    if combined:
+        print(f"[_union_requirements] Requirements (normalized): {combined}")
+
+    return combined
+
+
+# ============================================================================
+# REGION OPTIMIZATION (Tasks 3.2, 3.4)
+# ============================================================================
+
+def _item_has_applicable_stats(item, route_tuples: list, character, required_keywords: dict = None) -> bool:
+    """
+    Return True if the item has any travel-relevant stats for at least one
+    of the route starting locations, OR if it has a required keyword for these routes.
+
+    Items with only location-specific stats that don't apply to any route
+    (e.g., underwater-only items for Jarvonia routes) return False.
+    """
+    # Keep items with required keywords ONLY if those keywords are actually needed for these routes
+    if required_keywords and hasattr(item, 'keywords'):
+        item_kws = {k.lower() for k in item.keywords}
+        for kw in required_keywords:
+            # Check both exact match and partial match (e.g., 'diving gear' matches 'expert diving gear')
+            kw_lower = kw.lower()
+            if kw_lower in item_kws:
+                return True
+            # Also keep if item keyword contains the required keyword (e.g., item has 'expert diving gear', req is 'diving gear')
+            if any(kw_lower in ik for ik in item_kws):
+                return True
+
+    # Safety: always keep diving gear items for underwater routes
+    if hasattr(item, 'keywords'):
+        item_kws_lower = {k.lower() for k in item.keywords}
+        if 'diving gear' in item_kws_lower:
+            # Keep if any route starts at an underwater location
+            for t in route_tuples:
+                if t and hasattr(t[0], 'is_underwater') and t[0].is_underwater:
+                    return True
+
+    # Hard filter: items that ADD steps are strictly worse for travel.
+    # No DA/DR/CF gain compensates for increasing the primary step count
+    # along a route. Ring of Pandemonium (+5 DA, +2 steps_add) is the
+    # motivating example — the DA bonus reduces node count slightly, but
+    # the +2 steps_add is applied per node so the item nets more total
+    # steps than an alternative with just -steps_percent or no effect.
+    # See bug report 4dbabd2b.
+    # Items whose ONLY travel-scope contribution adds steps are rejected
+    # here; items with mixed stats (where the aggregate adds steps at
+    # this location) are also rejected because the aggregate is what
+    # affects route total.
+    starting_locations = {t[0] for t in route_tuples if t}
+    for location in starting_locations:
+        try:
+            stats = aggregate_gearset_stats(
+                items=[item],
+                skill='travel',
+                location=location,
+                character=character,
+                include_level_bonus=False,
+                include_collectibles=False,
+            )
+            if stats.get('steps_add', 0) > 0 or stats.get('steps_percent', 0) > 0:
+                return False
+        except Exception:
+            pass
+
+    # Check if item has any travel stats for any route's starting location
+    starting_locations = {t[0] for t in route_tuples if t}
+    for location in starting_locations:
+        try:
+            stats = aggregate_gearset_stats(
+                items=[item],
+                skill='travel',
+                location=location,
+                character=character,
+                include_level_bonus=False,
+                include_collectibles=False
+            )
+            # Check if any travel-relevant stat is non-zero. Includes the
+            # item-finding stat keys for the active Steps/Target-Item targets
+            # so e.g. the Adventuring amulet (AGT-finding only) is kept when
+            # the user targets Adventurers' Guild Tokens (bug 0421caa9).
+            if any(abs(stats.get(s, 0)) > 0.001 for s in _travel_relevant_stats_for_priority()):
+                return True
+        except Exception:
+            # If we can't compute stats, keep the item to be safe
+            return True
+
+    return False
+
+
+def _build_items_for_optimization(character, route_tuples: list, ignored_items: set = None, required_keywords: dict = None) -> tuple:
+    """
+    Build all_items and items_by_slot for optimization.
+
+    Returns:
+        (all_items, items_by_slot, gear_slots, tool_slots, all_slots)
+    """
+    from util.walkscape_constants import character_level_from_steps, tool_slots_for_level
+
+    if ignored_items is None:
+        ignored_items = set()
+
+    total_steps_char = sum(character.skills.values())
+    char_level = character_level_from_steps(total_steps_char)
+    max_tool_slots = tool_slots_for_level(char_level)
+
+    gear_slots = ['head', 'cape', 'neck', 'chest', 'hands', 'legs', 'feet',
+                  'ring1', 'ring2', 'back', 'primary', 'secondary']
+    tool_slots = [f'tool{i}' for i in range(max_tool_slots)]
+    all_slots = gear_slots + tool_slots
+
+    all_items = []
+    for item, qty in character.items.items():
+        if qty == 0 or not hasattr(item, 'slot'):
+            continue
+        if item in ignored_items:
+            continue
+        if hasattr(item, 'is_unlocked'):
+            if not item.is_unlocked(character, ignore_gear_requirements=True):
+                continue
+        all_items.append(item)
+
+    # Log all ski items before any filtering
+    ski_before = [i.name for i in all_items if hasattr(i, 'keywords') and any('ski' in k.lower() for k in i.keywords)]
+    print(f"  Ski items in character inventory (before filtering): {ski_before}")
+
+    # Log ring items before filtering
+    ring_items_before = [i.name for i in all_items if hasattr(i, 'slot') and i.slot == 'ring']
+    print(f"  Ring items in inventory (before filtering): {ring_items_before}")
+
+    all_items = filter_items_by_quality(all_items, keep_highest_only=True)
+
+    # Log after quality filter
+    ski_after_quality = [i.name for i in all_items if hasattr(i, 'keywords') and any('ski' in k.lower() for k in i.keywords)]
+    print(f"  Ski items after quality filter: {ski_after_quality}")
+
+    ring_items_after = [i.name for i in all_items if hasattr(i, 'slot') and i.slot == 'ring']
+    print(f"  Ring items after quality filter: {ring_items_after}")
+
+    # Dominance pruning for travel stats (gear/rings only, not tools)
+    # Protect items with travel-requirement keywords from pruning
+    PROTECTED_KEYWORDS = {'skis', 'diving gear', 'advanced diving gear', 'expert diving gear', 'light source'}
+    if route_tuples:
+        prune_location = route_tuples[0][0] if route_tuples[0] else None
+        gear_items = [item for item in all_items if hasattr(item, 'slot') and item.slot not in ('tools', 'tool')]
+        tool_items = [item for item in all_items if hasattr(item, 'slot') and item.slot in ('tools', 'tool')]
+        # Split out protected items before pruning
+        protected = []
+        pruneable = []
+        for item in gear_items:
+            item_kws = {k.lower() for k in (item.keywords if hasattr(item, 'keywords') else [])}
+            if item_kws & PROTECTED_KEYWORDS:
+                protected.append(item)
+            else:
+                pruneable.append(item)
+        pre_prune = len(pruneable)
+        pruneable = prune_dominated_items(pruneable, 'travel', prune_location, character, _travel_relevant_stats_for_priority())
+        pruned = pre_prune - len(pruneable)
+        # Don't prune protected items against each other — they're needed for
+        # route requirements and removing any could make requirements unmet
+        # (e.g., Mining Helmet has no travel stats but is a required light source)
+        gear_items = protected + pruneable
+        if pruned > 0:
+            print(f"  After dominance pruning: {len(gear_items) + len(tool_items)} items ({pruned} dominated gear/ring items removed, {len(protected)} protected kept)")
+        all_items = gear_items + tool_items
+
+        # Log rings after pruning
+        ring_items_final = [i.name for i in all_items if hasattr(i, 'slot') and i.slot == 'ring']
+        print(f"  Ring items after pruning: {ring_items_final}")
+
+    items_by_slot = {}
+    for slot in all_slots:
+        items_by_slot[slot] = []
+        for item in all_items:
+            if slot.startswith('tool') and item.slot in ('tools', 'tool'):
+                items_by_slot[slot].append(item)
+            elif slot.startswith('ring') and item.slot == 'ring':
+                items_by_slot[slot].append(item)
+            elif item.slot == slot:
+                items_by_slot[slot].append(item)
+
+    # Filter out items with no applicable stats for any route's starting location.
+    # This prevents items like Merfolk Shell Coverings (underwater-only) from being
+    # selected for Jarvonia routes where they contribute nothing.
+    # required_keywords ensures items needed for route requirements are kept.
+    if route_tuples:
+        before_stat_filter = len(all_items)
+        filtered_out = []
+        kept = []
+        for item in all_items:
+            if _item_has_applicable_stats(item, route_tuples, character, required_keywords or {}):
+                kept.append(item)
+            else:
+                filtered_out.append(item)
+        all_items = kept
+        filtered_count = before_stat_filter - len(all_items)
+        print(f"  Stat filter: {before_stat_filter} → {len(all_items)} items ({filtered_count} removed)")
+        print(f"  required_keywords passed to filter: {required_keywords}")
+        if filtered_count > 0:
+            print(f"  Filtered out: {[i.name for i in filtered_out]}")
+        # Log diving gear items specifically
+        diving_in_pool = [i.name for i in all_items if hasattr(i, 'keywords') and any('diving gear' in k.lower() for k in i.keywords)]
+        print(f"  Diving gear items remaining after filter: {diving_in_pool}")
+        # Log light source items specifically
+        light_in_pool = [f"{i.name} ({i.slot})" for i in all_items if hasattr(i, 'keywords') and any('light source' in k.lower() for k in i.keywords)]
+        print(f"  Light source items remaining after filter: {light_in_pool}")
+        # Log starting locations used for stat check
+        starting_locs = [t[0].name if hasattr(t[0], 'name') else str(t[0]) for t in route_tuples[:3]]
+        print(f"  Route starting locations (first 3): {starting_locs}")
+        # Rebuild items_by_slot after stat filter
+        items_by_slot = {}
+        for slot in all_slots:
+            items_by_slot[slot] = []
+            for item in all_items:
+                if slot.startswith('tool') and item.slot in ('tools', 'tool'):
+                    items_by_slot[slot].append(item)
+                elif slot.startswith('ring') and item.slot == 'ring':
+                    items_by_slot[slot].append(item)
+                elif item.slot == slot:
+                    items_by_slot[slot].append(item)
+
+    return all_items, items_by_slot, gear_slots, tool_slots, all_slots
+
+
+def optimize_single_region(region_id: str, route_ids: list, character, ignored_items: set = None, from_location: str = None, to_location: str = None) -> dict:
+    """
+    Find one gearset minimizing sum of calc_steps across all routes in region.
+
+    Args:
+        region_id: Region identifier (e.g. 'jarvonia')
+        route_ids: List of route ID strings from routes.json
+        character: Character object
+        ignored_items: Set of items to exclude
+        from_location: Override start location name (for flipped cross-region routes)
+        to_location: Override end location name (for flipped cross-region routes)
+
+    Returns:
+        Dict with keys: gearset_export, stats, route_statuses, total_steps
+    """
+    # For flipped cross-region routes, build the tuple from location names directly
+    if from_location and to_location:
+        from util.autogenerated.locations import Location, LocationInfo
+        def _name_to_location(name):
+            enum_name = name.upper().replace(' ', '_').replace("'", '').replace('-', '_')
+            loc = getattr(Location, enum_name, None)
+            if isinstance(loc, LocationInfo):
+                return loc
+            return None
+        start = _name_to_location(from_location)
+        end = _name_to_location(to_location)
+        if start and end:
+            route_tuples = [(start, end)]
+            print(f"[optimize_single_region] Using flipped route: {from_location} → {to_location}")
+        else:
+            route_tuples = _route_ids_to_tuples(route_ids)
+    else:
+        route_tuples = _route_ids_to_tuples(route_ids)
+    if not route_tuples:
+        return {'success': False, 'error': f'No valid routes found for region {region_id}'}
+
+    required_keywords = _union_requirements(route_ids)
+
+    all_items, items_by_slot, gear_slots, tool_slots, all_slots = _build_items_for_optimization(
+        character, route_tuples, ignored_items, required_keywords
+    )
+
+    if not all_items:
+        return {'success': False, 'error': 'No items available to optimize. Please import your character data first.'}
+
+    print(f"[optimize_single_region] Region: {region_id}")
+    print(f"[optimize_single_region] Routes: {len(route_ids)} routes, {len(route_tuples)} tuples")
+    print(f"[optimize_single_region] Required keywords (union): {required_keywords}")
+
+    # Also log per-route requirements from RAW_ROUTES for debugging
+    for t in route_tuples:
+        rinfo = RAW_ROUTES.get(t, {})
+        kw = rinfo.get('keyword_counts', {})
+        if kw:
+            print(f"[optimize_single_region]   Route {t[0].name} → {t[1].name}: keyword_counts={kw}")
+
+    # Score function: sum of steps across all routes
+    def score_fn(gearset_dict):
+        metrics, _ = calculate_travel_metrics(gearset_dict, route_tuples, character)
+        return metrics
+
+    # Validate function: check UUID uniqueness + route requirements
+    from util.gearset_utils import is_gearset_valid
+    def validate_fn(gearset_dict, check_route_requirements=True):
+        if not is_gearset_valid(gearset_dict, character, activity=None, service=None, check_requirements=False):
+            return False
+        if check_route_requirements:
+            items = [item for item in gearset_dict.values() if item is not None]
+            for kw, required_count in required_keywords.items():
+                if required_count <= 0:
+                    continue
+                count = sum(
+                    1 for item in items
+                    if hasattr(item, 'keywords') and
+                    any(kw.lower() in k.lower() for k in item.keywords)
+                )
+                if count < required_count:
+                    return False
+        return True
+
+    gearset, metrics, _ = optimize_single_route(
+        route=route_tuples[0] if len(route_tuples) == 1 else None,
+        character=character,
+        all_items=all_items,
+        items_by_slot=items_by_slot,
+        gear_slots=gear_slots,
+        tool_slots=tool_slots,
+        all_slots=all_slots,
+        segments=None if len(route_tuples) == 1 else [
+            {
+                'start': t[0].name.lower(),
+                'end': t[1].name.lower(),
+                'requirements': {
+                    'keyword_counts': (RAW_ROUTES.get(t) or RAW_ROUTES.get((t[1], t[0]), {})).get('keyword_counts', {})
+                }
+            }
+            for t in route_tuples
+        ],
+        required_keywords_override=required_keywords,
+    )
+
+    # Log result for debugging
+    result_items = [item for item in gearset.values() if item is not None]
+    ski_items = [item for item in result_items if hasattr(item, 'keywords') and any('ski' in k.lower() for k in item.keywords)]
+    print(f"[optimize_single_region] Result: {len(result_items)} items equipped")
+    if required_keywords:
+        for kw, req_count in required_keywords.items():
+            actual = sum(1 for item in result_items if hasattr(item, 'keywords') and any(kw.lower() in k.lower() for k in item.keywords))
+            status = '✓' if actual >= req_count else '✗'
+            print(f"[optimize_single_region]   {status} {kw}: need {req_count}, have {actual}")
+    if ski_items:
+        print(f"[optimize_single_region]   Ski items: {[item.name for item in ski_items]}")
+
+    # Build route statuses
+    route_statuses = {}
+    for rid, t in zip(route_ids, route_tuples):
+        met = meets_route_requirements(gearset, t, character)
+        route_statuses[rid] = 'assigned_met' if met else 'assigned_unmet'
+
+    export_string = encode_gearset(gearset)
+
+    # Build stats summary
+    items_list = [item for item in gearset.values() if item is not None]
+    from util.gearset_utils import aggregate_gearset_stats
+    stats_summary = {}
+    if route_tuples:
+        raw_stats = aggregate_gearset_stats(
+            items=items_list,
+            skill='travel',
+            location=route_tuples[0][0],
+            character=character,
+            include_level_bonus=True,
+            include_collectibles=True
+        )
+        stats_summary = {
+            'we': round(raw_stats.get('work_efficiency', 0) * 100, 1),
+            'da': round(raw_stats.get('double_action', 0) * 100, 1),
+            'steps_add': raw_stats.get('steps_add', 0),
+            'steps_percent': round(raw_stats.get('steps_percent', 0) * 100, 1),
+            'requirements_met': all(v == 'assigned_met' for v in route_statuses.values()),
+        }
+
+    return {
+        'success': True,
+        'gearset_export': export_string,
+        # The raw slot→Item dict. Callers in the same Python process can use
+        # this directly, avoiding the lossy Gearset(export_string) round-trip
+        # that was silently falling back to the player's in-game equipped gear
+        # and causing the alternatives panel to label "replaces: Ring of
+        # pandemonium" even when the optimizer had picked a different ring.
+        # Must be popped out before JSON-serializing the result — see
+        # ui/travel_optimize_worker.py.
+        'gearset': gearset,
+        'stats': stats_summary,
+        'route_statuses': route_statuses,
+        'total_steps': metrics.get('total_steps', 0),
+    }
+
+
+def optimize_multi_region(region_id: str, route_ids: list, n_gearsets: int, character,
+                          ignored_items: set = None, per_route_cache: dict = None) -> dict:
+    """
+    Find N gearsets that together minimize total steps across all routes.
+
+    Algorithm:
+    1. Generate (or load from per_route_cache) an individually optimized gearset per route.
+    2. Find the optimal partition of routes into N groups.
+    3. For each group, run a final optimization pass.
+
+    Args:
+        region_id: Region identifier
+        route_ids: List of route ID strings
+        n_gearsets: Number of gearsets to produce (2 for long_short)
+        character: Character object
+        ignored_items: Set of items to exclude
+        per_route_cache: Optional dict {route_id: export_string} to reuse
+
+    Returns:
+        Dict with keys: gearsets (list), route_statuses, breakpoint (for n=2)
+    """
+    print(f"[optimize_multi_region] Region: {region_id}, requested {n_gearsets} gearsets for {len(route_ids)} routes")
+
+    route_tuples = _route_ids_to_tuples(route_ids)
+    if not route_tuples:
+        return {'success': False, 'error': f'No valid routes found for region {region_id}'}
+
+    required_keywords_all = _union_requirements(route_ids)
+
+    all_items, items_by_slot, gear_slots, tool_slots, all_slots = _build_items_for_optimization(
+        character, route_tuples, ignored_items, required_keywords_all
+    )
+
+    if not all_items:
+        return {'success': False, 'error': 'No items available to optimize. Please import your character data first.'}
+
+    # Step 1: Per-route cache — optimize each route individually
+    per_route_gearsets = {}  # route_id -> gearset_dict
+
+    for rid, t in zip(route_ids, route_tuples):
+        # Check per-route cache — only use if version matches
+        cache_valid = (
+            per_route_cache
+            and per_route_cache.get('_version') == TRAVEL_OPTIMIZER_VERSION
+            and rid in per_route_cache
+        )
+        if cache_valid:
+            # Decode cached gearset
+            try:
+                from util.gearset_utils import Gearset
+                cached_gs = Gearset(per_route_cache[rid])
+                gearset_dict = {}
+                for slot, item in cached_gs.get_all_items():
+                    gearset_dict[slot] = item
+                per_route_gearsets[rid] = gearset_dict
+                continue
+            except Exception:
+                pass  # Fall through to re-optimize
+
+        # Optimize for this single route
+        single_result = optimize_single_region(region_id, [rid], character, ignored_items)
+        if single_result.get('success'):
+            try:
+                from util.gearset_utils import Gearset
+                gs = Gearset(single_result['gearset_export'])
+                gearset_dict = {}
+                for slot, item in gs.get_all_items():
+                    gearset_dict[slot] = item
+                per_route_gearsets[rid] = gearset_dict
+            except Exception:
+                per_route_gearsets[rid] = {}
+        else:
+            per_route_gearsets[rid] = {}
+
+    # Step 2: Find optimal partition of route_ids into n_gearsets groups
+    def score_group(group_route_ids):
+        """Score a group by total steps using the best per-route gearset as proxy."""
+        if not group_route_ids:
+            return float('inf')
+        total = 0
+        for rid in group_route_ids:
+            t = _route_id_to_tuple(rid)
+            if not t:
+                continue
+            gs = per_route_gearsets.get(rid, {})
+            if not gs:
+                continue
+            metrics, _ = calculate_travel_metrics(gs, [t], character)
+            total += metrics.get('total_steps', 0)
+        return total
+
+    def score_partition(partition):
+        return sum(score_group(group) for group in partition)
+
+    if n_gearsets == 2:
+        # Sort routes by distance and try all binary splits
+        route_distances = []
+        for rid in route_ids:
+            t = _route_id_to_tuple(rid)
+            dist = RAW_ROUTES.get(t, {}).get('distance', 0) if t else 0
+            route_distances.append((rid, dist))
+        route_distances.sort(key=lambda x: x[1])
+        sorted_ids = [r[0] for r in route_distances]
+
+        best_score = float('inf')
+        best_partition = [sorted_ids[:1], sorted_ids[1:]] if len(sorted_ids) >= 2 else [sorted_ids, []]
+
+        for split_idx in range(1, len(sorted_ids)):
+            partition = [sorted_ids[:split_idx], sorted_ids[split_idx:]]
+            s = score_partition(partition)
+            if s < best_score:
+                best_score = s
+                best_partition = partition
+    else:
+        # Greedy initial partition: sort by distance, split into n even chunks
+        route_distances = []
+        for rid in route_ids:
+            t = _route_id_to_tuple(rid)
+            dist = RAW_ROUTES.get(t, {}).get('distance', 0) if t else 0
+            route_distances.append((rid, dist))
+        route_distances.sort(key=lambda x: x[1])
+        sorted_ids = [r[0] for r in route_distances]
+
+        chunk_size = max(1, len(sorted_ids) // n_gearsets)
+        best_partition = []
+        for i in range(n_gearsets):
+            start = i * chunk_size
+            end = start + chunk_size if i < n_gearsets - 1 else len(sorted_ids)
+            best_partition.append(sorted_ids[start:end])
+
+        # Local swap refinement
+        improved = True
+        while improved:
+            improved = False
+            for i in range(len(best_partition)):
+                for j in range(len(best_partition)):
+                    if i == j:
+                        continue
+                    for rid in list(best_partition[i]):
+                        # Try moving rid from group i to group j
+                        new_partition = [list(g) for g in best_partition]
+                        new_partition[i].remove(rid)
+                        new_partition[j].append(rid)
+                        # Don't allow empty groups
+                        if any(len(g) == 0 for g in new_partition):
+                            continue
+                        if score_partition(new_partition) < score_partition(best_partition):
+                            best_partition = new_partition
+                            improved = True
+                            break
+                    if improved:
+                        break
+                if improved:
+                    break
+
+    # Log the partition
+    print(f"[optimize_multi_region] Partition into {len(best_partition)} groups:")
+    for gi, group in enumerate(best_partition):
+        group_dists = []
+        for rid in group:
+            t = _route_id_to_tuple(rid)
+            dist = RAW_ROUTES.get(t, {}).get('distance', 0) if t else 0
+            group_dists.append(dist)
+        routes_by_id = _load_routes_by_id()
+        group_names = [routes_by_id.get(rid, {}).get('name', rid) for rid in group]
+        print(f"  Group {gi+1}: {len(group)} routes, distances={group_dists}")
+        for name in group_names:
+            print(f"    - {name}")
+
+    # Step 3: Final optimization per group
+    result_gearsets = []
+    all_route_statuses = {}
+
+    for group_idx, group_route_ids in enumerate(best_partition):
+        if not group_route_ids:
+            continue
+
+        group_result = optimize_single_region(region_id, group_route_ids, character, ignored_items)
+        if not group_result.get('success'):
+            continue
+
+        result_gearsets.append({
+            'slot': str(group_idx + 1),
+            'gearset_export': group_result['gearset_export'],
+            'stats': group_result['stats'],
+            'route_ids': group_route_ids,
+        })
+        print(f"[optimize_multi_region] Group {group_idx+1}: WE={group_result['stats'].get('we', '?')}%, DA={group_result['stats'].get('da', '?')}%, total_steps={group_result.get('total_steps', '?')}")
+        all_route_statuses.update(group_result.get('route_statuses', {}))
+
+    if not result_gearsets:
+        return {'success': False, 'error': 'Optimization produced no results'}
+
+    # Step 4: Merge groups whose gearsets produce identical step counts for all their routes combined.
+    # Two groups can merge if using either gearset for all routes in both groups gives the same total steps.
+    def decode_gearset_dict(export_str):
+        try:
+            from util.gearset_utils import Gearset
+            gs = Gearset(export_str)
+            d = {}
+            for slot, item in gs.get_all_items():
+                d[slot] = item
+            return d
+        except Exception:
+            return None
+
+    def steps_for_routes(gearset_dict, route_id_list):
+        tuples = [t for t in (_route_id_to_tuple(rid) for rid in route_id_list) if t]
+        if not tuples:
+            return float('inf')
+        metrics, _ = calculate_travel_metrics(gearset_dict, tuples, character)
+        return metrics.get('total_steps', float('inf'))
+
+    print(f"[optimize_multi_region] Pre-dedup: {len(result_gearsets)} gearsets")
+
+    # Decode all gearsets once
+    decoded = [decode_gearset_dict(gs['gearset_export']) for gs in result_gearsets]
+
+    merged = []
+    merged_decoded = []
+    for i, gs_entry in enumerate(result_gearsets):
+        gd = decoded[i]
+        found = False
+        for j, existing in enumerate(merged):
+            ed = merged_decoded[j]
+            if gd is None or ed is None:
+                continue
+            # Check if exact match
+            if existing['gearset_export'] == gs_entry['gearset_export']:
+                print(f"[optimize_multi_region] Dedup: group {i+1} exact match with merged group {j+1}")
+                existing['route_ids'] = existing['route_ids'] + gs_entry['route_ids']
+                found = True
+                break
+            # Check if step-count equivalent: using either gearset for the combined routes gives same steps
+            combined_routes = existing['route_ids'] + gs_entry['route_ids']
+            steps_existing = steps_for_routes(ed, combined_routes)
+            steps_new = steps_for_routes(gd, combined_routes)
+            print(f"[optimize_multi_region] Dedup check: group {i+1} vs merged {j+1}: steps_existing={steps_existing:.1f}, steps_new={steps_new:.1f}, diff={abs(steps_existing - steps_new):.2f}")
+            if abs(steps_existing - steps_new) < 0.5:  # Within 0.5 steps = effectively identical
+                # Merge — keep the one with better stats (lower steps for its own routes)
+                own_steps_existing = steps_for_routes(ed, existing['route_ids'])
+                own_steps_new = steps_for_routes(gd, gs_entry['route_ids'])
+                print(f"[optimize_multi_region] Dedup: merging group {i+1} into merged {j+1} (step diff={abs(steps_existing - steps_new):.2f})")
+                if own_steps_new < own_steps_existing:
+                    existing['gearset_export'] = gs_entry['gearset_export']
+                    existing['stats'] = gs_entry['stats']
+                    merged_decoded[j] = gd
+                existing['route_ids'] = combined_routes
+                found = True
+                break
+        if not found:
+            merged.append(dict(gs_entry))
+            merged_decoded.append(gd)
+
+    # Re-number slots after merging
+    for i, gs_entry in enumerate(merged):
+        gs_entry['slot'] = str(i + 1)
+
+    result_gearsets = merged
+    print(f"[optimize_multi_region] After deduplication: {len(result_gearsets)} distinct gearsets (from {n_gearsets} requested)")
+
+    # Calculate breakpoint for n=2 (distance threshold between groups)
+    breakpoint_val = None
+    if n_gearsets == 2 and len(best_partition) == 2:
+        group1_ids, group2_ids = best_partition[0], best_partition[1]
+        max_dist_g1 = max(
+            (RAW_ROUTES.get(_route_id_to_tuple(rid), {}).get('distance', 0) for rid in group1_ids),
+            default=0
+        )
+        min_dist_g2 = min(
+            (RAW_ROUTES.get(_route_id_to_tuple(rid), {}).get('distance', 0) for rid in group2_ids),
+            default=0
+        )
+        if max_dist_g1 > 0 and min_dist_g2 > 0:
+            breakpoint_val = (max_dist_g1 + min_dist_g2) / 2
+
+    # Build updated per_route_cache with version stamp
+    new_cache = {
+        '_version': TRAVEL_OPTIMIZER_VERSION,
+        '_timestamp': time.time(),
+    }
+    for rid in route_ids:
+        gs = per_route_gearsets.get(rid)
+        if gs:
+            try:
+                new_cache[rid] = encode_gearset(gs)
+            except Exception:
+                pass
+
+    return {
+        'success': True,
+        'gearsets': result_gearsets,
+        'actual_count': len(result_gearsets),
+        'route_statuses': all_route_statuses,
+        'breakpoint': breakpoint_val,
+        'per_route_cache': new_cache,
+    }
+
+
+# ============================================================================
+# TERRAIN VALIDATION (Task 3.10)
+# ============================================================================
+
+def validate_gearset_for_routes(gearset_export: str, route_ids: list, character_config: dict = None) -> dict:
+    """
+    Validate a gearset against terrain requirements for a list of routes.
+
+    Checks keyword-based requirements (skis, diving gear, light sources) and
+    ability requirements (Navigate Desert).
+
+    Args:
+        gearset_export: Base64-gzip gearset export string
+        route_ids: List of route ID strings
+        character_config: Optional character config dict for ability checks
+
+    Returns:
+        Dict: { route_id: { 'met': bool, 'missing': [str] } }
+    """
+    from util.gearset_utils import Gearset
+
+    try:
+        gs = Gearset(gearset_export)
+        items = [item for _, item in gs.get_all_items() if item is not None]
+    except Exception:
+        items = []
+
+    # Check character abilities for Navigate Desert
+    has_navigate_desert = False
+    # Collect the set of keywords that the character's pet abilities fulfil
+    # via `provides_keyword` (e.g. Gecko Level 4 "Clever Climber" → "climbing gear").
+    # This matches how item keywords satisfy route requirements.
+    pet_provided_keywords = set()
+    # Ability name fallbacks for pets whose character-export abilities don't
+    # carry provides_keyword (older exports or custom configs).
+    _ability_name_to_keyword = {
+        'clever climber': 'climbing gear',
+    }
+    if character_config:
+        # Check pets for Navigate Desert ability
+        pets = character_config.get('pets', [])
+        if isinstance(pets, list):
+            for pet in pets:
+                if isinstance(pet, dict):
+                    abilities = pet.get('abilities', [])
+                    if isinstance(abilities, list):
+                        for ability in abilities:
+                            if not isinstance(ability, dict):
+                                continue
+                            name = ability.get('name', '') or ''
+                            if 'navigate desert' in name.lower():
+                                has_navigate_desert = True
+                            # Primary path: explicit provides_keyword on the ability.
+                            provided = ability.get('provides_keyword')
+                            if isinstance(provided, str):
+                                pet_provided_keywords.add(provided.lower())
+                            elif isinstance(provided, (list, tuple, set)):
+                                for p in provided:
+                                    if isinstance(p, str):
+                                        pet_provided_keywords.add(p.lower())
+                            # Fallback path: map known ability names to keywords.
+                            mapped = _ability_name_to_keyword.get(name.lower())
+                            if mapped:
+                                pet_provided_keywords.add(mapped)
+
+    results = {}
+    for rid in route_ids:
+        kw_counts = _get_route_requirements_from_id(rid)
+
+        # Also check RAW_ROUTES
+        t = _route_id_to_tuple(rid)
+        route_info = RAW_ROUTES.get(t, {}) if t else {}
+        for kw, count in route_info.get('keyword_counts', {}).items():
+            kw_counts[kw] = max(kw_counts.get(kw, 0), count)
+
+        missing = []
+
+        # Check keyword requirements (skis, diving gear, light sources)
+        for kw, required_count in kw_counts.items():
+            if required_count <= 0:
+                continue
+            actual = sum(
+                1 for item in items
+                if hasattr(item, 'keywords') and
+                any(kw.lower() in k.lower() for k in item.keywords)
+            )
+            # Equipped pet with a passive "provides_keyword" ability counts
+            # as a satisfied keyword (e.g. Gecko L4 Clever Climber → climbing gear).
+            if kw.lower() in pet_provided_keywords:
+                actual += 1
+            if actual < required_count:
+                missing.append(f"Need {required_count}x {kw}, have {actual}")
+
+        # Check ability requirements (Navigate Desert)
+        requires = route_info.get('requires')
+        if requires and isinstance(requires, tuple) and len(requires) == 2:
+            req_type, req_name = requires
+            if req_type == 'ability' and 'navigate desert' in req_name.lower():
+                if not has_navigate_desert:
+                    missing.append(f"Requires {req_name} ability (pet with this ability needed)")
+
+        results[rid] = {'met': len(missing) == 0, 'missing': missing}
+
+    return results
+
+
+def compute_travel_gearset_stats(gearset_export: str, route_ids: list, character_config: dict = None) -> dict:
+    """
+    Compute travel stats (WE, DA, steps_add, steps_percent) for a gearset on given routes.
+
+    Args:
+        gearset_export: Base64-gzip gearset export string
+        route_ids: List of route ID strings
+        character_config: Character config dict for level bonus, collectibles, etc.
+
+    Returns:
+        Dict with keys: we, da, steps_add, steps_percent
+    """
+    from util.gearset_utils import Gearset, aggregate_gearset_stats
+    from util.character_export_util import Character
+    from util.walkscape_constants import level_to_xp
+
+    try:
+        gs = Gearset(gearset_export)
+        items = [item for _, item in gs.get_all_items() if item is not None]
+    except Exception:
+        return {}
+
+    # Build character for stat calculation
+    character = None
+    if character_config:
+        try:
+            skills_xp = character_config.get('skills_xp', {})
+            skills_levels = character_config.get('skills', {})
+            skills_data = {}
+            for skill, level in skills_levels.items():
+                skills_data[skill] = level_to_xp(level)
+            for skill, xp in skills_xp.items():
+                skills_data[skill] = xp
+
+            minimal_export = {
+                "name": character_config.get('name', 'Player'),
+                "game_version": character_config.get('game_version', '1.0'),
+                "steps": character_config.get('steps', 0),
+                "achievement_points": character_config.get('achievement_points', 0),
+                "coins": 0,
+                "skills": skills_data,
+                "reputation": character_config.get('reputation', {}),
+                "inventory": {},
+                "bank": {},
+                "collectibles": character_config.get('collectibles', []),
+            }
+            character = Character(minimal_export)
+        except Exception:
+            pass
+
+    # Find the first route's starting location for location-aware stats
+    start_location = None
+    for rid in route_ids:
+        t = _route_id_to_tuple(rid)
+        if t:
+            start_location = t[0]
+            break
+
+    if not start_location or not character:
+        return {}
+
+    raw_stats = aggregate_gearset_stats(
+        items=items,
+        skill='travel',
+        location=start_location,
+        character=character,
+        include_level_bonus=True,
+        include_collectibles=True
+    )
+
+    return {
+        'we': round(raw_stats.get('work_efficiency', 0) * 100, 1),
+        'da': round(raw_stats.get('double_action', 0) * 100, 1),
+        'steps_add': raw_stats.get('steps_add', 0),
+        'steps_percent': round(raw_stats.get('steps_percent', 0) * 100, 1),
+    }
+
+
+# ============================================================================
+# REGION AUTO-DETECTION (Task 3.6)
+# ============================================================================
+
+def detect_unlocked_regions(character_config: dict) -> dict:
+    """
+    Detect which regions the player has unlocked based on character config.
+
+    Unlock rules:
+    - jarvonia: Always unlocked
+    - trellin/erdwise/gdte: jarvonian_letter_of_passage collectible OR 3+ diving gear items
+    - halfling_rebels: essence_of_the_swamp collectible
+    - syrenthia: 3+ diving gear items
+    - wallisia: GDTE access (Jarvonian Letter of Passage OR 3+ diving gear).
+                GDTE borders Wallisia, so GDTE access opens the Wallisia entry
+                (Tendon Wet Fields + Wraithwater). Locations BEYOND Wraithwater
+                (Blackrane, Blackwater Fields, Kildome Cross, Stalking Yew
+                Woods) require the Charter of the Drowned and are gated
+                per-location in detect_locked_locations.
+    - wrentmark: charter_of_the_drowned collectible AND camel pet at level 1+
+
+    Args:
+        character_config: Dict from session (has 'collectibles', 'owned_items', etc.)
+
+    Returns:
+        Dict: { region_id: bool }
+    """
+    if not character_config:
+        return {
+            'jarvonia': True,
+            'trellin': False,
+            'erdwise': False,
+            'gdte': False,
+            'halfling_rebels': False,
+            'syrenthia': False,
+            'wallisia': False,
+            'wrentmark': False,
+        }
+
+    collectibles = set()
+    raw_collectibles = character_config.get('collectibles', [])
+    for c in raw_collectibles:
+        if isinstance(c, str):
+            normalized = c.lower().replace(' ', '_').replace("'", '')
+            collectibles.add(normalized)
+        elif isinstance(c, dict):
+            # Game export may store collectibles as dicts with name/id fields
+            name = c.get('name') or c.get('id') or c.get('export_name') or ''
+            if name:
+                normalized = name.lower().replace(' ', '_').replace("'", '')
+                collectibles.add(normalized)
+
+    # Count diving gear items from owned_items — must be in DIFFERENT SLOTS
+    owned_items = character_config.get('owned_items', [])
+    diving_slots = set()
+    advanced_diving_slots = set()
+    expert_diving_slots = set()
+
+    try:
+        from util.autogenerated.export_names import get_item_from_export_name
+        for export_name in owned_items:
+            # Strip quality suffix
+            base_name = export_name
+            for suffix in ['_common', '_uncommon', '_rare', '_epic', '_legendary', '_ethereal']:
+                if export_name.endswith(suffix):
+                    base_name = export_name[:-len(suffix)]
+                    break
+            item = get_item_from_export_name(base_name)
+            if item and hasattr(item, 'keywords') and hasattr(item, 'slot'):
+                kws = [k.lower() for k in item.keywords]
+                slot = item.slot.lower() if item.slot else 'unknown'
+                if any('expert diving gear' in k for k in kws):
+                    expert_diving_slots.add(slot)
+                    advanced_diving_slots.add(slot)
+                    diving_slots.add(slot)
+                elif any('advanced diving gear' in k for k in kws):
+                    advanced_diving_slots.add(slot)
+                    diving_slots.add(slot)
+                elif any('diving gear' in k for k in kws):
+                    diving_slots.add(slot)
+    except Exception:
+        pass
+
+    diving_count = len(diving_slots)
+
+    has_letter = 'jarvonian_letter_of_passage' in collectibles
+    has_swamp = 'essence_of_the_swamp' in collectibles
+    has_charter = 'charter_of_the_drowned' in collectibles
+
+    # Check for camel pet at level 1+ (required for Wrentmark)
+    has_camel = False
+    pets = character_config.get('pets', [])
+    if isinstance(pets, list):
+        for pet in pets:
+            if isinstance(pet, dict):
+                species = pet.get('species', '').lower()
+                level = pet.get('level', 0)
+                if 'camel' in species and level >= 1:
+                    has_camel = True
+                    break
+
+    gdte_unlocked = has_letter or diving_count >= 3
+
+    return {
+        'jarvonia': True,
+        'trellin': gdte_unlocked,
+        'erdwise': gdte_unlocked,
+        'gdte': gdte_unlocked,
+        'halfling_rebels': has_swamp,
+        'syrenthia': diving_count >= 3,
+        # Wallisia entry (Tendon Wet Fields + Wraithwater) is reached via GDTE.
+        # Locations beyond Wraithwater are charter-gated in detect_locked_locations.
+        'wallisia': gdte_unlocked,
+        'wrentmark': has_charter and has_camel,
+    }
+
+
+def detect_locked_locations(character_config: dict) -> set:
+    """Return a set of location names that are locked for this character.
+
+    Per-location locks within otherwise-unlocked regions:
+    - Winter Waves Glacier: Mysterious northern map collectible
+    - Black Eye Peak & Winter's End: Black eye peak wilderness permit collectible
+    - Underwater Cave: 3 advanced diving gear in unique slots
+    - Darktide Trench: 3 expert diving gear in unique slots
+    - Halfling Campgrounds: 3 light sources in 3 different slots (+ Essence of the Swamp)
+    - Bog Bottom: 2 light sources + 3 advanced diving gear in unique slots (+ Essence of the Swamp)
+    - Bog Top, Witched Woods, Halfmaw Hideout: 2 light sources (+ Essence of the Swamp)
+    - Blackrane, Blackwater Fields, Kildome Cross, Stalking Yew Woods:
+      Charter of the Drowned. Wallisia is entered via GDTE (which opens
+      Tendon Wet Fields + Wraithwater); everything beyond Wraithwater needs
+      the charter.
+
+    Slot accounting: items must be owned, unlocked (requirements met), and
+    equippable. Non-ring slots dedupe by uuid (one helmet per slot). The ring
+    slot has TWO positions (ring1 + ring2) — a ring owned in quantity 2 (or
+    two different rings sharing the keyword) counts as 2 toward the slot
+    total. So 2x Gold Sun Stone Ring = 2 light sources, mirroring in-game
+    behavior where each equipped ring counts independently.
+    """
+    if not character_config:
+        return {
+            'Winter Waves Glacier', "Winter's End", 'Black Eye Peak',
+            'Underwater Cave', 'Darktide Trench',
+            'Halfling Campgrounds', 'Bog Bottom', 'Bog Top',
+            'Witched Woods', 'Halfmaw Hideout',
+            'Blackrane', 'Blackwater Fields', 'Kildome Cross',
+            'Stalking Yew Woods',
+        }
+
+    locked = set()
+
+    # Parse collectibles
+    collectibles = set()
+    for c in character_config.get('collectibles', []):
+        if isinstance(c, str):
+            collectibles.add(c.lower().replace(' ', '_').replace("'", ''))
+        elif isinstance(c, dict):
+            name = c.get('name') or c.get('id') or c.get('export_name') or ''
+            if name:
+                collectibles.add(name.lower().replace(' ', '_').replace("'", ''))
+
+    has_northern_map = 'mysterious_northern_map' in collectibles
+    has_wilderness_permit = 'black_eye_peak_wilderness_permit' in collectibles
+    has_swamp = 'essence_of_the_swamp' in collectibles
+    has_charter = 'charter_of_the_drowned' in collectibles
+
+    # Count unique equippable items by keyword and slot.
+    # Non-ring slots: each unique uuid fills one slot position (you can only
+    #   equip one helmet at a time).
+    # Ring slots: the player has TWO ring positions (ring1 + ring2), so a ring
+    #   with owned quantity >= 2 (or two different rings with the same keyword)
+    #   fills BOTH ring positions. Track ring quantity per keyword separately
+    #   and add min(ring_qty, 2) to the slot count.
+    owned_items = character_config.get('owned_items', [])
+    item_qualities = character_config.get('item_qualities', {}) or {}
+    item_quantities = character_config.get('item_quantities', {}) or {}
+    light_source_slots = set()
+    advanced_diving_slots = set()
+    expert_diving_slots = set()
+    light_ring_qty = 0
+    adv_div_ring_qty = 0
+    exp_div_ring_qty = 0
+    seen_ring_uuids = set()
+
+    try:
+        from util.autogenerated.export_names import get_item_from_export_name
+        seen_uuids = set()  # non-ring dedup
+        for export_name in owned_items:
+            base_name = export_name
+            for suffix in ['_common', '_uncommon', '_rare', '_epic', '_legendary', '_ethereal']:
+                if export_name.endswith(suffix):
+                    base_name = export_name[:-len(suffix)]
+                    break
+            # item_type='equipment' avoids circular-import noise on test entry
+            # paths — only equipment carries slot/keywords anyway.
+            item = get_item_from_export_name(base_name, item_type='equipment')
+            if not item or not hasattr(item, 'keywords') or not hasattr(item, 'slot'):
+                continue
+
+            kws = [k.lower() for k in item.keywords]
+            slot = (item.slot or 'unknown').lower()
+            is_light = any('light source' in k for k in kws)
+            is_exp_div = any('expert diving gear' in k for k in kws)
+            is_adv_div = any('advanced diving gear' in k for k in kws) or is_exp_div
+
+            if slot == 'ring':
+                # Each ring uuid contributes its total owned quantity (across
+                # all qualities) to the ring keyword count, capped at 2 below.
+                item_uuid = getattr(item, 'uuid', None) or base_name
+                if item_uuid in seen_ring_uuids:
+                    continue
+                seen_ring_uuids.add(item_uuid)
+                # item_id format must match the simplified_qualities key in
+                # ui/app.py: lowercase, spaces->_, no parens/hyphens/apostrophes.
+                item_id = item.name.lower().replace(' ', '_').replace('(', '').replace(')', '').replace('-', '_').replace("'", '')
+                qty = 0
+                qmap = item_qualities.get(item_id)
+                if isinstance(qmap, dict):
+                    for v in qmap.values():
+                        if isinstance(v, (int, float)):
+                            qty += int(v)
+                if qty == 0:
+                    fallback = item_quantities.get(item_id, 0)
+                    if isinstance(fallback, (int, float)):
+                        qty = int(fallback)
+                if qty == 0:
+                    qty = 1
+                if is_light:
+                    light_ring_qty += qty
+                if is_exp_div:
+                    exp_div_ring_qty += qty
+                if is_adv_div:
+                    adv_div_ring_qty += qty
+            else:
+                # Skip duplicate non-ring items (same UUID) — only one can be equipped
+                item_uuid = getattr(item, 'uuid', None) or base_name
+                if item_uuid in seen_uuids:
+                    continue
+                seen_uuids.add(item_uuid)
+                if is_light:
+                    light_source_slots.add(slot)
+                if is_exp_div:
+                    expert_diving_slots.add(slot)
+                    advanced_diving_slots.add(slot)
+                elif is_adv_div:
+                    advanced_diving_slots.add(slot)
+    except Exception:
+        pass
+
+    # Ring slot capacity is 2 (ring1 + ring2)
+    light_count = len(light_source_slots) + min(light_ring_qty, 2)
+    advanced_diving_count = len(advanced_diving_slots) + min(adv_div_ring_qty, 2)
+    expert_diving_count = len(expert_diving_slots) + min(exp_div_ring_qty, 2)
+
+    # Collectible-gated locations
+    if not has_northern_map:
+        locked.add('Winter Waves Glacier')
+    if not has_wilderness_permit:
+        locked.add('Black Eye Peak')
+        locked.add("Winter's End")
+
+    # Wallisia is entered via GDTE access (which opens Tendon Wet Fields +
+    # Wraithwater). The locations BEYOND Wraithwater require the Charter of
+    # the Drowned.
+    if not has_charter:
+        locked.add('Blackrane')
+        locked.add('Blackwater Fields')
+        locked.add('Kildome Cross')
+        locked.add('Stalking Yew Woods')
+
+    # Diving gear gated locations
+    if advanced_diving_count < 3:
+        locked.add('Underwater Cave')
+    if expert_diving_count < 3:
+        locked.add('Darktide Trench')
+
+    # Halfling Rebels sub-locations (all require Essence of the Swamp at region level)
+    if not has_swamp:
+        locked.add('Halfling Campgrounds')
+        locked.add('Bog Bottom')
+        locked.add('Bog Top')
+        locked.add('Witched Woods')
+        locked.add('Halfmaw Hideout')
+    else:
+        # Light source requirements within Halfling Rebels
+        if light_count < 3:
+            locked.add('Halfling Campgrounds')
+        if light_count < 2:
+            locked.add('Bog Top')
+            locked.add('Witched Woods')
+            locked.add('Halfmaw Hideout')
+        # Bog Bottom: 2 light sources + 3 advanced diving gear
+        if light_count < 2 or advanced_diving_count < 3:
+            locked.add('Bog Bottom')
+
+    return locked
+
+
+# ============================================================================
+# EVERHAVEN DUAL-REGION BONUS (Task 3.8)
+# ============================================================================
+
+def gearset_to_stats_everhaven(gearset_dict: dict, character) -> dict:
+    """
+    Calculate stats for routes starting at Everhaven.
+
+    Everhaven is on the border of Trellin and Erdwise, so both regional
+    bonuses apply simultaneously.
+
+    Args:
+        gearset_dict: Slot -> item mapping
+        character: Character object
+
+    Returns:
+        Stats dict with both Trellin and Erdwise regional bonuses merged
+    """
+    from util.gearset_utils import aggregate_gearset_stats
+    from util.autogenerated.locations import Location
+
+    items = [item for item in gearset_dict.values() if item is not None]
+
+    trellin_stats = aggregate_gearset_stats(
+        items=items, skill='travel', location=Location.SALSFIRTH,
+        character=character, include_level_bonus=True, include_collectibles=True
+    )
+    erdwise_stats = aggregate_gearset_stats(
+        items=items, skill='travel', location=Location.BLACKSPELL_HARBOUR,
+        character=character, include_level_bonus=True, include_collectibles=True
+    )
+
+    # Merge: for each stat, sum the regional-only contributions
+    # Base stats (global) are already in both; we need to add the regional delta
+    global_stats = aggregate_gearset_stats(
+        items=items, skill='travel', location=None,
+        character=character, include_level_bonus=True, include_collectibles=True
+    )
+
+    merged = dict(global_stats)
+    stat_keys = ['work_efficiency', 'double_action', 'steps_add', 'steps_percent',
+                 'double_rewards', 'no_materials_consumed', 'quality_outcome']
+
+    for key in stat_keys:
+        global_val = global_stats.get(key, 0.0)
+        trellin_delta = trellin_stats.get(key, 0.0) - global_val
+        erdwise_delta = erdwise_stats.get(key, 0.0) - global_val
+        merged[key] = global_val + trellin_delta + erdwise_delta
+
+    return merged
 
 
 # ============================================================================
@@ -883,14 +3347,29 @@ def optimize_for_route(segments, character, sorting_priority=None, hidden_items=
             if not item.is_unlocked(character, ignore_gear_requirements=True):
                 continue
         
-        # Check if has travel stats for any segment's starting location
+        # Check if has travel stats for any segment's starting location.
+        # An item is kept if it has ANY travel-relevant stat (WE, DA,
+        # steps_add, steps_percent) AND doesn't ADD steps (steps_add > 0
+        # or steps_percent > 0 means it makes the route worse — see
+        # `_item_has_applicable_stats` for the same rule, motivating
+        # bug report 4dbabd2b).
+        #
+        # NEGATIVE work_efficiency is FINE — items like Mountaineering
+        # guidebook (WE-10, DA+5, CF+20) more than compensate via the
+        # DA bonus. Previously this filter rejected them with `WE >= 0`
+        # which kept them out of the candidate pool entirely; the
+        # optimizer's local search never got a chance to try them.
+        # See bug report 1ec8eb98 (round 4 followup).
         has_stats = False
         for route in routes:
             stats = item.get_stats_for_skill('travel', location=route[0], character=character)
-            if any(stats.get(stat, 0) != 0 for stat in ['work_efficiency', 'double_action', 'steps_add', 'steps_percent']):
-                if stats.get('work_efficiency', 0) >= 0:
-                    has_stats = True
-                    break
+            # Reject items that increase step count (additive penalty)
+            if stats.get('steps_add', 0) > 0 or stats.get('steps_percent', 0) > 0:
+                has_stats = False
+                break
+            if any(stats.get(stat, 0) != 0 for stat in ['work_efficiency', 'double_action', 'steps_add', 'steps_percent', 'chest_finding', 'double_rewards']):
+                has_stats = True
+                break
             else:
                 has_stats = True
                 break
@@ -901,12 +3380,35 @@ def optimize_for_route(segments, character, sorting_priority=None, hidden_items=
     # Keep highest quality only
     all_items = filter_items_by_quality(all_items, keep_highest_only=True)
     
+    # Dominance pruning for travel stats (gear/rings only, not tools)
+    if routes:
+        prune_location = routes[0][0] if routes[0] else None
+        gear_items = [item for item in all_items if hasattr(item, 'slot') and item.slot not in ('tools', 'tool')]
+        tool_items = [item for item in all_items if hasattr(item, 'slot') and item.slot in ('tools', 'tool')]
+        # Protect items with travel-requirement keywords from pruning
+        PROTECTED_KEYWORDS = {'skis', 'diving gear', 'advanced diving gear', 'expert diving gear', 'light source'}
+        protected = []
+        pruneable = []
+        for item in gear_items:
+            item_kws = {k.lower() for k in (item.keywords if hasattr(item, 'keywords') else [])}
+            if item_kws & PROTECTED_KEYWORDS:
+                protected.append(item)
+            else:
+                pruneable.append(item)
+        pre_prune = len(pruneable)
+        pruneable = prune_dominated_items(pruneable, 'travel', prune_location, character, _travel_relevant_stats_for_priority())
+        pruned = pre_prune - len(pruneable)
+        gear_items = protected + pruneable
+        if pruned > 0:
+            print(f"  After dominance pruning: {len(gear_items) + len(tool_items)} items ({pruned} dominated gear/ring items removed, {len(protected)} protected)")
+        all_items = gear_items + tool_items
+    
     # Prepare items by slot
     items_by_slot = {}
     for slot in all_slots:
         items_by_slot[slot] = []
         for item in all_items:
-            if slot.startswith('tool') and item.slot == 'tools':
+            if slot.startswith('tool') and item.slot in ('tools', 'tool'):
                 items_by_slot[slot].append(item)
             elif slot.startswith('ring') and item.slot == 'ring':
                 items_by_slot[slot].append(item)
@@ -993,7 +3495,7 @@ def optimize_travel(test_routes):
         
         for item in all_items:
             # Match slot
-            if slot.startswith('tool') and item.slot == 'tools':
+            if slot.startswith('tool') and item.slot in ('tools', 'tool'):
                 items_by_slot[slot].append(item)
             elif slot.startswith('ring') and item.slot == 'ring':
                 items_by_slot[slot].append(item)

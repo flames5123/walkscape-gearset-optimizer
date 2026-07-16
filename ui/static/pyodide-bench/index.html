@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Pyodide Optimizer Benchmark (prototype)</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    font-family: -apple-system, system-ui, sans-serif;
+    background: #14171c; color: #d8dee9; margin: 0; padding: 16px;
+    line-height: 1.45;
+  }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  p.sub { margin: 0 0 16px; color: #8b97a7; font-size: 13px; }
+  .card { background: #1c2128; border: 1px solid #2b323c; border-radius: 10px;
+          padding: 14px; margin-bottom: 14px; }
+  label { font-size: 13px; color: #b6c0cf; }
+  input[type=number] { width: 56px; background: #0f1217; color: #d8dee9;
+          border: 1px solid #2b323c; border-radius: 6px; padding: 4px 6px; }
+  button { background: #3b82f6; color: #fff; border: none; border-radius: 8px;
+           padding: 10px 16px; font-size: 14px; font-weight: 600; cursor: pointer; }
+  button:disabled { background: #394150; cursor: not-allowed; }
+  #log { font-family: ui-monospace, Menlo, monospace; font-size: 12px;
+         white-space: pre-wrap; background: #0f1217; border: 1px solid #2b323c;
+         border-radius: 8px; padding: 10px; max-height: 240px; overflow: auto; }
+  .stat { display: flex; justify-content: space-between; padding: 3px 0;
+          border-bottom: 1px solid #232a33; font-size: 13px; }
+  .stat:last-child { border-bottom: none; }
+  .stat b { color: #7dd3fc; font-variant-numeric: tabular-nums; }
+  .hint { font-size: 12px; color: #8b97a7; }
+  .err { color: #f87171; }
+</style>
+</head>
+<body>
+  <h1>Pyodide optimizer benchmark</h1>
+  <p class="sub">Prototype (Option C). Runs the real <code>optimize_worker.main()</code>
+     in your browser via Pyodide and times it, so we can compare your device
+     against the server before building the full opt-in toggle.</p>
+
+  <div class="card">
+    <p class="hint">1. Run one normal optimization in the app first (so a real
+       request is captured). 2. Then run the benchmark below on this device.</p>
+    <p style="margin:10px 0 0">
+      <label>Iterations <input id="iters" type="number" min="1" max="10" value="3" /></label>
+      &nbsp;&nbsp;
+      <button id="go">Run benchmark</button>
+    </p>
+  </div>
+
+  <div class="card" id="results" style="display:none">
+    <div class="stat"><span>Pyodide boot (one-time)</span><b id="r-boot">—</b></div>
+    <div class="stat"><span>Bundle load (one-time)</span><b id="r-load">—</b></div>
+    <div class="stat"><span>Optimization (median)</span><b id="r-median">—</b></div>
+    <div class="stat"><span>Optimization (best / worst)</span><b id="r-range">—</b></div>
+    <div class="stat"><span>Result status</span><b id="r-status">—</b></div>
+  </div>
+
+  <div class="card">
+    <div id="log">idle.</div>
+  </div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const logEl = $("log");
+  function log(line, cls) {
+    const ts = new Date().toLocaleTimeString();
+    logEl.textContent += `\n[${ts}] ${line}`;
+    if (cls) { logEl.innerHTML = logEl.innerHTML; } // keep simple
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+  const fmt = (ms) => ms >= 1000 ? (ms / 1000).toFixed(2) + " s" : ms.toFixed(0) + " ms";
+  const median = (a) => {
+    const s = [...a].sort((x, y) => x - y);
+    const m = Math.floor(s.length / 2);
+    return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+  };
+
+  $("go").addEventListener("click", () => {
+    const iters = Math.max(1, Math.min(10, parseInt($("iters").value, 10) || 1));
+    $("go").disabled = true;
+    logEl.textContent = "starting…";
+    $("results").style.display = "none";
+
+    const worker = new Worker("/static/pyodide-bench/bench-worker.js");
+    worker.onmessage = (ev) => {
+      const m = ev.data;
+      if (m.phase) { log(`${m.phase}: ${m.detail}`); return; }
+      if (m.error) {
+        log("ERROR: " + m.error, "err");
+        $("go").disabled = false;
+        worker.terminate();
+        return;
+      }
+      if (m.done) {
+        $("results").style.display = "block";
+        $("r-boot").textContent = fmt(m.bootMs);
+        $("r-load").textContent = fmt(m.loadMs);
+        const okDts = (m.runs || []).filter(r => r.ok).map(r => r.dt);
+        const nOk = okDts.length, nTot = (m.runs || []).length;
+        if (okDts.length) {
+          $("r-median").textContent = fmt(median(okDts));
+          $("r-range").textContent = fmt(Math.min(...okDts)) + " / " + fmt(Math.max(...okDts));
+        } else {
+          $("r-median").textContent = "all runs failed";
+          $("r-range").textContent = "—";
+        }
+        $("r-status").textContent = `${nOk}/${nTot} succeeded`;
+        log("DONE. runs: " + (m.runs || [])
+          .map(r => `${r.dt.toFixed(0)}ms${r.ok ? "" : "✗"}`).join(", "));
+        log("result keys: " + (m.result ? Object.keys(m.result).join(", ") : "(none)"));
+        $("go").disabled = false;
+        worker.terminate();
+      }
+    };
+    worker.onerror = (e) => {
+      log("worker crashed: " + e.message, "err");
+      $("go").disabled = false;
+    };
+    worker.postMessage({ iterations: iters });
+  });
+</script>
+</body>
+</html>

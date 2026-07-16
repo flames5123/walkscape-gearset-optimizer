@@ -7,6 +7,8 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y \
     gcc \
     git \
+    curl \
+    docker.io \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first for better caching
@@ -26,6 +28,14 @@ EXPOSE 6969
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app
+
+# Bake git commit info at build time
+ARG GIT_COMMIT_DATE=""
+ARG GIT_COMMIT_HASH=""
+ARG GIT_COMMIT_RELATIVE=""
+ENV GIT_COMMIT_DATE=$GIT_COMMIT_DATE
+ENV GIT_COMMIT_HASH=$GIT_COMMIT_HASH
+ENV GIT_COMMIT_RELATIVE=$GIT_COMMIT_RELATIVE
 
 # Run the FastAPI app with uvicorn
 CMD ["uvicorn", "ui.app:app", "--host", "0.0.0.0", "--port", "6969"]

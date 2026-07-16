@@ -40,6 +40,8 @@ class OwnedItemsSection extends CollapsibleSection {
         // Now we can safely use 'this'
         this.catalog = this.props.catalog;
         this.itemComponents = new Map(); // Track ItemRow components
+        this.searchText = '';
+        this.itemNameMap = null; // Built lazily on first search
 
         // Validate catalog
         if (!catalog || !catalog.categories) {
@@ -50,6 +52,30 @@ class OwnedItemsSection extends CollapsibleSection {
         // Listen to both base items and user override items
         this.subscribe('items', () => this.updateCounts());
         this.subscribe('ui.user_overrides.items', () => this.updateCounts());
+
+        // Re-render custom items when generic items change
+        this.subscribe('genericItems', () => {
+            // Destroy existing generic item ItemRow components
+            for (const [key, component] of this.itemComponents.entries()) {
+                if (key.startsWith('generic::item::')) {
+                    component.destroy();
+                    this.itemComponents.delete(key);
+                }
+            }
+            // Re-render the category HTML
+            const $cat = this.$element.find('[data-category="custom-items"]');
+            if ($cat.length) {
+                $cat.replaceWith(this.renderCustomItems());
+                // If the category was expanded, initialize the new ItemRow components
+                const $newCat = this.$element.find('[data-category="custom-items"]');
+                const $items = $newCat.find('.category-subcategories');
+                if ($items.is(':visible')) {
+                    this.initializeItemRowsInContainer($items);
+                }
+            }
+            // Invalidate search name map so generic items are re-indexed
+            this.itemNameMap = null;
+        });
 
         // Initial count update
         this.updateCounts();
@@ -64,10 +90,22 @@ class OwnedItemsSection extends CollapsibleSection {
         // Access catalog from props (set before super() was called)
         const catalog = this.props.catalog || { categories: {} };
 
-        console.log('renderContent called, catalog:', catalog);
-        console.log('catalog.categories:', catalog.categories);
+        console.log('[OIS] renderContent: catalog summary',
+            catalog.categories
+                ? {
+                      category_groups: Object.keys(catalog.categories),
+                      collectibles: Object.keys(catalog.categories.collectibles || {}).length,
+                      materials: Array.isArray(catalog.categories.materials) ? catalog.categories.materials.length : 0,
+                      chests: Object.keys(catalog.categories.chests || {}).length,
+                      pets: Array.isArray(catalog.categories.pets) ? catalog.categories.pets.length : 0,
+                  }
+                : 'no categories');
+        if (window.__walkscapeVerboseDebug) {
+            console.log('[VERBOSE] renderContent catalog full payload:', catalog);
+            console.log('[VERBOSE] catalog.categories full payload:', catalog.categories);
+        }
         if (catalog.categories) {
-            console.log('collectibles count:', catalog.categories.collectibles?.length);
+            console.log('collectibles subcategories:', Object.keys(catalog.categories.collectibles || {}));
         }
 
         // Check if catalog is valid
@@ -84,13 +122,34 @@ class OwnedItemsSection extends CollapsibleSection {
 
         const html = `
             <div class="owned-items-container">
-                ${this.renderCollectibles()}
-                ${this.renderConsumables()}
-                ${this.renderLoot()}
-                ${this.renderCrafted()}
-                ${this.renderChests()}
-                ${this.renderPets()}
-                ${this.renderMaterials()}
+                <div class="owned-items-search-container">
+                    <input type="text" 
+                           class="owned-items-search" 
+                           placeholder="Search by name or keyword..." 
+                           value="${this.searchText || ''}">
+                </div>
+                <div class="owned-items-categories">
+                    ${this.renderCollectibles()}
+                    ${this.renderConsumables()}
+                    ${this.renderLoot()}
+                    ${this.renderCrafted()}
+                    ${this.renderChests()}
+                    ${this.renderPets()}
+                    ${this.renderMaterials()}
+                    ${this.renderCustomItems()}
+                </div>
+                <div style="padding: var(--spacing-sm); text-align: center; border-top: 1px solid var(--border-color); margin-top: var(--spacing-sm);">
+                    <button class="btn-expand-all-items" style="
+                        background: var(--bg-tertiary);
+                        border: 1px solid var(--border-color);
+                        border-radius: 4px;
+                        color: var(--text-secondary);
+                        cursor: pointer;
+                        font-size: 0.8em;
+                        padding: var(--spacing-xs) var(--spacing-sm);
+                        width: 100%;
+                    ">⬇️ Expand All</button>
+                </div>
             </div>
         `;
 
@@ -98,25 +157,46 @@ class OwnedItemsSection extends CollapsibleSection {
     }
 
     /**
-     * Render Collectibles category
+     * Render Collectibles category with subcategories
      * @returns {string} HTML string
      */
     renderCollectibles() {
         const catalog = this.props.catalog || { categories: {} };
-        const items = catalog.categories.collectibles || [];
-        const obtained = this.countObtained(items);
+        const collectiblesData = catalog.categories.collectibles || {};
 
-        console.log(`Rendering Collectibles: ${items.length} items`);
+        // Count all collectible items across subcategories
+        let totalItems = 0;
+        let totalObtained = 0;
+
+        for (const [subcategory, data] of Object.entries(collectiblesData)) {
+            if (Array.isArray(data)) {
+                totalItems += data.length;
+                totalObtained += this.countObtained(data);
+            } else if (typeof data === 'object') {
+                // Nested subcategories (e.g. Faction Rewards -> {faction: [items]})
+                for (const subItems of Object.values(data)) {
+                    totalItems += subItems.length;
+                    totalObtained += this.countObtained(subItems);
+                }
+            }
+        }
 
         return `
             <div class="item-category collapsible-category" data-category="collectibles">
                 <div class="category-header clickable">
                     <span class="category-title">Collectibles</span>
-                    <span class="category-count">${obtained}/${items.length}</span>
+                    <span class="category-count">${totalObtained}/${totalItems}</span>
                     <span class="expand-arrow">▼</span>
                 </div>
-                <div class="category-items" style="display: none;">
-                    ${items.map(item => `<div class="item-row-container" data-item-id="${item.id}"></div>`).join('')}
+                <div class="category-subcategories" style="display: none;">
+                    ${Object.entries(collectiblesData).map(([subcategory, data]) => {
+            if (Array.isArray(data)) {
+                return this.renderLootSubcategory(subcategory, data);
+            } else if (typeof data === 'object') {
+                return this.renderLootNestedSubcategory(subcategory, data);
+            }
+            return '';
+        }).join('')}
                 </div>
             </div>
         `;
@@ -130,7 +210,11 @@ class OwnedItemsSection extends CollapsibleSection {
         const catalog = this.props.catalog || { categories: {} };
         const consumablesBySkill = catalog.categories.consumables || {};
         const allItems = Object.values(consumablesBySkill).flat();
-        const obtained = this.countObtained(allItems);
+
+        // Deduplicate by item ID for the category total
+        // (skill group items like Nut Mix appear in multiple skill subcategories)
+        const uniqueItems = [...new Map(allItems.map(item => [item.id, item])).values()];
+        const obtained = this.countObtained(uniqueItems);
 
         // Sort skills: "Global Consumables" first, then alphabetically
         const sortedSkills = Object.keys(consumablesBySkill).sort((a, b) => {
@@ -143,7 +227,7 @@ class OwnedItemsSection extends CollapsibleSection {
             <div class="item-category collapsible-category" data-category="consumables">
                 <div class="category-header clickable">
                     <span class="category-title">Consumables</span>
-                    <span class="category-count">${obtained}/${allItems.length}</span>
+                    <span class="category-count">${obtained}/${uniqueItems.length}</span>
                     <span class="expand-arrow">▼</span>
                 </div>
                 <div class="category-subcategories" style="display: none;">
@@ -172,7 +256,7 @@ class OwnedItemsSection extends CollapsibleSection {
                     <span class="expand-arrow">▼</span>
                 </div>
                 <div class="subcategory-items" style="display: none;">
-                    ${items.map(item => `<div class="item-row-container" data-item-id="${item.id}"></div>`).join('')}
+                    ${items.map(item => `<div class="item-row-container" data-item-id="${item.id}" data-skill="${skill}"></div>`).join('')}
                 </div>
             </div>
         `;
@@ -237,6 +321,7 @@ class OwnedItemsSection extends CollapsibleSection {
                     ${this.renderLootSubcategory('Achievement Point Rewards', loot.ap_rewards || [])}
                     ${this.renderLootNestedSubcategory('Achievement Rewards', loot.achievement_rewards || {})}
                     ${this.renderLootSubcategory('Activity Drops', loot.activity_drops || [])}
+                    ${this.renderLootSubcategory('Misc. Loot', loot.misc_loot || [])}
                     ${this.renderLootNestedSubcategory('Faction Rewards', loot.faction_rewards || {})}
                     ${this.renderLootSubcategory('Shop Items', loot.shop_items || [])}
                 </div>
@@ -273,7 +358,7 @@ class OwnedItemsSection extends CollapsibleSection {
                     <span class="expand-arrow">▼</span>
                 </div>
                 <div class="subcategory-items" style="display: none;">
-                    ${items.map(item => `<div class="item-row-container" data-item-id="${item.id}"></div>`).join('')}
+                    ${items.map(item => `<div class="item-row-container" data-item-id="${item.id}" data-subcat="${title}"></div>`).join('')}
                 </div>
             </div>
         `;
@@ -339,7 +424,7 @@ class OwnedItemsSection extends CollapsibleSection {
                     <span class="expand-arrow">▼</span>
                 </div>
                 <div class="keyword-items" style="display: none;">
-                    ${items.map(item => `<div class="item-row-container" data-item-id="${item.id}"></div>`).join('')}
+                    ${items.map(item => `<div class="item-row-container" data-item-id="${item.id}" data-subcat="${keyword}"></div>`).join('')}
                 </div>
             </div>
         `;
@@ -352,11 +437,18 @@ class OwnedItemsSection extends CollapsibleSection {
     renderCrafted() {
         const catalog = this.props.catalog || { categories: {} };
         const craftedByKeyword = catalog.categories.crafted || {};
-        const allItems = Object.values(craftedByKeyword).flat();
-        const obtained = this.countObtained(allItems);
+        // Get server-computed unique count, then remove metadata key
+        const uniqueCount = craftedByKeyword._unique_count || 0;
+        // Filter to only real category arrays (skip metadata keys starting with _)
+        const categoryKeys = Object.keys(craftedByKeyword).filter(k => !k.startsWith('_'));
+        const allItemsRaw = categoryKeys.flatMap(k => craftedByKeyword[k]);
+        const uniqueItems = [...new Map(allItemsRaw.map(item => [item.id, item])).values()];
+        const obtained = this.countObtained(uniqueItems);
+        const totalCount = uniqueCount || uniqueItems.length;
 
         // Sort keywords alphabetically, but put "Misc. Crafted" at the end
-        const sortedKeywords = Object.keys(craftedByKeyword).sort((a, b) => {
+        // Skip the _unique_count metadata key
+        const sortedKeywords = categoryKeys.sort((a, b) => {
             if (a === 'Misc. Crafted') return 1;
             if (b === 'Misc. Crafted') return -1;
             return a.localeCompare(b);
@@ -366,7 +458,7 @@ class OwnedItemsSection extends CollapsibleSection {
             <div class="item-category collapsible-category" data-category="crafted">
                 <div class="category-header clickable">
                     <span class="category-title">Crafted</span>
-                    <span class="category-count">${obtained}/${allItems.length}</span>
+                    <span class="category-count">${obtained}/${totalCount}</span>
                     <span class="expand-arrow">▼</span>
                 </div>
                 <div class="category-subcategories" style="display: none;">
@@ -386,25 +478,24 @@ class OwnedItemsSection extends CollapsibleSection {
      */
     renderCraftedKeywordSubcategory(keyword, items) {
         const obtained = this.countObtained(items);
+        // Rename slot-based categories to clarify they refer to gear slots, not containers
+        const slotDisplayNames = { 'Chests': 'Chest Slots', 'Pants': 'Pant Slots', 'Rings': 'Ring Slots' };
+        const displayName = slotDisplayNames[keyword] || keyword;
 
         return `
             <div class="subcategory collapsible-subcategory" data-subcategory="${keyword}">
                 <div class="subcategory-header clickable">
-                    <span class="subcategory-title">${keyword}</span>
+                    <span class="subcategory-title">${displayName}</span>
                     <span class="subcategory-count">${obtained}/${items.length}</span>
                     <span class="expand-arrow">▼</span>
                 </div>
                 <div class="subcategory-items" style="display: none;">
-                    ${items.map(item => `<div class="item-row-container" data-item-id="${item.id}"></div>`).join('')}
+                    ${items.map(item => `<div class="item-row-container" data-item-id="${item.id}" data-subcat="${keyword}"></div>`).join('')}
                 </div>
             </div>
         `;
     }
 
-    /**
-     * Render Chests category
-     * @returns {string} HTML string
-     */
     renderChests() {
         const catalog = this.props.catalog || { categories: {} };
         const chests = catalog.categories.chests || {};
@@ -438,7 +529,7 @@ class OwnedItemsSection extends CollapsibleSection {
                     ${sortedChests.map(chest => this.renderChestSubcategory(chest)).join('')}
                 </div>
             </div>
-        `;
+            `;
     }
 
     /**
@@ -447,7 +538,7 @@ class OwnedItemsSection extends CollapsibleSection {
      * @returns {string} HTML string
      */
     renderChestSubcategory(chest) {
-        console.log(`Rendering chest: ${chest.name}, contents:`, chest.contents);
+        console.log(`Rendering chest: ${chest.name}, contents: `, chest.contents);
         const obtained = this.countObtained(chest.contents);
 
         const itemsHtml = chest.contents.map(item => {
@@ -476,15 +567,217 @@ class OwnedItemsSection extends CollapsibleSection {
      * @returns {string} HTML string
      */
     renderPets() {
+        const catalog = this.props.catalog || { categories: {} };
+        const petsData = catalog.categories.pets || [];
+
+        if (petsData.length === 0) {
+            return `
+                <div class="item-category collapsible-category" data-category="pets">
+                    <div class="category-header clickable">
+                        <span class="category-title">Pets</span>
+                        <span class="category-count">0/0</span>
+                        <span class="expand-arrow">▼</span>
+                    </div>
+                </div>
+            `;
+        }
+
+        const obtained = this.countObtained(petsData);
+
         return `
             <div class="item-category collapsible-category" data-category="pets">
                 <div class="category-header clickable">
                     <span class="category-title">Pets</span>
-                    <span class="category-count">TODO - not in export yet</span>
-                    <span class="category-arrow">▼</span>
+                    <span class="category-count">${obtained}/${petsData.length}</span>
+                    <span class="expand-arrow">▼</span>
+                </div>
+                <div class="category-items" style="display: none;">
+                    ${petsData.map(pet => `<div class="item-row-container" data-item-id="${pet.id}" data-item-type="pet"></div>`).join('')}
                 </div>
             </div>
         `;
+    }
+
+    /**
+     * Render Custom Items category (generic items).
+     * Gated behind window._featureFlags?.generic.
+     */
+    renderCustomItems() {
+        if (!window._featureFlags?.generic) return '';
+
+        const items = store.state.genericItems || [];
+        const communityChecked = store.state.column1?.showGenericItemCommunity ? 'checked' : '';
+
+        // Ensure each generic item has a state entry so ItemRow subscriptions work
+        // ALL generic items default to unchecked (has: false) — ownership is determined
+        // by the import matching code in main.js or manual user action.
+        // Previously non-community items defaulted to has:true which incorrectly
+        // marked sheet-synced items like Weighted vest as owned.
+        for (const gi of items) {
+            const stateId = `generic::item::${gi.id}`;
+            if (!store.state.items[stateId]) {
+                store.state.items[stateId] = { has: false };
+            }
+        }
+
+        // Group items by slot
+        const slotOrder = ['head', 'cape', 'back', 'chest', 'hands', 'legs', 'neck', 'feet', 'ring', 'tool', 'primary', 'secondary', 'consumable', 'collectible', 'input', 'pet'];
+        const slotLabels = {
+            head: 'Head', cape: 'Cape', back: 'Back', chest: 'Chest',
+            hands: 'Hands', legs: 'Legs', neck: 'Neck', feet: 'Feet',
+            ring: 'Ring', tool: 'Tool', primary: 'Primary', secondary: 'Secondary',
+            consumable: 'Consumable', collectible: 'Collectible', input: 'Input', pet: 'Pet'
+        };
+        const bySlot = {};
+        for (const item of items) {
+            const slot = item.slot || 'tool';
+            if (!bySlot[slot]) bySlot[slot] = [];
+            bySlot[slot].push(item);
+        }
+
+        // Build subcategory HTML for each slot that has items
+        const subcategoriesHtml = slotOrder
+            .filter(slot => bySlot[slot] && bySlot[slot].length > 0)
+            .map(slot => {
+                const slotItems = bySlot[slot];
+                const rows = slotItems.map(item => {
+                    const stateId = `generic::item::${item.id}`;
+                    return `<div class="item-row-container" data-item-id="${stateId}"></div>`;
+                }).join('');
+                const label = slotLabels[slot] || slot.charAt(0).toUpperCase() + slot.slice(1);
+                return `
+                    <div class="subcategory collapsible-subcategory" data-subcategory="gi-${slot}">
+                        <div class="subcategory-header clickable">
+                            <img src="/assets/icons/slots/${slot}.svg" class="gi-slot-subcat-icon" />
+                            <span class="subcategory-title">${label}</span>
+                            <span class="subcategory-count">${slotItems.length}</span>
+                            <span class="expand-arrow">▼</span>
+                        </div>
+                        <div class="subcategory-items" style="display:none">${rows}</div>
+                    </div>`;
+            }).join('');
+
+        return `
+        <div class="item-category collapsible-category" data-category="custom-items">
+            <div class="category-header clickable">
+                <span class="category-title">🔧 Generic Items</span>
+                <span class="category-count">${items.length}</span>
+                <span class="expand-arrow">▼</span>
+            </div>
+            <div class="category-subcategories" style="display:none">
+                <div class="gi-category-controls">
+                    <button class="btn-create-generic-item optimize-btn" style="font-size:13px;padding:5px 14px">🔧 Add/Edit Generic Items</button>
+                    <label class="gi-checkbox-label gi-community-toggle" style="margin-top:6px">
+                        <input type="checkbox" class="gi-show-community-col1" ${communityChecked} />
+                        Show community definitions
+                    </label>
+                </div>
+                ${items.length === 0 ? '<div class="gi-no-items-msg" style="padding:4px 0;color:var(--text-secondary);font-size:12px">No custom items yet.</div>' : subcategoriesHtml}
+            </div>
+        </div>`;
+    }
+
+    /**
+     * Convert a generic item to a catalog-compatible item object for ItemRow
+     * @param {Object} gi - Generic item from store.state.genericItems
+     * @returns {Object} Catalog-compatible item object
+     */
+    _genericItemToCatalogItem(gi) {
+        const isConsumable = gi.slot === 'consumable' || gi.slot === 'input';
+        const isCollectible = gi.slot === 'collectible';
+        const isPet = gi.slot === 'pet';
+        // Consumables and inputs are always crafted (Normal/Fine), collectibles and pets are never crafted
+        const isCrafted = (isCollectible || isPet) ? false : (gi.is_crafted || isConsumable);
+        // Consumables/inputs with quality_stats have fine versions
+        const hasFine = isConsumable && gi.quality_stats && gi.quality_stats['Fine'];
+        // For consumables/inputs, normal stats come from quality_stats.Normal
+        let stats = gi.stats || {};
+        let statsFine = null;
+        if (isConsumable && gi.quality_stats) {
+            stats = gi.quality_stats['Normal'] || gi.stats || {};
+            statsFine = gi.quality_stats['Fine'] || null;
+        }
+
+        // For pets, build levels dict from quality_stats (keyed by "Level 1", "Level 2", etc.)
+        let levels = null;
+        let maxLevel = 0;
+        if (isPet && gi.quality_stats) {
+            levels = {};
+            const petXpReqs = gi.quality_values?._pet_xp_requirements || {};
+            const petXpReqRows = gi.quality_values?._pet_xp_req_rows || [];
+            for (const [key, levelStats] of Object.entries(gi.quality_stats)) {
+                if (key === 'Egg') continue;
+                const match = key.match(/Level (\d+)/);
+                if (match) {
+                    const lvl = parseInt(match[1]);
+                    if (lvl > maxLevel) maxLevel = lvl;
+                    levels[String(lvl)] = {
+                        xp_required: petXpReqs[key] || 0,
+                        requirement_to_gain_xp: this._formatPetXpReqDisplay(petXpReqRows),
+                        stats: levelStats || {},
+                        abilities: [],
+                    };
+                }
+            }
+        }
+
+        // If icon field contains a path (from sheet data), treat it as icon_path
+        const rawIcon = gi.icon || '⚡';
+        const iconIsPath = rawIcon.includes('/') || rawIcon.endsWith('.svg') || rawIcon.endsWith('.png');
+
+        const result = {
+            id: `generic::item::${gi.id}`,
+            name: gi.name,
+            slot: gi.slot,
+            keywords: gi.keywords || [],
+            rarity: (isCrafted || isPet) ? 'common' : (gi.rarity || 'common'),
+            icon: iconIsPath ? '⚡' : (gi.icon || '⚡'),
+            icon_color: gi.icon_color,
+            icon_path: iconIsPath ? gi.icon : (gi.icon_path || null),
+            type: isPet ? 'pet' : (isCollectible ? 'collectible' : (isConsumable ? 'consumable' : (isCrafted ? 'crafted_item' : 'item'))),
+            is_generic: true,
+            is_crafted: isCrafted,
+            generic_id: gi.id,
+            stats: stats,
+            stats_fine: statsFine,
+            stats_by_quality: (!isConsumable && !isPet && gi.quality_stats) ? gi.quality_stats : null,
+            quality_stats: gi.quality_stats || null,
+            gated_stats: gi.gated_stats || {},
+            requirements: (gi.gated_stats && gi.gated_stats.requirements) ? gi.gated_stats.requirements : [],
+            has_fine: !!hasFine,
+        };
+
+        // Add pet-specific fields
+        if (isPet) {
+            result.levels = levels || {};
+            result.max_level = maxLevel;
+            result.egg_name = gi.name + ' egg';
+        }
+
+        return result;
+    }
+
+    /**
+     * Format pet XP requirement rows into a display string
+     */
+    _formatPetXpReqDisplay(rows) {
+        if (!rows || !rows.length) return null;
+        const locLabels = {
+            jarvonia: 'Jarvonia', gdte: 'GDTE', trellin: 'Trellin', erdwise: 'Erdwise',
+            halfling_rebels: 'Halfling Rebels', syrenthia: 'Syrenthia', wallisia: 'Wallisia',
+            wrentmark: 'Wrentmark', underwater: 'Underwater', spectral: 'Spectral'
+        };
+        return rows.filter(r => r.type && r.value).map(r => {
+            if (r.type === 'location') {
+                const loc = locLabels[r.value] || r.value;
+                return `While in ${loc} area`;
+            }
+            if (r.type === 'skill') {
+                const prefix = r.not ? 'Not doing ' : 'While doing ';
+                return prefix + (r.value.charAt(0).toUpperCase() + r.value.slice(1));
+            }
+            return '';
+        }).filter(Boolean).join('. ') + '.';
     }
 
     /**
@@ -530,26 +823,52 @@ class OwnedItemsSection extends CollapsibleSection {
 
         const items = [];
 
-        // Collectibles
-        items.push(...(catalog.categories.collectibles || []));
+        // Collectibles (now a dict of subcategories)
+        const collectibles = catalog.categories.collectibles || {};
+        for (const subcatData of Object.values(collectibles)) {
+            if (Array.isArray(subcatData)) {
+                items.push(...subcatData);
+            } else if (typeof subcatData === 'object') {
+                for (const groupItems of Object.values(subcatData)) {
+                    items.push(...groupItems);
+                }
+            }
+        }
 
-        // Consumables
+        // Consumables (deduplicate — skill group items appear in multiple subcategories)
         const consumables = catalog.categories.consumables || {};
+        const seenConsumableIds = new Set();
         for (const skillItems of Object.values(consumables)) {
-            items.push(...skillItems);
+            for (const item of skillItems) {
+                if (!seenConsumableIds.has(item.id)) {
+                    seenConsumableIds.add(item.id);
+                    items.push(item);
+                }
+            }
         }
 
         // Materials
         items.push(...(catalog.categories.materials || []));
 
-        // Loot
+        // Loot (deduplicate — items can appear in multiple subcategories)
         const loot = catalog.categories.loot || {};
+        const seenLootIds = new Set();
         for (const [subcategory, subcatItems] of Object.entries(loot)) {
             if (Array.isArray(subcatItems)) {
-                items.push(...subcatItems);
+                for (const item of subcatItems) {
+                    if (!seenLootIds.has(item.id)) {
+                        seenLootIds.add(item.id);
+                        items.push(item);
+                    }
+                }
             } else if (typeof subcatItems === 'object') {
                 for (const keywordItems of Object.values(subcatItems)) {
-                    items.push(...keywordItems);
+                    for (const item of keywordItems) {
+                        if (!seenLootIds.has(item.id)) {
+                            seenLootIds.add(item.id);
+                            items.push(item);
+                        }
+                    }
                 }
             }
         }
@@ -574,6 +893,7 @@ class OwnedItemsSection extends CollapsibleSection {
         this.$element.find('.category-count, .subcategory-count, .keyword-count').each((i, el) => {
             const $el = $(el);
             const $container = $el.closest('[data-category], [data-subcategory], [data-keyword]');
+            const category = $container.data('category');
 
             // Find all items in this container
             const $items = $container.find('.item-row-container');
@@ -583,10 +903,25 @@ class OwnedItemsSection extends CollapsibleSection {
                 return; // Skip empty categories (TODO placeholders)
             }
 
-            // Count obtained items - check user overrides first
+            // For the consumables, loot, and crafted category headers, deduplicate by item ID
+            // (skill group items appear in multiple consumable subcategories,
+            //  loot items can appear in multiple loot subcategories like faction rewards + shop items,
+            //  crafted items can appear in multiple keyword subcategories like "Diving Gear" + "Chests")
+            const needsDedup = (category === 'consumables' || category === 'loot' || category === 'crafted') && $el.hasClass('category-count');
+
+            // Collect item IDs, deduplicating for category totals
+            const seen = new Set();
             let obtained = 0;
+            let uniqueTotal = 0;
+
             $items.each((j, itemEl) => {
                 const itemId = $(itemEl).data('item-id');
+
+                if (needsDedup && seen.has(itemId)) {
+                    return; // Skip duplicate for category total
+                }
+                seen.add(itemId);
+                uniqueTotal++;
 
                 // Check user overrides first, then fall back to base items state
                 const overrides = store.state.ui.user_overrides || {};
@@ -600,8 +935,25 @@ class OwnedItemsSection extends CollapsibleSection {
                 }
             });
 
-            $el.text(`${obtained}/${total}`);
+            $el.text(`${obtained}/${needsDedup ? uniqueTotal : total}`);
         });
+    }
+
+    /**
+     * Override toggle to add scroll-to-fit when expanding the Owned Items header.
+     */
+    toggle() {
+        const wasExpanded = this.expanded;
+        super.toggle();
+
+        // After expanding, scroll so the header is near the top
+        if (!wasExpanded && this.expanded) {
+            const $header = this.$element.find('.collapsible-header');
+            // Wait for slideDown animation to finish
+            this.$element.find('.collapsible-content').promise().done(() => {
+                this._scrollToFitExpanded($header);
+            });
+        }
     }
 
     /**
@@ -618,41 +970,32 @@ class OwnedItemsSection extends CollapsibleSection {
             const $items = $category.find('.category-items, .category-subcategories').first();
             const $arrow = $header.find('.expand-arrow');
 
-            console.log('Category clicked, arrow classes:', $arrow.attr('class'));
-
             // Check current visibility state
             const isCurrentlyVisible = $items.is(':visible');
 
-            console.log('Is currently visible:', isCurrentlyVisible);
-
             // Toggle based on current visibility
             if (isCurrentlyVisible) {
-                console.log('Collapsing - removing expanded class');
                 $arrow.removeClass('expanded');
-                console.log('After removeClass, arrow classes:', $arrow.attr('class'));
                 $items.slideUp(200);
             } else {
-                console.log('Expanding - adding expanded class');
                 $arrow.addClass('expanded');
-                console.log('After addClass, arrow classes:', $arrow.attr('class'));
                 $items.slideDown(200, () => {
                     // After animation, initialize ItemRows if expanded
                     this.initializeItemRowsInContainer($items);
+                    // Scroll to fit expanded content in view
+                    this._scrollToFitExpanded($header);
                 });
             }
         });
 
         // Add subcategory collapse/expand handlers
         this.$element.on('click', '.subcategory-header.clickable', (e) => {
-            console.log('Subcategory header clicked');
             e.stopPropagation(); // Prevent category header from triggering
 
             const $header = $(e.currentTarget);
             const $subcategory = $header.closest('.collapsible-subcategory');
-            console.log('Found subcategory:', $subcategory.length);
 
             const $items = $subcategory.find('.subcategory-items, .subcategory-nested').first();
-            console.log('Found items container:', $items.length, 'visible:', $items.is(':visible'));
 
             const $arrow = $header.find('.expand-arrow');
 
@@ -669,9 +1012,9 @@ class OwnedItemsSection extends CollapsibleSection {
                     $arrow.addClass('expanded');
                 }, 10);
                 $items.slideDown(200, () => {
-                    console.log('Slide down complete, now visible:', $items.is(':visible'));
-                    console.log('Calling initializeItemRowsInContainer');
                     this.initializeItemRowsInContainer($items);
+                    // Scroll to fit expanded content in view
+                    this._scrollToFitExpanded($header);
                 });
             }
         });
@@ -700,16 +1043,224 @@ class OwnedItemsSection extends CollapsibleSection {
                 $items.slideDown(200, () => {
                     // After animation, initialize ItemRows if expanded
                     this.initializeItemRowsInContainer($items);
+                    // Scroll to fit expanded content in view
+                    this._scrollToFitExpanded($header);
                 });
             }
         });
 
-        // Only initialize ItemRow components if the section is expanded
+        // Expand All button — recursively expands every category, subcategory, and keyword group
+        this.$element.on('click', '.btn-expand-all-items', (e) => {
+            e.stopPropagation();
+            const $btn = $(e.currentTarget);
+            const $categories = this.$element.find('.owned-items-categories');
+            const isExpanding = $btn.data('af-expanded') !== true;
+
+            if (isExpanding) {
+                // Expand all top-level categories
+                $categories.find('.category-header.clickable').each((_, header) => {
+                    const $header = $(header);
+                    const $items = $header.closest('.collapsible-category').find('.category-items, .category-subcategories').first();
+                    if (!$items.is(':visible')) {
+                        $header.find('.expand-arrow').addClass('expanded');
+                        $items.show();
+                        this.initializeItemRowsInContainer($items);
+                    }
+                });
+                // Expand all subcategories
+                $categories.find('.subcategory-header.clickable').each((_, header) => {
+                    const $header = $(header);
+                    const $items = $header.closest('.collapsible-subcategory').find('.subcategory-items, .subcategory-nested').first();
+                    if (!$items.is(':visible')) {
+                        $header.find('.expand-arrow').addClass('expanded');
+                        $items.show();
+                        this.initializeItemRowsInContainer($items);
+                    }
+                });
+                // Expand all keyword groups
+                $categories.find('.keyword-header.clickable').each((_, header) => {
+                    const $header = $(header);
+                    const $items = $header.closest('.collapsible-keyword').find('.keyword-items');
+                    if (!$items.is(':visible')) {
+                        $header.find('.expand-arrow').addClass('expanded');
+                        $items.show();
+                        this.initializeItemRowsInContainer($items);
+                    }
+                });
+                $btn.text('⬆️ Collapse All').data('af-expanded', true);
+            } else {
+                // Collapse everything
+                $categories.find('.expand-arrow').removeClass('expanded');
+                $categories.find('.category-items, .category-subcategories, .subcategory-items, .subcategory-nested, .keyword-items').hide();
+                $btn.text('⬇️ Expand All').data('af-expanded', false);
+            }
+        });
         // When collapsed, defer initialization until first expand (saves ~700+ SVG requests)
         if (this.expanded) {
             setTimeout(() => {
                 this.initializeItemRows();
             }, 0);
+        }
+
+        // Search input handler
+        this.$element.on('input', '.owned-items-search', (e) => {
+            this.applySearch(e.target.value);
+        });
+
+        // Custom items: create button
+        this.$element.on('click', '.btn-create-generic-item', (e) => {
+            e.stopPropagation();
+            import('./generic-item-form.js').then(mod => mod.default.show());
+        });
+
+        // Custom items: community toggle
+        this.$element.on('change', '.gi-show-community-col1', async (e) => {
+            e.stopPropagation();
+            if (!store.state.column1) store.state.column1 = {};
+            const checked = $(e.target).is(':checked');
+            store.state.column1.showGenericItemCommunity = checked;
+            // Persist to session
+            const uuid = store.state.session?.uuid;
+            if (uuid) {
+                api.updateConfig(uuid, 'ui.column1.showGenericItemCommunity', checked);
+            }
+
+            // Get the user's own items (non-community) as the base
+            const userItems = (store.state.genericItems || []).filter(i => !i._community);
+
+            if (checked) {
+                try {
+                    const community = await api.getCommunityDefinitions();
+                    const communityItems = community.items || [];
+                    // Filter out items the user already owns (by id AND by name to catch seed data)
+                    const existingIds = new Set(userItems.map(i => i.id));
+                    const existingNames = new Set(userItems.map(i => (i.name || '').toLowerCase()));
+                    const newItems = communityItems.filter(ci =>
+                        !existingIds.has(ci.id) && !existingNames.has((ci.name || '').toLowerCase())
+                    );
+                    store.state.communityGenericItems = newItems;
+                    store.state.genericItems = [...userItems, ...newItems.map(ci => ({ ...ci, _community: true }))];
+                } catch (err) {
+                    console.warn('Failed to load community generic items:', err);
+                }
+            } else {
+                // Remove community items from genericItems, keep user's own
+                store.state.genericItems = userItems;
+                store.state.communityGenericItems = [];
+            }
+
+            this._refreshCustomItemsSubcategories();
+        });
+    }
+
+    /**
+     * Refresh the custom items subcategories in-place without collapsing the category.
+     * Cleans up stale ItemRow components and rebuilds slot subcategories from store.state.genericItems.
+     */
+    _refreshCustomItemsSubcategories() {
+        const $category = this.$element.find('[data-category="custom-items"]');
+        if (!$category.length) return;
+
+        const items = store.state.genericItems || [];
+
+        // Ensure each item has a state entry
+        for (const gi of items) {
+            const stateId = `generic::item::${gi.id}`;
+            if (!store.state.items[stateId]) {
+                store.state.items[stateId] = { has: false };
+            }
+        }
+
+        // Update the count in the header
+        $category.find('.category-header .category-count').text(items.length);
+
+        // Destroy ALL generic item components — DOM is about to be rebuilt
+        for (const [key, component] of this.itemComponents.entries()) {
+            if (key.startsWith('generic::item::')) {
+                if (component.destroy) component.destroy();
+                this.itemComponents.delete(key);
+            }
+        }
+
+        // Remove existing slot subcategories (but keep .gi-category-controls)
+        const $subcategories = $category.find('.category-subcategories');
+        $subcategories.find('.collapsible-subcategory').remove();
+        $subcategories.find('.gi-no-items-msg').remove();
+
+        // Build and append new subcategory HTML
+        const slotOrder = ['head', 'cape', 'back', 'chest', 'hands', 'legs', 'neck', 'feet', 'ring', 'tool', 'primary', 'secondary', 'consumable', 'collectible', 'input', 'pet'];
+        const slotLabels = {
+            head: 'Head', cape: 'Cape', back: 'Back', chest: 'Chest',
+            hands: 'Hands', legs: 'Legs', neck: 'Neck', feet: 'Feet',
+            ring: 'Ring', tool: 'Tool', primary: 'Primary', secondary: 'Secondary',
+            consumable: 'Consumable', collectible: 'Collectible', input: 'Input', pet: 'Pet'
+        };
+        const bySlot = {};
+        for (const item of items) {
+            const slot = item.slot || 'tool';
+            if (!bySlot[slot]) bySlot[slot] = [];
+            bySlot[slot].push(item);
+        }
+
+        if (items.length === 0) {
+            $subcategories.append('<div class="gi-no-items-msg" style="padding:4px 0;color:var(--text-secondary);font-size:12px">No custom items yet.</div>');
+        } else {
+            for (const slot of slotOrder) {
+                if (!bySlot[slot] || bySlot[slot].length === 0) continue;
+                const slotItems = bySlot[slot];
+                const rows = slotItems.map(item => {
+                    const stateId = `generic::item::${item.id}`;
+                    return `<div class="item-row-container" data-item-id="${stateId}"></div>`;
+                }).join('');
+                const label = slotLabels[slot] || slot.charAt(0).toUpperCase() + slot.slice(1);
+                $subcategories.append(`
+                    <div class="subcategory collapsible-subcategory" data-subcategory="gi-${slot}">
+                        <div class="subcategory-header clickable">
+                            <img src="/assets/icons/slots/${slot}.svg" class="gi-slot-subcat-icon" />
+                            <span class="subcategory-title">${label}</span>
+                            <span class="subcategory-count">${slotItems.length}</span>
+                            <span class="expand-arrow">▼</span>
+                        </div>
+                        <div class="subcategory-items" style="display:none">${rows}</div>
+                    </div>`);
+            }
+        }
+
+        // Initialize ItemRows for the new containers
+        $subcategories.find('.item-row-container').each((i, container) => {
+            this.initializeItemRow(container);
+        });
+    }
+
+    /**
+     * Scroll the column container so that the expanded header and its content
+     * are visible. If the content extends below the viewport, scroll up so the
+     * header sits near the top of the visible area.
+     * @param {jQuery} $header - The header element that was clicked to expand
+     */
+    _scrollToFitExpanded($header) {
+        // On mobile, .column scrolls; on desktop, .column-content scrolls
+        let $scrollContainer = this.$element.closest('.column-content');
+        if (!$scrollContainer.length || $scrollContainer[0].scrollHeight <= $scrollContainer[0].clientHeight) {
+            $scrollContainer = this.$element.closest('.column');
+        }
+        if (!$scrollContainer.length) return;
+
+        const scrollContainer = $scrollContainer[0];
+        const headerEl = $header[0];
+        if (!headerEl) return;
+
+        const containerRect = scrollContainer.getBoundingClientRect();
+        const headerRect = headerEl.getBoundingClientRect();
+
+        // If the header is already in the top half of the viewport, no need to scroll
+        const headerRelativeTop = headerRect.top - containerRect.top;
+        const viewportHeight = containerRect.height;
+
+        // Only scroll if the header is in the bottom 40% of the visible area
+        if (headerRelativeTop > viewportHeight * 0.6) {
+            const targetScrollTop = scrollContainer.scrollTop + headerRelativeTop - 80;
+            $scrollContainer.animate({ scrollTop: targetScrollTop }, 200);
         }
     }
 
@@ -717,17 +1268,20 @@ class OwnedItemsSection extends CollapsibleSection {
      * Initialize ItemRow components for all item containers
      */
     initializeItemRows() {
-        console.log('Initializing ItemRow components...');
-
-        // Find all item row containers
-        const $containers = this.$element.find('.item-row-container');
-        console.log(`Found ${$containers.length} item containers`);
+        // Only mount rows that are actually VISIBLE. Every category/subcategory/
+        // keyword group renders collapsed (display:none) by default and lazily
+        // mounts its own rows on expand via initializeItemRowsInContainer(), and
+        // search lazily mounts matching rows. Mounting every row here — including
+        // the ~700 hidden ones — needlessly builds DOM and fires hundreds of icon
+        // (SVG) requests on a single blocking task, which froze page load for
+        // 25-30s whenever the Owned Items section was expanded on load.
+        // Scoping to :visible makes this a no-op on a freshly-rendered (collapsed)
+        // section while still mounting rows in any category the user has expanded.
+        const $containers = this.$element.find('.item-row-container:visible');
 
         $containers.each((i, container) => {
             this.initializeItemRow(container);
         });
-
-        console.log(`Initialized ${this.itemComponents.size} ItemRow components`);
     }
 
     /**
@@ -750,12 +1304,14 @@ class OwnedItemsSection extends CollapsibleSection {
     initializeItemRow(container) {
         const $container = $(container);
         const itemId = $container.data('item-id');
+        const skill = $container.data('skill');
+        const subcat = $container.data('subcat');
 
-        console.log('initializeItemRow called for:', itemId);
+        // Use composite key when item appears in multiple subcategories
+        const componentKey = skill ? `${itemId}__${skill}` : (subcat ? `${itemId}__${subcat}` : itemId);
 
         // Skip if already initialized
-        if (this.itemComponents.has(itemId)) {
-            console.log('  Already initialized, skipping');
+        if (this.itemComponents.has(componentKey)) {
             return;
         }
 
@@ -768,16 +1324,13 @@ class OwnedItemsSection extends CollapsibleSection {
             return;
         }
 
-        console.log('  Found item:', item.name);
-
         // Determine if this is a crafted item (needs quality dropdown)
         const showQuality = item.type === 'crafted_item';
 
         // Create ItemRow component
         try {
             const itemRow = new ItemRow(container, { item, showQuality });
-            this.itemComponents.set(itemId, itemRow);
-            console.log('  ItemRow created successfully');
+            this.itemComponents.set(componentKey, itemRow);
         } catch (error) {
             console.error(`Failed to create ItemRow for ${item.name}:`, error);
             // Remove the container if ItemRow creation fails
@@ -800,9 +1353,20 @@ class OwnedItemsSection extends CollapsibleSection {
         // Search through all categories
         const categories = catalog.categories;
 
-        // Collectibles
-        for (const item of (categories.collectibles || [])) {
-            if (item.id === itemId) return item;
+        // Collectibles (dict of subcategories)
+        const collectibles = categories.collectibles || {};
+        for (const subcatData of Object.values(collectibles)) {
+            if (Array.isArray(subcatData)) {
+                for (const item of subcatData) {
+                    if (item.id === itemId) return item;
+                }
+            } else if (typeof subcatData === 'object') {
+                for (const groupItems of Object.values(subcatData)) {
+                    for (const item of groupItems) {
+                        if (item.id === itemId) return item;
+                    }
+                }
+            }
         }
 
         // Consumables
@@ -853,7 +1417,124 @@ class OwnedItemsSection extends CollapsibleSection {
             if (item.id === itemId) return item;
         }
 
+        // Generic items (custom user-created items)
+        if (itemId.startsWith('generic::item::')) {
+            const genericId = itemId.replace('generic::item::', '');
+            const genericItems = store.state.genericItems || [];
+            const gi = genericItems.find(g => g.id === genericId);
+            if (gi) return this._genericItemToCatalogItem(gi);
+        }
+
         return null;
+    }
+
+    /**
+     * Build a map of item ID -> lowercase name for fast search filtering
+     */
+    _buildItemNameMap() {
+        const map = {};
+        const allItems = this.getAllItems();
+        for (const item of allItems) {
+            // Include both name and keywords for search
+            const keywords = (item.keywords || []).join(' ').toLowerCase();
+            map[item.id] = `${(item.name || '').toLowerCase()} ${keywords}`;
+        }
+        const chests = (this.catalog && this.catalog.categories && this.catalog.categories.chests) || {};
+        for (const chest of Object.values(chests)) {
+            if (chest.contents) {
+                for (const item of chest.contents) {
+                    const keywords = (item.keywords || []).join(' ').toLowerCase();
+                    map[item.id] = `${(item.name || '').toLowerCase()} ${keywords}`;
+                }
+            }
+        }
+        // Include generic items in search (searchable by name and keywords)
+        const genericItems = store.state.genericItems || [];
+        for (const item of genericItems) {
+            const keywords = (item.keywords || []).join(' ').toLowerCase();
+            map[`generic::item::${item.id}`] = `${(item.name || '').toLowerCase()} ${keywords}`;
+        }
+        return map;
+    }
+
+    /**
+     * Apply search filter - hide/show item rows and auto-expand matching sections
+     */
+    applySearch(searchText) {
+        this.searchText = searchText;
+        const query = searchText.toLowerCase().trim();
+        const $container = this.$element.find('.owned-items-categories');
+
+        if (!query) {
+            // Clear search: remove all search classes, restore normal state
+            $container.find('.search-match').removeClass('search-match');
+            $container.find('.search-no-match').removeClass('search-no-match');
+            $container.find('.search-hidden').removeClass('search-hidden');
+            $container.find('.search-expanded').each((_, el) => {
+                // Collapse sections that were auto-expanded by search
+                const $el = $(el);
+                $el.removeClass('search-expanded');
+                $el.find('> .category-items, > .category-subcategories, > .subcategory-items, > .subcategory-nested, > .keyword-items').hide();
+                $el.find('> .category-header > .expand-arrow, > .subcategory-header > .expand-arrow, > .keyword-header > .expand-arrow').removeClass('expanded');
+            });
+            return;
+        }
+
+        // Build name map lazily on first search
+        if (!this.itemNameMap) {
+            this.itemNameMap = this._buildItemNameMap();
+        }
+
+        // Mark item rows as match/no-match using classes (works even when parent is hidden)
+        $container.find('.item-row-container').each((_, el) => {
+            const $el = $(el);
+            const itemId = $el.data('item-id');
+            const name = this.itemNameMap[itemId] || '';
+            const matches = name.includes(query);
+            $el.toggleClass('search-match', matches);
+            $el.toggleClass('search-no-match', !matches);
+        });
+
+        // Keyword groups: hide if no matching items, auto-expand if matches
+        $container.find('.collapsible-keyword').each((_, el) => {
+            const $group = $(el);
+            const hasMatch = $group.find('.item-row-container.search-match').length > 0;
+            $group.toggleClass('search-hidden', !hasMatch);
+            if (hasMatch) {
+                $group.addClass('search-expanded');
+                $group.find('.keyword-items').show();
+                $group.find('.keyword-header > .expand-arrow').addClass('expanded');
+            }
+        });
+
+        // Subcategories
+        $container.find('.collapsible-subcategory').each((_, el) => {
+            const $sub = $(el);
+            const hasMatch = $sub.find('.item-row-container.search-match').length > 0;
+            $sub.toggleClass('search-hidden', !hasMatch);
+            if (hasMatch) {
+                $sub.addClass('search-expanded');
+                $sub.find('> .subcategory-items, > .subcategory-nested').show();
+                $sub.find('> .subcategory-header > .expand-arrow').addClass('expanded');
+            }
+        });
+
+        // Categories
+        $container.find('.collapsible-category').each((_, el) => {
+            const $cat = $(el);
+            const hasMatch = $cat.find('.item-row-container.search-match').length > 0;
+            $cat.toggleClass('search-hidden', !hasMatch);
+            if (hasMatch) {
+                $cat.addClass('search-expanded');
+                $cat.find('> .category-items, > .category-subcategories').show();
+                $cat.find('> .category-header > .expand-arrow').addClass('expanded');
+            }
+        });
+
+        // Initialize any matching item rows that haven't been initialized yet
+        $container.find('.item-row-container.search-match').each((_, el) => {
+            this.initializeItemRow(el);
+        });
     }
 
     /**

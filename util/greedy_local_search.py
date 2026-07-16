@@ -626,8 +626,10 @@ def optimize_for_activity(
         needed_keywords = {kw for kw, required in required_keywords.items() 
                           if current_keyword_counts[kw] < required}
         
-        best_item = None
-        best_metric = float('inf') if not sorting_priority[0].is_reverse else float('-inf')
+        best_keyword_item = None  # Best item that satisfies a needed keyword
+        best_keyword_metric = float('inf') if not sorting_priority[0].is_reverse else float('-inf')
+        best_free_item = None  # Best item regardless of keywords
+        best_free_metric = float('inf') if not sorting_priority[0].is_reverse else float('-inf')
         
         for item in all_items:
             if not hasattr(item, 'slot') or item.slot != item_slot:
@@ -635,10 +637,6 @@ def optimize_for_activity(
             
             # Check which needed keywords this item has
             item_keywords = {kw for kw in needed_keywords if item_has_keyword_fn(item, kw)}
-            
-            # Skip if we need keywords but this item doesn't have any
-            if needed_keywords and not item_keywords:
-                continue
             
             # Test this item in the slot
             test_gearset = gearset.copy()
@@ -651,21 +649,30 @@ def optimize_for_activity(
             metrics, _ = calculate_metrics_fn(test_gearset)
             metric_value = metrics[sorting_priority[0].metric_key]
             
-            # Boost items that have needed keywords
+            # Track best keyword item separately from best free item
             if item_keywords:
+                boosted = metric_value * 0.5 if not sorting_priority[0].is_reverse else metric_value * 1.5
                 if sorting_priority[0].is_reverse:
-                    metric_value = metric_value * 1.5  # Boost for maximize metrics
+                    if boosted > best_keyword_metric:
+                        best_keyword_metric = boosted
+                        best_keyword_item = item
                 else:
-                    metric_value = metric_value * 0.5  # Boost for minimize metrics (lower is better)
+                    if boosted < best_keyword_metric:
+                        best_keyword_metric = boosted
+                        best_keyword_item = item
             
+            # Always track best free item
             if sorting_priority[0].is_reverse:
-                if metric_value > best_metric:
-                    best_metric = metric_value
-                    best_item = item
+                if metric_value > best_free_metric:
+                    best_free_metric = metric_value
+                    best_free_item = item
             else:
-                if metric_value < best_metric:
-                    best_metric = metric_value
-                    best_item = item
+                if metric_value < best_free_metric:
+                    best_free_metric = metric_value
+                    best_free_item = item
+        
+        # Prefer keyword item when we still need keywords, otherwise pick best free item
+        best_item = best_keyword_item if (needed_keywords and best_keyword_item) else best_free_item
         
         gearset[slot] = best_item
         
@@ -698,8 +705,10 @@ def optimize_for_activity(
         needed_keywords = {kw for kw, required in required_keywords.items() 
                           if current_keyword_counts[kw] < required}
         
-        best_tool = None
-        best_metric = float('inf') if not sorting_priority[0].is_reverse else float('-inf')
+        best_keyword_tool = None  # Best tool that satisfies a needed keyword
+        best_keyword_metric = float('inf') if not sorting_priority[0].is_reverse else float('-inf')
+        best_free_tool = None  # Best tool regardless of keywords
+        best_free_metric = float('inf') if not sorting_priority[0].is_reverse else float('-inf')
         
         for item in all_items:
             if not hasattr(item, 'slot') or item.slot != 'tools':
@@ -707,10 +716,6 @@ def optimize_for_activity(
             
             # Check which needed keywords this item has
             item_keywords = {kw for kw in needed_keywords if item_has_keyword_fn(item, kw)}
-            
-            # Skip if we need keywords but this item doesn't have any
-            if needed_keywords and not item_keywords:
-                continue
             
             # Test this tool
             test_gearset = gearset.copy()
@@ -723,21 +728,30 @@ def optimize_for_activity(
             metrics, _ = calculate_metrics_fn(test_gearset)
             metric_value = metrics[sorting_priority[0].metric_key]
             
-            # Boost items that have needed keywords
+            # Track best keyword tool separately from best free tool
             if item_keywords:
+                boosted = metric_value * 0.5 if not sorting_priority[0].is_reverse else metric_value * 1.5
                 if sorting_priority[0].is_reverse:
-                    metric_value = metric_value * 1.5  # Boost for maximize metrics
+                    if boosted > best_keyword_metric:
+                        best_keyword_metric = boosted
+                        best_keyword_tool = item
                 else:
-                    metric_value = metric_value * 0.5  # Boost for minimize metrics (lower is better)
+                    if boosted < best_keyword_metric:
+                        best_keyword_metric = boosted
+                        best_keyword_tool = item
             
+            # Always track best free tool
             if sorting_priority[0].is_reverse:
-                if metric_value > best_metric:
-                    best_metric = metric_value
-                    best_tool = item
+                if metric_value > best_free_metric:
+                    best_free_metric = metric_value
+                    best_free_tool = item
             else:
-                if metric_value < best_metric:
-                    best_metric = metric_value
-                    best_tool = item
+                if metric_value < best_free_metric:
+                    best_free_metric = metric_value
+                    best_free_tool = item
+        
+        # Prefer keyword tool when we still need keywords, otherwise pick best free tool
+        best_tool = best_keyword_tool if (needed_keywords and best_keyword_tool) else best_free_tool
         
         gearset[slot] = best_tool
         
@@ -762,11 +776,19 @@ def optimize_for_activity(
         print(f"{'='*70}")
     
     current_gearset = gearset.copy()
-    metric_key = sorting_priority[0].metric_key
+    _primary = sorting_priority[0]
+    metric_key = _primary.metric_key
     
     # Calculate initial metrics
     current_metrics, current_stats = calculate_metrics_fn(current_gearset)
-    current_value = current_metrics[metric_key]
+    # Safe lookup: falls back to the bare key when the primary entry's
+    # target doesn't map to a composite key on the metrics dict (happens
+    # with non-duplicable sorts that still carry a UI-level target, e.g.
+    # MATERIALS_PER_CHEST + cat:if:adventurers_guild_tokens).
+    current_value = current_metrics.get(
+        metric_key,
+        current_metrics.get(_primary.sort.metric_key, 0.0),
+    )
     
     if verbose:
         print(f"Initial {metric_key}: {current_value:.4f}")
@@ -1053,7 +1075,16 @@ def optimize_for_activity(
     # Get initial metrics
     try:
         current_metrics, current_stats = calculate_metrics_fn(current_gearset)
-        current_value = current_metrics[sorting_priority[0].metric_key]
+        # Safe lookup: falls back to the bare key when the primary entry's
+        # target (e.g. cat:if:adventurers_guild_tokens) doesn't correspond
+        # to a composite metric key written by the scorer. Without this
+        # fallback, target-bearing entries on non-duplicable sorts crash
+        # with KeyError here.
+        _primary = sorting_priority[0]
+        current_value = current_metrics.get(
+            _primary.metric_key,
+            current_metrics.get(_primary.sort.metric_key, 0.0),
+        )
     except Exception as e:
         if verbose:
             print(f"  Error calculating initial metrics: {e}")

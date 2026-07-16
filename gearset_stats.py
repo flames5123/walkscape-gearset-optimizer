@@ -15,7 +15,7 @@ GEARSET_EXPORT = "H4sIAAAAAAAAA62V3WrbQBCF30XXGdj/n9yXPkRdxOzurK1GllxJbmpC3r2jFA
 SKILL = Skill.CARPENTRY
 
 # Region for location-aware stats (e.g., "Jarvonia", "Trellin", "Erdwise", "underwater", "global")
-REGION = Location.BLACKSPELL_PORT
+REGION = Location.BLACKSPELL_HARBOUR
 
 # Load character to get collectibles
 character = get_character()

@@ -16,3 +16,12 @@ httpx==0.26.0  # Required for FastAPI TestClient
 
 # Database (SQLite is built-in to Python)
 # No additional dependencies needed for SQLite
+
+# Discord Bot
+discord.py==2.3.2
+
+# Web Push Notifications
+pywebpush==2.0.0
+
+# Linear programming solver — used by crafting tree holistic optimization
+scipy>=1.11

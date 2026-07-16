@@ -16,33 +16,47 @@ CACHE_FILE = get_cache_file('routes_cache.html')
 validator = ScraperValidator()
 
 def parse_requirement(note_text):
-    """Parse requirement from note text into keyword_counts format."""
+    """Parse requirement from note text into a list of requirement tuples.
+
+    Returns a list of requirement tuples. Each tuple is one of:
+      ('collectible', item_name)
+      ('ability', ability_name)
+      ('keyword_counts', {keyword: count})
+      ('agility_level', level_int)
+
+    Multiple requirements can coexist on the same route (e.g., skis + agility level).
+    """
     note_lower = note_text.lower()
-    
+    requirements = []
+
     # Check for collectible requirement: "Have item X with you"
     if 'have item' in note_lower and 'with you' in note_lower:
-        # Extract item name from the text
         match = re.search(r'have item\s+(.+?)\s+with you', note_text, re.IGNORECASE)
         if match:
             item_name = match.group(1).strip()
-            return ('collectible', item_name)
-    
+            requirements.append(('collectible', item_name))
+
     # Check for ability requirement: "While having X ability"
     if 'while having' in note_lower and 'ability' in note_lower:
-        # Extract ability name
         match = re.search(r'while having\s+(.+?)\s+ability', note_text, re.IGNORECASE)
         if match:
             ability_name = match.group(1).strip()
-            return ('ability', ability_name)
-    
+            requirements.append(('ability', ability_name))
+
+    # Check for agility level requirement: "At least Agility lvl. N" or "Agility level N"
+    agility_match = re.search(r'agility\s+lvl?\.?\s*(\d+)', note_lower)
+    if agility_match:
+        level = int(agility_match.group(1))
+        requirements.append(('agility_level', level))
+
     # Parse keyword requirements with counts (can have multiple on same route)
     keyword_counts = {}
-    
-    # Check for diving gear requirements - look for [N] unique pattern
-    expert_match = re.search(r'\[(\d+)\]\s+unique\s+expert\s+diving\s+gear', note_lower)
-    advanced_match = re.search(r'\[(\d+)\]\s+unique\s+advanced\s+diving\s+gear', note_lower)
-    diving_match = re.search(r'\[(\d+)\]\s+unique\s+diving\s+gear', note_lower)
-    
+
+    # Check for diving gear requirements - look for [N] (unique) pattern
+    expert_match = re.search(r'\[(\d+)\]\s+(?:unique\s+)?expert\s+diving\s+gear', note_lower)
+    advanced_match = re.search(r'\[(\d+)\]\s+(?:unique\s+)?advanced\s+diving\s+gear', note_lower)
+    diving_match = re.search(r'\[(\d+)\]\s+(?:unique\s+)?diving\s+gear', note_lower)
+
     if expert_match:
         keyword_counts['expert diving gear'] = int(expert_match.group(1))
     elif advanced_match:
@@ -55,25 +69,24 @@ def parse_requirement(note_text):
         keyword_counts['advanced diving gear'] = 3
     elif 'diving' in note_lower or 'underwater' in note_lower:
         keyword_counts['diving gear'] = 3
-    
+
     # Check for ski requirements
     if 'skis' in note_lower or 'ski' in note_lower:
         keyword_counts['skis'] = 1
-    
-    # Check for light source requirements - look for [N] unique pattern
-    light_match = re.search(r'\[(\d+)\]\s+unique\s+light\s+source', note_lower)
+
+    # Check for light source requirements - look for [N] (unique) pattern
+    light_match = re.search(r'\[(\d+)\]\s+(?:unique\s+)?light\s+source', note_lower)
     if light_match:
         keyword_counts['light source'] = int(light_match.group(1))
     elif '3 light' in note_lower or 'three light' in note_lower:
         keyword_counts['light source'] = 3
     elif '2 light' in note_lower or 'two light' in note_lower:
         keyword_counts['light source'] = 2
-    
-    # Return keyword_counts if any found
+
     if keyword_counts:
-        return ('keyword_counts', keyword_counts)
-    
-    return None
+        requirements.append(('keyword_counts', keyword_counts))
+
+    return requirements if requirements else None
 
 def parse_routes():
     """Parse all routes from the cached HTML file."""
@@ -110,10 +123,10 @@ def parse_routes():
                 continue
             
             # Parse requirements from requirements column
-            requirement = None
+            requirements = None
             if len(cells) >= 7:
                 note_text = clean_text(cells[6].get_text())
-                requirement = parse_requirement(note_text)
+                requirements = parse_requirement(note_text)
             
             # Convert location names to enum format
             start_enum = name_to_enum(start_loc)
@@ -124,7 +137,7 @@ def parse_routes():
                 'start': start_enum,
                 'end': end_enum,
                 'distance': distance,
-                'requirement': requirement
+                'requirements': requirements  # Now a list of requirement tuples or None
             }
             
             routes.append(route)
@@ -161,21 +174,25 @@ def generate_routes_module(routes):
             end = f"Location.{route['end']}"
             distance = route['distance']
             
-            if route['requirement']:
-                req_type, req_value = route['requirement']
+            if route['requirements']:
+                # Build route dict with all requirements
+                parts = [f"'distance': {distance}"]
                 
-                if req_type == 'collectible':
-                    # Try to resolve to Collectible enum
-                    collectible_ref = collectibles_map.get(req_value.lower())
-                    if collectible_ref:
-                        lines.append(f"    ({start}, {end}): {{'distance': {distance}, 'requires': ('collectible', '{collectible_ref}')}},")
-                    else:
-                        lines.append(f"    ({start}, {end}): {{'distance': {distance}, 'requires': ('collectible', '{req_value}')}},")
-                elif req_type == 'ability':
-                    lines.append(f"    ({start}, {end}): {{'distance': {distance}, 'requires': ('ability', '{req_value}')}},")
-                elif req_type == 'keyword_counts':
-                    # New format: keyword_counts dict
-                    lines.append(f"    ({start}, {end}): {{'distance': {distance}, 'keyword_counts': {req_value}}},")
+                for req_type, req_value in route['requirements']:
+                    if req_type == 'collectible':
+                        collectible_ref = collectibles_map.get(req_value.lower())
+                        if collectible_ref:
+                            parts.append(f"'requires': ('collectible', '{collectible_ref}')")
+                        else:
+                            parts.append(f"'requires': ('collectible', '{req_value}')")
+                    elif req_type == 'ability':
+                        parts.append(f"'requires': ('ability', '{req_value}')")
+                    elif req_type == 'keyword_counts':
+                        parts.append(f"'keyword_counts': {req_value}")
+                    elif req_type == 'agility_level':
+                        parts.append(f"'agility_level': {req_value}")
+                
+                lines.append(f"    ({start}, {end}): {{{', '.join(parts)}}},")
             else:
                 lines.append(f"    ({start}, {end}): {{'distance': {distance}}},")
         

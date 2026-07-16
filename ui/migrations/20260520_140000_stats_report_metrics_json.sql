@@ -1,0 +1,12 @@
+-- Add metrics_json column to stats_report_gearsets so the worker can record
+-- the optimizer's underlying metric breakdown (displayed/expected steps per
+-- action, primary/secondary XP per action). The frontend uses this for:
+--   * "Steps to next level" calculation (needs displayed_steps_per_action and
+--     expected_steps_per_action separately so it can apply the floor rule
+--     described in user spec).
+--   * Secondary XP popover for activities like Treasure hunt that grant XP
+--     to multiple skills per action.
+--
+-- Older rows (before this migration ran) will have metrics_json = NULL; the
+-- frontend tolerates that and falls back to showing only the primary metric.
+ALTER TABLE stats_report_gearsets ADD COLUMN metrics_json TEXT;

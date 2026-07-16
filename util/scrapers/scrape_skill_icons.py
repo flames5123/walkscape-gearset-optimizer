@@ -102,7 +102,7 @@ def download_all_icons():
     print()
     
     # Define which icons go where
-    skill_names = ['fishing', 'foraging', 'mining', 'woodcutting', 
+    skill_names = ['fishing', 'foraging', 'mining', 'woodcutting', 'hunting', 'tailoring', 
                    'carpentry', 'cooking', 'crafting', 'smithing', 'trinketry', 'agility']
     category_names = ['gathering', 'artisan', 'utility']
     

@@ -1,0 +1,4 @@
+{
+    "//": "Marks this directory as ESM so node:test files in ./tests can import root-level .js modules (e.g. walkdle-engine.js). The browser ignores this file; it only affects Node's module resolution. Mirrors utils/package.json.",
+    "type": "module"
+}

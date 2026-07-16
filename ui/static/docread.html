@@ -1,0 +1,2451 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Doc Reader - Walkscape Optimizer</title>
+    <link rel="icon"
+        href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📚</text></svg>">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <style>
+        /* Custom highlight.js theme matching Kiro IDE colors */
+        .hljs {
+            background: #101010;
+            color: #d4d4d4;
+            font-variant-ligatures: contextual;
+        }
+
+        .hljs-keyword,
+        .hljs-selector-tag {
+            color: #FF5010;
+        }
+
+        .hljs-type {
+            color: #7A9B7A;
+        }
+
+        .hljs-built_in,
+        .hljs-selector-class {
+            color: #59A9FF;
+        }
+
+        .hljs-string,
+        .hljs-string .hljs-subst {
+            color: #FF9147;
+        }
+
+        .hljs-number,
+        .hljs-literal {
+            color: #C180FF;
+        }
+
+        .hljs-comment,
+        .hljs-doctag {
+            color: #4DB84D;
+        }
+
+        .hljs-function .hljs-title,
+        .hljs-title.function_ {
+            color: #AAFF00;
+        }
+
+        .hljs-title,
+        .hljs-title.class_,
+        .hljs-title.class_.inherited__ {
+            color: #59A9FF;
+        }
+
+        .hljs-variable,
+        .hljs-template-variable {
+            color: #FFC598;
+        }
+
+        .hljs-variable.constant_ {
+            color: #1956FF;
+        }
+
+        .hljs-attr {
+            color: #00A6FF;
+        }
+
+        .hljs-attribute {
+            color: #9CDCFE;
+        }
+
+        .hljs-params {
+            color: #FFAE4B;
+        }
+
+        .hljs-property {
+            color: #D3BA00;
+        }
+
+        .hljs-meta {
+            color: #569CD6;
+        }
+
+        .hljs-regexp {
+            color: #D16969;
+        }
+
+        .hljs-tag {
+            color: #569CD6;
+        }
+
+        .hljs-name {
+            color: #569CD6;
+        }
+
+        .hljs-symbol,
+        .hljs-bullet,
+        .hljs-link {
+            color: #B5CEA8;
+        }
+
+        .hljs-selector-id,
+        .hljs-selector-attr,
+        .hljs-selector-pseudo {
+            color: #D7BA7D;
+        }
+
+        .hljs-addition {
+            color: #B5CEA8;
+        }
+
+        .hljs-deletion {
+            color: #CE9178;
+        }
+
+        .hljs-section {
+            color: #569CD6;
+            font-weight: bold;
+        }
+
+        .hljs-emphasis {
+            font-style: italic;
+        }
+
+        .hljs-strong {
+            font-weight: bold;
+        }
+
+        .hljs-punctuation {
+            color: #E8E8E8;
+        }
+
+        .hljs-operator {
+            color: #E8E8E8;
+        }
+
+        .hljs-null,
+        .hljs-language_ .hljs-literal {
+            color: #FF0D00;
+        }
+
+        /* Extra: object variables, enum members, JSON keys */
+        .hljs-variable.language_ {
+            color: #48CDF9;
+        }
+
+        .hljs-subst {
+            color: #48CDF9;
+        }
+    </style>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: #060c0f;
+            color: #e0e0e0;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            line-height: 1.7;
+            padding: 40px 20px 80px;
+        }
+
+        #toolbar {
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            background: #060c0f;
+            padding: 12px 0 8px;
+            margin: 0 auto 8px;
+        }
+
+        #toolbar-inner {
+            max-width: 820px;
+            margin: 0 auto;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex-wrap: wrap;
+            width: 100%;
+            padding: 0 20px;
+        }
+
+        #toolbar select {
+            background: #0d191f;
+            border: 1px solid #2a3a44;
+            color: #e0e0e0;
+            padding: 6px 12px;
+            border-radius: 6px;
+            font-family: inherit;
+            font-size: 13px;
+            cursor: pointer;
+            min-width: 260px;
+        }
+
+        #toolbar select:hover,
+        #toolbar select:focus {
+            border-color: #4a9eff;
+            outline: none;
+        }
+
+        #toolbar button {
+            background: #0d191f;
+            border: 1px solid #2a3a44;
+            color: #e0e0e0;
+            padding: 6px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-family: inherit;
+            font-size: 13px;
+            transition: border-color 0.15s;
+        }
+
+        #toolbar button.active {
+            background: #1a3a50;
+            border-color: #4a9eff;
+            color: #4a9eff;
+        }
+
+        #toolbar button:hover {
+            border-color: #4a9eff;
+        }
+
+        #diff-badge {
+            font-size: 12px;
+            color: #90b0c8;
+        }
+
+        #comment-count {
+            font-size: 12px;
+            color: #c8a040;
+            margin-left: auto;
+        }
+
+        #content {
+            max-width: 820px;
+            margin: 0 auto;
+            background: #0d191f;
+            border: 1px solid #2a3a44;
+            border-radius: 8px;
+            padding: 48px 56px;
+            box-shadow: 0 2px 20px rgba(0, 0, 0, 0.4);
+        }
+
+        h1 {
+            font-size: 2em;
+            margin-bottom: 0.4em;
+            color: #e8d8b0;
+            border-bottom: 2px solid #4a9eff;
+            padding-bottom: 0.3em;
+        }
+
+        h2 {
+            font-size: 1.4em;
+            margin: 1.8em 0 0.5em;
+            color: #c8b890;
+            border-bottom: 1px solid #2a3a44;
+            padding-bottom: 0.2em;
+        }
+
+        h3 {
+            font-size: 1.15em;
+            margin: 1.4em 0 0.4em;
+            color: #a0c8e0;
+        }
+
+        h4 {
+            font-size: 1em;
+            margin: 1.2em 0 0.3em;
+            color: #b0b0b0;
+            font-style: italic;
+        }
+
+        p {
+            margin: 0.6em 0;
+        }
+
+        ul,
+        ol {
+            margin: 0.5em 0 0.5em 1.8em;
+        }
+
+        li {
+            margin: 0.3em 0;
+        }
+
+        code {
+            background: #0f2030;
+            border: 1px solid #2a3a44;
+            border-radius: 3px;
+            padding: 1px 5px;
+            font-family: 'Fira Code', 'SF Mono', 'Consolas', monospace;
+            font-size: 0.88em;
+            color: #4a9eff;
+        }
+
+        pre {
+            background: #091116;
+            border: 1px solid #2a3a44;
+            border-radius: 6px;
+            padding: 16px;
+            overflow-x: auto;
+            margin: 1em 0;
+        }
+
+        pre code {
+            background: none;
+            border: none;
+            padding: 0;
+            color: #c0d8e8;
+        }
+
+        /* Override highlight.js background to match our theme */
+        pre code.hljs {
+            background: transparent;
+            padding: 0;
+        }
+
+        /* Mermaid diagrams */
+        .mermaid-wrapper {
+            position: relative;
+            margin: 1em 0;
+        }
+
+        .mermaid {
+            text-align: center;
+            padding: 16px;
+            background: #091116;
+            border: 1px solid #2a3a44;
+            border-radius: 6px;
+            overflow-x: auto;
+        }
+
+        .mermaid-expand {
+            position: absolute;
+            bottom: 8px;
+            right: 8px;
+            width: 28px;
+            height: 28px;
+            background: rgba(255, 255, 255, 0.1);
+            border: 1px solid #2a3a44;
+            border-radius: 4px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: background 0.15s;
+        }
+
+        .mermaid-expand:hover {
+            background: rgba(255, 255, 255, 0.2);
+        }
+
+        .mermaid-expand svg {
+            width: 16px;
+            height: 16px;
+            fill: none;
+            stroke: #e0e0e0;
+            stroke-width: 2;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+
+        /* Mermaid fullscreen popup */
+        .mermaid-fullscreen {
+            position: fixed;
+            inset: 0;
+            z-index: 250;
+            background: rgba(0, 0, 0, 0.7);
+            backdrop-filter: blur(4px);
+            -webkit-backdrop-filter: blur(4px);
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.2s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .mermaid-fullscreen.visible {
+            opacity: 1;
+            pointer-events: auto;
+        }
+
+        .mermaid-fullscreen .mf-panel {
+            width: 75vw;
+            height: 75vh;
+            background: #0d191f;
+            border: 1px solid #2a3a44;
+            border-radius: 10px;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            box-shadow: 0 16px 64px rgba(0, 0, 0, 0.6);
+            transform: scale(0.95);
+            opacity: 0;
+            transition: transform 0.2s ease, opacity 0.2s ease;
+        }
+
+        @media (max-width: 768px) {
+            .mermaid-fullscreen .mf-panel {
+                width: 95vw;
+                height: 85vh;
+            }
+        }
+
+        .mermaid-fullscreen.visible .mf-panel {
+            transform: scale(1);
+            opacity: 1;
+        }
+
+        .mermaid-fullscreen .mf-toolbar {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 12px;
+            background: #101010;
+            border-bottom: 1px solid #2a3a44;
+            flex-shrink: 0;
+        }
+
+        .mermaid-fullscreen .mf-toolbar button {
+            background: #1a1a2e;
+            border: 1px solid #2a3a44;
+            color: #e0e0e0;
+            width: 32px;
+            height: 32px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 16px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            touch-action: manipulation;
+        }
+
+        .mermaid-fullscreen .mf-toolbar button:hover {
+            border-color: #4a9eff;
+        }
+
+        .mermaid-fullscreen .mf-zoom-label {
+            font-size: 13px;
+            color: #90b0c8;
+            min-width: 50px;
+            text-align: center;
+        }
+
+        .mermaid-fullscreen .mf-spacer {
+            flex: 1;
+        }
+
+        .mermaid-fullscreen .mf-viewport {
+            flex: 1;
+            overflow: hidden;
+            position: relative;
+            cursor: grab;
+            touch-action: none;
+        }
+
+        .mermaid-fullscreen .mf-viewport:active {
+            cursor: grabbing;
+        }
+
+        .mermaid-fullscreen .mf-content {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform-origin: center center;
+            transition: transform 0.25s ease;
+        }
+
+        .mermaid-fullscreen .mf-content.no-transition {
+            transition: none;
+        }
+
+        .mermaid-fullscreen .mf-content .mermaid {
+            background: transparent;
+            border: none;
+            padding: 0;
+        }
+
+        strong {
+            color: #f0e0c0;
+        }
+
+        em {
+            color: #90b8d0;
+        }
+
+        hr {
+            border: none;
+            border-top: 1px solid #2a3a44;
+            margin: 2em 0;
+        }
+
+        blockquote {
+            border-left: 4px solid #4a9eff;
+            margin: 1em 0;
+            padding: 0.5em 1em;
+            background: #091116;
+            color: #90b0c8;
+        }
+
+        table {
+            border-collapse: collapse;
+            width: 100%;
+            margin: 1em 0;
+        }
+
+        /* Wrap tables in scrollable container when they overflow */
+        #content {
+            overflow-x: hidden;
+        }
+
+        #content table {
+            display: block;
+            overflow-x: auto;
+            white-space: nowrap;
+        }
+
+        th,
+        td {
+            border: 1px solid #2a3a44;
+            padding: 8px 12px;
+            text-align: left;
+            white-space: normal;
+        }
+
+        /* Long inline code in tables should break */
+        td code,
+        th code {
+            word-break: break-all;
+        }
+
+        th {
+            background: #0f2030;
+            color: #a0c8e0;
+        }
+
+        tr:nth-child(even) {
+            background: rgba(15, 32, 48, 0.3);
+        }
+
+        .empty-state {
+            text-align: center;
+            color: #606060;
+            padding: 60px 20px;
+            font-size: 14px;
+        }
+
+        /* Diff styles */
+        .diff-added {
+            background: rgba(40, 160, 40, 0.35);
+            border-radius: 3px;
+            padding: 0 2px;
+            color: #fff;
+        }
+
+        .diff-removed {
+            background: rgba(180, 40, 40, 0.35);
+            border-radius: 3px;
+            padding: 0 2px;
+            text-decoration: line-through;
+            color: #e08080;
+        }
+
+        .line-added {
+            background: rgba(40, 160, 40, 0.12);
+            border-left: 3px solid #40c040;
+            padding-left: 6px;
+            margin: 1px 0;
+            border-radius: 0 3px 3px 0;
+        }
+
+        .line-removed {
+            background: rgba(180, 40, 40, 0.12);
+            border-left: 3px solid #c04040;
+            padding-left: 6px;
+            margin: 1px 0;
+            border-radius: 0 3px 3px 0;
+            text-decoration: line-through;
+            color: #e08080;
+        }
+
+        li.line-added,
+        li.line-removed {
+            display: list-item;
+        }
+
+        p.line-added,
+        p.line-removed,
+        h1.line-added,
+        h2.line-added,
+        h3.line-added,
+        h4.line-added,
+        h1.line-removed,
+        h2.line-removed,
+        h3.line-removed,
+        h4.line-removed {
+            display: block;
+        }
+
+        /* Comment FAB */
+        #comment-fab {
+            display: none;
+            position: fixed;
+            bottom: 24px;
+            right: 24px;
+            z-index: 260;
+            width: 56px;
+            height: 56px;
+            border-radius: 50%;
+            background: #ff4500;
+            color: #fff;
+            border: none;
+            cursor: pointer;
+            font-size: 32px;
+            font-weight: bold;
+            box-shadow: 0 4px 16px rgba(255, 69, 0, 0.4);
+            transition: transform 0.15s;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            line-height: 1;
+        }
+
+        #comment-fab:hover {
+            transform: scale(1.1);
+        }
+
+        /* Comment modal */
+        .comment-modal-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.7);
+            z-index: 300;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            backdrop-filter: blur(4px);
+            -webkit-backdrop-filter: blur(4px);
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.2s ease-in-out;
+        }
+
+        .comment-modal-overlay.visible {
+            opacity: 1;
+            pointer-events: auto;
+        }
+
+        .comment-modal {
+            background: #0d191f;
+            border: 1px solid #2a3a44;
+            border-radius: 8px;
+            padding: 24px;
+            width: 480px;
+            max-width: 90vw;
+            transform: scale(0.95);
+            opacity: 0;
+            transition: transform 0.2s ease-in-out, opacity 0.2s ease-in-out;
+        }
+
+        .comment-modal-overlay.visible .comment-modal {
+            transform: scale(1);
+            opacity: 1;
+        }
+
+        .comment-modal h3 {
+            color: #c8a040;
+            margin-bottom: 12px;
+            font-size: 1em;
+        }
+
+        .comment-modal .selected-preview {
+            background: #091116;
+            border: 1px solid #2a3a44;
+            border-radius: 4px;
+            padding: 8px 12px;
+            font-size: 13px;
+            color: #90b0c8;
+            margin-bottom: 12px;
+            max-height: 80px;
+            overflow: auto;
+            font-style: italic;
+        }
+
+        .comment-modal textarea {
+            width: 100%;
+            min-height: 80px;
+            padding: 8px;
+            border-radius: 4px;
+            border: 1px solid #2a3a44;
+            background: #060c0f;
+            color: #e0e0e0;
+            font-family: inherit;
+            font-size: 14px;
+            resize: vertical;
+            margin-bottom: 12px;
+        }
+
+        .comment-modal .modal-actions {
+            display: flex;
+            gap: 8px;
+            justify-content: flex-end;
+        }
+
+        .comment-modal button {
+            padding: 6px 16px;
+            border-radius: 4px;
+            border: 1px solid #2a3a44;
+            cursor: pointer;
+            font-size: 13px;
+        }
+
+        .comment-modal .btn-save {
+            background: #c8a040;
+            color: #000;
+            border-color: #c8a040;
+        }
+
+        .comment-modal .btn-cancel {
+            background: transparent;
+            color: #90b0c8;
+        }
+
+        /* Comments sidebar */
+        #comments-panel {
+            position: fixed;
+            top: 0;
+            right: 0;
+            bottom: 0;
+            width: 360px;
+            background: #0a1218;
+            border-left: 1px solid #2a3a44;
+            z-index: 150;
+            overflow-y: auto;
+            padding: 16px;
+            box-shadow: -4px 0 20px rgba(0, 0, 0, 0.4);
+            transform: translateX(100%);
+            transition: transform 0.25s ease;
+        }
+
+        #comments-panel.visible {
+            transform: translateX(0);
+        }
+
+        #comments-panel h3 {
+            color: #c8a040;
+            margin-bottom: 12px;
+            font-size: 1em;
+        }
+
+        .comment-entry {
+            background: #0d191f;
+            border: 1px solid #2a3a44;
+            border-radius: 6px;
+            padding: 10px;
+            margin-bottom: 8px;
+        }
+
+        .comment-entry .ce-text {
+            font-size: 12px;
+            color: #90b0c8;
+            font-style: italic;
+            margin-bottom: 4px;
+        }
+
+        .comment-entry .ce-comment {
+            font-size: 13px;
+            color: #e0e0e0;
+            margin-bottom: 4px;
+        }
+
+        .comment-entry .ce-meta {
+            font-size: 11px;
+            color: #505060;
+            display: flex;
+            justify-content: space-between;
+        }
+
+        .comment-entry .ce-delete {
+            color: #c04040;
+            cursor: pointer;
+            font-size: 11px;
+        }
+
+        .comment-entry .ce-delete:hover {
+            text-decoration: underline;
+        }
+
+        #comments-panel .panel-actions {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 12px;
+        }
+
+        #comments-panel .panel-actions button {
+            padding: 4px 10px;
+            border-radius: 4px;
+            border: 1px solid #2a3a44;
+            background: #0d191f;
+            color: #90b0c8;
+            cursor: pointer;
+            font-size: 12px;
+        }
+
+        #comments-panel .panel-actions button:hover {
+            border-color: #4a9eff;
+        }
+
+        /* Glossary popup */
+        .glossary-popup {
+            position: fixed;
+            z-index: 400;
+            background: #0d191f;
+            border: 1px solid #4a9eff;
+            border-radius: 8px;
+            padding: 8px 10px;
+            max-width: 400px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+            opacity: 0;
+            transform: scale(0.95);
+            pointer-events: none;
+            transition: opacity 0.15s ease-in-out, transform 0.15s ease-in-out;
+        }
+
+        .glossary-popup.visible {
+            opacity: 1;
+            transform: scale(1);
+            pointer-events: auto;
+        }
+
+        .glossary-popup .glossary-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 2px;
+        }
+
+        .glossary-popup h4 {
+            color: #4a9eff;
+            margin: 0;
+            font-style: normal;
+            font-size: 0.95em;
+            flex: 1;
+            min-width: 0;
+        }
+
+        .glossary-popup .close-glossary {
+            color: #606060;
+            cursor: pointer;
+            font-size: 14px;
+            line-height: 1;
+            flex-shrink: 0;
+        }
+
+        .glossary-popup .glossary-body {
+            font-size: 13px;
+            color: #c0c0d0;
+            margin: 0;
+        }
+
+        .glossary-popup .glossary-body code {
+            background: #0f2030;
+            border: 1px solid #2a3a44;
+            border-radius: 3px;
+            padding: 1px 4px;
+            font-family: 'Fira Code', 'SF Mono', 'Consolas', monospace;
+            font-size: 0.88em;
+            color: #4a9eff;
+        }
+
+        /* Glossary term highlighting */
+        .glossary-term {
+            border-bottom: 1px dotted #4a9eff;
+            cursor: help;
+        }
+
+        /* Comment-highlighted lines */
+        .has-comment {
+            position: relative;
+            background: rgba(200, 160, 64, 0.08);
+            border-left: 2px solid rgba(200, 160, 64, 0.4);
+            padding-left: 6px;
+            margin-left: -8px;
+        }
+
+        .comment-badge {
+            position: absolute;
+            right: -6px;
+            top: 2px;
+            background: #c8a040;
+            color: #000;
+            font-size: 10px;
+            font-weight: 700;
+            width: 18px;
+            height: 18px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+        }
+
+        .comment-badge:hover {
+            transform: scale(1.15);
+        }
+
+        /* Comment thread popup */
+        .comment-thread-popup {
+            position: fixed;
+            z-index: 350;
+            background: #0d191f;
+            border: 1px solid #c8a040;
+            border-radius: 8px;
+            padding: 10px;
+            width: 360px;
+            max-width: 90vw;
+            max-height: 300px;
+            overflow-y: auto;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+            opacity: 0;
+            transform: scale(0.95);
+            transition: opacity 0.15s ease, transform 0.15s ease;
+        }
+
+        .comment-thread-popup.visible {
+            opacity: 1;
+            transform: scale(1);
+        }
+
+        .thread-comment {
+            margin-bottom: 8px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid #1a2a3a;
+        }
+
+        .thread-comment:last-child {
+            margin-bottom: 0;
+            padding-bottom: 0;
+            border-bottom: none;
+        }
+
+        .tc-text {
+            font-size: 11px;
+            color: #90b0c8;
+            font-style: italic;
+            margin-bottom: 2px;
+        }
+
+        .tc-comment {
+            font-size: 13px;
+            color: #e0e0e0;
+            margin-bottom: 4px;
+        }
+
+        .tc-actions {
+            font-size: 11px;
+            color: #505060;
+            display: flex;
+            gap: 10px;
+        }
+
+        .tc-date {
+            flex: 1;
+        }
+
+        .tc-edit,
+        .tc-delete {
+            cursor: pointer;
+        }
+
+        .tc-edit {
+            color: #4a9eff;
+        }
+
+        .tc-edit:hover {
+            text-decoration: underline;
+        }
+
+        .tc-delete {
+            color: #c04040;
+        }
+
+        .tc-delete:hover {
+            text-decoration: underline;
+        }
+
+        .tc-edit-area {
+            width: 100%;
+            min-height: 50px;
+            padding: 6px;
+            border-radius: 4px;
+            border: 1px solid #2a3a44;
+            background: #060c0f;
+            color: #e0e0e0;
+            font-family: inherit;
+            font-size: 13px;
+            resize: vertical;
+            margin-bottom: 4px;
+        }
+
+        .tc-edit-actions {
+            display: flex;
+            gap: 8px;
+            font-size: 11px;
+        }
+
+        .tc-save {
+            color: #4caf50;
+            cursor: pointer;
+        }
+
+        .tc-save:hover {
+            text-decoration: underline;
+        }
+
+        .tc-cancel {
+            color: #606060;
+            cursor: pointer;
+        }
+
+        .tc-cancel:hover {
+            text-decoration: underline;
+        }
+
+        @media (max-width: 600px) {
+            #content {
+                padding: 24px 20px;
+            }
+
+            #toolbar select {
+                min-width: 100%;
+            }
+
+            #comments-panel {
+                width: 100%;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div id="toolbar">
+        <div id="toolbar-inner">
+            <select id="doc-selector" onchange="onDocChange()">
+                <option value="">— Select a document —</option>
+            </select>
+            <button id="btn-rendered" class="active" onclick="showMode('rendered')">Rendered</button>
+            <button id="btn-diff" onclick="showMode('diff')">Changes</button>
+            <span id="diff-badge"></span>
+            <span id="comment-count" style="cursor:pointer" onclick="toggleCommentsPanel()"></span>
+        </div>
+    </div>
+    <div id="content">
+        <div class="empty-state">Select a document from the dropdown above.</div>
+    </div>
+
+    <!-- Comment FAB (appears on text selection) -->
+    <button id="comment-fab" onclick="openCommentModal()">+</button>
+
+    <!-- Comment modal -->
+    <div class="comment-modal-overlay" id="comment-modal" onclick="if(event.target===this)closeCommentModal()">
+        <div class="comment-modal">
+            <h3>💬 Add Comment</h3>
+            <div class="selected-preview" id="comment-selected-text"></div>
+            <textarea id="comment-text" placeholder="Your comment..."></textarea>
+            <div class="modal-actions">
+                <button class="btn-cancel" onclick="closeCommentModal()">Cancel</button>
+                <button class="btn-save" onclick="saveComment()">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Comments sidebar panel -->
+    <div id="comments-panel">
+        <h3>💬 Comments <span id="panel-comment-count"></span></h3>
+        <div class="panel-actions">
+            <button onclick="exportComments()">📥 Export</button>
+            <button onclick="toggleCommentsPanel()">✕ Close</button>
+        </div>
+        <div id="comments-list"></div>
+    </div>
+
+    <!-- Glossary popup -->
+    <div class="glossary-popup" id="glossary-popup">
+        <div class="glossary-header">
+            <h4 id="glossary-term"></h4>
+            <span class="close-glossary" onclick="closeGlossary()">✕</span>
+        </div>
+        <div class="glossary-body" id="glossary-def"></div>
+    </div>
+
+    <script>
+        const STORAGE_KEY = 'docread_last_doc';
+        const SCROLL_KEY = 'docread_scroll_';
+        let _old = '', _new = '', _hasDiff = false, _currentMode = 'rendered';
+        let _currentDocId = '';
+        let _comments = [];
+        let _glossary = {};  // term -> definition
+        let _selectedText = '';
+        let _selectedContext = {};  // { lineNum, section, fullSentence }
+
+        // Find context for selected text in the source markdown
+        function getSelectionContext(selectedText, domContext) {
+            if (!_new || !selectedText) return {};
+            const lines = _new.split('\n');
+            const searchKey = selectedText.substring(0, 40);
+            // Use domContext (the full paragraph text from the DOM) for better matching
+            const contextKey = domContext ? domContext.substring(0, 80) : '';
+            let lineNum = -1;
+            let section = '';
+            let currentSection = '';
+            let fullLine = '';
+            const inMermaid = !!document.querySelector('.mermaid-fullscreen.visible');
+            let inCodeBlock = false;
+            let codeBlockLang = '';
+            const candidates = [];
+            for (let i = 0; i < lines.length; i++) {
+                const line = lines[i];
+                if (!inCodeBlock) {
+                    const h1 = line.match(/^# (.+)/);
+                    const h2 = line.match(/^## (.+)/);
+                    const h3 = line.match(/^### (.+)/);
+                    if (h1) currentSection = h1[1];
+                    else if (h2) currentSection = h2[1];
+                    else if (h3) currentSection = currentSection.split(' > ')[0] + ' > ' + h3[1];
+                }
+                if (line.startsWith('```')) {
+                    if (!inCodeBlock) { inCodeBlock = true; codeBlockLang = line.slice(3).trim(); }
+                    else { inCodeBlock = false; codeBlockLang = ''; }
+                    continue;
+                }
+                const plainLine = line.replace(/\*\*/g, '').replace(/\*/g, '').replace(/`/g, '').replace(/^#+\s+/, '').replace(/^[-*+]\s+/, '').replace(/^\d+\.\s+/, '');
+                if (plainLine.includes(searchKey) || line.includes(searchKey)) {
+                    let score = 10; // base: selected text found
+                    // Bonus if the DOM context paragraph also matches this line
+                    if (contextKey && (plainLine.includes(contextKey.substring(0, 40)) || line.includes(contextKey.substring(0, 40)))) {
+                        score += 100;
+                    }
+                    candidates.push({ lineNum: i + 1, section: currentSection, fullLine: plainLine.trim(), inCode: inCodeBlock, codeLang: codeBlockLang, score });
+                }
+            }
+            if (candidates.length > 0) {
+                // Sort by score descending, then apply mermaid preference
+                candidates.sort((a, b) => b.score - a.score);
+                let best;
+                if (inMermaid) {
+                    best = candidates.find(c => c.inCode && c.codeLang === 'mermaid' && c.score >= candidates[0].score) || candidates[0];
+                } else {
+                    best = candidates[0];
+                }
+                lineNum = best.lineNum;
+                section = best.section;
+                fullLine = best.fullLine;
+            }
+            return { lineNum, section, fullLine };
+        }
+
+        // ── INIT ─────────────────────────────────────────────────────────────
+
+        // Configure marked — use a custom renderer for code blocks
+        const renderer = new marked.Renderer();
+        renderer.code = function (code, lang) {
+            // Handle object form (newer marked versions pass {text, lang})
+            if (typeof code === 'object') { lang = code.lang; code = code.text; }
+            if (lang === 'mermaid') {
+                return `<pre><code class="language-mermaid">${code}</code></pre>`;
+            }
+            let highlighted;
+            if (lang && hljs.getLanguage(lang)) {
+                highlighted = hljs.highlight(code, { language: lang }).value;
+            } else {
+                highlighted = hljs.highlightAuto(code).value;
+            }
+            return `<pre><code class="hljs language-${lang || ''}">${highlighted}</code></pre>`;
+        };
+        marked.setOptions({ renderer });
+
+        // Configure mermaid
+        mermaid.initialize({
+            startOnLoad: false, theme: 'dark', themeVariables: {
+                primaryColor: '#1a3a50', primaryTextColor: '#e0e0e0', primaryBorderColor: '#4a9eff',
+                lineColor: '#4a9eff', secondaryColor: '#1e2a3a', tertiaryColor: '#1e2a3a',
+                background: '#0d191f', mainBkg: '#1a3a50', nodeBorder: '#4a9eff',
+                clusterBkg: '#1a1a2e', clusterBorder: '#3a3a5a', titleColor: '#e8d8b0',
+                edgeLabelBackground: '#0d191f'
+            }
+        });
+
+        // Post-render: convert mermaid code blocks into rendered diagrams
+        function renderMermaidBlocks() {
+            document.querySelectorAll('pre code.language-mermaid').forEach((block, i) => {
+                const pre = block.parentElement;
+                const wrapper = document.createElement('div');
+                wrapper.className = 'mermaid-wrapper';
+                const container = document.createElement('div');
+                container.className = 'mermaid';
+                container.textContent = block.textContent;
+                wrapper.appendChild(container);
+                // Expand button
+                const expandBtn = document.createElement('div');
+                expandBtn.className = 'mermaid-expand';
+                expandBtn.title = 'Expand diagram';
+                expandBtn.innerHTML = '<svg viewBox="0 0 24 24"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>';
+                expandBtn.onclick = () => openMermaidFullscreen(container);
+                wrapper.appendChild(expandBtn);
+                pre.replaceWith(wrapper);
+            });
+            mermaid.run({ querySelector: '.mermaid' }).catch(() => { });
+        }
+
+        // ── MERMAID FULLSCREEN VIEWER ────────────────────────────────────────
+        let _mfZoom = 1, _mfBaseZoom = 1, _mfPanX = 0, _mfPanY = 0, _mfDragging = false, _mfStartX = 0, _mfStartY = 0, _mfPinchDist = 0, _mfPinchMidX = 0, _mfPinchMidY = 0;
+
+        function openMermaidFullscreen(mermaidEl) {
+            // Remove existing
+            document.querySelectorAll('.mermaid-fullscreen').forEach(e => e.remove());
+
+            _mfZoom = 1; _mfPanX = 0; _mfPanY = 0; _mfLocked = false; _mfLastTap = 0;
+
+            const overlay = document.createElement('div');
+            overlay.className = 'mermaid-fullscreen';
+            // Click on backdrop (outside panel) closes
+            overlay.addEventListener('click', (e) => { if (e.target === overlay) closeMermaidFullscreen(); });
+            overlay.innerHTML = `
+                <div class="mf-panel">
+                    <div class="mf-toolbar">
+                        <button onclick="mfZoom(-0.25)" title="Zoom out" touch-action="manipulation">−</button>
+                        <span class="mf-zoom-label" id="mf-zoom-label">100%</span>
+                        <button onclick="mfZoom(0.25)" title="Zoom in" touch-action="manipulation">+</button>
+                        <button onclick="mfReset()" title="Reset view">⟲</button>
+                        <button id="mf-lock-btn" onclick="mfToggleLock()" title="Lock for text selection">🔓</button>
+                        <span class="mf-spacer"></span>
+                        <button onclick="closeMermaidFullscreen()" title="Close">✕</button>
+                    </div>
+                    <div class="mf-viewport" id="mf-viewport">
+                        <div class="mf-content" id="mf-content"></div>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(overlay);
+
+            // Clone the rendered mermaid SVG into the viewer
+            const content = document.getElementById('mf-content');
+            const clone = mermaidEl.cloneNode(true);
+            content.appendChild(clone);
+
+            // Animate in
+            requestAnimationFrame(() => {
+                overlay.classList.add('visible');
+                // Auto-fit: measure SVG and scale so it fills 90% of viewport, then call that "100%"
+                setTimeout(() => {
+                    const vp = document.getElementById('mf-viewport');
+                    const svg = content.querySelector('svg');
+                    if (svg && vp) {
+                        const vpW = vp.clientWidth;
+                        const vpH = vp.clientHeight;
+                        const svgW = svg.getBoundingClientRect().width / _mfZoom;
+                        const svgH = svg.getBoundingClientRect().height / _mfZoom;
+                        if (svgW > 0 && svgH > 0) {
+                            const scaleW = (vpW * 0.9) / svgW;
+                            const scaleH = (vpH * 0.9) / svgH;
+                            _mfBaseZoom = Math.min(scaleW, scaleH);
+                            _mfZoom = _mfBaseZoom;
+                        }
+                    }
+                    _mfPanX = 0; _mfPanY = 0;
+                    mfUpdateTransform();
+                }, 100);
+            });
+
+            // Mouse/touch pan + pinch zoom
+            const vp = document.getElementById('mf-viewport');
+            vp.addEventListener('mousedown', mfDragStart);
+            vp.addEventListener('mousemove', mfDragMove);
+            vp.addEventListener('mouseup', mfDragEnd);
+            vp.addEventListener('mouseleave', mfDragEnd);
+            vp.addEventListener('touchstart', mfTouchStart, { passive: false });
+            vp.addEventListener('touchmove', mfTouchMove, { passive: false });
+            vp.addEventListener('touchend', mfTouchEnd);
+            vp.addEventListener('wheel', mfWheel, { passive: false });
+        }
+
+        function closeMermaidFullscreen() {
+            const overlay = document.querySelector('.mermaid-fullscreen');
+            if (overlay) {
+                overlay.classList.remove('visible');
+                setTimeout(() => overlay.remove(), 200);
+            }
+        }
+
+        function mfUpdateTransform(instant) {
+            const content = document.getElementById('mf-content');
+            if (!content) return;
+            // Disable transition during drag/pinch for responsiveness
+            if (instant) {
+                content.classList.add('no-transition');
+            } else {
+                content.classList.remove('no-transition');
+            }
+            content.style.transform = `translate(calc(-50% + ${_mfPanX}px), calc(-50% + ${_mfPanY}px)) scale(${_mfZoom})`;
+            const label = document.getElementById('mf-zoom-label');
+            if (label) label.textContent = Math.round((_mfZoom / _mfBaseZoom) * 100) + '%';
+        }
+
+        function mfToggleLock() {
+            _mfLocked = !_mfLocked;
+            const btn = document.getElementById('mf-lock-btn');
+            if (btn) {
+                btn.textContent = _mfLocked ? '🔒' : '🔓';
+                btn.style.borderColor = _mfLocked ? '#ff4500' : '';
+                btn.title = _mfLocked ? 'Unlock (re-enable pan/zoom)' : 'Lock for text selection';
+            }
+            const vp = document.getElementById('mf-viewport');
+            if (vp) vp.style.cursor = _mfLocked ? 'text' : 'grab';
+        }
+
+        function mfZoom(delta) {
+            // Zoom toward viewport center
+            const vp = document.getElementById('mf-viewport');
+            const relDelta = delta * _mfBaseZoom;
+            const newZoom = Math.max(_mfBaseZoom * 0.1, _mfZoom + relDelta);
+            // Pan adjusts so the viewport center stays fixed (offset 0,0 from center)
+            _mfPanX = _mfPanX * (newZoom / _mfZoom);
+            _mfPanY = _mfPanY * (newZoom / _mfZoom);
+            _mfZoom = newZoom;
+            mfUpdateTransform();
+        }
+
+        function mfReset() {
+            _mfPanX = 0; _mfPanY = 0;
+            _mfZoom = _mfBaseZoom;
+            mfUpdateTransform();
+        }
+
+        function mfWheel(e) {
+            e.preventDefault();
+            const vp = document.getElementById('mf-viewport');
+            const delta = e.deltaY > 0 ? -0.1 : 0.1;
+            const relDelta = delta * _mfBaseZoom;
+            const newZoom = Math.max(_mfBaseZoom * 0.1, _mfZoom + relDelta);
+            if (vp) {
+                const vpRect = vp.getBoundingClientRect();
+                const vpCenterX = vpRect.left + vpRect.width / 2;
+                const vpCenterY = vpRect.top + vpRect.height / 2;
+                const offsetX = e.clientX - vpCenterX;
+                const offsetY = e.clientY - vpCenterY;
+                _mfPanX = offsetX + (_mfPanX - offsetX) * (newZoom / _mfZoom);
+                _mfPanY = offsetY + (_mfPanY - offsetY) * (newZoom / _mfZoom);
+            }
+            _mfZoom = newZoom;
+            mfUpdateTransform();
+        }
+
+        function mfDragStart(e) {
+            _mfDragging = true;
+            _mfStartX = e.clientX - _mfPanX;
+            _mfStartY = e.clientY - _mfPanY;
+        }
+
+        function mfDragMove(e) {
+            if (!_mfDragging || _mfLocked) return;
+            _mfPanX = e.clientX - _mfStartX;
+            _mfPanY = e.clientY - _mfStartY;
+            mfUpdateTransform(true);
+        }
+
+        function mfDragEnd() { _mfDragging = false; }
+
+        function mfTouchStart(e) {
+            if (e.touches.length === 2) {
+                // Two fingers: pinch zoom — prevent default to stop viewport zoom
+                e.preventDefault();
+                _mfDragging = false;
+                _mfPinchDist = Math.hypot(
+                    e.touches[0].clientX - e.touches[1].clientX,
+                    e.touches[0].clientY - e.touches[1].clientY
+                );
+                // Store midpoint for zoom-toward-fingers
+                _mfPinchMidX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+                _mfPinchMidY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+            } else if (e.touches.length === 1) {
+                // Single finger: pan — but only if no text is currently selected
+                const sel = window.getSelection();
+                if (sel && sel.toString().trim().length > 0) return;
+                _mfDragging = true;
+                _mfStartX = e.touches[0].clientX - _mfPanX;
+                _mfStartY = e.touches[0].clientY - _mfPanY;
+            }
+        }
+
+        function mfTouchMove(e) {
+            if (e.touches.length === 2 && _mfPinchDist > 0) {
+                e.preventDefault();
+                const newDist = Math.hypot(
+                    e.touches[0].clientX - e.touches[1].clientX,
+                    e.touches[0].clientY - e.touches[1].clientY
+                );
+                const midX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+                const midY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+                const scale = newDist / _mfPinchDist;
+                const newZoom = Math.max(_mfBaseZoom * 0.1, _mfZoom * scale);
+
+                // Zoom toward the pinch midpoint
+                const vp = document.getElementById('mf-viewport');
+                if (vp) {
+                    const vpRect = vp.getBoundingClientRect();
+                    const vpCenterX = vpRect.left + vpRect.width / 2;
+                    const vpCenterY = vpRect.top + vpRect.height / 2;
+                    const offsetX = midX - vpCenterX;
+                    const offsetY = midY - vpCenterY;
+                    _mfPanX = offsetX + (_mfPanX - offsetX) * (newZoom / _mfZoom);
+                    _mfPanY = offsetY + (_mfPanY - offsetY) * (newZoom / _mfZoom);
+                }
+
+                _mfZoom = newZoom;
+                _mfPinchDist = newDist;
+                mfUpdateTransform(true);
+            } else if (_mfDragging && e.touches.length === 1 && !_mfLocked) {
+                // Don't pan if user has text selected — let iOS move selection handles
+                const sel = window.getSelection();
+                if (sel && sel.toString().trim().length > 0) return;
+                e.preventDefault();
+                _mfPanX = e.touches[0].clientX - _mfStartX;
+                _mfPanY = e.touches[0].clientY - _mfStartY;
+                mfUpdateTransform(true);
+            }
+        }
+
+        let _mfLastTap = 0;
+        let _mfLocked = false; // Lock mode: disables pan/double-tap zoom for text selection
+
+        function mfTouchEnd(e) {
+            const wasPinching = _mfPinchDist > 0;
+            _mfDragging = false;
+            _mfPinchDist = 0;
+
+            // Double-tap to zoom +175% — only for single-finger taps, not after pinch, not when locked
+            if (!wasPinching && !_mfLocked && e.changedTouches.length === 1) {
+                const now = Date.now();
+                if (now - _mfLastTap < 300) {
+                    const tap = e.changedTouches[0];
+                    const vp = document.getElementById('mf-viewport');
+                    const relDelta = 1.75 * _mfBaseZoom;
+                    const newZoom = Math.max(_mfBaseZoom * 0.1, _mfZoom + relDelta);
+                    if (vp) {
+                        const vpRect = vp.getBoundingClientRect();
+                        const vpCenterX = vpRect.left + vpRect.width / 2;
+                        const vpCenterY = vpRect.top + vpRect.height / 2;
+                        const offsetX = tap.clientX - vpCenterX;
+                        const offsetY = tap.clientY - vpCenterY;
+                        _mfPanX = offsetX + (_mfPanX - offsetX) * (newZoom / _mfZoom);
+                        _mfPanY = offsetY + (_mfPanY - offsetY) * (newZoom / _mfZoom);
+                    }
+                    _mfZoom = newZoom;
+                    mfUpdateTransform(false); // smooth
+                    _mfLastTap = 0;
+                } else {
+                    _mfLastTap = now;
+                }
+            } else if (wasPinching) {
+                _mfLastTap = 0; // Reset so pinch-end doesn't count as a tap
+            }
+        }
+
+        // ── RAINBOW BRACKETS ─────────────────────────────────────────────────
+        const RAINBOW_COLORS = ['#ffd700', '#ff71fa', '#ff5b5b', '#6262ff'];
+        const BRACKET_PAIRS = { '(': ')', '[': ']', '{': '}' };
+        const CLOSE_BRACKETS = new Set([')', ']', '}']);
+
+        function rainbowBrackets() {
+            document.querySelectorAll('pre code').forEach(block => {
+                // Skip mermaid blocks
+                if (block.classList.contains('language-mermaid')) return;
+                // Walk all text nodes and wrap brackets with colored spans
+                const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT, null);
+                const textNodes = [];
+                while (walker.nextNode()) textNodes.push(walker.currentNode);
+
+                let depth = 0;
+                for (const node of textNodes) {
+                    // Skip nodes inside hljs-comment or hljs-string spans
+                    const parent = node.parentElement;
+                    if (parent && (parent.classList.contains('hljs-comment') || parent.classList.contains('hljs-string') || parent.classList.contains('hljs-doctag'))) continue;
+
+                    const text = node.textContent;
+                    if (!/[(){}\[\]]/.test(text)) continue;
+
+                    const frag = document.createDocumentFragment();
+                    let lastIdx = 0;
+
+                    for (let i = 0; i < text.length; i++) {
+                        const ch = text[i];
+                        if (BRACKET_PAIRS[ch] || CLOSE_BRACKETS.has(ch)) {
+                            // Add text before this bracket
+                            if (i > lastIdx) frag.appendChild(document.createTextNode(text.substring(lastIdx, i)));
+
+                            if (CLOSE_BRACKETS.has(ch)) depth = Math.max(0, depth - 1);
+                            const color = RAINBOW_COLORS[depth % RAINBOW_COLORS.length];
+                            if (BRACKET_PAIRS[ch]) depth++;
+
+                            const span = document.createElement('span');
+                            span.style.color = color;
+                            span.textContent = ch;
+                            frag.appendChild(span);
+                            lastIdx = i + 1;
+                        }
+                    }
+
+                    if (lastIdx < text.length) frag.appendChild(document.createTextNode(text.substring(lastIdx)));
+                    if (lastIdx > 0) node.parentNode.replaceChild(frag, node);
+                }
+            });
+        }
+
+        async function init() {
+            const resp = await fetch('/api/docs/list');
+            const data = await resp.json();
+            const selector = document.getElementById('doc-selector');
+            for (const doc of data.docs) {
+                const opt = document.createElement('option');
+                opt.value = doc.id;
+                opt.textContent = doc.label;
+                selector.appendChild(opt);
+            }
+            const hashDoc = window.location.hash.replace('#', '');
+            const lastDoc = hashDoc || localStorage.getItem(STORAGE_KEY);
+            if (lastDoc) {
+                const exists = data.docs.some(d => d.id === lastDoc);
+                if (exists) {
+                    selector.value = lastDoc;
+                    await loadDoc(lastDoc);
+                }
+            }
+        }
+
+        function onDocChange() {
+            // Save scroll for previous doc
+            if (_currentDocId) saveScroll();
+            const docId = document.getElementById('doc-selector').value;
+            if (!docId) {
+                document.getElementById('content').innerHTML = '<div class="empty-state">Select a document from the dropdown above.</div>';
+                _old = ''; _new = ''; _hasDiff = false; _currentDocId = '';
+                _glossary = {}; _comments = [];
+                updateDiffBadge(); updateCommentCount();
+                localStorage.removeItem(STORAGE_KEY);
+                window.location.hash = '';
+                return;
+            }
+            localStorage.setItem(STORAGE_KEY, docId);
+            window.location.hash = docId;
+            loadDoc(docId);
+        }
+
+        async function loadDoc(docId) {
+            _currentDocId = docId;
+            document.getElementById('content').innerHTML = '<div class="empty-state">Loading...</div>';
+            try {
+                // Build fetch list: main doc + comments
+                const fetches = [
+                    fetch(`/api/docs/read/${encodeURIComponent(docId)}`),
+                    fetch(`/api/docs/comments/${encodeURIComponent(docId)}`)
+                ];
+                // If this isn't a requirements doc, also fetch the sibling requirements for glossary
+                const reqDocId = deriveRequirementsDocId(docId);
+                if (reqDocId && reqDocId !== docId) {
+                    fetches.push(fetch(`/api/docs/read/${encodeURIComponent(reqDocId)}`));
+                }
+
+                const results = await Promise.all(fetches);
+                const [docResp, commResp] = results;
+                if (!docResp.ok) {
+                    const err = await docResp.json();
+                    document.getElementById('content').innerHTML = `<div class="empty-state">Error: ${err.detail || 'Unknown error'}</div>`;
+                    return;
+                }
+                const data = await docResp.json();
+                _old = data.old || '';
+                _new = data.new || '';
+                _hasDiff = data.has_diff;
+                // Parse glossary from this doc
+                _glossary = parseGlossary(_new);
+                // Merge glossary from requirements doc if available
+                if (results[2] && results[2].ok) {
+                    const reqData = await results[2].json();
+                    const reqGlossary = parseGlossary(reqData.new || '');
+                    // Requirements glossary fills in terms not already defined in this doc
+                    for (const [term, def] of Object.entries(reqGlossary)) {
+                        if (!_glossary[term]) _glossary[term] = def;
+                    }
+                }
+                // Load comments
+                if (commResp.ok) {
+                    const commData = await commResp.json();
+                    _comments = commData.comments || [];
+                }
+                updateDiffBadge();
+                updateCommentCount();
+                showMode(_currentMode);
+                // Restore scroll position
+                restoreScroll();
+            } catch (e) {
+                document.getElementById('content').innerHTML = '<div class="empty-state">Failed to load document.</div>';
+            }
+        }
+
+        // Derive the requirements doc ID from any doc in the same spec
+        // e.g., "admin-reports-design" → "admin-reports-requirements"
+        function deriveRequirementsDocId(docId) {
+            const suffixes = ['-design', '-tasks'];
+            for (const suffix of suffixes) {
+                if (docId.endsWith(suffix)) {
+                    return docId.slice(0, -suffix.length) + '-requirements';
+                }
+            }
+            return null;
+        }
+
+        // ── GLOSSARY ─────────────────────────────────────────────────────────
+        function parseGlossary(md) {
+            const glossary = {};
+            // Match "- **Term**: Definition" pattern in Glossary section
+            const glossaryMatch = md.match(/## Glossary\s*\n([\s\S]*?)(?=\n## |\n# |$)/);
+            if (!glossaryMatch) return glossary;
+            const lines = glossaryMatch[1].split('\n');
+            for (const line of lines) {
+                const m = line.match(/^-\s+\*\*([^*]+)\*\*\s*[:：]\s*(.+)/);
+                if (m) glossary[m[1].trim()] = m[2].trim();
+            }
+            return glossary;
+        }
+
+        function linkGlossaryTerms() {
+            if (!Object.keys(_glossary).length) return;
+            // Sort terms longest-first so Session_Detail_View matches before Session
+            const sortedTerms = Object.keys(_glossary).sort((a, b) => b.length - a.length);
+            const content = document.getElementById('content');
+            const walker = document.createTreeWalker(content, NodeFilter.SHOW_TEXT, null);
+            const replacements = [];
+            while (walker.nextNode()) {
+                const node = walker.currentNode;
+                if (node.parentElement.closest('pre, code, .glossary-term, h1, h2')) continue;
+                for (const term of sortedTerms) {
+                    // Use word boundary check: char before and after must not be word chars
+                    const idx = node.textContent.indexOf(term);
+                    if (idx >= 0) {
+                        const before = idx > 0 ? node.textContent[idx - 1] : ' ';
+                        const after = idx + term.length < node.textContent.length ? node.textContent[idx + term.length] : ' ';
+                        const isWordBoundaryBefore = !/\w/.test(before);
+                        const isWordBoundaryAfter = !/\w/.test(after);
+                        if (isWordBoundaryBefore && isWordBoundaryAfter) {
+                            replacements.push({ node, term, idx });
+                            break; // one replacement per text node
+                        }
+                    }
+                }
+            }
+            for (const { node, term, idx } of replacements) {
+                const before = node.textContent.substring(0, idx);
+                const after = node.textContent.substring(idx + term.length);
+                const span = document.createElement('span');
+                span.className = 'glossary-term';
+                span.textContent = term;
+                span.onclick = (e) => showGlossary(term, e);
+                const parent = node.parentNode;
+                if (before) parent.insertBefore(document.createTextNode(before), node);
+                parent.insertBefore(span, node);
+                if (after) parent.insertBefore(document.createTextNode(after), node);
+                parent.removeChild(node);
+            }
+        }
+
+        let _glossaryOpenTerm = '';
+
+        function showGlossary(term, e) {
+            const popup = document.getElementById('glossary-popup');
+            // Toggle: if clicking the same term that's already open, close it
+            if (popup.classList.contains('visible') && _glossaryOpenTerm === term) {
+                closeGlossary();
+                e.stopPropagation();
+                return;
+            }
+            _glossaryOpenTerm = term;
+            document.getElementById('glossary-term').textContent = term;
+            // Render definition as inline markdown so backticks become <code>
+            document.getElementById('glossary-def').innerHTML = marked.parseInline(_glossary[term] || 'No definition found.');
+            popup.style.left = Math.min(e.clientX, window.innerWidth - 420) + 'px';
+            popup.style.top = Math.min(e.clientY + 10, window.innerHeight - 200) + 'px';
+            popup.classList.add('visible');
+            e.stopPropagation();
+        }
+
+        function closeGlossary() {
+            document.getElementById('glossary-popup').classList.remove('visible');
+            _glossaryOpenTerm = '';
+        }
+
+        document.addEventListener('click', (e) => {
+            if (!e.target.closest('.glossary-popup') && !e.target.closest('.glossary-term')) {
+                closeGlossary();
+            }
+        });
+
+        // ── COMMENT HIGHLIGHTING ──────────────────────────────────────────
+        function highlightCommentedLines() {
+            // Clear existing highlights first
+            const content = document.getElementById('content');
+            content.querySelectorAll('.has-comment').forEach(el => {
+                el.classList.remove('has-comment');
+                el.style.position = '';
+            });
+            content.querySelectorAll('.comment-badge').forEach(el => el.remove());
+
+            if (!_comments.length || !_new) return;
+            const blocks = content.querySelectorAll('p, li, h1, h2, h3, h4, h5, h6, td, th, pre, .mermaid-wrapper');
+
+            // For each comment, find the best matching block using context
+            // Strategy: use full_line > section+selected_text > selected_text alone
+            const blockMatches = new Map(); // block element -> [comments]
+
+            for (const c of _comments) {
+                let bestBlock = null;
+                let bestScore = 0;
+
+                for (const block of blocks) {
+                    const blockText = block.textContent.trim();
+                    if (!blockText) continue;
+
+                    let score = 0;
+
+                    // If we have full_line, check if the block contains it (strong match)
+                    if (c.full_line && c.full_line.length > 10) {
+                        const fullLineKey = c.full_line.substring(0, 60);
+                        if (blockText.includes(fullLineKey)) {
+                            score += 100;
+                        }
+                    }
+
+                    // Check if selected text is in this block
+                    const selKey = (c.selected_text || '').substring(0, 40);
+                    if (selKey && blockText.includes(selKey)) {
+                        score += 50;
+                    }
+
+                    // If we have section context, check if this block is under that section
+                    // by looking at preceding headings
+                    if (c.section && score > 0) {
+                        // Walk backwards from this block to find the nearest heading
+                        let el = block.previousElementSibling;
+                        let depth = 0;
+                        while (el && depth < 20) {
+                            const tag = el.tagName;
+                            if (/^H[1-6]$/.test(tag)) {
+                                const headingText = el.textContent.trim();
+                                // Check if any part of the section path matches
+                                const sectionParts = c.section.split(' > ');
+                                for (const part of sectionParts) {
+                                    if (headingText.includes(part)) {
+                                        score += 30;
+                                        break;
+                                    }
+                                }
+                                break;
+                            }
+                            el = el.previousElementSibling;
+                            depth++;
+                        }
+                    }
+
+                    if (score > bestScore) {
+                        bestScore = score;
+                        bestBlock = block;
+                    }
+                }
+
+                // Only highlight if we have a reasonable match (not just "a" appearing everywhere)
+                if (bestBlock && bestScore >= 50) {
+                    if (!blockMatches.has(bestBlock)) blockMatches.set(bestBlock, []);
+                    blockMatches.get(bestBlock).push(c);
+                }
+            }
+
+            // Apply highlights
+            for (const [block, comments] of blockMatches) {
+                block.classList.add('has-comment');
+                block.dataset.commentIds = comments.map(c => c.id).join(',');
+                const badge = document.createElement('span');
+                badge.className = 'comment-badge';
+                badge.textContent = comments.length;
+                badge.title = `${comments.length} comment${comments.length > 1 ? 's' : ''}`;
+                badge.onclick = (e) => {
+                    e.stopPropagation();
+                    showCommentThread(block, comments);
+                };
+                block.style.position = 'relative';
+                block.appendChild(badge);
+            }
+        }
+
+        // ── COMMENT THREAD POPUP ─────────────────────────────────────────────
+        function showCommentThread(block, comments) {
+            // Remove existing thread popup
+            document.querySelectorAll('.comment-thread-popup').forEach(el => el.remove());
+
+            const popup = document.createElement('div');
+            popup.className = 'comment-thread-popup';
+
+            let html = comments.map(c => `
+                <div class="thread-comment" data-id="${c.id}">
+                    <div class="tc-text">"${(c.selected_text || '').substring(0, 80)}${(c.selected_text || '').length > 80 ? '...' : ''}"</div>
+                    <div class="tc-comment" data-id="${c.id}">${c.comment}</div>
+                    <div class="tc-actions">
+                        <span class="tc-date">${c.created_at ? c.created_at.substring(0, 16).replace('T', ' ') : ''}</span>
+                        <span class="tc-edit" onclick="editCommentInline(${c.id})">edit</span>
+                        <span class="tc-delete" onclick="confirmDeleteThread(this, ${c.id})">delete</span>
+                    </div>
+                </div>
+            `).join('');
+
+            popup.innerHTML = html;
+
+            // Position below the block
+            const rect = block.getBoundingClientRect();
+            popup.style.position = 'fixed';
+            popup.style.left = Math.min(rect.left, window.innerWidth - 380) + 'px';
+            popup.style.top = Math.min(rect.bottom + 4, window.innerHeight - 200) + 'px';
+
+            document.body.appendChild(popup);
+            // Animate in
+            requestAnimationFrame(() => popup.classList.add('visible'));
+
+            // Close on outside click
+            const closeHandler = (e) => {
+                if (!popup.contains(e.target) && !e.target.closest('.comment-badge')) {
+                    popup.classList.remove('visible');
+                    setTimeout(() => popup.remove(), 150);
+                    document.removeEventListener('click', closeHandler);
+                }
+            };
+            setTimeout(() => document.addEventListener('click', closeHandler), 50);
+        }
+
+        function confirmDeleteThread(el, commentId) {
+            if (el.dataset.armed === 'true') {
+                deleteComment(commentId);
+                // Close thread popup
+                document.querySelectorAll('.comment-thread-popup').forEach(p => p.remove());
+            } else {
+                el.dataset.armed = 'true';
+                el.textContent = 'sure?';
+                el.style.color = '#ff4500';
+                setTimeout(() => { if (el.dataset.armed === 'true') { el.dataset.armed = ''; el.textContent = 'delete'; el.style.color = ''; } }, 3000);
+            }
+        }
+
+        function editCommentInline(commentId) {
+            const c = _comments.find(x => x.id === commentId);
+            if (!c) return;
+            const el = document.querySelector(`.tc-comment[data-id="${commentId}"]`);
+            if (!el) return;
+            const original = c.comment;
+            el.innerHTML = `<textarea class="tc-edit-area">${original}</textarea><div class="tc-edit-actions"><span class="tc-save" onclick="saveEditComment(${commentId})">save</span><span class="tc-cancel" onclick="cancelEditComment(${commentId}, '${original.replace(/'/g, "\\'")}')">cancel</span></div>`;
+            el.querySelector('textarea').focus();
+        }
+
+        async function saveEditComment(commentId) {
+            const textarea = document.querySelector(`.tc-comment[data-id="${commentId}"] textarea`);
+            if (!textarea) return;
+            const newText = textarea.value.trim();
+            if (!newText) return;
+            try {
+                const resp = await fetch(`/api/docs/comments/${encodeURIComponent(_currentDocId)}/${commentId}`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ comment: newText })
+                });
+                if (resp.ok) {
+                    const c = _comments.find(x => x.id === commentId);
+                    if (c) c.comment = newText;
+                    // Close thread popup and refresh
+                    document.querySelectorAll('.comment-thread-popup').forEach(p => p.remove());
+                    renderCommentsList();
+                }
+            } catch (e) { console.error('Failed to edit comment', e); }
+        }
+
+        function cancelEditComment(commentId, original) {
+            const el = document.querySelector(`.tc-comment[data-id="${commentId}"]`);
+            if (el) el.textContent = original;
+        }
+
+        // ── COMMENTS ─────────────────────────────────────────────────────────
+        function updateCommentCount() {
+            const el = document.getElementById('comment-count');
+            const panelEl = document.getElementById('panel-comment-count');
+            if (_comments.length > 0) {
+                el.textContent = `💬 ${_comments.length} comment${_comments.length > 1 ? 's' : ''}`;
+                panelEl.textContent = `(${_comments.length})`;
+            } else {
+                el.textContent = '';
+                panelEl.textContent = '';
+            }
+        }
+
+        // Show FAB when text is selected — works on desktop (mouseup) and mobile (selectionchange)
+        function checkSelectionForFab() {
+            const sel = window.getSelection();
+            const text = sel ? sel.toString().trim() : '';
+            const fab = document.getElementById('comment-fab');
+            if (text.length > 0 && _currentDocId) {
+                _selectedText = text;
+                // Position the FAB
+                const contentEl = document.getElementById('content');
+                const contentRect = contentEl.getBoundingClientRect();
+                const rightSpace = window.innerWidth - contentRect.right;
+
+                // Get selection bounding rect for vertical positioning
+                let selMidY = window.innerHeight / 2;
+                if (sel.rangeCount > 0) {
+                    const range = sel.getRangeAt(0);
+                    const rects = range.getClientRects();
+                    if (rects.length > 0) {
+                        const firstRect = rects[0];
+                        const lastRect = rects[rects.length - 1];
+                        selMidY = (firstRect.top + lastRect.bottom) / 2;
+                        selMidY = Math.max(40, Math.min(selMidY, window.innerHeight - 40));
+                    }
+                }
+
+                if (rightSpace > 80) {
+                    fab.style.position = 'fixed';
+                    fab.style.right = 'auto';
+                    fab.style.bottom = 'auto';
+                    fab.style.left = (contentRect.right + (rightSpace - 56) / 2) + 'px';
+                    fab.style.top = (selMidY - 28) + 'px';
+                } else {
+                    fab.style.position = 'fixed';
+                    fab.style.left = 'auto';
+                    fab.style.top = 'auto';
+                    fab.style.right = '24px';
+                    fab.style.bottom = '24px';
+                }
+                fab.style.display = 'flex';
+            } else {
+                fab.style.display = 'none';
+            }
+        }
+
+        // Desktop: mouseup
+        document.addEventListener('mouseup', () => setTimeout(checkSelectionForFab, 50));
+        // Mobile: selectionchange fires when touch selection handles are released
+        let _selChangeTimer = null;
+        document.addEventListener('selectionchange', () => {
+            clearTimeout(_selChangeTimer);
+            _selChangeTimer = setTimeout(checkSelectionForFab, 300);
+        });
+
+        function openCommentModal() {
+            if (!_selectedText) return;
+            // Get surrounding DOM context for better line matching
+            let domContext = '';
+            try {
+                const sel = window.getSelection();
+                if (sel && sel.rangeCount > 0) {
+                    const node = sel.getRangeAt(0).startContainer;
+                    // Walk up to find the nearest block element
+                    let block = node.nodeType === 3 ? node.parentElement : node;
+                    while (block && !['P', 'LI', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'TD', 'TH', 'PRE', 'DIV'].includes(block.tagName)) {
+                        block = block.parentElement;
+                    }
+                    if (block) domContext = block.textContent.trim();
+                }
+            } catch (e) { }
+            _selectedContext = getSelectionContext(_selectedText, domContext);
+            const preview = _selectedText.length > 200 ? _selectedText.substring(0, 200) + '...' : _selectedText;
+            let contextInfo = '';
+            if (_selectedContext.section) contextInfo += `📍 ${_selectedContext.section}`;
+            if (_selectedContext.lineNum > 0) contextInfo += contextInfo ? ` (line ${_selectedContext.lineNum})` : `Line ${_selectedContext.lineNum}`;
+            document.getElementById('comment-selected-text').innerHTML = contextInfo
+                ? `<div style="font-size:11px;color:#606060;margin-bottom:4px">${contextInfo}</div>"${preview}"`
+                : `"${preview}"`;
+            document.getElementById('comment-text').value = '';
+            document.getElementById('comment-modal').classList.add('visible');
+            document.getElementById('comment-fab').style.display = 'none';
+            // Longer delay for mobile keyboards — needs element fully visible
+            setTimeout(() => {
+                const ta = document.getElementById('comment-text');
+                ta.focus();
+                ta.click(); // Extra trigger for mobile Safari keyboard
+            }, 300);
+        }
+
+        function closeCommentModal() {
+            const overlay = document.getElementById('comment-modal');
+            overlay.classList.remove('visible');
+            _selectedText = '';
+        }
+
+        async function saveComment() {
+            const comment = document.getElementById('comment-text').value.trim();
+            if (!comment || !_selectedText || !_currentDocId) return;
+            try {
+                const resp = await fetch(`/api/docs/comments/${encodeURIComponent(_currentDocId)}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        selected_text: _selectedText,
+                        comment,
+                        line_num: _selectedContext.lineNum || null,
+                        section: _selectedContext.section || '',
+                        full_line: _selectedContext.fullLine || ''
+                    })
+                });
+                if (resp.ok) {
+                    const data = await resp.json();
+                    _comments.push({
+                        id: data.id, selected_text: _selectedText, comment,
+                        line_num: _selectedContext.lineNum, section: _selectedContext.section,
+                        full_line: _selectedContext.fullLine, created_at: new Date().toISOString()
+                    });
+                    updateCommentCount();
+                    renderCommentsList();
+                    highlightCommentedLines();
+                    closeCommentModal();
+                }
+            } catch (e) { console.error('Failed to save comment', e); }
+        }
+
+        async function deleteComment(commentId) {
+            try {
+                await fetch(`/api/docs/comments/${encodeURIComponent(_currentDocId)}/${commentId}`, { method: 'DELETE' });
+                _comments = _comments.filter(c => c.id !== commentId);
+                updateCommentCount();
+                renderCommentsList();
+                highlightCommentedLines();
+            } catch (e) { console.error('Failed to delete comment', e); }
+        }
+
+        function toggleCommentsPanel() {
+            const panel = document.getElementById('comments-panel');
+            panel.classList.toggle('visible');
+            if (panel.classList.contains('visible')) renderCommentsList();
+        }
+
+        // Clicking on the content area closes the comments panel if open
+        document.getElementById('content').addEventListener('click', (e) => {
+            const panel = document.getElementById('comments-panel');
+            if (panel.classList.contains('visible')) {
+                panel.classList.remove('visible');
+            }
+        });
+
+        function renderCommentsList() {
+            const list = document.getElementById('comments-list');
+            if (!_comments.length) {
+                list.innerHTML = '<div class="empty-state" style="padding:20px">No comments yet. Select text and click + to add one.</div>';
+                return;
+            }
+            list.innerHTML = _comments.map(c => {
+                let contextLine = '';
+                if (c.section) contextLine += `📍 ${c.section}`;
+                if (c.line_num) contextLine += contextLine ? ` (L${c.line_num})` : `L${c.line_num}`;
+                return `
+                <div class="comment-entry" onclick="scrollToComment(${c.id})" style="cursor:pointer">
+                    ${contextLine ? `<div style="font-size:11px;color:#4a9eff;margin-bottom:3px">${contextLine}</div>` : ''}
+                    <div class="ce-text">"${(c.selected_text || '').substring(0, 120)}${(c.selected_text || '').length > 120 ? '...' : ''}"</div>
+                    <div class="ce-comment">${c.comment}</div>
+                    <div class="ce-meta">
+                        <span>${c.created_at ? c.created_at.substring(0, 16).replace('T', ' ') : ''}</span>
+                        <span class="ce-delete" onclick="event.stopPropagation(); confirmDelete(this, ${c.id})">delete</span>
+                    </div>
+                </div>`;
+            }).join('');
+        }
+
+        function scrollToComment(commentId) {
+            const c = _comments.find(x => x.id === commentId);
+            if (!c) return;
+            const content = document.getElementById('content');
+            // Find the block that has this comment's ID in its dataset
+            const blocks = content.querySelectorAll('.has-comment');
+            for (const block of blocks) {
+                const ids = (block.dataset.commentIds || '').split(',');
+                if (ids.includes(String(commentId))) {
+                    block.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    block.style.transition = 'background 0.3s';
+                    block.style.background = 'rgba(200, 160, 64, 0.25)';
+                    setTimeout(() => { block.style.background = ''; }, 1500);
+                    break;
+                }
+            }
+        }
+
+        function confirmDelete(el, commentId) {
+            if (el.dataset.armed === 'true') {
+                deleteComment(commentId);
+            } else {
+                el.dataset.armed = 'true';
+                el.textContent = 'are you sure?';
+                el.style.color = '#ff4500';
+                setTimeout(() => {
+                    if (el.dataset.armed === 'true') {
+                        el.dataset.armed = '';
+                        el.textContent = 'delete';
+                        el.style.color = '';
+                    }
+                }, 3000);
+            }
+        }
+
+        function exportComments() {
+            if (!_currentDocId) return;
+            window.open(`/api/docs/comments/${encodeURIComponent(_currentDocId)}/export`, '_blank');
+        }
+
+        // ── SCROLL PERSISTENCE ───────────────────────────────────────────────
+        function saveScroll() {
+            if (_currentDocId) {
+                sessionStorage.setItem(SCROLL_KEY + _currentDocId, window.scrollY.toString());
+            }
+        }
+
+        function restoreScroll() {
+            if (_currentDocId) {
+                const saved = sessionStorage.getItem(SCROLL_KEY + _currentDocId);
+                if (saved) {
+                    setTimeout(() => window.scrollTo(0, parseInt(saved, 10)), 50);
+                }
+            }
+        }
+
+        // Save scroll on any scroll event (debounced)
+        let _scrollTimer = null;
+        window.addEventListener('scroll', () => {
+            clearTimeout(_scrollTimer);
+            _scrollTimer = setTimeout(saveScroll, 300);
+        });
+
+        // Save scroll before unload
+        window.addEventListener('beforeunload', saveScroll);
+
+        // ── DISPLAY ──────────────────────────────────────────────────────────
+        function updateDiffBadge() {
+            const badge = document.getElementById('diff-badge');
+            const diffBtn = document.getElementById('btn-diff');
+            if (_hasDiff) {
+                badge.textContent = '● Changes detected';
+                badge.style.color = '#50c850';
+                diffBtn.style.borderColor = '#50c850';
+                diffBtn.style.color = '#50c850';
+            } else {
+                badge.textContent = _new ? 'No changes since last commit' : '';
+                badge.style.color = '#606060';
+                diffBtn.style.borderColor = '';
+                diffBtn.style.color = '';
+            }
+        }
+
+        function showMode(mode) {
+            _currentMode = mode;
+            const scrollY = window.scrollY;
+            document.getElementById('btn-rendered').classList.toggle('active', mode === 'rendered');
+            document.getElementById('btn-diff').classList.toggle('active', mode === 'diff');
+            if (!_new) return;
+            if (mode === 'rendered') {
+                document.getElementById('content').innerHTML = marked.parse(_new);
+            } else {
+                document.getElementById('content').innerHTML = (!_hasDiff || !_old)
+                    ? marked.parse(_new) + '<p style="color:#606060;font-style:italic;margin-top:2em">No changes since last commit.</p>'
+                    : renderInlineDiff(_old, _new);
+            }
+            // Link glossary terms after rendering
+            linkGlossaryTerms();
+            // Highlight lines that have comments
+            highlightCommentedLines();
+            // Render mermaid diagrams
+            renderMermaidBlocks();
+            // Rainbow brackets in code blocks
+            rainbowBrackets();
+            window.scrollTo(0, scrollY);
+        }
+
+        // Listen for hash changes (browser back/forward)
+        window.addEventListener('hashchange', () => {
+            const hashDoc = window.location.hash.replace('#', '');
+            const selector = document.getElementById('doc-selector');
+            if (hashDoc && selector.value !== hashDoc) {
+                if (_currentDocId) saveScroll();
+                selector.value = hashDoc;
+                localStorage.setItem(STORAGE_KEY, hashDoc);
+                loadDoc(hashDoc);
+            }
+        });
+
+        // Keyboard: Escape closes modals/panels, Enter/Space opens comment, C toggles panel
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                closeMermaidFullscreen();
+                closeCommentModal();
+                closeGlossary();
+                document.querySelectorAll('.comment-thread-popup').forEach(p => p.remove());
+                document.getElementById('comments-panel').classList.remove('visible');
+            }
+            // C toggles comments panel (unless in an input/textarea)
+            if ((e.key === 'c' || e.key === 'C') && !e.target.closest('input, textarea, select') && !e.metaKey && !e.ctrlKey) {
+                toggleCommentsPanel();
+            }
+            // Enter or Space with text selected opens comment modal (unless in an input/textarea)
+            if ((e.key === 'Enter' || e.key === ' ') && !e.target.closest('input, textarea, select')) {
+                const sel = window.getSelection();
+                const text = sel ? sel.toString().trim() : '';
+                if (text.length > 0 && _currentDocId) {
+                    e.preventDefault();
+                    _selectedText = text;
+                    openCommentModal();
+                }
+            }
+        });
+
+        // ── DIFF ENGINE ──────────────────────────────────────────────────────
+        function renderInlineDiff(oldText, newText) {
+            const ops = diffLines(oldText.split('\n'), newText.split('\n'));
+            function lineSim(a, b) {
+                const wa = new Set((a.match(/[\w_]+/g) || []));
+                const wb = new Set((b.match(/[\w_]+/g) || []));
+                if (!wa.size) return 0;
+                const shared = [...wa].filter(w => wb.has(w)).length;
+                const union = wa.size + wb.size - shared;
+                return Math.max(shared / wa.size, union > 0 ? shared / union : 0);
+            }
+            const usedAdds = new Set(), pairMap = new Map();
+            for (let ri = 0; ri < ops.length; ri++) {
+                if (ops[ri].type !== 'remove') continue;
+                let best = 0.29, bestAi = -1;
+                for (let ai = Math.max(0, ri - 2); ai < Math.min(ops.length, ri + 9); ai++) {
+                    if (ops[ai].type !== 'add' || usedAdds.has(ai)) continue;
+                    const s = lineSim(ops[ri].line, ops[ai].line);
+                    if (s > best) { best = s; bestAi = ai; }
+                }
+                if (bestAi >= 0) { pairMap.set(ri, bestAi); usedAdds.add(bestAi); }
+            }
+            const skipAdds = new Set(pairMap.values());
+            const paired = [];
+            for (let i = 0; i < ops.length; i++) {
+                if (pairMap.has(i)) paired.push({ type: 'modify', oldLine: ops[i].line, newLine: ops[pairMap.get(i)].line });
+                else if (!skipAdds.has(i)) paired.push(ops[i]);
+            }
+            const mdLines = [], annotations = [];
+            for (const op of paired) {
+                if (op.type === 'equal') { mdLines.push(op.line); annotations.push(null); }
+                else if (op.type === 'add') { mdLines.push(op.line); annotations.push('add'); }
+                else if (op.type === 'remove') { mdLines.push(op.line); annotations.push('remove'); }
+                else { mdLines.push(op.newLine); annotations.push({ type: 'modify', oldLine: op.oldLine, newLine: op.newLine }); }
+            }
+            const container = document.createElement('div');
+            container.innerHTML = marked.parse(mdLines.join('\n'));
+            const annotationMap = [];
+            for (let j = 0; j < mdLines.length; j++) {
+                if (annotations[j] === null) continue;
+                const stripped = stripMd(mdLines[j]);
+                if (stripped.trim()) annotationMap.push({ stripped, annotation: annotations[j] });
+            }
+            applyAnnotations(container, annotationMap);
+            return container.innerHTML;
+        }
+
+        function stripMd(md) {
+            return md.replace(/^#{1,6}\s+/, '').replace(/^[-*+]\s+/, '').replace(/^\d+\.\s+/, '')
+                .replace(/\*\*(.+?)\*\*/g, '$1').replace(/\*(.+?)\*/g, '$1')
+                .replace(/`(.+?)`/g, '$1').replace(/\[(.+?)\]\(.+?\)/g, '$1').trim();
+        }
+
+        function wordSim(a, b) {
+            const wa = new Set((a.match(/[\w_]+/g) || []).map(s => s.toLowerCase()));
+            const wb = new Set((b.match(/[\w_]+/g) || []).map(s => s.toLowerCase()));
+            if (!wa.size && !wb.size) return 1;
+            if (!wa.size || !wb.size) return 0;
+            const inter = [...wa].filter(w => wb.has(w)).length;
+            return inter / new Set([...wa, ...wb]).size;
+        }
+
+        function applyAnnotations(container, annotationMap) {
+            const blocks = container.querySelectorAll('p, li, h1, h2, h3, h4, h5, h6, td, th');
+            const used = new Set();
+            for (const block of blocks) {
+                const blockText = block.textContent.trim();
+                if (!blockText) continue;
+                let bestIdx = -1, bestScore = 0;
+                for (let i = 0; i < annotationMap.length; i++) {
+                    if (used.has(i)) continue;
+                    const s = wordSim(blockText, annotationMap[i].stripped);
+                    if (s > bestScore && s > 0.5) { bestScore = s; bestIdx = i; }
+                }
+                if (bestIdx === -1) continue;
+                used.add(bestIdx);
+                const ann = annotationMap[bestIdx].annotation;
+                if (ann === 'add') { block.classList.add('line-added'); }
+                else if (ann === 'remove') { block.classList.add('line-removed'); }
+                else if (ann.type === 'modify') {
+                    const oldPlain = stripMd(ann.oldLine);
+                    const wordOps = diffWords(oldPlain, block.textContent);
+                    const total = wordOps.length;
+                    const eq = wordOps.filter(w => w.type === 'equal').length;
+                    if (total > 0 && eq / total < 0.55) {
+                        block.classList.add('line-added');
+                        const oldRaw = ann.oldLine.replace(/^[-*+]\s+/, '').replace(/^\d+\.\s+/, '').replace(/^#{1,6}\s+/, '');
+                        const rem = document.createElement(block.tagName.toLowerCase());
+                        rem.classList.add('line-removed');
+                        rem.innerHTML = marked.parseInline(oldRaw);
+                        block.parentNode.insertBefore(rem, block);
+                    } else {
+                        const srcLine = ann.newLine.replace(/^[-*+]\s+/, '').replace(/^\d+\.\s+/, '').replace(/^#{1,6}\s+/, '');
+                        block.innerHTML = buildDiffHtml(wordOps, srcLine);
+                    }
+                }
+            }
+        }
+
+        function buildDiffHtml(wordOps, srcLine) {
+            const merged = [];
+            for (const op of wordOps) {
+                const last = merged[merged.length - 1];
+                if (last && last.type === op.type) last.text += ' ' + op.text;
+                else merged.push({ type: op.type, text: op.text });
+            }
+            // Collapse remove(X)+add(Y) where they share words into equal for shared prefix
+            // More importantly: if remove and add have identical text, treat as equal
+            for (let k = 0; k < merged.length - 1; k++) {
+                if (merged[k].type === 'remove' && merged[k + 1].type === 'add') {
+                    const remWords = merged[k].text.split(/\s+/).filter(Boolean);
+                    const addWords = merged[k + 1].text.split(/\s+/).filter(Boolean);
+                    // Find common prefix words
+                    let common = 0;
+                    while (common < remWords.length && common < addWords.length && remWords[common] === addWords[common]) common++;
+                    if (common > 0) {
+                        const eqText = remWords.slice(0, common).join(' ');
+                        const remRest = remWords.slice(common).join(' ');
+                        const addRest = addWords.slice(common).join(' ');
+                        // Replace the pair with up to 3 ops: equal, remove-rest, add-rest
+                        const replacement = [{ type: 'equal', text: eqText }];
+                        if (remRest) replacement.push({ type: 'remove', text: remRest });
+                        if (addRest) replacement.push({ type: 'add', text: addRest });
+                        merged.splice(k, 2, ...replacement);
+                        k--; // re-check from same position
+                    }
+                }
+            }
+            // Re-merge adjacent same-type after collapse
+            const merged2 = [];
+            for (const op of merged) {
+                const last = merged2[merged2.length - 1];
+                if (last && last.type === op.type) last.text += ' ' + op.text;
+                else merged2.push({ type: op.type, text: op.text });
+            }
+            const ops = [];
+            for (let k = 0; k < merged2.length; k++) {
+                const op = merged2[k];
+                if (op.type === 'equal') {
+                    const wc = op.text.split(/\s+/).filter(Boolean).length;
+                    const prevC = k > 0 && merged2[k - 1].type !== 'equal';
+                    const nextC = k < merged2.length - 1 && merged2[k + 1].type !== 'equal';
+                    if (prevC && nextC && wc < 2) { ops.push({ type: 'both', text: op.text }); continue; }
+                }
+                ops.push(op);
+            }
+            let src = srcLine, out = '', removeAccum = '';
+            const findWord = (plainWord) => {
+                const stem = plainWord.replace(/[^\w_]+$/, '') || plainWord;
+                const esc = stem.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                const m = src.match(new RegExp('^([\\s\\S]*?)\\b(' + esc + ')\\b'));
+                if (!m) return null;
+                return { pre: m[1], token: m[2], rest: src.slice(m[1].length + m[2].length) };
+            };
+            const flushRemove = () => { if (removeAccum) { out += '\x04' + removeAccum.trim() + '\x05'; removeAccum = ''; } };
+            for (const op of ops) {
+                const words = op.text.split(/\s+/).filter(Boolean);
+                if (op.type === 'equal') {
+                    flushRemove();
+                    for (const w of words) { const f = findWord(w); if (f) { out += f.pre + f.token; src = f.rest; } else out += w; }
+                } else if (op.type === 'add') {
+                    flushRemove();
+                    let pre0 = '', chunk = '';
+                    for (let i = 0; i < words.length; i++) { const f = findWord(words[i]); if (f) { if (i === 0) pre0 = f.pre; else chunk += f.pre; chunk += f.token; src = f.rest; } else chunk += words[i]; }
+                    out += pre0 + '\x02' + chunk + '\x03';
+                } else if (op.type === 'remove') {
+                    removeAccum += op.text + ' ';
+                } else if (op.type === 'both') {
+                    removeAccum += op.text + ' ';
+                    let pre0 = '', chunk = '';
+                    for (let i = 0; i < words.length; i++) { const f = findWord(words[i]); if (f) { if (i === 0) pre0 = f.pre; else chunk += f.pre; chunk += f.token; src = f.rest; } else chunk += words[i]; }
+                    flushRemove();
+                    out += pre0 + '\x02' + chunk + '\x03';
+                }
+            }
+            flushRemove(); out += src;
+            return marked.parseInline(out)
+                .replace(/\x02([\s\S]*?)\x03/g, '<mark class="diff-added">$1</mark>')
+                .replace(/\x04([\s\S]*?)\x05/g, '<mark class="diff-removed">$1</mark>');
+        }
+
+        function diffWords(oldStr, newStr) {
+            const tok = s => s.match(/[\w_]+/g) || [];
+            const a = tok(oldStr), b = tok(newStr);
+            const m = a.length, n = b.length;
+            const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+            for (let r = 1; r <= m; r++) for (let c = 1; c <= n; c++)
+                dp[r][c] = a[r - 1] === b[c - 1] ? dp[r - 1][c - 1] + 1 : Math.max(dp[r - 1][c], dp[r][c - 1]);
+            const ops = []; let r = m, c = n;
+            while (r > 0 || c > 0) {
+                if (r > 0 && c > 0 && a[r - 1] === b[c - 1]) { ops.push({ type: 'equal', text: a[r - 1] }); r--; c--; }
+                else if (c > 0 && (r === 0 || dp[r][c - 1] >= dp[r - 1][c])) { ops.push({ type: 'add', text: b[c - 1] }); c--; }
+                else { ops.push({ type: 'remove', text: a[r - 1] }); r--; }
+            }
+            return ops.reverse();
+        }
+
+        function diffLines(oldLines, newLines) {
+            const m = oldLines.length, n = newLines.length;
+            const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+            for (let r = 1; r <= m; r++) for (let c = 1; c <= n; c++)
+                dp[r][c] = oldLines[r - 1] === newLines[c - 1] ? dp[r - 1][c - 1] + 1 : Math.max(dp[r - 1][c], dp[r][c - 1]);
+            const ops = []; let r = m, c = n;
+            while (r > 0 || c > 0) {
+                if (r > 0 && c > 0 && oldLines[r - 1] === newLines[c - 1]) { ops.push({ type: 'equal', line: newLines[c - 1] }); r--; c--; }
+                else if (c > 0 && (r === 0 || dp[r][c - 1] >= dp[r - 1][c])) { ops.push({ type: 'add', line: newLines[c - 1] }); c--; }
+                else { ops.push({ type: 'remove', line: oldLines[r - 1] }); r--; }
+            }
+            return ops.reverse();
+        }
+
+        init().catch(() => {
+            document.getElementById('content').innerHTML = '<div class="empty-state">Failed to load document list.</div>';
+        });
+    </script>
+</body>
+
+</html>

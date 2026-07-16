@@ -236,6 +236,13 @@ class SkillSection extends CollapsibleSection {
                                step="1"
                                data-field="coins">
                     </div>
+                    <div class="skill-row inventory-value-row">
+                        <img src="/assets/icons/items/equipment/greedy_piggy_bank.svg" 
+                             class="skill-icon" 
+                             alt="Value of all items"
+                             onerror="this.style.display='none'">
+                        <span class="inventory-value-label" title="Value of all items">${(character.inventory_value || 0).toLocaleString()}</span>
+                    </div>
                 </div>
             </div>
         `;
@@ -291,13 +298,21 @@ class SkillSection extends CollapsibleSection {
             progressPercent = 100; // Max level shows full ring
         }
 
-        return `
-            <div class="skill-row" data-skill="${skill.id}" style="--progress: ${progressPercent}%;">
-                <img src="/assets/icons/text/skill_icons/${skill.id}.svg" 
+        // Emoji fallbacks for skills without SVG icons
+        const SKILL_EMOJI_FALLBACK = {};
+
+        const emoji = SKILL_EMOJI_FALLBACK[skill.id];
+        const iconHtml = emoji
+            ? `<span class="skill-icon skill-icon-emoji" title="${skill.display_name}">${emoji}</span>`
+            : `<img src="/assets/icons/text/skill_icons/${skill.id}.svg" 
                      class="skill-icon" 
                      alt="${skill.display_name}"
                      title="${skill.display_name}"
-                     onerror="this.style.display='none'">
+                     onerror="this.style.display='none'">`;
+
+        return `
+            <div class="skill-row" data-skill="${skill.id}" style="--progress: ${progressPercent}%;">
+                ${iconHtml}
                 <input type="number" 
                        class="skill-level-input" 
                        value="${level}" 

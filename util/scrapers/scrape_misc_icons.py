@@ -56,6 +56,28 @@ ICONS = [
         'https://wiki.walkscape.app/images/d/df/Recipes.svg',
         'assets/icons/wiki.svg'
     ),
+    (
+        'https://wiki.walkscape.app/images/c/cb/Fine_Material.svg',
+        'assets/icons/keywords/fine_material.svg'
+    ),
+    (
+        'https://wiki.walkscape.app/images/c/c2/Collectibles_Icon.svg',
+        'assets/icons/keywords/collectible.svg'
+    ),
+    (
+        'https://wiki.walkscape.app/images/8/8c/Materials_Icon.svg',
+        'assets/icons/attributes/materials.svg'
+    ),
+    (
+        'https://wiki.walkscape.app/images/b/bc/Chest_Chips.svg',
+        'assets/icons/items/chest_chips.svg'
+    ),
+    (
+        # "Find linens" stat icon (Mummy's That's A Wrap passive). Not in the
+        # gear API under find_linens, so sourced from the wiki.
+        'https://wiki.walkscape.app/images/6/66/Find_Linens.svg',
+        'assets/icons/attributes/find_linens.svg'
+    ),
 ]
 
 # ============================================================================

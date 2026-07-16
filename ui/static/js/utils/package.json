@@ -1,0 +1,4 @@
+{
+    "//": "Marks this directory as ESM so node:test files in ../tests can import .js utility modules. The browser ignores this file; it only affects Node's module resolution.",
+    "type": "module"
+}

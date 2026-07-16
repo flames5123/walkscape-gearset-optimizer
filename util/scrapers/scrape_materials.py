@@ -122,6 +122,155 @@ def extract_value_from_page(html_content):
     
     return value, fine_value, special_sell, special_sell_fine
 
+
+def extract_requirement_from_page(html_content):
+    """Extract the skill level requirement from a material page.
+
+    Parses the 'Requirement' section, e.g.:
+        "At least Hunting lvl. 30."
+    Returns a requirements list like:
+        [{'type': 'skill', 'skill': 'Hunting', 'level': 30}]
+    or [] if no requirement is found.
+    """
+    soup = BeautifulSoup(html_content, 'html.parser')
+
+    req_heading = soup.find(['h1', 'h2', 'h3'], id='Requirement')
+    if not req_heading:
+        return []
+
+    # The requirement is in the <ul> immediately after the heading wrapper
+    start = req_heading.parent if req_heading.parent and 'mw-heading' in (req_heading.parent.get('class') or []) else req_heading
+    ul = start.find_next('ul')
+    if not ul:
+        return []
+
+    li = ul.find('li')
+    if not li:
+        return []
+
+    text = li.get_text()
+    # Match "At least <Skill> lvl. <N>"
+    m = re.search(r'At least\s+(\w+)\s+lvl\.\s*(\d+)', text, re.IGNORECASE)
+    if not m:
+        return []
+
+    skill = m.group(1).lower()
+    level = int(m.group(2))
+    return [{'type': 'skill', 'skill': skill, 'level': level}]
+
+
+def extract_input_stats_from_page(html_content):
+    """Extract 'Attribute (Input)' stats from a material page.
+    
+    Parses the Normal quality row only from the Attributes (Input) table.
+    Fine version stats are universal bonuses handled by the game engine,
+    so we only extract the Normal row's stats and apply them to both versions.
+    
+    Returns:
+        Dict in nested stats format: {skill: {location: {stat: value}}}
+        Empty dict if no input stats found.
+    """
+    soup = BeautifulSoup(html_content, 'html.parser')
+    stats = {}
+    
+    # Find the "Attributes (Input)" heading
+    attr_heading = soup.find(['h1', 'h2', 'h3'], id=lambda x: x and 'Attribute' in str(x) and 'Input' in str(x))
+    if not attr_heading:
+        for heading in soup.find_all(['h1', 'h2', 'h3']):
+            if 'Attribute' in heading.get_text() and 'Input' in heading.get_text():
+                attr_heading = heading
+                break
+    if not attr_heading:
+        return stats
+    
+    # Find the wikitable after the heading
+    start_element = attr_heading
+    if attr_heading.parent and 'mw-heading' in (attr_heading.parent.get('class', []) or []):
+        start_element = attr_heading.parent
+    
+    table = start_element.find_next('table', class_='wikitable')
+    if not table:
+        return stats
+    
+    # Parse the table rows — find the Normal quality row
+    rows = table.find_all('tr')
+    normal_cell_text = None
+    
+    for row in rows:
+        cells = row.find_all('td')
+        if len(cells) < 3:
+            continue
+        
+        # Check if this is the Normal quality row by looking for "Normal" in alt text
+        quality_img = cells[1].find('img')
+        if quality_img:
+            alt = quality_img.get('alt', '').strip()
+            if alt == 'Normal':
+                # Get the attributes cell (3rd column)
+                attr_cell = cells[2]
+                # Replace <br> with newlines for parsing
+                for br in attr_cell.find_all('br'):
+                    br.replace_with('\n')
+                normal_cell_text = attr_cell.get_text()
+                break
+    
+    if not normal_cell_text or not normal_cell_text.strip():
+        return stats
+    
+    # Parse stat lines from the Normal cell
+    import re
+    for line in normal_cell_text.split('\n'):
+        line = line.strip()
+        if not line:
+            continue
+        
+        stat_match = re.search(r'([+-]?\d+(?:\.\d+)?)\s*(%?)\s*(Work efficiency|Double action|Double rewards|Steps required|Chest finding|Fine material finding|Find collectibles|Find gems|Find bird nests|No materials consumed|Quality outcome|Bonus experience|Inventory space)', line, re.IGNORECASE)
+        
+        if stat_match:
+            value_str = stat_match.group(1)
+            is_percent = stat_match.group(2) == '%'
+            stat_name_raw = stat_match.group(3)
+            
+            stat_map = {
+                'work efficiency': 'work_efficiency',
+                'double action': 'double_action',
+                'double rewards': 'double_rewards',
+                'steps required': 'steps_add',
+                'chest finding': 'chest_finding',
+                'fine material finding': 'fine_material_finding',
+                'find collectibles': 'find_collectibles',
+                'find gems': 'find_gems',
+                'find bird nests': 'find_bird_nests',
+                'find bird nest': 'ItemFindingCategory.BIRD_NEST',
+                'no materials consumed': 'no_materials_consumed',
+                'quality outcome': 'quality_outcome',
+                'bonus experience': 'bonus_xp_percent',
+                'inventory space': 'inventory_space',
+            }
+            stat_name = stat_map.get(stat_name_raw.lower(), stat_name_raw.lower().replace(' ', '_'))
+            
+            if stat_name == 'steps_add' and is_percent:
+                stat_name = 'steps_percent'
+            if stat_name == 'bonus_xp_percent' and not is_percent:
+                stat_name = 'bonus_xp_add'
+            
+            value = float(value_str)
+            
+            skill = 'global'
+            skill_match = re.search(r'[Ww]hile\s+(?:doing\s+)?(\w+)', line)
+            if skill_match:
+                skill = skill_match.group(1).lower()
+            
+            location = 'global'
+            
+            if skill not in stats:
+                stats[skill] = {}
+            if location not in stats[skill]:
+                stats[skill][location] = {}
+            stats[skill][location][stat_name] = value
+    
+    return stats
+
 # ============================================================================
 # PARSING FUNCTIONS
 # ============================================================================
@@ -185,15 +334,28 @@ def extract_materials(html_content):
                     material_html = download_material_page(material_url)
                     if material_html:
                         value, fine_value, special_sell, special_sell_fine = extract_value_from_page(material_html)
+                        # Only extract Normal quality stats — fine version bonuses are
+                        # universal and handled by the game engine
+                        input_stats = extract_input_stats_from_page(material_html)
+                        requirements = extract_requirement_from_page(material_html)
                     else:
                         value, fine_value, special_sell, special_sell_fine = 0, 0, None, None
+                        input_stats = {}
+                        requirements = []
+                    
+                    if input_stats:
+                        print(f"    Found input stats: {input_stats}")
+                    if requirements:
+                        print(f"    Found requirements: {requirements}")
                     
                     # Add regular material
                     materials.append({
                         'name': material_name,  # Already decoded above
                         'keywords': keywords,
                         'value': value,
-                        'special_sell': special_sell  # Only use normal special_sell, not fine
+                        'special_sell': special_sell,  # Only use normal special_sell, not fine
+                        'stats': input_stats,
+                        'requirements': requirements,
                     })
                     
                     # Add fine version
@@ -201,7 +363,9 @@ def extract_materials(html_content):
                         'name': material_name + ' (Fine)',  # Already decoded above
                         'keywords': keywords,
                         'value': fine_value if fine_value else value,
-                        'special_sell': special_sell_fine  # Only use fine special_sell
+                        'special_sell': special_sell_fine,  # Only use fine special_sell
+                        'stats': input_stats,  # Fine version has same input stats
+                        'requirements': requirements,  # Fine version has same requirements
                     })
     
     return materials
@@ -242,15 +406,18 @@ def generate_materials_py(materials):
     
     with open(output_file, 'w', encoding='utf-8') as f:
         write_module_header(f, 'Auto-generated materials data from Walkscape wiki', 'scrape_materials.py')
-        write_imports(f, ['from typing import List, Optional, Tuple, Any'])
+        write_imports(f, ['from typing import List, Optional, Tuple, Any, Dict', 'from util.stats_mixin import StatsMixin'])
         
         lines = [
-        'class MaterialInstance:',
-        '    """Base class for material instances"""',
-        '    def __init__(self, name: str, keywords: List[str], value: int, special_sell: Optional[Tuple[int, str]] = None):',
+        'class MaterialInstance(StatsMixin):',
+        '    """Base class for material instances. Optionally has stats (e.g., arrows with WE)."""',
+        '    def __init__(self, name: str, keywords: List[str], value: int, special_sell: Optional[Tuple[int, str]] = None, stats: Optional[Dict] = None, requirements: Optional[List] = None):',
         '        self.name = name',
         '        self.keywords = keywords',
         '        self.value = value  # Coin value',
+        '        self._stats = stats or {}  # {skill: {location: {stat: value}}} — for input items like arrows',
+        '        self.gated_stats = {}  # Required by StatsMixin',
+        '        self.requirements = requirements or []  # Skill level requirements for use as input',
         '        self._special_sell_ref = special_sell  # (quantity, "Material.ENUM_NAME") or None',
         '        self._special_sell_cached = None',
         '    ',
@@ -311,12 +478,22 @@ def generate_materials_py(materials):
             # Escape the name properly for Python string
             escaped_name = material["name"].replace('\\', '\\\\').replace('"', '\\"')
             
+            # Format stats
+            stats = material.get('stats', {})
+            stats_str = repr(stats) if stats else None
+            
             lines.extend([
             f'    {const_name} = MaterialInstance(',
             f'        name="{escaped_name}",',
             f'        keywords={material["keywords"]},',
             f'        value={material["value"]},',
-            f'        special_sell={special_sell_str}',
+            f'        special_sell={special_sell_str}' + ('' if not stats_str and not material.get('requirements') else ','),
+            ])
+            if stats_str:
+                lines.append(f'        stats={stats_str}' + ('' if not material.get('requirements') else ','))
+            if material.get('requirements'):
+                lines.append(f'        requirements={material["requirements"]}')
+            lines.extend([
             '    )',
             '',
             ])

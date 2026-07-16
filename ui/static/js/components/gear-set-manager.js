@@ -18,6 +18,7 @@ import Component from './base.js';
 import store from '../state.js';
 import api from '../api.js';
 import KeyboardNavigator from '../utils/keyboard-navigation.js';
+import CleanupModal from './cleanup-modal.js';
 
 class GearSetManager extends Component {
     /**
@@ -44,6 +45,7 @@ class GearSetManager extends Component {
         // Subscribe to gear set state changes
         this.subscribe('gearsets.selectedId', () => this.onSelectionChange());
         this.subscribe('gearsets.selectedName', () => {
+            if (this._isSlot2Active()) return; // Ignore GS1 name changes when GS2 is active
             // Preserve dropdown state when name changes
             if (this.dropdownOpen) {
                 const $nameInput = this.$element.find('.gear-set-name-input');
@@ -55,7 +57,26 @@ class GearSetManager extends Component {
                 this.render();
             }
         });
+        this.subscribe('gearsets.gearset2SavedName', () => {
+            if (!this._isSlot2Active()) return; // Ignore GS2 name changes when GS1 is active
+            if (this.dropdownOpen) {
+                const $nameInput = this.$element.find('.gear-set-name-input');
+                if ($nameInput.length) {
+                    $nameInput.val(store.state.gearsets.gearset2SavedName || '');
+                }
+                this.updateSaveButtonState();
+            } else {
+                this.render();
+            }
+        });
+        this.subscribe('gearsets.gearset2SavedId', () => {
+            if (this._isSlot2Active()) this.onSelectionChange();
+        });
+        this.subscribe('gearsets.activeGearsetSlot', () => this.onSelectionChange());
         this.subscribe('gearsets.current', () => this.render());
+        this.subscribe('gearsets.gearset2', () => {
+            if (this._isSlot2Active()) this.render();
+        });
         this.subscribe('gearsets.saved', () => {
             // When saved gearsets change (add/delete), preserve dropdown state
             if (this.dropdownOpen) {
@@ -67,20 +88,59 @@ class GearSetManager extends Component {
 
         this.render();
         this.attachEvents();
+
+        // Create cleanup modal container
+        this.$cleanupContainer = $('<div class="cleanup-modal-container"></div>');
+        $('body').append(this.$cleanupContainer);
+        this.cleanupModal = new CleanupModal(this.$cleanupContainer[0]);
+    }
+
+    /**
+     * Check if comparison mode slot 2 is active
+     */
+    _isSlot2Active() {
+        return store.state.gearsets.comparisonMode && store.state.gearsets.activeGearsetSlot === 2;
+    }
+
+    /**
+     * Get the active name for the current slot
+     */
+    _getActiveName() {
+        return this._isSlot2Active()
+            ? (store.state.gearsets.gearset2SavedName || '')
+            : (store.state.gearsets.selectedName || '');
+    }
+
+    /**
+     * Get the active ID for the current slot
+     */
+    _getActiveId() {
+        return this._isSlot2Active()
+            ? store.state.gearsets.gearset2SavedId
+            : store.state.gearsets.selectedId;
+    }
+
+    /**
+     * Get the active gear object for the current slot
+     */
+    _getActiveGear() {
+        return this._isSlot2Active()
+            ? store.state.gearsets.gearset2
+            : store.state.gearsets.current;
     }
 
     /**
      * Handle selection change - update tracking state
      */
     onSelectionChange() {
-        const selectedId = store.state.gearsets.selectedId;
-        const selectedName = store.state.gearsets.selectedName;
+        const selectedId = this._getActiveId();
+        const selectedName = this._getActiveName();
 
         this.currentGearSetId = selectedId;
         this.originalName = selectedName;
 
         // Deep copy current gear for comparison
-        this.originalGear = JSON.parse(JSON.stringify(store.state.gearsets.current));
+        this.originalGear = JSON.parse(JSON.stringify(this._getActiveGear()));
 
         // Preserve dropdown state when selection changes
         if (this.dropdownOpen) {
@@ -102,8 +162,8 @@ class GearSetManager extends Component {
      * @returns {boolean} True if name or gear has changed
      */
     hasChanges() {
-        const currentName = store.state.gearsets.selectedName || '';
-        const currentGear = store.state.gearsets.current;
+        const currentName = this._getActiveName();
+        const currentGear = this._getActiveGear();
 
         // Check if name changed
         const nameChanged = currentName !== this.originalName;
@@ -121,7 +181,7 @@ class GearSetManager extends Component {
      * @returns {boolean} True if save button should be enabled
      */
     canSave() {
-        const currentName = store.state.gearsets.selectedName || '';
+        const currentName = this._getActiveName();
 
         // Must have a name AND have changes
         return currentName.trim().length > 0 && this.hasChanges();
@@ -132,7 +192,7 @@ class GearSetManager extends Component {
      * Requirements: 1.9
      */
     async save() {
-        const name = store.state.gearsets.selectedName.trim();
+        const name = this._getActiveName().trim();
 
         if (!name) {
             api.showError('Please enter a gear set name');
@@ -143,9 +203,9 @@ class GearSetManager extends Component {
             await store.saveGearSet(name, this.currentGearSetId);
 
             // Update tracking state
-            this.currentGearSetId = store.state.gearsets.selectedId;
+            this.currentGearSetId = this._getActiveId();
             this.originalName = name;
-            this.originalGear = JSON.parse(JSON.stringify(store.state.gearsets.current));
+            this.originalGear = JSON.parse(JSON.stringify(this._getActiveGear()));
 
             // Show success toast
             if (this.currentGearSetId) {
@@ -168,7 +228,12 @@ class GearSetManager extends Component {
      * @param {string} gearSetId - ID of gear set to load
      */
     load(gearSetId) {
-        store.loadGearSet(gearSetId);
+        // In comparison mode with slot 2 active, load into gearset 2
+        if (store.state.gearsets.comparisonMode && store.state.gearsets.activeGearsetSlot === 2) {
+            store.loadGearSetToSlot2(gearSetId);
+        } else {
+            store.loadGearSet(gearSetId);
+        }
 
         // Close dropdown after loading
         this.dropdownOpen = false;
@@ -253,7 +318,15 @@ class GearSetManager extends Component {
      * Requirements: 1.6
      */
     createNew() {
-        store.createNewGearSet();
+        if (this._isSlot2Active()) {
+            // For slot 2, clear the gearset2 name/id but keep gear
+            store.state.gearsets.gearset2SavedId = null;
+            store.state.gearsets.gearset2SavedName = '';
+            store._notifySubscribers('gearsets.gearset2SavedId');
+            store._notifySubscribers('gearsets.gearset2SavedName');
+        } else {
+            store.createNewGearSet();
+        }
 
         // Close dropdown
         this.dropdownOpen = false;
@@ -261,7 +334,7 @@ class GearSetManager extends Component {
         // Reset tracking state
         this.currentGearSetId = null;
         this.originalName = '';
-        this.originalGear = JSON.parse(JSON.stringify(store.state.gearsets.current));
+        this.originalGear = JSON.parse(JSON.stringify(this._getActiveGear()));
 
         this.render();
     }
@@ -286,6 +359,22 @@ class GearSetManager extends Component {
         const $arrow = this.$element.find('.dropdown-toggle .expand-arrow');
 
         if (this.dropdownOpen) {
+            // Page load only fetches the first 50 most-recent gearsets; the
+            // rest are pulled lazily here on first dropdown open. Users with
+            // <=50 gearsets pay nothing extra. Users with more see the partial
+            // list immediately and the rest fade in when the fetch resolves
+            // (typically <1s). Idempotent — subsequent opens skip the fetch.
+            if (!store.state.gearsets.allLoaded && !this._loadingAllInProgress) {
+                this._loadingAllInProgress = true;
+                Promise.resolve(store._loadAllGearSets?.()).then(() => {
+                    this._loadingAllInProgress = false;
+                    if (this.dropdownOpen) {
+                        const $dd = this.$element.find('.gear-set-dropdown');
+                        $dd.html(this.renderDropdownContent());
+                        this.initKeyboardNav();
+                    }
+                });
+            }
             // Opening - update content and show with animation
             $dropdown.html(this.renderDropdownContent());
             $arrow.addClass('expanded');
@@ -322,6 +411,8 @@ class GearSetManager extends Component {
             onSelect: ($item) => {
                 if ($item.hasClass('new-gear-set')) {
                     this.createNew();
+                } else if ($item.hasClass('gear-set-loading-row')) {
+                    // No-op — placeholder while remaining gearsets load.
                 } else {
                     const id = $item.data('id');
                     this.load(id);
@@ -355,6 +446,22 @@ class GearSetManager extends Component {
             `;
         }).join('');
 
+        // Page load only fetches the first 50 most-recent gearsets to keep
+        // gearsets_load fast. The rest are pulled on the first dropdown open
+        // (handled in toggleDropdown). While that fetch is in flight we show
+        // a small "Loading remaining gearsets…" row so the user understands
+        // the list might still grow.
+        const allLoaded = !!store.state.gearsets.allLoaded;
+        const isLoadingAll = !!this._loadingAllInProgress;
+        let pendingRow = '';
+        if (!allLoaded && isLoadingAll) {
+            pendingRow = `
+                <div class="gear-set-item gear-set-loading-row" aria-disabled="true">
+                    <span class="gear-set-name">Loading remaining gearsets…</span>
+                </div>
+            `;
+        }
+
         return `
             <input 
                 type="text" 
@@ -366,7 +473,11 @@ class GearSetManager extends Component {
                 <div class="gear-set-item new-gear-set">
                     <span class="gear-set-name">+ New Gear Set</span>
                 </div>
+                <div class="gear-set-item cleanup-gear-sets">
+                    <span class="gear-set-name">Clean Up Duplicates</span>
+                </div>
                 ${gearSetItems}
+                ${pendingRow}
             </div>
         `;
     }
@@ -407,7 +518,11 @@ class GearSetManager extends Component {
      * @param {string} name - New name
      */
     updateName(name) {
-        store.state.gearsets.selectedName = name;
+        if (this._isSlot2Active()) {
+            store.state.gearsets.gearset2SavedName = name;
+        } else {
+            store.state.gearsets.selectedName = name;
+        }
         // Don't notify subscribers to avoid re-render on every keystroke
         // Just update the save button state
         this.updateSaveButtonState();
@@ -473,7 +588,7 @@ class GearSetManager extends Component {
      * Requirements: 1.1, 1.3, 1.13
      */
     render() {
-        const selectedName = store.state.gearsets.selectedName || '';
+        const selectedName = this._getActiveName();
         const canSave = this.canSave();
         const arrowIcon = `<span class="expand-arrow ${this.dropdownOpen ? 'expanded' : ''}">▼</span>`;
 
@@ -568,8 +683,18 @@ class GearSetManager extends Component {
             this.createNew();
         });
 
+        // Clean up duplicates click
+        this.$element.on('click', '.cleanup-gear-sets', () => {
+            this.dropdownOpen = false;
+            const $arrow = this.$element.find('.dropdown-toggle .expand-arrow');
+            const $dropdown = this.$element.find('.gear-set-dropdown');
+            $arrow.removeClass('expanded');
+            $dropdown.slideUp(200);
+            this.cleanupModal.open();
+        });
+
         // Gear set item click (load)
-        this.$element.on('click', '.gear-set-item:not(.new-gear-set)', (e) => {
+        this.$element.on('click', '.gear-set-item:not(.new-gear-set):not(.cleanup-gear-sets):not(.gear-set-loading-row)', (e) => {
             // Don't trigger if clicking delete button
             if ($(e.target).hasClass('delete-button') || $(e.target).hasClass('delete-confirm')) {
                 return;

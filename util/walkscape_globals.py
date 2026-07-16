@@ -39,6 +39,23 @@ def get_total_skill_level() -> int:
     return getattr(_thread_locals, 'total_skill_level', DEFAULT_TOTAL_SKILL_LEVEL)
 
 
+DEFAULT_TOTAL_COLLECTIBLES = 0
+
+
+def set_total_collectibles(count: int):
+    """Set total obtained-collectibles count for current thread/user.
+
+    Used by CollectibleOwned gated stats (e.g. the item collection ring, which
+    grants finding bonuses that scale with the number of collectibles owned).
+    """
+    _thread_locals.total_collectibles = count
+
+
+def get_total_collectibles() -> int:
+    """Get the current total obtained-collectibles count for this thread/user."""
+    return getattr(_thread_locals, 'total_collectibles', DEFAULT_TOTAL_COLLECTIBLES)
+
+
 def set_custom_stats(custom_stats: dict):
     """
     Set custom stats for current thread/user.

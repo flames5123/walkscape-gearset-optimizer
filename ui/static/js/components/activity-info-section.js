@@ -19,6 +19,34 @@ import Component from './base.js';
 import store from '../state.js';
 import api from '../api.js';
 import TravelInfoSection from './travel-info-section.js';
+import { getInstantActionsPet, SMELTING_RECIPE_NAMES } from '../utils/pet-utils.js';
+import { getPetIconPath } from '../utils/pet-utils.js';
+
+import { formatFixed } from '../utils/number-format.js';
+import { wikiDarkModeSuffix } from '../utils/wiki-link.js';
+
+const SKILL_ICON_FALLBACK = {
+    'traveling': '🧭',
+};
+
+// Global fine input bonus — same for all fine input items, defined in game data
+const FINE_INPUT_BONUS = {
+    global: {
+        global: {
+            work_efficiency: 40.0,
+            double_rewards: 10.0,
+            bonus_xp_percent: 100.0,
+            fine_material_finding: 200.0,
+        }
+    }
+};
+
+function skillIconHtml(skillName, cssClass = 'xp-icon') {
+    const skillId = skillName.toLowerCase().replace(' ', '_');
+    const fallback = SKILL_ICON_FALLBACK[skillId];
+    if (fallback) return `<span class="${cssClass}" style="font-size:18px;display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px" title="${skillName}">${fallback}</span>`;
+    return `<img src="/assets/icons/text/skill_icons/${skillId}.svg" alt="${skillName}" class="${cssClass}" title="${skillName}" />`;
+}
 
 class ActivityInfoSection extends Component {
     /**
@@ -34,6 +62,11 @@ class ActivityInfoSection extends Component {
         this.selectedLocation = null;
         this.isExpanded = true;
         this.useFine = store.state.column3?.useFine || false;
+        this.useFineInputs = store.state.column3?.useFineInputs || false;
+        // Selected input items: {idx: itemObject} — one per input_item slot
+        this._selectedInputItems = {};
+        this._customKeywords = []; // Custom keywords from DB
+        this._loadCustomKeywords();
 
         // Travel info section (rendered when activity is Traveling)
         this.travelInfoSection = null;
@@ -45,6 +78,9 @@ class ActivityInfoSection extends Component {
         this.subscribe('gearset', () => this.onGearsetChange());
         this.subscribe('ui.user_overrides.skills', () => this.onSkillOverridesChange());
         this.subscribe('character.skills', () => this.onSkillsChange());
+        // Re-render when instant-actions checkbox changes
+        this.subscribe('ui.instant_actions_foraging', () => { if (this.activity) this.render(); });
+        this.subscribe('ui.instant_actions_smelting', () => { if (this.activity) this.render(); });
 
         // Subscribe to Column 2 stats updates
         // When Column 2 finishes calculating, re-render to show updated stats
@@ -55,6 +91,13 @@ class ActivityInfoSection extends Component {
                     this.render();
                 }
             });
+        } else {
+            // bug fbb51cdb: if Column 2 isn't ready at construction the callback
+            // was silently never registered, so the Activity page relied on a
+            // handoff that could never happen. We now paint directly in
+            // onActivityChange(), so this is no longer fatal — but log it so we
+            // can see the ordering in any future bug report.
+            console.warn('[ActivityInfo] combinedStatsSection not ready at construction — live-stats re-render callback NOT registered (direct render still applies)');
         }
 
         // Initial render
@@ -78,18 +121,123 @@ class ActivityInfoSection extends Component {
             return;
         }
 
-        // Fetch activity details from API
+        // Handle generic activities — fetch from generic endpoint
+        if (selectedId === 'generic') {
+            // "generic" without ID means the form is open but nothing saved yet
+            this.activity = null;
+            this.render();
+            return;
+        }
+        if (selectedId.startsWith('generic::')) {
+            try {
+                const defId = selectedId.replace('generic::', '');
+                const data = await api.getGenericDefinitionView(defId);
+                if (data && data.type === 'activity') {
+                    this.activity = data;
+                    this._selectedInputItems = {};  // Reset input selections on activity change
+                    // Restore saved input items from store (only if valid for this activity's input slots)
+                    if (data.input_items && data.input_items.length > 0) {
+                        const savedInputItems = store.state.column3?.selectedInputItems;
+                        if (savedInputItems && typeof savedInputItems === 'object') {
+                            for (const [idx, item] of Object.entries(savedInputItems)) {
+                                const slot = data.input_items[parseInt(idx)];
+                                if (!slot || !item) continue;
+                                const requiredKeyword = (slot.reference || slot.name || '').toLowerCase();
+                                const itemKeywords = (item.keywords || []).map(k => k.toLowerCase());
+                                if (itemKeywords.includes(requiredKeyword)) {
+                                    this._selectedInputItems[idx] = item;
+                                }
+                            }
+                        }
+                    }
+                    this.useFine = store.state.column3?.useFine || false;
+                    this.useFineInputs = store.state.column3?.useFineInputs || false;
+                    // Sync filtered inputs back to store so stale items don't persist
+                    if (!store.state.column3) store.state.column3 = {};
+                    store.state.column3.selectedInputItems = { ...this._selectedInputItems };
+                    let selectedLoc = null;
+                    const savedLocation = store.state.column3?.selectedLocation;
+                    if (savedLocation && data.locations) {
+                        selectedLoc = data.locations.find(loc => loc.id === savedLocation);
+                    }
+                    if (!selectedLoc && data.locations && data.locations.length > 0) {
+                        selectedLoc = data.locations[0];
+                    }
+                    if (selectedLoc) {
+                        this.selectedLocation = selectedLoc.id;
+                        if (!store.state.column3) store.state.column3 = {};
+                        store.state.column3.selectedLocation = this.selectedLocation;
+                        const locationRegions = selectedLoc.regions && selectedLoc.regions.length > 0
+                            ? selectedLoc.regions : [selectedLoc.id];
+                        const combinedStatsSection = window.combinedStatsSection;
+                        if (combinedStatsSection && typeof combinedStatsSection.setActivityAndLocation === 'function') {
+                            await combinedStatsSection.setActivityAndLocation(data.id, locationRegions, this._selectedInputItems, this.useFineInputs);
+                        } else {
+                            await this.notifyColumn2ActivityChange(data);
+                        }
+                    } else {
+                        await this.notifyColumn2ActivityChange(data);
+                        // Restore input items after setActivity (which clears them) and re-render
+                        const css2 = window.combinedStatsSection;
+                        if (css2 && Object.keys(this._selectedInputItems).length > 0) {
+                            for (const [idx, item] of Object.entries(this._selectedInputItems)) {
+                                if (item && item.stats) {
+                                    css2._inputItems[parseInt(idx)] = item;
+                                }
+                            }
+                            if (this.useFineInputs) {
+                                css2._useFineInputs = true;
+                            }
+                            css2.render();
+                            css2.attachEvents();
+                        }
+                    }
+                    store._saveColumn3Selection();
+                    return;
+                }
+            } catch (error) {
+                console.error('Failed to load generic activity:', error);
+            }
+            return;
+        }
+
+        // Fetch activity details from cached data (already loaded by dropdown)
         try {
-            const response = await $.get('/api/activities');
+            // Use cached activities data from the dropdown instead of re-fetching
+            const activityDropdown = window.activitySelector;
+            const cachedData = activityDropdown?.activitiesData;
+
+            // Fall back to API only if cache is empty
+            const response = cachedData || await $.get('/api/activities');
 
             // Find activity by ID
             for (const activities of Object.values(response.by_skill)) {
                 const activity = activities.find(a => a.id === selectedId);
                 if (activity) {
                     this.activity = activity;
+                    this._selectedInputItems = {};  // Reset input selections on activity change
+                    // Restore saved input items from store (only if valid for this activity's input slots)
+                    if (activity.input_items && activity.input_items.length > 0) {
+                        const savedInputItems2 = store.state.column3?.selectedInputItems;
+                        if (savedInputItems2 && typeof savedInputItems2 === 'object') {
+                            for (const [idx, item] of Object.entries(savedInputItems2)) {
+                                const slot = activity.input_items[parseInt(idx)];
+                                if (!slot || !item) continue;
+                                const requiredKeyword = (slot.reference || slot.name || '').toLowerCase();
+                                const itemKeywords = (item.keywords || []).map(k => k.toLowerCase());
+                                if (itemKeywords.includes(requiredKeyword)) {
+                                    this._selectedInputItems[idx] = item;
+                                }
+                            }
+                        }
+                    }
 
                     // Initialize useFine from state
                     this.useFine = store.state.column3?.useFine || false;
+                    this.useFineInputs = store.state.column3?.useFineInputs || false;
+                    // Sync filtered inputs back to store so stale items don't persist
+                    if (!store.state.column3) store.state.column3 = {};
+                    store.state.column3.selectedInputItems = { ...this._selectedInputItems };
 
                     // Try to restore saved location, otherwise auto-select first
                     const savedLocation = store.state.column3?.selectedLocation;
@@ -112,6 +260,17 @@ class ActivityInfoSection extends Component {
                         }
                         store.state.column3.selectedLocation = this.selectedLocation;
 
+                        // Paint the activity page NOW from the data we already
+                        // have (bug fbb51cdb). Previously we returned without
+                        // rendering and relied solely on Column 2's async
+                        // statsCalculatedCallbacks to trigger the first paint.
+                        // In comparison mode that callback could fail to fire,
+                        // leaving the Activity page permanently blank. render()
+                        // reads Column 2 stats defensively (cachedStats || {}),
+                        // so an early paint is safe; the callback below re-renders
+                        // with live work-efficiency once Column 2 finishes.
+                        this.render();
+
                         // Notify Column 2 of both activity and location together (single render)
                         const locationRegions = selectedLoc.regions && selectedLoc.regions.length > 0
                             ? selectedLoc.regions
@@ -121,21 +280,42 @@ class ActivityInfoSection extends Component {
 
                         const combinedStatsSection = window.combinedStatsSection;
                         if (combinedStatsSection && typeof combinedStatsSection.setActivityAndLocation === 'function') {
-                            await combinedStatsSection.setActivityAndLocation(activity.id, locationRegions);
+                            await combinedStatsSection.setActivityAndLocation(activity.id, locationRegions, this._selectedInputItems, this.useFineInputs);
                         } else {
                             await this.notifyColumn2ActivityChange(activity);
                             await this.notifyColumn2LocationChange(locationRegions);
                         }
                     } else {
                         // No locations, just notify activity change
+                        // Paint now (bug fbb51cdb) — don't wait on the async
+                        // Column 2 stats callback which may never fire.
+                        this.render();
                         await this.notifyColumn2ActivityChange(activity);
+                        // Restore input items after setActivity clears them
+                        const css3 = window.combinedStatsSection;
+                        if (css3 && Object.keys(this._selectedInputItems).length > 0) {
+                            for (const [idx, item] of Object.entries(this._selectedInputItems)) {
+                                if (item && item.stats) {
+                                    css3._inputItems[parseInt(idx)] = item;
+                                }
+                            }
+                            if (this.useFineInputs) {
+                                css3._useFineInputs = true;
+                            }
+                            css3.render();
+                            css3.attachEvents();
+                        }
                     }
 
                     // Save the auto-selected/restored location to session
                     // (the dropdown's save fires before these async calls complete)
                     store._saveColumn3Selection();
 
-                    // Column 3 will re-render when Column 2 calls onStatsCalculated callback
+                    // Activity page is already painted above; Column 3 will
+                    // re-render with live work-efficiency stats when Column 2
+                    // fires its statsCalculatedCallbacks (bug fbb51cdb: this
+                    // callback is best-effort, not the sole path to first paint).
+                    console.log('[ActivityInfo] painted; awaiting Column 2 live stats for', selectedId);
                     return;
                 }
             }
@@ -255,8 +435,9 @@ class ActivityInfoSection extends Component {
         }
         store.state.column3.selectedLocation = locationId;
 
-        // Don't notify subscribers here - will cause double render
-        // store._notifySubscribers('column3.selectedLocation');
+        // Update location button styling without full re-render
+        this.$element.find('.location-item').removeClass('location-selected');
+        this.$element.find(`.location-item[data-location-id="${locationId}"]`).addClass('location-selected');
 
         // Get the regions for this location from the activity data
         let locationRegions = null;
@@ -277,8 +458,6 @@ class ActivityInfoSection extends Component {
 
         // Auto-save selection to session
         store._saveColumn3Selection();
-
-        // Don't call render() here - Column 2 callback will handle it
     }
 
     /**
@@ -293,11 +472,13 @@ class ActivityInfoSection extends Component {
             'Foraging': '#ABD3A1',
             'Mining': '#8CA4D4',
             'Woodcutting': '#5EF06B',
+            'Hunting': '#FEA255',
             'Carpentry': '#F18C62',
             'Cooking': '#F0AD5F',
             'Crafting': '#E9487C',
             'Smithing': '#E2A6A6',
             'Trinketry': '#FEE0AC',
+            'Tailoring': '#AAF2FE',
             'Agility': '#F05FBE',
             'Traveling': '#00BCD4'  // Not in CSS, using a default
         };
@@ -330,20 +511,13 @@ class ActivityInfoSection extends Component {
         const cappedWE = Math.min(we, maxEfficiency);
         const totalEfficiency = 1 + cappedWE;
 
-        // Step 2: Calculate base steps with efficiency (no ceil yet)
-        const stepsWithEfficiency = baseSteps / totalEfficiency;
-
-        // Step 3: Calculate min_steps
-        const minSteps = baseSteps * Math.pow(1 + maxEfficiency, -1);
-
-        // Step 4: Take max of steps_with_efficiency and min_steps
-        const stepsAfterMin = Math.max(stepsWithEfficiency, minSteps);
-
-        // Step 5: Apply percentage reduction and ceil
-        const stepsWithPct = Math.ceil(stepsAfterMin * (1 + pct));
-
-        // Step 6: Apply flat modifier
-        const stepsPerSingleAction = Math.max(10, stepsWithPct + flat);
+        // Match the game's formula (per KamiTzayig reference): single ceil at the
+        // END of the chain. Applying ceil before the pct multiplier introduces
+        // off-by-one errors (e.g. Flowing pocketwatch -5% on Lizard Hunting).
+        const baseOverEff = baseSteps / totalEfficiency;
+        const stepsWithPct = baseOverEff * (1 + pct);
+        const stepsWithFlat = stepsWithPct + flat;
+        const stepsPerSingleAction = Math.max(10, Math.ceil(stepsWithFlat));
 
         // Apply DA for expected steps (no ceil - keep as float for accurate XP/step)
         const expectedStepsPerAction = (1 / (1 + da)) * stepsPerSingleAction;
@@ -392,7 +566,7 @@ class ActivityInfoSection extends Component {
             totalXP += xp;
         }
 
-        const xpPerStep = (totalXP / expectedStepsPerAction).toFixed(3);
+        const xpPerStep = formatFixed((totalXP / expectedStepsPerAction), 3);
 
         return {
             baseSteps: baseSteps,
@@ -485,16 +659,65 @@ class ActivityInfoSection extends Component {
             fulfilled.keywords = {};
             const currentGear = store.state.gearsets?.current || {};
 
+            // Keywords that ALSO have a minimum-skill-level requirement are shown
+            // by the keyword_level_requirements block below (with the level), so
+            // skip them here to avoid showing the same keyword twice.
+            const leveledKeywords = new Set(
+                (requirements.keyword_level_requirements || [])
+                    .map(r => (r.keyword || '').toLowerCase())
+            );
+
+            // Collect keywords provided by the equipped pet's passive abilities
+            // (e.g. Gecko Level 4 "Clever Climber" → "climbing gear"). The pet on
+            // currentGear doesn't carry its own abilities, so look up the pet
+            // catalog entry and pull abilities from the equipped level.
+            const petProvidedKeywords = new Set();
+            const equippedPet = currentGear.pet;
+            if (equippedPet) {
+                const petCatalog = window.optimizeButton?._petCatalog || [];
+                const petId = (equippedPet.itemId || equippedPet.petId || equippedPet.id || equippedPet.name || '').toLowerCase();
+                const petEntry = petCatalog.find(p =>
+                    (p.id && p.id.toLowerCase() === petId) ||
+                    (p.name && p.name.toLowerCase() === (equippedPet.name || '').toLowerCase())
+                );
+                const petLevel = equippedPet.level != null ? equippedPet.level : 0;
+                const levelData = petEntry?.levels?.[String(petLevel)] || null;
+                const abilities = levelData?.abilities || [];
+                // Ability-name fallback for catalogs/exports that don't serialize provides_keyword.
+                const ABILITY_NAME_TO_KEYWORD = {
+                    'clever climber': 'climbing gear',
+                };
+                for (const ability of abilities) {
+                    if (!ability) continue;
+                    const provided = ability.provides_keyword;
+                    if (typeof provided === 'string') {
+                        petProvidedKeywords.add(provided.toLowerCase());
+                    } else if (Array.isArray(provided)) {
+                        for (const p of provided) {
+                            if (typeof p === 'string') petProvidedKeywords.add(p.toLowerCase());
+                        }
+                    }
+                    const mapped = ABILITY_NAME_TO_KEYWORD[(ability.name || '').toLowerCase()];
+                    if (mapped) petProvidedKeywords.add(mapped);
+                }
+            }
+
             for (const [keyword, count] of Object.entries(requirements.keyword_counts)) {
+                // Skip keywords that have a stricter level requirement (shown below)
+                if (leveledKeywords.has(keyword.toLowerCase())) continue;
                 // Count items in current gear that have this keyword
                 let keywordCount = 0;
 
                 for (const [slot, slotItem] of Object.entries(currentGear)) {
                     if (!slotItem || !slotItem.keywords) continue;
 
-                    // Check if any keyword matches (case-insensitive)
+                    // Check if any keyword matches (case-insensitive, EXACT match).
+                    // EXACT match — substring match would incorrectly count
+                    // "Fishing rod rest" / "Fishing cage" / "Fishing tool" as
+                    // satisfying a "fishing rod" requirement. Must mirror
+                    // util/walkscape_constants.py:item_has_keyword.
                     const hasKeyword = slotItem.keywords.some(kw =>
-                        kw.toLowerCase().includes(keyword.toLowerCase())
+                        kw.toLowerCase() === keyword.toLowerCase()
                     );
 
                     if (hasKeyword) {
@@ -502,11 +725,69 @@ class ActivityInfoSection extends Component {
                     }
                 }
 
+                // Also check selected input items (e.g., arrows in input slots)
+                if (this._selectedInputItems) {
+                    for (const [idx, inputItem] of Object.entries(this._selectedInputItems)) {
+                        if (!inputItem || !inputItem.keywords) continue;
+                        const hasKeyword = inputItem.keywords.some(kw =>
+                            kw.toLowerCase() === keyword.toLowerCase()
+                        );
+                        if (hasKeyword) {
+                            keywordCount++;
+                        }
+                    }
+                }
+
+                // Equipped pet passive ability counts as +1 (e.g. Gecko L4 Clever Climber → climbing gear)
+                if (petProvidedKeywords.has(keyword.toLowerCase())) {
+                    keywordCount++;
+                }
+
                 fulfilled.keywords[keyword] = {
                     required: count,
                     current: keywordCount,
                     fulfilled: keywordCount >= count
                 };
+            }
+        }
+
+        // Check tool keyword minimum-skill-level requirements, e.g.
+        // "Have a Pickaxe equipped that requires at least Mining level 60".
+        if (requirements.keyword_level_requirements && requirements.keyword_level_requirements.length > 0) {
+            fulfilled.keyword_levels = [];
+            const currentGear = store.state.gearsets?.current || {};
+            for (const req of requirements.keyword_level_requirements) {
+                const reqKw = (req.keyword || '').toLowerCase();
+                const reqSkill = (req.skill || '').toLowerCase();
+                const reqLevel = req.level || 0;
+                let hasKeyword = false;
+                let levelOk = false;
+                let levelKnown = false;
+                for (const slotItem of Object.values(currentGear)) {
+                    if (!slotItem || !slotItem.keywords) continue;
+                    if (!slotItem.keywords.some(kw => kw.toLowerCase() === reqKw)) continue;
+                    hasKeyword = true;
+                    // Verify the equipped tool's own skill-level requirement when available.
+                    const itemReqs = Array.isArray(slotItem.requirements) ? slotItem.requirements : null;
+                    if (itemReqs) {
+                        for (const r of itemReqs) {
+                            if (r && r.type === 'skill' && (r.skill || '').toLowerCase() === reqSkill) {
+                                levelKnown = true;
+                                if ((r.level || 0) >= reqLevel) { levelOk = true; }
+                            }
+                        }
+                    }
+                }
+                // If item tier data isn't available on the client, fall back to
+                // keyword presence (mirrors the plain keyword check, which only
+                // verifies presence). The optimizer still enforces the tier.
+                const isFulfilled = hasKeyword && (levelKnown ? levelOk : true);
+                fulfilled.keyword_levels.push({
+                    keyword: req.keyword,
+                    skill: req.skill,
+                    level: reqLevel,
+                    fulfilled: isFulfilled
+                });
             }
         }
 
@@ -552,6 +833,23 @@ class ActivityInfoSection extends Component {
             };
         }
 
+        // Check item requirements (e.g., "Have item Spectral saw equipped")
+        if (requirements.item_requirements && requirements.item_requirements.length > 0) {
+            fulfilled.item_requirements = {};
+            const currentGear = store.state.gearsets?.current || {};
+            const equippedNames = new Set();
+            for (const slotItem of Object.values(currentGear)) {
+                if (slotItem && slotItem.name) {
+                    equippedNames.add(slotItem.name.toLowerCase());
+                }
+            }
+            for (const requiredName of requirements.item_requirements) {
+                fulfilled.item_requirements[requiredName] = {
+                    fulfilled: equippedNames.has(requiredName.toLowerCase())
+                };
+            }
+        }
+
         return fulfilled;
     }
 
@@ -583,6 +881,158 @@ class ActivityInfoSection extends Component {
     }
 
     /**
+     * Render inputs section — shows items consumed per action
+     * Only displayed if the activity has input_items
+     */
+
+    async _loadCustomKeywords() {
+        try {
+            const data = await api.getCustomKeywords();
+            this._customKeywords = data.keywords || [];
+        } catch (e) { this._customKeywords = []; }
+    }
+
+    /**
+     * Render inputs section
+     * @returns {string} HTML for inputs section
+     */
+    renderInputsSection() {
+        if (!this.activity || !this.activity.input_items || this.activity.input_items.length === 0) {
+            return '';
+        }
+
+        // Filter out invalid/empty input items
+        const validInputItems = this.activity.input_items.filter(ii => ii && ii.name);
+        if (validInputItems.length === 0) {
+            return '';
+        }
+
+        // Check if any input item is a keyword type (selectable slot)
+        let hasKeywordInput = false;
+
+        const itemsHtml = validInputItems.map((ii, idx) => {
+            const itemId = ii.name.toLowerCase().replace(/ /g, '_').replace(/[^a-z0-9_]/g, '');
+            const isKeyword = ii.type === 'keyword';
+            const selectedItem = this._selectedInputItems?.[idx] || null;
+
+            if (isKeyword || selectedItem) {
+                hasKeywordInput = true;
+                let slotInner, slotClasses = 'input-item-slot';
+                if (selectedItem) {
+                    slotClasses += ' equipped';
+                    // Apply fine styling when checkbox is checked
+                    if (this.useFineInputs) {
+                        slotClasses += ' fine';
+                    } else {
+                        const rarity = selectedItem.rarity || 'common';
+                        slotClasses += ` rarity-${rarity}`;
+                    }
+                    if (selectedItem.is_generic && selectedItem.icon && !selectedItem.icon_path) {
+                        const iconStyle = selectedItem.icon_color ? `${window.emojiTintStyle(selectedItem.icon_color)}` : '';
+                        slotInner = `<span class="input-slot-emoji" style="${iconStyle}">${selectedItem.icon}</span>`;
+                    } else {
+                        const selItemId = (selectedItem.name || '').toLowerCase().replace(/ /g, '_').replace(/[^a-z0-9_]/g, '');
+                        const iconPath = selectedItem.icon_path || `/assets/icons/items/materials/${selItemId}.svg`;
+                        slotInner = `<img src="${iconPath}" alt="${selectedItem.name}" class="input-slot-icon" onerror="this.style.display='none'" />`;
+                    }
+                } else {
+                    const label = isKeyword ? (ii.name.length > 6 ? ii.name.substring(0, 5) + '…' : ii.name) : 'INPUT';
+                    slotInner = `<span class="input-slot-name">${label}</span>`;
+                }
+                const title = selectedItem ? selectedItem.name : `Select ${ii.name}`;
+
+                return `<div class="input-item-row">
+                    <div class="${slotClasses}" data-input-idx="${idx}" data-input-keyword="${ii.reference || ii.name}" data-input-level="${ii.level || 0}" title="${title}">
+                        ${slotInner}
+                    </div>
+                    <div>
+                        <span class="input-item-label">
+                            ${(() => {
+                        const ck = this._customKeywords.find(k => k.name.toLowerCase() === ii.name.toLowerCase());
+                        if (ck && ck.icon) {
+                            const cs = ck.icon_color ? `${window.emojiTintStyle(ck.icon_color)};` : '';
+                            return `<span style="font-size:14px;vertical-align:middle;margin-right:2px;${cs}">${ck.icon}</span>`;
+                        }
+                        return `<img src="/assets/icons/keywords/${itemId}.svg" style="width:16px;height:16px;vertical-align:middle;margin-right:2px" onerror="this.outerHTML='<span style=\\'font-size:14px;vertical-align:middle;margin-right:2px\\'>🏷️</span>'" />`;
+                    })()}
+                            <span class="input-qty">${ii.quantity}×</span> ${ii.name}${ii.level ? ` <span class="input-level-req" title="Requires level ${ii.level}+ items">Lv.${ii.level}+</span>` : ''}${ii.optional ? ' <span class="input-optional-badge" title="This input is optional">(optional)</span>' : ''}
+                        </span>
+                    </div>
+                </div>`;
+            } else {
+                // Simple material — render as material box (no selection needed)
+                const iconPath = `/assets/icons/items/materials/${itemId}.svg`;
+                const fallback = `/assets/icons/items/${itemId}.svg`;
+                return `<div class="material-item" title="${ii.name}">
+                    <img src="${iconPath}" alt="${ii.name}" class="material-icon"
+                        onerror="this.onerror=null;this.src='${fallback}';this.onerror=function(){this.style.display='none';this.parentNode.insertAdjacentHTML('afterbegin','<span style=\\'font-size:16px\\'>📥</span>')}" />
+                    <span class="material-quantity">${ii.quantity}</span>
+                </div>`;
+            }
+        }).join('');
+
+        // Fine inputs checkbox — only show when there are keyword-type inputs (selectable slots)
+        let fineCheckboxHtml = '';
+        if (hasKeywordInput) {
+            fineCheckboxHtml = `
+                <div class="fine-inputs-toggle" style="margin-top:6px">
+                    <label class="fine-checkbox" style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;font-size:12px">
+                        <input type="checkbox" class="fine-inputs-cb" ${this.useFineInputs ? 'checked' : ''} />
+                        <span class="fine-checkbox-label">Fine Inputs</span>
+                    </label>
+                </div>`;
+        }
+
+        return `
+            <div class="recipe-section">
+                <div class="section-header">INPUTS</div>
+                <div class="materials-grid" style="gap:8px">
+                    ${itemsHtml}
+                </div>
+                ${fineCheckboxHtml}
+            </div>
+        `;
+    }
+
+    /**
+     * Get instant-actions pet info if the checkbox is checked and pet is eligible.
+     * Returns null if not active.
+     */
+    _getActiveInstantActionsPet() {
+        const ownedItems = store.state.items || {};
+        const userOverrideItems = store.state.ui?.user_overrides?.items || {};
+        const petCatalog = window.optimizeButton?._petCatalog || [];
+        if (!petCatalog.length) return null;
+
+        const skillType = (this.activity?.primary_skill || '').toLowerCase();
+        if (!skillType) return null;
+
+        const petInfo = getInstantActionsPet(skillType, ownedItems, petCatalog, userOverrideItems);
+        if (!petInfo) return null;
+
+        // Check if checkbox is checked
+        const uiState = store.state.ui || {};
+        const isChecked = skillType === 'foraging'
+            ? !!(uiState.instant_actions_foraging)
+            : (skillType === 'smithing' || skillType === 'smelting')
+                ? !!(uiState.instant_actions_smelting)
+                : false;
+
+        if (!isChecked) return null;
+
+        // Get the pet's icon path using the user's current level/variant
+        const petId = petInfo.petId;
+        const itemState = ownedItems[petId] || null;
+        const overrideState = userOverrideItems[petId] || null;
+        const level = overrideState?.level ?? itemState?.level ?? petInfo.requiredLevel;
+        const variant = overrideState?.variant ?? itemState?.variant ?? 'normal';
+        const maxLevel = petCatalog.find(p => p.id === petId)?.max_level || 0;
+        const iconPath = getPetIconPath(petInfo.species, level, variant, maxLevel);
+
+        return { ...petInfo, iconPath, level };
+    }
+
+    /**
      * Render stats section
      * Requirements: 2.3, 2.4, 2.5
      * @returns {string} HTML for stats section
@@ -608,11 +1058,11 @@ class ActivityInfoSection extends Component {
         const currentWEDisplay = currentWEPercent + 100;
         const maxWEDisplay = maxWEPercent + 100;
         const currentWEFormatted = (currentWEDisplay % 1 === 0)
-            ? currentWEDisplay.toFixed(0)
+            ? formatFixed(currentWEDisplay, 0)
             : (currentWEDisplay % 0.1 < 0.01)
-                ? currentWEDisplay.toFixed(1)
-                : currentWEDisplay.toFixed(2);
-        const maxWEFormatted = (maxWEDisplay % 1 === 0) ? maxWEDisplay.toFixed(0) : maxWEDisplay.toFixed(1);
+                ? formatFixed(currentWEDisplay, 1)
+                : formatFixed(currentWEDisplay, 2);
+        const maxWEFormatted = (maxWEDisplay % 1 === 0) ? formatFixed(maxWEDisplay, 0) : formatFixed(maxWEDisplay, 1);
 
         return `
             <div class="activity-section">
@@ -628,9 +1078,42 @@ class ActivityInfoSection extends Component {
                     </div>
                     <div class="info-stat-row">
                         <img src="/assets/icons/attributes/double_rewards.svg" alt="DR" class="stat-icon" title="Steps per Reward Roll" />
-                        <span class="stat-value">${stats.stepsPerRewardRoll.toFixed(2)}</span>
+                        <span class="stat-value">${formatFixed(stats.stepsPerRewardRoll, 2)}</span>
                     </div>
+                    ${this._renderInstantActionsStatRow()}
                 </div>
+            </div>
+        `;
+    }
+
+    /**
+     * Render the instant-actions "reward rolls per activation" stat row.
+     * Only shown when the instant-actions checkbox is checked. The pet runs
+     * `count` actions per activation, so reward rolls per activation is
+     * count × (1+DA) × (1+DR) — matching the recipe info section's per-charge
+     * stats. Rendered as the reward-rolls icon "/" pet icon (per activation).
+     */
+    _renderInstantActionsStatRow() {
+        const petInfo = this._getActiveInstantActionsPet();
+        if (!petInfo) return '';
+
+        const gearStats = this.getGearStats();
+        const da = gearStats.double_action || 0;
+        const dr = gearStats.double_rewards || 0;
+        const chargeCount = petInfo.count || 5;
+        const rewardRollsPerActivation = chargeCount * (1 + da) * (1 + dr);
+        const formatted = formatFixed(rewardRollsPerActivation, 3, { trim: true });
+        const title = `Reward rolls per activation (${chargeCount} actions × (1+DA) × (1+DR))`;
+
+        return `
+            <div class="info-stat-row" title="${title}">
+                <img src="/assets/icons/attributes/double_rewards.svg" alt="Reward rolls" class="stat-icon" title="${title}" />
+                <span style="font-size:0.85em;color:var(--text-secondary)">/</span>
+                <img src="${petInfo.iconPath}" alt="${petInfo.petName}" class="stat-icon"
+                     style="width:24px;height:24px;object-fit:contain;margin:-2px 0"
+                     title="${title}"
+                     onerror="this.src='/assets/icons/items/pet_eggs/${petInfo.species}_egg.svg'" />
+                <span class="stat-value" title="${title}">${formatted}</span>
             </div>
         `;
     }
@@ -657,12 +1140,10 @@ class ActivityInfoSection extends Component {
             for (const [skill, req] of Object.entries(fulfilled.skills)) {
                 const borderClass = req.fulfilled ? 'requirement-fulfilled' : 'requirement-not-fulfilled';
                 const skillColor = this.getSkillColor(skill);
-                const skillId = skill.toLowerCase();
-                const skillIcon = `/assets/icons/text/skill_icons/${skillId}.svg`;
 
                 html += `
                     <div class="requirement-item ${borderClass}" style="border-color: ${skillColor};">
-                        <img src="${skillIcon}" alt="${skill}" class="requirement-icon" title="${skill} Level ${req.required}" />
+                        ${skillIconHtml(skill, 'requirement-icon')}
                         <span class="requirement-value">${req.required}</span>
                     </div>
                 `;
@@ -683,6 +1164,26 @@ class ActivityInfoSection extends Component {
                         <span class="requirement-value">${req.required}</span>
                         <img src="${keywordIcon}" alt="${keyword}" class="requirement-icon" title="${keyword}" />
                         <span class="requirement-label">${keyword}</span>
+                    </div>
+                `;
+            }
+        }
+
+        // Tool keyword minimum-skill-level requirements
+        // (e.g. "Pickaxe requiring Mining 60"): keyword icon + skill icon + level
+        if (fulfilled.keyword_levels) {
+            for (const req of fulfilled.keyword_levels) {
+                const borderClass = req.fulfilled ? 'requirement-fulfilled' : 'requirement-not-fulfilled';
+                const keywordId = (req.keyword || '').replace(/ /g, '_').replace(/'/g, '');
+                const keywordIcon = `/assets/icons/keywords/${keywordId}.svg`;
+                const title = `${req.keyword} that requires at least ${req.skill} level ${req.level}`;
+
+                html += `
+                    <div class="requirement-item ${borderClass}" title="${title}">
+                        <img src="${keywordIcon}" alt="${req.keyword}" class="requirement-icon" />
+                        <span class="requirement-label">${req.keyword}</span>
+                        ${skillIconHtml(req.skill, 'requirement-icon')}
+                        <span class="requirement-value">${req.level}</span>
                     </div>
                 `;
             }
@@ -717,6 +1218,22 @@ class ActivityInfoSection extends Component {
                     <img src="/assets/icons/text/general_icons/achievement_points.svg" alt="AP" class="requirement-icon" title="Achievement Points" />
                 </div>
             `;
+        }
+
+        // Item requirements - show item icon + name (e.g., Spectral saw)
+        if (fulfilled.item_requirements) {
+            for (const [itemName, req] of Object.entries(fulfilled.item_requirements)) {
+                const borderClass = req.fulfilled ? 'requirement-fulfilled' : 'requirement-not-fulfilled';
+                const itemId = itemName.toLowerCase().replace(/ /g, '_').replace(/'/g, '');
+                const itemIcon = `/assets/icons/items/equipment/${itemId}.svg`;
+
+                html += `
+                    <div class="requirement-item ${borderClass}">
+                        <img src="${itemIcon}" alt="${itemName}" class="requirement-icon" title="${itemName}" onerror="this.style.display='none'" />
+                        <span class="requirement-label">${itemName}</span>
+                    </div>
+                `;
+            }
         }
 
         html += `
@@ -776,17 +1293,13 @@ class ActivityInfoSection extends Component {
         const primarySkill = this.activity.primary_skill;
         const primaryColor = this.getSkillColor(primarySkill);
 
-        // Get skill icon path
-        const primarySkillId = primarySkill.toLowerCase();
-        const primarySkillIcon = `/assets/icons/text/skill_icons/${primarySkillId}.svg`;
-
         let html = `
             <div class="activity-section">
                 <div class="section-header">XP REWARDS</div>
                 <div class="xp-grid">
                     <div class="xp-row" style="border-color: ${primaryColor};">
-                        <img src="${primarySkillIcon}" alt="${primarySkill}" class="xp-icon" title="${primarySkill} XP" />
-                        <span class="xp-value">${stats.primaryXP.toFixed(2).replace(/\.?0+$/, '')} / ${stats.basePrimaryXP.toFixed(2).replace(/\.?0+$/, '')}</span>
+                        ${skillIconHtml(primarySkill, 'xp-icon')}
+                        <span class="xp-value">${formatFixed(stats.primaryXP, 2, { trim: true })} / ${formatFixed(stats.basePrimaryXP, 2, { trim: true })}</span>
                     </div>
         `;
 
@@ -796,12 +1309,11 @@ class ActivityInfoSection extends Component {
                 const baseXP = stats.baseSecondaryXP[skill];
                 const skillName = skill.charAt(0).toUpperCase() + skill.slice(1);
                 const skillColor = this.getSkillColor(skillName);
-                const skillIcon = `/assets/icons/text/skill_icons/${skill.toLowerCase()}.svg`;
 
                 html += `
                     <div class="xp-row" style="border-color: ${skillColor};">
-                        <img src="${skillIcon}" alt="${skillName}" class="xp-icon" title="${skillName} XP" />
-                        <span class="xp-value">${xp.toFixed(2).replace(/\.?0+$/, '')} / ${baseXP.toFixed(2).replace(/\.?0+$/, '')}</span>
+                        ${skillIconHtml(skillName, 'xp-icon')}
+                        <span class="xp-value">${formatFixed(xp, 2, { trim: true })} / ${formatFixed(baseXP, 2, { trim: true })}</span>
                     </div>
                 `;
             }
@@ -814,7 +1326,7 @@ class ActivityInfoSection extends Component {
                 html += `
                     <div class="xp-row xp-total">
                         <img src="/assets/icons/attributes/bonus_experience.svg" alt="Total XP" class="xp-icon" title="Total XP" />
-                        <span class="xp-value">${totalXP.toFixed(2).replace(/\.?0+$/, '')} / ${baseTotalXP.toFixed(2).replace(/\.?0+$/, '')}</span>
+                        <span class="xp-value">${formatFixed(totalXP, 2, { trim: true })} / ${formatFixed(baseTotalXP, 2, { trim: true })}</span>
                     </div>
                 `;
             }
@@ -833,10 +1345,10 @@ class ActivityInfoSection extends Component {
         `;
 
         // Primary skill XP/step (use expectedSteps for XP/step calculation)
-        const primaryXPPerStep = (stats.primaryXP / stats.expectedSteps).toFixed(3).replace(/\.?0+$/, '');
+        const primaryXPPerStep = formatFixed((stats.primaryXP / stats.expectedSteps), 3, { trim: true });
         html += `
                     <div class="xp-row" style="border-color: ${primaryColor};">
-                        <img src="${primarySkillIcon}" alt="${primarySkill}" class="xp-icon" title="${primarySkill} XP per Step" />
+                        ${skillIconHtml(primarySkill, 'xp-icon')}
                         <span class="xp-value">${primaryXPPerStep}</span>
                     </div>
         `;
@@ -846,12 +1358,11 @@ class ActivityInfoSection extends Component {
             for (const [skill, xp] of Object.entries(stats.secondaryXP)) {
                 const skillName = skill.charAt(0).toUpperCase() + skill.slice(1);
                 const skillColor = this.getSkillColor(skillName);
-                const skillIcon = `/assets/icons/text/skill_icons/${skill.toLowerCase()}.svg`;
-                const xpPerStep = (xp / stats.expectedSteps).toFixed(3).replace(/\.?0+$/, '');
+                const xpPerStep = formatFixed((xp / stats.expectedSteps), 3, { trim: true });
 
                 html += `
                     <div class="xp-row" style="border-color: ${skillColor};">
-                        <img src="${skillIcon}" alt="${skillName}" class="xp-icon" title="${skillName} XP per Step" />
+                        ${skillIconHtml(skillName, 'xp-icon')}
                         <span class="xp-value">${xpPerStep}</span>
                     </div>
                 `;
@@ -922,6 +1433,36 @@ class ActivityInfoSection extends Component {
      * Requirements: 2.1, 2.2
      */
     render() {
+        // Resilient wrapper (bug fbb51cdb): a throw anywhere in the render
+        // body used to leave Column 3 (the "Activity page") permanently blank
+        // while Columns 1 & 2 rendered fine — an unrecoverable, silent failure
+        // for the user. Now we catch, log the real error into the debug log
+        // (so it ships with any future bug report), and paint a visible
+        // fallback instead of nothing.
+        try {
+            this._renderImpl();
+        } catch (err) {
+            console.error('[ActivityInfo] render() failed:', err);
+            if (typeof window !== 'undefined' && window.__walkscapeRecordError) {
+                window.__walkscapeRecordError('activityinfo-render', err);
+            }
+            try {
+                const name = (this.activity && this.activity.name) ? this.activity.name : 'this activity';
+                this.$element.html(`
+                    <div class="activity-info-section" data-pin-id="activity-info" style="padding:12px;">
+                        <div class="activity-info-header">
+                            <span class="activity-info-title">Couldn't display ${name}</span>
+                        </div>
+                        <div class="activity-info-content" style="display:block;">
+                            <p>Something went wrong rendering this activity. Try reselecting it or reloading the page. The error has been logged for the developers.</p>
+                        </div>
+                    </div>
+                `);
+            } catch (_) { /* element detached — nothing more we can do */ }
+        }
+    }
+
+    _renderImpl() {
         console.log('[ActivityInfo] render() called, useFine:', this.useFine);
 
         if (!this.activity) {
@@ -944,6 +1485,9 @@ class ActivityInfoSection extends Component {
                         onRouteChange: (routeData) => {
                             // Store route data for optimize button access
                             window.currentTravelRoute = routeData;
+                            // Notify Combined Stats so location-scoped travel
+                            // bonuses are matched against the new route's segments.
+                            window.dispatchEvent(new CustomEvent('travelRouteChanged'));
                         }
                     }
                 );
@@ -956,6 +1500,7 @@ class ActivityInfoSection extends Component {
             this.travelInfoSection.destroy();
             this.travelInfoSection = null;
             window.currentTravelRoute = null;
+            window.dispatchEvent(new CustomEvent('travelRouteChanged'));
         }
 
         const skillColor = this.getSkillColor(this.activity.primary_skill);
@@ -977,6 +1522,7 @@ class ActivityInfoSection extends Component {
         const arrowIcon = `<span class="expand-arrow ${this.isExpanded ? 'expanded' : ''}">▼</span>`;
 
         const contentHtml = `
+            ${this.renderInputsSection()}
             ${this.renderStatsSection()}
             ${this.renderRequirementsSection()}
             ${this.renderXPSection()}
@@ -984,12 +1530,13 @@ class ActivityInfoSection extends Component {
         `;
 
         const html = `
-            <div class="activity-info-section " style="border-color: ${skillColor};">
+            <div class="activity-info-section " data-pin-id="activity-info" style="border-color: ${skillColor};">
                 <div class="activity-info-header">
                     <span class="activity-info-title">${this.activity.name.toUpperCase()}</span>
                     ${arrowIcon}
                 </div>
                 <div class="activity-info-content" style="display: ${this.isExpanded ? 'block' : 'none'};">
+                    <div class="info-wiki-link-wrapper"><a href="https://wiki.walkscape.app/wiki/${encodeURIComponent(this.activity.name.replace(/ /g, '_'))}${wikiDarkModeSuffix()}" target="_blank" rel="noopener noreferrer" class="wiki-link info-wiki-link">Wiki</a></div>
                     ${contentHtml}
                 </div>
             </div>
@@ -1017,6 +1564,75 @@ class ActivityInfoSection extends Component {
             e.stopPropagation();
             const locationId = $(e.currentTarget).data('location-id');
             this.selectLocation(locationId);
+        });
+
+        // Fine inputs checkbox
+        this.$element.off('change', '.fine-inputs-cb');
+        this.$element.on('change', '.fine-inputs-cb', (e) => {
+            e.stopPropagation();
+            this.useFineInputs = e.target.checked;
+            if (!store.state.column3) store.state.column3 = {};
+            store.state.column3.useFineInputs = this.useFineInputs;
+            store._saveColumn3Selection();
+            // Notify combined stats to update fine input bonus
+            const css = window.combinedStatsSection;
+            if (css && typeof css.setFineInputs === 'function') {
+                css.setFineInputs(this.useFineInputs);
+            }
+            // Update slot styling without full re-render
+            this.$element.find('.input-item-slot.equipped').toggleClass('fine', this.useFineInputs);
+            if (!this.useFineInputs) {
+                this.$element.find('.input-item-slot.equipped').each(function () {
+                    if (!$(this).hasClass('fine')) {
+                        const rarity = $(this).data('rarity') || 'common';
+                        $(this).addClass('rarity-' + rarity);
+                    }
+                });
+            }
+        });
+
+        // Input item slot click — open item selection popup filtered to keyword
+        this.$element.on('click', '.input-item-slot', (e) => {
+            e.stopPropagation();
+            const $slot = $(e.currentTarget);
+            const idx = parseInt($slot.data('input-idx'));
+            const keyword = $slot.data('input-keyword');
+            const level = parseInt($slot.data('input-level')) || 0;
+
+            // Store callback for when item is selected
+            this._pendingInputSlotIdx = idx;
+            this._pendingInputKeyword = keyword;
+
+            // Open the item selection popup for the 'input' slot with keyword filter
+            if (window.itemSelectionPopup && typeof window.itemSelectionPopup.show === 'function') {
+                window.itemSelectionPopup.show('input', {
+                    filterKeyword: keyword,
+                    filterLevel: level,
+                    onSelect: (item) => {
+                        this._selectedInputItems[idx] = item;
+                        // Persist to store for session save
+                        if (!store.state.column3) store.state.column3 = {};
+                        store.state.column3.selectedInputItems = { ...this._selectedInputItems };
+                        store._saveColumn3Selection();
+                        this.render();
+                        const css = window.combinedStatsSection;
+                        if (css && typeof css.setInputItem === 'function') {
+                            css.setInputItem(idx, item);
+                        }
+                    },
+                    onUnequip: () => {
+                        delete this._selectedInputItems[idx];
+                        if (!store.state.column3) store.state.column3 = {};
+                        store.state.column3.selectedInputItems = { ...this._selectedInputItems };
+                        store._saveColumn3Selection();
+                        this.render();
+                        const css = window.combinedStatsSection;
+                        if (css && typeof css.setInputItem === 'function') {
+                            css.setInputItem(idx, null);
+                        }
+                    }
+                });
+            }
         });
     }
 

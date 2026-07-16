@@ -6,6 +6,7 @@ This is the EXACT same code, just made into reusable functions.
 
 from typing import Dict, Tuple
 from util.gearset_utils import Gearset, aggregate_gearset_stats
+from util.walkscape_constants import EXCLUDED_TOOL_KEYWORDS, BANNED_KEYWORD_GROUPS
 
 # ============================================================================
 # HELPER FUNCTIONS
@@ -35,7 +36,8 @@ def calculate_gearset_metrics(
         location=location,
         character=character,
         include_level_bonus=True,
-        include_collectibles=True
+        include_collectibles=True,
+        activity=activity
     )
     
     # Use activity's get_expected_drop_rate with verbose=True to get all metrics
@@ -45,7 +47,12 @@ def calculate_gearset_metrics(
         location=location,
         character=character,
         target_item=None,  # Get all drops
-        verbose=True
+        verbose=True,
+        # 2026-05-26 (jwbail): total_stats already has collectibles merged
+        # in via aggregate_gearset_stats(include_collectibles=True). Tell
+        # get_expected_drop_rate to skip its internal collectible re-add
+        # to avoid double-counting all aggregated stats.
+        include_collectibles_from_character=False,
     )
     
     # Extract metrics from details
@@ -57,7 +64,33 @@ def calculate_gearset_metrics(
         'secondary_xp_per_step': details.get('secondary_xp_per_step', {}),
         'total_xp_per_step': details.get('total_xp_per_step', 0.0),
     }
-    
+
+    # Inject synthetic 'cat:coins' and 'cat:coins_no_chests' entries into
+    # drop_rates so the target_item lookup below sees them like any other
+    # drop. Steps-per-coin is 1 / (sum of items_per_step * coin_value) over
+    # all drops produced by this gearset, matching the coins/1k-steps pill
+    # in the drops section UI.
+    from util.coin_value import compute_coin_targets_for_activity
+    collectible_stats = details.get('collectible_stats') if isinstance(details, dict) else None
+    consumable_stats = details.get('consumable_stats') if isinstance(details, dict) else None
+    coin_targets = compute_coin_targets_for_activity(
+        activity, drop_rates, total_stats,
+        collectible_stats=collectible_stats,
+        consumable_stats=consumable_stats,
+    )
+    drop_rates.update(coin_targets)
+
+    # 2026-05-31: same pattern as coins — inject the 'cat:sea_shells'
+    # synthetic aggregator. See util/shell_value.py for the math
+    # (direct + chest + fine-fold).
+    from util.shell_value import compute_shell_targets_for_activity
+    shell_targets = compute_shell_targets_for_activity(
+        activity, drop_rates, total_stats,
+        collectible_stats=collectible_stats,
+        consumable_stats=consumable_stats,
+    )
+    drop_rates.update(shell_targets)
+
     # If targeting a specific item, override steps_per_reward_roll
     if target_item is not None and is_gearset_complete(gearset_dict, character):
         target_name = target_item if isinstance(target_item, str) else target_item.name
@@ -92,7 +125,8 @@ def is_gearset_valid(gearset_dict: dict, character, activity=None, check_require
     used_uuids = {}
     used_items = {}  # Track specific item objects for quantity validation
     used_keywords = set()
-    excluded_keywords = ['regional', 'tool', 'light source', 'achievement reward', 'faction reward', 'activity tool']
+    used_groups = set()
+    excluded_keywords = EXCLUDED_TOOL_KEYWORDS
     
     for slot, item in gearset_dict.items():
         if item is None:
@@ -129,10 +163,31 @@ def is_gearset_valid(gearset_dict: dict, character, activity=None, check_require
         
         # Check keyword uniqueness for tools
         if slot.startswith('tool') and hasattr(item, 'keywords'):
-            item_keywords = {kw.lower() for kw in item.keywords if kw.lower() not in excluded_keywords}
-            if item_keywords & used_keywords:
-                return False
-            used_keywords.update(item_keywords)
+            # Track banned groups this specific tool occupies. A single tool
+            # can legitimately carry multiple keywords from the same banned
+            # group (e.g. Spectral fishing cagespear has both 'Fishing cage'
+            # and 'Fishing spear'); it should only count once.
+            tool_groups = set()
+            for kw in item.keywords:
+                kw_lower = kw.lower()
+                if kw_lower in excluded_keywords:
+                    continue
+                # Check banned keyword groups
+                group_conflict = False
+                for i, group in enumerate(BANNED_KEYWORD_GROUPS):
+                    if kw_lower in group:
+                        if i in used_groups and i not in tool_groups:
+                            # Another tool already occupies this banned group
+                            return False
+                        tool_groups.add(i)
+                        group_conflict = True
+                        break
+                # Check individual keyword conflict
+                if kw_lower in used_keywords:
+                    return False
+                used_keywords.add(kw_lower)
+            # Commit this tool's banned-group usage
+            used_groups.update(tool_groups)
     
     # Check activity requirements on complete gearsets
     if activity and check_requirements and is_gearset_complete(gearset_dict, character):

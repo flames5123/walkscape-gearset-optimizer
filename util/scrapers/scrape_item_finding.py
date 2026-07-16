@@ -15,7 +15,6 @@ CACHE_FILE = get_cache_file('item_finding_cache.html')
 
 # Categories to skip (these map to single items and should use direct references)
 SKIP_CATEGORIES = {
-    'bird nest',
     'coin pouch',
 }
 

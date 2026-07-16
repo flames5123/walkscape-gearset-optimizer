@@ -31,6 +31,41 @@ SKIP_ACTIVITIES = [
     'Traveling',  # Handled by route system
 ]
 
+# One-time activities: completed in a single action, so they never benefit
+# from Double Action's long-run averaging. The optimizer neutralizes DA for
+# these (steps metric == displayed steps). Source: movement + emergency
+# activities (https://wiki.walkscape.app/wiki/Movement_Activities) plus the
+# hidden single-completion activity "Repair the bank".
+ONE_TIME_ACTIVITIES = {
+    # Movement activities
+    'Explore bog bottom',
+    'Explore underwater cave',
+    'Spring bat tracking',
+    'Venture into the bog',
+    'Venture into the hideout',
+    'Venture into the woods',
+    # Emergency (anti-soft-lock) movement activities
+    'Emergency darkness escape (Swamp)',
+    'Emergency desert escape',
+    'Emergency swim escape',
+    'Emergency swim escape (Swamp)',
+    'Run for your life',
+    # Hidden single-completion activities
+    'Repair the bank',
+}
+
+# Single-completion activities: can only ever be performed ONCE per character.
+# The game gates them via an `actionCompleted` history requirement (e.g.
+# "Repair the bank" -> requirements.singulars.uniques.wraithwaterBankRebuild,
+# opposite=true). These emit `single_completion=True` so the optimizer can drop
+# them from recommendations once the player flags completion via a custom stat.
+# This is a STRICT SUBSET of ONE_TIME_ACTIVITIES — movement activities are
+# repeatable; only the hidden uniques are truly once-ever. Currently just
+# "Repair the bank".
+SINGLE_COMPLETION_ACTIVITIES = {
+    'Repair the bank',
+}
+
 # Folder scanning - set to True to also scan cache folder for individual activity files
 SCAN_FOLDER_FOR_NEW_ITEMS = True
 
@@ -186,7 +221,9 @@ def parse_activity_page(activity):
             'keyword_counts': {},  # {keyword: count} - unified gear requirements
             'achievement_points': 0,
             'reputation': {},  # {faction: amount}
-            'activity_completions': {}  # {activity_name: count}
+            'activity_completions': {},  # {activity_name: count}
+            'item_requirements': [],  # List of specific item names required to be equipped
+            'keyword_level_requirements': []  # [{keyword, skill, level}] - equipped tool of this keyword must itself require >= skill level
         },
         'drop_table': [],
         'secondary_drop_table': [],
@@ -195,7 +232,8 @@ def parse_activity_page(activity):
         'secondary_xp': {},  # Dict of skill -> base_xp for secondary skills
         'max_efficiency': None,
         'faction_reputation_reward': None,  # Tuple of (faction_name, amount) or None
-        'description': None
+        'description': None,
+        'input_items': [],  # List of {name, type, reference, quantity} consumed per action
     }
     
     # Extract description and primary skill from first paragraph
@@ -228,6 +266,9 @@ def parse_activity_page(activity):
     
     # Parse requirements from Requirement section
     parse_requirements_section(soup, activity_data, activity_name)
+    
+    # Parse input items from Items Required section
+    parse_input_items_section(soup, activity_data, activity_name)
     
     # Parse base XP and steps from Experience Information table
     parse_experience_table(soup, activity_data, activity_name)
@@ -501,6 +542,65 @@ def parse_requirements_section(soup, activity_data, activity_name):
             for li in next_elem.find_all('li'):
                 li_text = li.get_text()
                 
+                # Check for specific item requirements like "Have item Spectral saw equipped"
+                # Pattern: "Have item X equipped" with link to /wiki/Special:MyLanguage/X (not a Keyword page)
+                item_req_match = re.match(r'\s*Have\s+item\s+', li_text, re.IGNORECASE)
+                if item_req_match:
+                    # Find the item link (not a keyword link, not a file link)
+                    item_links = li.find_all('a', href=True)
+                    for item_link in item_links:
+                        href = item_link.get('href', '')
+                        if '/wiki/File:' in href or 'Keyword' in href:
+                            continue
+                        item_name = clean_text(item_link.get_text())
+                        if item_name:
+                            if item_name not in activity_data['requirements']['item_requirements']:
+                                activity_data['requirements']['item_requirements'].append(item_name)
+                                print(f"  Found item requirement: {item_name}")
+                            break  # Only one item per "Have item X equipped" line
+                    # Don't also parse this line as a keyword requirement
+                    continue
+
+                # Check for "tool keyword that itself requires a minimum skill level",
+                # e.g. "Have <Pickaxe> equipped that requires at least <Mining> level [60]."
+                # This is an Other Requirement gating on the equip-level (tier) of the
+                # equipped tool, NOT the character's own skill level. We record it as a
+                # structured keyword_level_requirement. We intentionally do NOT `continue`
+                # here so the generic keyword logic below still records the keyword in
+                # keyword_counts (the "have a pickaxe equipped" part), keeping all
+                # existing tool-seeding/optimizer paths working; the level requirement
+                # below is enforced as an additional, stricter gate.
+                if re.search(r'equipped\s+that\s+requires\s+at\s+least', li_text, re.IGNORECASE):
+                    tool_keyword = None
+                    for kw_link in li.find_all('a', href=re.compile(r'Keyword', re.I)):
+                        if '/wiki/File:' in kw_link.get('href', ''):
+                            continue
+                        tool_keyword = clean_text(kw_link.get_text())
+                        if tool_keyword:
+                            break
+                    # Skill is the first non-File, non-Keyword wiki link (e.g. Mining)
+                    tool_skill = None
+                    for link in li.find_all('a', href=True):
+                        href = link.get('href', '')
+                        if '/wiki/File:' in href or 'Keyword' in href:
+                            continue
+                        link_text = clean_text(link.get_text())
+                        if link_text:
+                            tool_skill = link_text
+                            break
+                    level_match = re.search(r'level\s*\[?\s*(\d+)', li_text, re.IGNORECASE)
+                    tool_level = int(level_match.group(1)) if level_match else None
+                    if tool_keyword and tool_skill and tool_level:
+                        entry = {
+                            'keyword': tool_keyword.lower(),
+                            'skill': tool_skill,
+                            'level': tool_level,
+                        }
+                        klr = activity_data['requirements']['keyword_level_requirements']
+                        if entry not in klr:
+                            klr.append(entry)
+                            print(f"  Found tool keyword level requirement: {tool_keyword} requiring {tool_skill} level {tool_level}")
+
                 # Check for keyword requirements - look for links with "Keyword" in href
                 # There are multiple links per li: one for the icon, one for the keyword page
                 keyword_links = li.find_all('a', href=re.compile(r'Keyword', re.I))
@@ -565,6 +665,153 @@ def parse_requirements_section(soup, activity_data, activity_name):
             activity_name = clean_text(completion_match.group(1))
             count = int(completion_match.group(2))
             activity_data['requirements']['activity_completions'][activity_name] = count
+        
+        next_elem = next_elem.find_next_sibling()
+
+
+def parse_input_items_section(soup, activity_data, activity_name):
+    """Parse 'Item(s) Required' section for items consumed per action.
+    
+    Wiki format (keyword input):
+    <h1 id="Item_Required">Item Required</h1>
+    <p>This activity requires the following item be supplied for each action:</p>
+    <ul>
+        <li>Needs <b>1x</b> [skill icon] [skill] level <b>20</b> [keyword icon] [keyword link]</li>
+    </ul>
+    
+    Wiki format (material input):
+    <h1 id="Items_Required">Items Required</h1>
+    <p>This activity requires the following items be supplied for each action:</p>
+    <ul>
+        <li>50x [icon] [link to Ectoplasm]</li>
+    </ul>
+
+    Optional inputs use "may use ... if supplied" phrasing instead of "requires ... be supplied".
+    """
+    from util.misc_utils import build_all_item_lookups, resolve_item_reference
+    
+    content = soup.find('div', class_='mw-parser-output')
+    if not content:
+        return
+    
+    # Check both singular and plural headings
+    heading = content.find('h1', id='Items_Required') or content.find('h1', id='Item_Required')
+    if not heading:
+        return
+    
+    print(f"  Found '{heading.get_text().strip()}' section")
+
+    # Detect optional vs required from the <p> between heading and <ul>
+    is_optional = False
+    probe = heading.parent.find_next_sibling()
+    while probe:
+        if probe.name and probe.name.startswith('h'):
+            break
+        if probe.name == 'p':
+            phrase = probe.get_text(separator=' ', strip=True).lower()
+            if 'may use' in phrase:
+                is_optional = True
+                print(f"  → input marked OPTIONAL")
+            break
+        if probe.name == 'ul':
+            break
+        probe = probe.find_next_sibling()
+
+    activity_data['input_optional'] = is_optional
+
+    # Find the <ul> after the heading
+    next_elem = heading.parent.find_next_sibling()
+    lookups = build_all_item_lookups()
+    
+    while next_elem:
+        if next_elem.name and next_elem.name.startswith('h'):
+            break  # Hit next section
+        
+        if next_elem.name == 'ul':
+            for li in next_elem.find_all('li'):
+                li_text = li.get_text(separator=' ', strip=True)
+                
+                # Check if this is a keyword input: link href contains "Keyword" (but not File:)
+                keyword_link = None
+                for link in li.find_all('a', href=re.compile(r'Keyword')):
+                    href = link.get('href', '')
+                    if 'File:' not in href:
+                        keyword_link = link
+                        break
+                
+                if keyword_link:
+                    # Keyword-based input (e.g., "Needs 1x Hunting level 20 Arrows")
+                    keyword_name = keyword_link.get_text(strip=True)
+                    
+                    # Parse quantity: "Needs 1x" or "Needs 2x"
+                    qty_match = re.search(r'(\d+)\s*x', li_text)
+                    quantity = int(qty_match.group(1)) if qty_match else 1
+                    
+                    # Parse optional level requirement: "level 20" or "level 30"
+                    level_match = re.search(r'level\s+(\d+)', li_text)
+                    level = int(level_match.group(1)) if level_match else None
+                    
+                    # Normalize keyword reference
+                    keyword_ref = keyword_name.lower().replace(' ', '_')
+                    
+                    input_item = {
+                        'name': keyword_name,
+                        'type': 'keyword',
+                        'reference': keyword_ref,
+                        'quantity': quantity,
+                    }
+                    if level:
+                        input_item['level'] = level
+                    
+                    if 'input_items' not in activity_data:
+                        activity_data['input_items'] = []
+                    activity_data['input_items'].append(input_item)
+                    level_str = f" (level {level})" if level else ""
+                    print(f"  Found input item: {quantity}x {keyword_name} (keyword: {keyword_ref}{level_str})")
+                else:
+                    # Material-based input (e.g., "50x Ectoplasm")
+                    qty_match = re.match(r'(\d+)\s*x?\s*', li_text)
+                    quantity = int(qty_match.group(1)) if qty_match else 1
+                    
+                    # Get item name from the link (skip icon links)
+                    item_link = None
+                    for link in li.find_all('a', href=re.compile(r'/wiki/')):
+                        if 'File:' not in link.get('href', ''):
+                            item_link = link
+                            break
+                    
+                    if not item_link:
+                        continue
+                    
+                    item_name = item_link.get_text(strip=True)
+                    if not item_name:
+                        continue
+                    
+                    # Resolve to a module reference
+                    item_ref = resolve_item_reference(item_name, lookups)
+                    item_type = 'material'
+                    if item_ref:
+                        if item_ref.startswith('Material.'):
+                            item_type = 'material'
+                        elif item_ref.startswith('Item.'):
+                            item_type = 'item'
+                        elif item_ref.startswith('Consumable.'):
+                            item_type = 'consumable'
+                    else:
+                        item_ref = item_name
+                        validator.add_item_issue(activity_name, [f"Could not resolve input item: {item_name}"])
+                    
+                    input_item = {
+                        'name': item_name,
+                        'type': item_type,
+                        'reference': item_ref,
+                        'quantity': quantity,
+                    }
+                    
+                    if 'input_items' not in activity_data:
+                        activity_data['input_items'] = []
+                    activity_data['input_items'].append(input_item)
+                    print(f"  Found input item: {quantity}x {item_name} ({item_type}: {item_ref})")
         
         next_elem = next_elem.find_next_sibling()
 
@@ -730,6 +977,7 @@ def parse_drop_tables(soup, activity_data, activity_name):
             caption_text = clean_text(prev_heading.get_text()) if prev_heading else ''
         
         is_secondary = 'secondary' in caption_text.lower() or 'rare' in caption_text.lower()
+        is_bonus = 'bonus' in caption_text.lower()
         
         # Detect if this is a level-based table by checking headers
         header_row = table.find('tr')
@@ -778,6 +1026,12 @@ def parse_drop_tables(soup, activity_data, activity_name):
             
             # Skip empty rows
             if not item_name or item_name == '':
+                continue
+            
+            # Skip "Nothing" rows from bonus drop tables — they represent the
+            # bonus table's own no-drop chance, not a real drop entry.  The main
+            # table already has its own "Nothing" row.
+            if is_bonus and item_name.lower() == 'nothing':
                 continue
             
             # Skip rows where the item name is a percentage (like "0.411%")
@@ -860,8 +1114,16 @@ def parse_drop_tables(soup, activity_data, activity_name):
                 # Regular table parsing
                 if is_secondary and len(cols) >= 4:
                     # Secondary: col 1=name, col 2=type, col 3=quantity, col 4=chance
+                    # Note column is typically the last column (col 7 in 8-col tables)
                     quantity_text = clean_text(cols[3].get_text())
                     chance_text = clean_text(cols[4].get_text()) if len(cols) > 4 else None
+                    
+                    # Check for "Does X rolls" in the Note column (last column)
+                    note_text = clean_text(cols[-1].get_text()) if len(cols) > 5 else ''
+                    rolls_match = re.search(r'[Dd]oes\s+(\d+)\s+rolls?', note_text)
+                    if rolls_match:
+                        drop_entry['multi_roll_count'] = int(rolls_match.group(1))
+                        print(f"    Found multi-roll drop: {item_name} ({drop_entry['multi_roll_count']} rolls)")
                 else:
                     # Main: col 1=name, col 2=quantity, col 3=chance
                     quantity_text = clean_text(cols[2].get_text())
@@ -873,6 +1135,8 @@ def parse_drop_tables(soup, activity_data, activity_name):
             if is_secondary:
                 activity_data['secondary_drop_table'].append(drop_entry)
             else:
+                # Bonus drops merge into the main drop table (Nothing already
+                # filtered above), so they appear alongside the other main drops.
                 activity_data['drop_table'].append(drop_entry)
 
 
@@ -931,6 +1195,47 @@ def link_items_and_locations(activities):
                 drop['item_object'] = None
 
 
+def _format_drop_entry(drop, escape_str):
+    """Format a single drop dict as a DropEntry(...) constructor string."""
+    item_name = escape_str(drop['item'])
+    item_ref = drop.get('item_object')
+    item_ref_str = f'"{item_ref}"' if item_ref else 'None'
+    
+    # Format quantity
+    qty = drop['quantity']
+    if qty['is_na']:
+        qty_str = "Quantity(is_na=True)"
+    else:
+        qty_str = f"Quantity(min_qty={qty['min_qty']}, max_qty={qty['max_qty']})"
+    
+    # Build optional params
+    parts = [f"item_name='{item_name}'", f"item_ref={item_ref_str}", f"quantity={qty_str}"]
+    
+    # Raw API fields (preferred over chance_percent)
+    if 'no_drop_chance' in drop and drop['no_drop_chance'] is not None:
+        parts.append(f"no_drop_chance={drop['no_drop_chance']}")
+        parts.append(f"row_weight={drop['row_weight']}")
+        parts.append(f"table_weight={drop['table_weight']}")
+    elif drop.get('chance') is not None:
+        # Legacy: direct chance_percent
+        parts.append(f"chance_percent={drop['chance']}")
+    
+    if 'bonus_xp' in drop and drop.get('bonus_xp') is not None:
+        parts.append(f"bonus_xp={drop['bonus_xp']}")
+    
+    # Level-based parameters
+    if 'initial_level' in drop and 'max_chance_level' in drop and 'final_chance' in drop:
+        parts.append(f"initial_level={drop['initial_level']}")
+        parts.append(f"max_chance_level={drop['max_chance_level']}")
+        parts.append(f"final_chance={drop['final_chance']}")
+    
+    # Multi-roll
+    if 'multi_roll_count' in drop:
+        parts.append(f"multi_roll_count={drop['multi_roll_count']}")
+    
+    return f"DropEntry({', '.join(parts)})"
+
+
 def generate_module(activities):
     """Generate the activities.py module."""
     output_file = get_output_file('activities.py')
@@ -959,6 +1264,20 @@ def generate_module(activities):
         '',
         '',
         '@dataclass',
+        'class InputItem:',
+        '    """Represents an item consumed per activity action."""',
+        '    name: str        # Display name: "Ectoplasm"',
+        '    type: str        # "material" or "keyword"',
+        '    reference: str   # "Material.ECTOPLASM" or keyword like "arrow"',
+        '    quantity: int = 1  # How many consumed per action',
+        '    level: Optional[int] = None  # Minimum skill level required on the input item (e.g., lvl 20 arrows)',
+        '    optional: bool = False  # True if "may use" (optional), False if "requires" (required)',
+        '    ',
+        '    def __str__(self) -> str:',
+        '        return f"{self.quantity}x {self.name}"',
+        '',
+        '',
+        '@dataclass',
         'class ActivityInfo:',
         '    """Detailed information about an activity."""',
         '    name: str',
@@ -974,9 +1293,11 @@ def generate_module(activities):
         '    max_efficiency: Optional[float] = None',
         '    faction_reputation_reward: Optional[FactionReward] = None',
         '    description: Optional[str] = None',
+        '    input_items: List[Any] = field(default_factory=list)  # List of InputItem consumed per action',
         '    ',
         '    def get_expected_drop_rate(self, stats: Dict[str, float], location: Optional[str] = None, ',
-        '                               target_item = None, verbose: bool = False, character=None, consumable=None):',
+        '                               target_item = None, verbose: bool = False, character=None, consumable=None, input_item=None,',
+        '                               include_collectibles_from_character: bool = True):',
         '        """',
         '        Calculate expected steps per item drop.',
         '        ',
@@ -989,6 +1310,7 @@ def generate_module(activities):
         '            verbose: If True, return (results, details) tuple with calculation breakdown',
         '            character: Optional Character object (if not provided, will load from config)',
         '            consumable: Optional Consumable object to add consumable stats',
+        '            input_item: Optional stat-bearing item consumed per action (like arrows)',
         '        ',
         '        Returns:',
         '            If verbose=False: Dict mapping item names to expected steps per item (includes fine materials)',
@@ -1018,8 +1340,9 @@ def generate_module(activities):
         '        level_bonus_we = min(levels_above, 20) * 0.0125',
         '        ',
         '        # Calculate collectible stats (get all stats dynamically)',
+        '        # Skipped when caller pre-merged collectibles into `stats` to avoid double-count.',
         '        collectible_stats = {}',
-        '        if character and self.primary_skill:',
+        '        if include_collectibles_from_character and character and self.primary_skill:',
         '            try:',
         '                for collectible in character.collectibles:',
         '                    coll_stats = collectible.get_stats_for_skill(self.primary_skill, location=location)',
@@ -1038,48 +1361,62 @@ def generate_module(activities):
         '            except:',
         '                pass',
         '        ',
+        '        # Calculate input item stats if provided (e.g., arrows with stats)',
+        '        input_item_stats = {}',
+        '        if input_item and self.primary_skill:',
+        '            try:',
+        '                if hasattr(input_item, "get_stats_for_skill"):',
+        '                    ii_stats = input_item.get_stats_for_skill(self.primary_skill, location=location)',
+        '                    for stat_name, stat_value in ii_stats.items():',
+        '                        input_item_stats[stat_name] = input_item_stats.get(stat_name, 0.0) + stat_value',
+        '            except:',
+        '                pass',
+        '        ',
         '        # Extract stats (already in decimal form from gearset_utils) and add all bonuses',
-        '        we = stats.get("work_efficiency", 0.0) + level_bonus_we + collectible_stats.get("work_efficiency", 0.0) + consumable_stats.get("work_efficiency", 0.0)',
-        '        da = stats.get("double_action", 0.0) + collectible_stats.get("double_action", 0.0) + consumable_stats.get("double_action", 0.0)',
-        '        dr = stats.get("double_rewards", 0.0) + collectible_stats.get("double_rewards", 0.0) + consumable_stats.get("double_rewards", 0.0)',
-        '        flat = stats.get("steps_add", 0) + int(collectible_stats.get("steps_add", 0.0)) + int(consumable_stats.get("steps_add", 0.0))',
-        '        pct = stats.get("steps_percent", 0.0) + collectible_stats.get("steps_percent", 0.0) + consumable_stats.get("steps_percent", 0.0)',
-        '        bonus_xp_add = stats.get("bonus_xp_add", 0.0) + collectible_stats.get("bonus_xp_add", 0.0) + consumable_stats.get("bonus_xp_add", 0.0)',
-        '        bonus_xp_pct = stats.get("bonus_xp_percent", 0.0) + collectible_stats.get("bonus_xp_percent", 0.0) + consumable_stats.get("bonus_xp_percent", 0.0)',
+        '        we = stats.get("work_efficiency", 0.0) + level_bonus_we + collectible_stats.get("work_efficiency", 0.0) + consumable_stats.get("work_efficiency", 0.0) + input_item_stats.get("work_efficiency", 0.0)',
+        '        da = stats.get("double_action", 0.0) + collectible_stats.get("double_action", 0.0) + consumable_stats.get("double_action", 0.0) + input_item_stats.get("double_action", 0.0)',
+        '        dr = stats.get("double_rewards", 0.0) + collectible_stats.get("double_rewards", 0.0) + consumable_stats.get("double_rewards", 0.0) + input_item_stats.get("double_rewards", 0.0)',
+        '        flat = stats.get("steps_add", 0) + int(collectible_stats.get("steps_add", 0.0)) + int(consumable_stats.get("steps_add", 0.0)) + int(input_item_stats.get("steps_add", 0.0))',
+        '        pct = stats.get("steps_percent", 0.0) + collectible_stats.get("steps_percent", 0.0) + consumable_stats.get("steps_percent", 0.0) + input_item_stats.get("steps_percent", 0.0)',
+        '        bonus_xp_add = stats.get("bonus_xp_add", 0.0) + collectible_stats.get("bonus_xp_add", 0.0) + consumable_stats.get("bonus_xp_add", 0.0) + input_item_stats.get("bonus_xp_add", 0.0)',
+        '        bonus_xp_pct = stats.get("bonus_xp_percent", 0.0) + collectible_stats.get("bonus_xp_percent", 0.0) + consumable_stats.get("bonus_xp_percent", 0.0) + input_item_stats.get("bonus_xp_percent", 0.0)',
         '        ',
         '        # Find stats (affect drop chances)',
-        '        find_collectibles = stats.get("find_collectibles", 0.0) + collectible_stats.get("find_collectibles", 0.0) + consumable_stats.get("find_collectibles", 0.0)',
-        '        find_gems = stats.get("find_gems", 0.0) + collectible_stats.get("find_gems", 0.0) + consumable_stats.get("find_gems", 0.0)',
-        '        find_bird_nests = stats.get("find_bird_nests", 0.0) + collectible_stats.get("find_bird_nests", 0.0) + consumable_stats.get("find_bird_nests", 0.0)',
-        '        chest_finding = stats.get("chest_finding", 0.0) + collectible_stats.get("chest_finding", 0.0) + consumable_stats.get("chest_finding", 0.0)',
-        '        fine_material_finding = stats.get("fine_material_finding", 0.0) + collectible_stats.get("fine_material_finding", 0.0) + consumable_stats.get("fine_material_finding", 0.0)',
+        '        find_collectibles = stats.get("find_collectibles", 0.0) + collectible_stats.get("find_collectibles", 0.0) + consumable_stats.get("find_collectibles", 0.0) + input_item_stats.get("find_collectibles", 0.0)',
+        '        find_gems = stats.get("find_gems", 0.0) + collectible_stats.get("find_gems", 0.0) + consumable_stats.get("find_gems", 0.0) + input_item_stats.get("find_gems", 0.0)',
+        '        find_bird_nests = stats.get("find_bird_nests", 0.0) + collectible_stats.get("find_bird_nests", 0.0) + consumable_stats.get("find_bird_nests", 0.0) + input_item_stats.get("find_bird_nests", 0.0)',
+        '        chest_finding = stats.get("chest_finding", 0.0) + collectible_stats.get("chest_finding", 0.0) + consumable_stats.get("chest_finding", 0.0) + input_item_stats.get("chest_finding", 0.0)',
+        '        fine_material_finding = stats.get("fine_material_finding", 0.0) + collectible_stats.get("fine_material_finding", 0.0) + consumable_stats.get("fine_material_finding", 0.0) + input_item_stats.get("fine_material_finding", 0.0)',
         '        fine_chance_multiplier = 1.0 + fine_material_finding',
         '        ',
-        '        # Calculate steps per action (corrected formula matching Excel)',
+        '        # Calculate steps per action — match the UI display formula in',
+        '        # ui/static/js/components/activity-info-section.js, which does',
+        '        # SINGLE ceil at the END of the chain (per KamiTzayig reference).',
+        '        '
         '        # Step 1: Calculate total efficiency',
         '        total_efficiency = 1.0 + we',
         '        ',
-        '        # Step 2: Calculate base steps with efficiency',
-        '        steps_with_efficiency = math.ceil(self.base_steps / total_efficiency)',
+        '        # Step 2: Calculate base steps with efficiency (NO ceil)',
+        '        steps_with_efficiency = self.base_steps / total_efficiency',
         '        ',
-        '        # Step 3: Calculate min_steps',
-        '        min_steps = math.ceil(self.base_steps * math.pow(1 + self.max_efficiency, -1))',
+        '        # Step 3: Calculate min_steps (NO ceil)',
+        '        min_steps = self.base_steps / (1 + self.max_efficiency)',
         '        ',
         '        # Step 4: Take max of steps_with_efficiency and min_steps',
         '        steps_after_min = max(steps_with_efficiency, min_steps)',
         '        ',
-        '        # Step 5: Apply percentage reduction',
-        '        steps_with_pct = math.ceil(steps_after_min * (1 + pct))',
+        '        # Step 5: Apply percentage reduction (NO ceil)',
+        '        steps_with_pct = steps_after_min * (1 + pct)',
         '        ',
-        '        # Step 6: Apply flat reduction',
+        '        # Step 6: Apply flat reduction (NO ceil)',
         '        steps_with_flat = steps_with_pct + flat',
         '        ',
-        '        # Step 7: Ensure minimum of 10 steps',
-        '        steps_per_single_action = max(steps_with_flat, 10)',
+        '        # Step 7: SINGLE ceil at the end. Floor at 10 steps minimum.',
+        '        steps_per_single_action = max(math.ceil(steps_with_flat), 10)',
         '        ',
-        '        # Apply double action (reduces steps per paid action)',
+        '        # Apply double action (reduces steps per paid action, no ceil for accurate XP/step)',
         '        expected_paid_actions = 1.0 / (1 + da)',
-        '        expected_steps_per_action = math.ceil(expected_paid_actions * steps_per_single_action)',
+        '        expected_steps_per_action = expected_paid_actions * steps_per_single_action',
         '        ',
         '        # Calculate effective rewards with DA and DR interaction',
         '        # When DA triggers, you get another action that can also proc DR',
@@ -1087,7 +1424,10 @@ def generate_module(activities):
         '        steps_per_reward_roll = steps_per_single_action / rewards_per_completion',
         '        ',
         '        # XP Calculation',
-        '        primary_xp_per_action = (self.base_xp * (1.0 + bonus_xp_pct)) + bonus_xp_add',
+        '        # Match UI: ui/static/js/components/activity-info-section.js does',
+        '        # (base * (1+fineBonus) + add) * (1+percent). Activities do not',
+        '        # consume Fine materials, so fineBonus is 0 here.',
+        '        primary_xp_per_action = (self.base_xp + bonus_xp_add) * (1.0 + bonus_xp_pct)',
         '        primary_xp_per_step = primary_xp_per_action / expected_steps_per_action',
         '        ',
         '        # Calculate drop rates',
@@ -1137,6 +1477,9 @@ def generate_module(activities):
         '                    pass',
         '        ',
         '        # Combine equipment drops with activity drops',
+        '        # Equipment drops are tracked separately so they don\'t get finding bonuses',
+        '        # applied in the main loop (their chance already reflects the stat value).',
+        '        equipment_drop_refs = {id(d) for d in equipment_drops}',
         '        all_drops = all_drops + equipment_drops',
         '        ',
         '        # Store comprehensive calculation details for verbose mode',
@@ -1259,52 +1602,79 @@ def generate_module(activities):
         '            # Calculate steps per item',
         '            if drop_chance_percent and drop_chance_percent > 0:',
         '                # Apply find bonuses based on item type',
+        '                # Equipment drops (from ItemFindingCategory.* stats) do NOT get finding',
+        '                # bonuses applied — their chance already reflects the stat value directly.',
         '                base_chance = drop_chance_percent / 100.0',
         '                find_bonus = 0.0',
         '                drop_category = None  # Track category for aggregate metrics',
         '                ',
-        '                # Check actual item type if item_object is available',
-        '                try:',
-        '                    if drop.item_object:',
-        '                        from util.autogenerated.collectibles import CollectibleInstance',
-        '                        from util.autogenerated.containers import Container',
-        '                        # Check if item is a Collectible',
-        '                        if isinstance(drop.item_object, CollectibleInstance):',
+        '                is_equipment_drop = id(drop) in equipment_drop_refs',
+        '                ',
+        '                if not is_equipment_drop:',
+        '                    # Check actual item type if item_object is available',
+        '                    try:',
+        '                        if drop.item_object:',
+        '                            from util.autogenerated.collectibles import CollectibleInstance',
+        '                            from util.autogenerated.containers import Container',
+        '                            # Check if item is a Collectible',
+        '                            if isinstance(drop.item_object, CollectibleInstance):',
+        '                                find_bonus = find_collectibles',
+        '                                drop_category = "collectible"',
+        '                            # Check if item is a Container (chest) - exclude bird nests',
+        '                            elif drop.item_ref and "Container." in drop.item_ref and "BIRD_NEST" not in drop.item_ref:',
+        '                                find_bonus = chest_finding',
+        '                                drop_category = "chest"',
+        '                            # Check if item has gem or rough gem keyword',
+        '                            elif hasattr(drop.item_object, "keywords") and any(kw.lower() in ["gem", "rough gem"] for kw in drop.item_object.keywords):',
+        '                                find_bonus = find_gems',
+        '                            # Check if item is a bird nest',
+        '                            elif "bird nest" in drop.item_name.lower() or "nest" in drop.item_name.lower():',
+        '                                find_bonus = find_bird_nests',
+        '                    except:',
+        '                        # Fallback to string-based detection if item_object check fails',
+        '                        if drop.item_ref and "Collectible." in drop.item_ref:',
         '                            find_bonus = find_collectibles',
         '                            drop_category = "collectible"',
-        '                        # Check if item is a Container (chest) - exclude bird nests',
         '                        elif drop.item_ref and "Container." in drop.item_ref and "BIRD_NEST" not in drop.item_ref:',
         '                            find_bonus = chest_finding',
         '                            drop_category = "chest"',
-        '                        # Check if item has gem or rough gem keyword',
-        '                        elif hasattr(drop.item_object, "keywords") and any(kw.lower() in ["gem", "rough gem"] for kw in drop.item_object.keywords):',
-        '                            find_bonus = find_gems',
-        '                        # Check if item is a bird nest',
         '                        elif "bird nest" in drop.item_name.lower() or "nest" in drop.item_name.lower():',
         '                            find_bonus = find_bird_nests',
-        '                except:',
-        '                    # Fallback to string-based detection if item_object check fails',
-        '                    if drop.item_ref and "Collectible." in drop.item_ref:',
-        '                        find_bonus = find_collectibles',
-        '                        drop_category = "collectible"',
-        '                    elif drop.item_ref and "Container." in drop.item_ref and "BIRD_NEST" not in drop.item_ref:',
-        '                        find_bonus = chest_finding',
-        '                        drop_category = "chest"',
-        '                    elif "bird nest" in drop.item_name.lower() or "nest" in drop.item_name.lower():',
-        '                        find_bonus = find_bird_nests',
         '                ',
-        '                # Calculate steps per item using formula:',
-        '                # steps_per_item = (1/drop_rate) * steps_per_single_action / ((1 + find_bonus) * rewards_per_completion * avg_qty)',
-        '                drop_rate_inverse = 1.0 / base_chance',
-        '                steps_per_item = drop_rate_inverse * steps_per_single_action / ((1 + find_bonus) * rewards_per_completion * avg_qty)',
+        '                # Calculate steps per item',
+        '                if drop.is_multi_roll:',
+        '                    # Multi-roll drop (e.g., "Does 100 rolls")',
+        '                    # Each completion does N rolls, each with per-roll base chance',
+        '                    # DA and DR are already factored into steps_per_reward_roll',
+        '                    # CF (find_bonus) boosts the per-roll chance',
+        '                    per_roll_chance = drop.base_roll_chance  # chance_percent / 100 (per-roll, from row_weight/table_weight)',
+        '                    boosted_chance = per_roll_chance * (1 + find_bonus)',
+        '                    # Formula: steps_per_item = steps_per_reward_roll / (N * boosted_chance * avg_qty)',
+        '                    denominator = drop.multi_roll_count * boosted_chance * avg_qty',
+        '                    if denominator > 0:',
+        '                        steps_per_item = steps_per_reward_roll / denominator',
+        '                    else:',
+        '                        steps_per_item = float("inf")',
+        '                else:',
+        '                    # Normal drop: steps_per_item = (1/drop_rate) * steps_per_single_action / ((1 + find_bonus) * rewards_per_completion * avg_qty)',
+        '                    drop_rate_inverse = 1.0 / base_chance',
+        '                    steps_per_item = drop_rate_inverse * steps_per_single_action / ((1 + find_bonus) * rewards_per_completion * avg_qty)',
         '                ',
         '                # Add bonus XP from this drop to primary XP per step',
         '                if drop.bonus_xp and drop.bonus_xp > 0:',
-        '                    bonus_xp_from_drop = (((drop.bonus_xp * (1.0 + bonus_xp_pct)) + bonus_xp_add) / expected_steps_per_action) * (drop_chance_percent / 100.0)',
+        '                    bonus_xp_from_drop = (((drop.bonus_xp + bonus_xp_add) * (1.0 + bonus_xp_pct)) / expected_steps_per_action) * (drop_chance_percent / 100.0)',
         '                    primary_xp_per_step += bonus_xp_from_drop',
         '                ',
-        '                # Add regular material to results',
-        '                results[drop.item_name] = steps_per_item',
+        '                # Add regular material to results (combine if multiple sources)',
+        '                if drop.item_name in results and results[drop.item_name] != float("inf"):',
+        '                    # Same item from multiple sources — combine drop rates',
+        '                    # 1/combined_steps = 1/existing_steps + 1/new_steps',
+        '                    existing = results[drop.item_name]',
+        '                    if steps_per_item != float("inf"):',
+        '                        results[drop.item_name] = (existing * steps_per_item) / (existing + steps_per_item)',
+        '                    # else: keep existing (new source is inf, contributes nothing)',
+        '                else:',
+        '                    results[drop.item_name] = steps_per_item',
         '                ',
         '                # Track steps for aggregate finding metrics',
         '                if drop_category == "chest":',
@@ -1314,27 +1684,37 @@ def generate_module(activities):
         '                    total_steps_collectible += steps_per_item',
         '                    count_collectible += 1',
         '                ',
-        '                # Check if this material has a fine counterpart - if so, add it too',
+        '                # Check if this item has a fine counterpart - materials and consumables',
         '                has_fine = False',
         '                try:',
         '                    if drop.item_object and hasattr(drop.item_object, "has_fine_material"):',
         '                        has_fine = drop.item_object.has_fine_material()',
+        '                    elif drop.item_ref and drop.item_ref.startswith("Consumable."):',
+        '                        from util.autogenerated.consumables import Consumable as _Cons',
+        '                        _cname = drop.item_ref.replace("Consumable.", "") + "_FINE"',
+        '                        has_fine = hasattr(_Cons, _cname)',
         '                except:',
         '                    pass',
         '                ',
         '                if has_fine:',
-        '                    # Fine materials have 1% base chance when finding regular material',
-        '                    # Fine Material Finding bonus applies multiplicatively',
+        '                    # Fine materials have 1% base chance when finding regular material.',
+        '                    # Fine Material Finding bonus applies multiplicatively.',
+        '                    # Use the outer fine_chance_multiplier (computed at top of function)',
+        '                    # which sums FMF from all sources (stats, collectibles, consumable, input_item).',
         '                    base_fine_chance = 0.01',
-        '                    fine_material_finding = stats.get("fine_material_finding", 0.0) + collectible_stats.get("fine_material_finding", 0.0)',
-        '                    fine_chance_multiplier = 1.0 + fine_material_finding',
         '                    fine_chance = base_fine_chance * fine_chance_multiplier',
         '                    ',
         '                    # Steps per fine = steps per regular / fine_chance',
         '                    steps_per_fine = steps_per_item / fine_chance',
         '                    ',
-        '                    # Add fine material with " (Fine)" suffix',
-        '                    results[f"{drop.item_name} (Fine)"] = steps_per_fine',
+        '                    # Add fine material with " (Fine)" suffix (combine if multiple sources)',
+        '                    fine_key = f"{drop.item_name} (Fine)"',
+        '                    if fine_key in results and results[fine_key] != float("inf"):',
+        '                        existing_fine = results[fine_key]',
+        '                        if steps_per_fine != float("inf"):',
+        '                            results[fine_key] = (existing_fine * steps_per_fine) / (existing_fine + steps_per_fine)',
+        '                    else:',
+        '                        results[fine_key] = steps_per_fine',
         '                    total_steps_fine += steps_per_fine',
         '                    count_fine += 1',
         '        ',
@@ -1377,10 +1757,11 @@ def generate_module(activities):
         '            if char_level < level:',
         '                return False',
         '        ',
-        '        # Check reputation requirements',
+        '        # Check reputation requirements (case-insensitive: requirement keys are',
+        '        # capitalized like "Syrenthia" but character reputation is keyed lowercase)',
+        '        _rep_lc = {str(k).lower(): v for k, v in (character.reputation or {}).items()}',
         '        for faction, amount in self.requirements.get("reputation", {}).items():',
-        '            char_rep = character.reputation.get(faction, 0)',
-        '            if char_rep < amount:',
+        '            if _rep_lc.get(str(faction).lower(), 0) < amount:',
         '                return False',
         '        ',
         '        return True',
@@ -1411,10 +1792,11 @@ def generate_module(activities):
         '            if char_level < required_level:',
         '                return False',
         '        ',
-        '        # Check reputation requirements',
+        '        # Check reputation requirements (case-insensitive: requirement keys are',
+        '        # capitalized like "Syrenthia" but character reputation is keyed lowercase)',
+        '        _rep_lc = {str(k).lower(): v for k, v in (character.reputation or {}).items()}',
         '        for faction, required_amount in self.requirements.get("reputation", {}).items():',
-        '            char_rep = character.reputation.get(faction, 0)',
-        '            if char_rep < required_amount:',
+        '            if _rep_lc.get(str(faction).lower(), 0) < required_amount:',
         '                return False',
         '        ',
         '        # Check achievement points requirement',
@@ -1456,6 +1838,33 @@ def generate_module(activities):
         '                    )',
         '                    if count < required_count:',
         '                        return False',
+        '                ',
+        '                # Check tool keyword minimum-skill-level requirements, e.g.',
+        '                # "Have a Pickaxe equipped that requires at least Mining level 60".',
+        '                # At least one equipped item must carry the keyword AND have its',
+        '                # own skill requirement for that skill be >= the required level.',
+        '                for req in self.requirements.get("keyword_level_requirements", []):',
+        '                    req_kw = str(req.get("keyword", "")).lower()',
+        '                    req_skill = str(req.get("skill", "")).lower()',
+        '                    req_level = req.get("level", 0)',
+        '                    if not req_kw:',
+        '                        continue',
+        '                    satisfied = False',
+        '                    for slot, item in gearset.get_all_items():',
+        '                        if not item or not getattr(item, "keywords", None):',
+        '                            continue',
+        '                        if not any(req_kw == kw.lower() for kw in item.keywords):',
+        '                            continue',
+        '                        for r in (getattr(item, "requirements", []) or []):',
+        '                            if (r.get("type") == "skill"',
+        '                                    and str(r.get("skill", "")).lower() == req_skill',
+        '                                    and r.get("level", 0) >= req_level):',
+        '                                satisfied = True',
+        '                                break',
+        '                        if satisfied:',
+        '                            break',
+        '                    if not satisfied:',
+        '                        return False',
         '            ',
         '            except Exception:',
         '                # If cant check gearset, assume requirements are met',
@@ -1495,16 +1904,31 @@ def generate_module(activities):
             # Requirements - structured dict (only include if non-empty)
             reqs = activity['requirements']
             keyword_counts = reqs.get('keyword_counts', {})
+            item_requirements = reqs.get('item_requirements', [])
+            keyword_level_requirements = reqs.get('keyword_level_requirements', [])
             has_reqs = (keyword_counts or 
                        reqs.get('achievement_points', 0) > 0 or
-                       reqs['reputation'] or reqs['activity_completions'])
+                       reqs['reputation'] or reqs['activity_completions'] or
+                       item_requirements or keyword_level_requirements)
             
             if has_reqs:
                 # Format keyword_counts as dict
                 kw_items = ', '.join([f"'{k}': {v}" for k, v in keyword_counts.items()])
                 rep_str = ', '.join([f"'{f}': {a}" for f, a in reqs['reputation'].items()])
                 comp_str = ', '.join([f"'{a}': {c}" for a, c in reqs['activity_completions'].items()])
-                reqs_dict = f"{{'keyword_counts': {{{kw_items}}}, 'achievement_points': {reqs.get('achievement_points', 0)}, 'reputation': {{{rep_str}}}, 'activity_completions': {{{comp_str}}}}}"
+                item_reqs_str = ', '.join([f"'{escape_str(name)}'" for name in item_requirements])
+                klr_str = ', '.join([
+                    f"{{'keyword': '{escape_str(e['keyword'])}', 'skill': '{escape_str(e['skill'])}', 'level': {e['level']}}}"
+                    for e in keyword_level_requirements
+                ])
+                reqs_dict = (
+                    f"{{'keyword_counts': {{{kw_items}}}, "
+                    f"'achievement_points': {reqs.get('achievement_points', 0)}, "
+                    f"'reputation': {{{rep_str}}}, "
+                    f"'activity_completions': {{{comp_str}}}, "
+                    f"'item_requirements': [{item_reqs_str}], "
+                    f"'keyword_level_requirements': [{klr_str}]}}"
+                )
             else:
                 reqs_dict = "{}"
             
@@ -1525,30 +1949,7 @@ def generate_module(activities):
             if activity['drop_table']:
                 lines.append(f"        drop_table=[")
                 for drop in activity['drop_table']:
-                    item_name = escape_str(drop['item'])
-                    item_ref = drop.get('item_object')
-                    item_ref_str = f'"{item_ref}"' if item_ref else 'None'
-                    
-                    # Format quantity
-                    qty = drop['quantity']
-                    if qty['is_na']:
-                        qty_str = "Quantity(is_na=True)"
-                    elif qty['min_qty'] == qty['max_qty']:
-                        qty_str = f"Quantity(min_qty={qty['min_qty']}, max_qty={qty['max_qty']})"
-                    else:
-                        qty_str = f"Quantity(min_qty={qty['min_qty']}, max_qty={qty['max_qty']})"
-                    
-                    # Check if this drop has level-based parameters
-                    if 'initial_level' in drop and 'max_chance_level' in drop and 'final_chance' in drop:
-                        # Level-based drop
-                        bonus_xp_str = f", bonus_xp={drop['bonus_xp']}" if 'bonus_xp' in drop else ""
-                        lines.append(f"            DropEntry(item_name='{item_name}', item_ref={item_ref_str}, quantity={qty_str}{bonus_xp_str}, initial_level={drop['initial_level']}, max_chance_level={drop['max_chance_level']}, final_chance={drop['final_chance']}),")
-                    else:
-                        # Static drop
-                        chance = drop['chance']
-                        chance_str = f", chance_percent={chance}" if chance is not None else ""
-                        bonus_xp_str = f", bonus_xp={drop['bonus_xp']}" if 'bonus_xp' in drop else ""
-                        lines.append(f"            DropEntry(item_name='{item_name}', item_ref={item_ref_str}, quantity={qty_str}{bonus_xp_str}{chance_str}),")
+                    lines.append(f"            {_format_drop_entry(drop, escape_str)},")
                 lines.append(f"        ],")
             else:
                 lines.append(f"        drop_table=[],")
@@ -1556,30 +1957,7 @@ def generate_module(activities):
             if activity['secondary_drop_table']:
                 lines.append(f"        secondary_drop_table=[")
                 for drop in activity['secondary_drop_table']:
-                    item_name = escape_str(drop['item'])
-                    item_ref = drop.get('item_object')
-                    item_ref_str = f'"{item_ref}"' if item_ref else 'None'
-                    
-                    # Format quantity
-                    qty = drop['quantity']
-                    if qty['is_na']:
-                        qty_str = "Quantity(is_na=True)"
-                    elif qty['min_qty'] == qty['max_qty']:
-                        qty_str = f"Quantity(min_qty={qty['min_qty']}, max_qty={qty['max_qty']})"
-                    else:
-                        qty_str = f"Quantity(min_qty={qty['min_qty']}, max_qty={qty['max_qty']})"
-                    
-                    # Check if this drop has level-based parameters
-                    if 'initial_level' in drop and 'max_chance_level' in drop and 'final_chance' in drop:
-                        # Level-based drop
-                        bonus_xp_str = f", bonus_xp={drop['bonus_xp']}" if 'bonus_xp' in drop else ""
-                        lines.append(f"            DropEntry(item_name='{item_name}', item_ref={item_ref_str}, quantity={qty_str}{bonus_xp_str}, initial_level={drop['initial_level']}, max_chance_level={drop['max_chance_level']}, final_chance={drop['final_chance']}),")
-                    else:
-                        # Static drop
-                        chance = drop['chance']
-                        chance_str = f", chance_percent={chance}" if chance is not None else ""
-                        bonus_xp_str = f", bonus_xp={drop['bonus_xp']}" if 'bonus_xp' in drop else ""
-                        lines.append(f"            DropEntry(item_name='{item_name}', item_ref={item_ref_str}, quantity={qty_str}{bonus_xp_str}{chance_str}),")
+                    lines.append(f"            {_format_drop_entry(drop, escape_str)},")
                 lines.append(f"        ],")
             else:
                 lines.append(f"        secondary_drop_table=[],")
@@ -1595,6 +1973,10 @@ def generate_module(activities):
                 lines.append(f"        secondary_xp={{{sec_xp_items}}},")
             if activity['max_efficiency'] is not None:
                 lines.append(f"        max_efficiency={activity['max_efficiency']},")
+            if activity['name'] in ONE_TIME_ACTIVITIES:
+                lines.append(f"        one_time=True,")
+            if activity['name'] in SINGLE_COMPLETION_ACTIVITIES:
+                lines.append(f"        single_completion=True,")
             if activity.get('faction_reputation_reward'):
                 # Format as FactionReward object
                 faction, amount = activity['faction_reputation_reward']
@@ -1606,6 +1988,24 @@ def generate_module(activities):
             if activity.get('requirements_raw'):
                 req_raw = activity['requirements_raw'].replace("'", "\\'")
                 lines.append(f"        requirements_raw='{req_raw}',")
+            if activity.get('input_items'):
+                # Format as list of InputItem objects
+                input_items_strs = []
+                is_optional = activity.get('input_optional', False)
+                for ii in activity['input_items']:
+                    name_esc = ii['name'].replace("'", "\\'")
+                    level_str = f", level={ii['level']}" if ii.get('level') else ""
+                    optional_str = ", optional=True" if is_optional else ""
+                    input_items_strs.append(
+                        f"InputItem(name='{name_esc}', type='{ii['type']}', reference='{ii['reference']}', quantity={ii['quantity']}{level_str}{optional_str})"
+                    )
+                if len(input_items_strs) == 1:
+                    lines.append(f"        input_items=[{input_items_strs[0]}],")
+                else:
+                    lines.append(f"        input_items=[")
+                    for iis in input_items_strs:
+                        lines.append(f"            {iis},")
+                    lines.append(f"        ],")
             
             lines.append(f"    )")
             lines.append('')
@@ -1658,9 +2058,9 @@ if __name__ == '__main__':
         print(f"Found {len(folder_activities)} additional activities from folder")
         
         # Merge, avoiding duplicates (folder activities take precedence)
-        existing_names = {a['name'] for a in activities_list}
+        existing_names = {a['name'].lower() for a in activities_list}
         for folder_activity in folder_activities:
-            if folder_activity['name'] not in existing_names:
+            if folder_activity['name'].lower() not in existing_names:
                 activities_list.append(folder_activity)
                 print(f"  Added new activity: {folder_activity['name']}")
             else:
@@ -1680,6 +2080,18 @@ if __name__ == '__main__':
     print(f"\n{'=' * 60}")
     print(f"Successfully parsed {len(activities_data)} activities")
     print(f"{'=' * 60}")
+    
+    # Overlay precise data from gear.walkscape.app API
+    print("\nOverlaying gear API data...")
+    try:
+        from overlay_gear_api import overlay_api_data
+        patched, new_added = overlay_api_data(activities_data)
+        print(f"API overlay complete: {patched} patched, {new_added} new")
+    except Exception as e:
+        import traceback
+        print(f"Warning: Could not overlay API data: {e}")
+        traceback.print_exc()
+        print("Continuing with wiki data only...")
     
     # Link items and locations
     print("\nLinking items and locations...")
@@ -1728,3 +2140,11 @@ if __name__ == '__main__':
         print("\n✅ All items found!")
     
     print("✓ Scraping complete!")
+
+    # Refresh stats_report precomputed tables after scrape completes.
+    # See util/stats_report/ for details. No-op if sessions.db not present.
+    try:
+        from util.stats_report.precompute.scraper_hook import refresh_after_scrape
+        refresh_after_scrape()
+    except Exception as _e:
+        print(f"[stats_report precompute] hook failed: {_e}")

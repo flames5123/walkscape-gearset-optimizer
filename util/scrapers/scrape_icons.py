@@ -33,6 +33,44 @@ WIKI_BASE_URL = 'https://wiki.walkscape.app'
 # HELPER FUNCTIONS
 # ============================================================================
 
+def ensure_svg_dimensions(filepath: str) -> None:
+    """Ensure an SVG file has explicit width and height attributes.
+
+    Some wiki SVGs only have a viewBox but no width/height, which causes
+    browsers to render them at an ambiguous size. This reads the viewBox
+    dimensions and adds matching width/height attributes if missing.
+    """
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            content = f.read()
+
+        # Skip if already has width in the <svg> tag
+        svg_match = re.search(r'<svg[^>]*>', content)
+        if not svg_match or 'width=' in svg_match.group(0):
+            return
+
+        # Extract dimensions from viewBox
+        vb_match = re.search(r'viewBox="[\d.\-]+ [\d.\-]+ (\d+) (\d+)"', content)
+        if not vb_match:
+            return
+
+        w, h = vb_match.group(1), vb_match.group(2)
+
+        # Insert width/height after <svg
+        new_content = re.sub(
+            r'<svg\s+xmlns=',
+            f'<svg width="{w}" height="{h}" xmlns=',
+            content,
+            count=1
+        )
+
+        if new_content != content:
+            with open(filepath, 'w', encoding='utf-8') as f:
+                f.write(new_content)
+    except Exception:
+        pass  # Don't fail the download over a dimension fix
+
+
 def get_icon_url_from_html(html_content: str, item_type: str = 'equipment') -> str | None:
     """Extract icon URL from cached HTML page."""
     soup = BeautifulSoup(html_content, 'html.parser')
@@ -128,6 +166,9 @@ def download_icon_by_name(item_name: str, output_path: str) -> bool:
         with open(output_path, 'wb') as f:
             f.write(content)
         
+        # Ensure SVG has explicit width/height for proper rendering
+        ensure_svg_dimensions(output_path)
+        
         return True
     except Exception as e:
         return False
@@ -179,6 +220,10 @@ def download_icon(url: str, output_path: str) -> bool:
         # Write file
         with open(output_path, 'wb') as f:
             f.write(response.content)
+        
+        # Ensure SVG has explicit width/height for proper rendering
+        if output_path.endswith('.svg'):
+            ensure_svg_dimensions(output_path)
         
         return True
     except Exception as e:

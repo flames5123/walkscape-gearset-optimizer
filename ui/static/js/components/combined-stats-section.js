@@ -18,6 +18,47 @@
 import CollapsibleSection from './collapsible.js';
 import store from '../state.js';
 import api from '../api.js';
+import { getPetIconPath, SMELTING_RECIPE_NAMES } from '../utils/pet-utils.js';
+
+/**
+ * Format condition text for stat contributor display
+ * @param {string} skill - Skill name (e.g., 'gathering', 'fishing')
+ * @param {string} location - Location name (e.g., 'spectral', 'underwater')
+ * @returns {string} Formatted condition text
+ */
+function formatStatCondition(skill, location) {
+    const capitalize = (str) => str.charAt(0).toUpperCase() + str.slice(1);
+
+    const formatLocation = (loc) => {
+        if (loc === 'gdte') return 'GDTE location';
+        if (loc === 'underwater') return 'Underwater location';
+        return `${capitalize(loc)} location`;
+    };
+
+    const skillGroupNames = {
+        'artisan': 'doing Artisan skills',
+        'gathering': 'doing Gathering skills',
+        'utility': 'doing Utility skills',
+        // Smelting is a sub-skill of Smithing; the bonus only applies to the
+        // bar-smelting recipe subset (SMELTING_RECIPE_NAMES).
+        'smelting': 'doing Smelting recipes',
+    };
+
+    const skillLower = skill ? skill.toLowerCase() : 'global';
+    let formattedSkill = null;
+    if (skillLower !== 'global') {
+        formattedSkill = skillGroupNames[skillLower] || capitalize(skill);
+    }
+
+    if (formattedSkill && location !== 'global') {
+        return `While ${formattedSkill} in ${formatLocation(location)}`;
+    } else if (formattedSkill) {
+        return `While ${formattedSkill}`;
+    } else if (location !== 'global') {
+        return `While in ${formatLocation(location)}`;
+    }
+    return 'Global';
+}
 
 class CombinedStatsSection extends CollapsibleSection {
     /**
@@ -51,6 +92,11 @@ class CombinedStatsSection extends CollapsibleSection {
         // Guard to prevent re-rendering while already rendering
         this.isRendering = false;
 
+        // Comparison mode: cache rendered HTML per slot for instant switching
+        this._slotContentCache = { 1: null, 2: null };
+        this._slotContributorsCache = { 1: null, 2: null };
+        this._slotExpandedStatsCache = { 1: null, 2: null };
+
         // Hooks for Column 3 integration
         // Requirements: 6.12
         this.currentActivity = null;  // Will be set by Column 3
@@ -59,61 +105,102 @@ class CombinedStatsSection extends CollapsibleSection {
         this.isTravel = false;  // Whether current activity is traveling
         this.currentRecipe = null;  // Will be set by Column 3
         this.currentRecipeSkill = null;  // Skill of current recipe
+        this.currentRecipeName = null;  // Name of current recipe (for SMELTING_RECIPE_NAMES gating)
+        this._inputItems = {};  // {idx: itemObject} — input items selected in Column 3
+        this._useFineInputs = store.state.column3?.useFineInputs || false;
         this.currentLocation = null;  // Will be set by Column 3
         this.currentService = null;   // Will be set by Column 3 (for recipes)
+        this.currentRequiredKeywords = [];  // Keywords required by current activity (e.g., ['Light source', 'Diving gear'])
 
         // Subscribe to gear changes
         this.subscribe('gearsets.current', () => {
             console.log('Gear changed subscription fired, recalculating stats');
-
-            // Save scroll position before render
-            const scrollTop = window.pageYOffset || document.documentElement.scrollTop;
-
-            this.render();
-            this.attachEvents();
-
-            // Restore scroll position after render
-            // Use requestAnimationFrame to ensure DOM has updated
-            requestAnimationFrame(() => {
-                window.scrollTo(0, scrollTop);
-            });
+            // Cancel any pending service change re-render (it was part of a slot switch)
+            clearTimeout(this._serviceChangeTimer);
+            // In comparison mode, check if this is just a slot switch (cached content available)
+            if (store.state.gearsets.comparisonMode) {
+                const slot = store.state.gearsets.activeGearsetSlot || 1;
+                const cachedHtml = this._slotContentCache[slot];
+                if (cachedHtml !== null) {
+                    // Check if the actual gear has changed since cache was saved
+                    const currentGear = slot === 1 ? store.state.gearsets.current : store.state.gearsets.gearset2;
+                    const gearHash = JSON.stringify(Object.entries(currentGear || {}).map(([k, v]) => [k, v?.itemId, v?.useAbility]).sort());
+                    if (this._slotGearHash && this._slotGearHash[slot] === gearHash) {
+                        // Gear hasn't changed — this is a slot switch, use cache
+                        this.$element.find('.collapsible-content').html(cachedHtml);
+                        // Re-apply current expanded state to the restored HTML (no animation)
+                        const $arrows = this.$element.find('.stat-row .expand-arrow');
+                        $arrows.css('transition', 'none');
+                        this.$element.find('.stat-row').each((_, row) => {
+                            const statName = $(row).data('stat');
+                            const isExpanded = this.expandedStats.has(statName);
+                            $(row).toggleClass('expanded', isExpanded);
+                            $(row).find('.stat-contributors').toggle(isExpanded);
+                            $(row).find('.expand-arrow').toggleClass('expanded', isExpanded);
+                        });
+                        requestAnimationFrame(() => $arrows.css('transition', ''));
+                        this.attachEvents();
+                        return;
+                    }
+                    // Gear changed — invalidate cache
+                    this._slotContentCache[slot] = null;
+                }
+            }
+            this._renderPreservingScroll();
         });
+
+        // Also re-render when gearset2 changes or active slot switches (comparison mode)
+        this.subscribe('gearsets.gearset2', () => {
+            if (store.state.gearsets.comparisonMode && store.state.gearsets.activeGearsetSlot === 2) {
+                this._slotContentCache[2] = null; // Invalidate slot 2 cache
+                this._renderPreservingScroll();
+            }
+        });
+
+        // Re-render when service/location changes (e.g., gearset slot switch restores different context)
+        this.subscribe('column3.selectedService', () => {
+            if (store.state.gearsets.comparisonMode) {
+                const svc = store.state.column3.selectedService;
+                const loc = store.state.column3.selectedLocation;
+                // Update service and location, then re-render
+                this.currentService = svc;
+                this.currentLocation = loc ? [loc] : null;
+                // Don't invalidate cache here — slot switches fire this before gearsets.current.
+                // The cache will be used by the gearsets.current handler.
+                // Only re-render if NOT about to get a gearsets.current notification (i.e., user manually changed service).
+                // We detect this by checking if the slot switch is in progress via a microtask delay.
+                clearTimeout(this._serviceChangeTimer);
+                this._serviceChangeTimer = setTimeout(() => {
+                    // If we get here, no gearsets.current fired right after — this was a real service change
+                    this._slotContentCache = { 1: null, 2: null };
+                    this._renderPreservingScroll();
+                }, 0);
+            }
+        });
+
+        // Defensive location-sync for single view:
+        // On session restore (and any other state-driven location change that didn't go
+        // through setRecipeContext/setLocation), keep currentLocation in sync with the
+        // store. Without this, drops + combined stats don't pick up location bonuses on
+        // reload because onRecipeChange fires before the recipe loads and the subsequent
+        // `column3.selectedLocation` notification doesn't propagate anywhere.
+        this.subscribe('column3.selectedLocation', () => this._syncLocationFromStore());
 
         // Subscribe to character skill changes for level bonus recalculation
 
         // Subscribe to character skill changes for level bonus recalculation
         this.subscribe('character.skills', () => {
             console.log('Column 2: Character skills changed subscription fired');
-
-            // Save scroll position before render
-            const scrollTop = window.pageYOffset || document.documentElement.scrollTop;
-
-            // Render immediately with new level bonuses
-            this.render();
-            this.attachEvents();
-
-            // Restore scroll position after render
-            requestAnimationFrame(() => {
-                window.scrollTo(0, scrollTop);
-            });
+            this._slotContentCache = { 1: null, 2: null };
+            this._renderPreservingScroll();
         });
 
         this.subscribe('ui.user_overrides.skills', () => {
             console.log('Column 2: Skill overrides changed subscription fired');
             console.log('Current activity:', this.currentActivity);
             console.log('Current recipe skill:', this.currentRecipeSkill);
-
-            // Save scroll position before render
-            const scrollTop = window.pageYOffset || document.documentElement.scrollTop;
-
-            // Render immediately with new level bonuses
-            this.render();
-            this.attachEvents();
-
-            // Restore scroll position after render
-            requestAnimationFrame(() => {
-                window.scrollTo(0, scrollTop);
-            });
+            this._slotContentCache = { 1: null, 2: null };
+            this._renderPreservingScroll();
         });
 
         // Subscribe to achievement points changes for AP-gated stats
@@ -125,22 +212,51 @@ class CombinedStatsSection extends CollapsibleSection {
                 console.log('  Skipping render - already rendering');
                 return;
             }
-
-            // Save scroll position before render
-            const scrollTop = window.pageYOffset || document.documentElement.scrollTop;
-
-            // Render immediately with new AP-gated stats
-            this.render();
-            this.attachEvents();
-
-            // Restore scroll position after render
-            requestAnimationFrame(() => {
-                window.scrollTo(0, scrollTop);
-            });
+            this._slotContentCache = { 1: null, 2: null };
+            this._renderPreservingScroll();
         });
 
         // Don't subscribe to general character or items - only recalculate when gear or skills change
         // Item quality changes are less frequent and can be manually refreshed
+
+        // UI setting: hide unapplicable stats
+        this.hideUnapplicableStats = localStorage.getItem('hideUnapplicableStats') === 'true';
+        this._hideUnapplicableHandler = (e) => {
+            this.hideUnapplicableStats = e.detail.value;
+            this._slotContentCache = { 1: null, 2: null };
+            this._renderPreservingScroll();
+        };
+        window.addEventListener('hideUnapplicableStatsChanged', this._hideUnapplicableHandler);
+
+        // Recompute when the travel route changes. Travel stats are matched
+        // against the route's segments (see _travelLocationMatches), and the
+        // route can arrive after the first render (it's fetched async by the
+        // Travel info section), so we must re-render once it's available.
+        this._travelRouteChangedHandler = () => {
+            if (!this.isTravel) return;
+            this._slotContentCache = { 1: null, 2: null };
+            this._renderPreservingScroll();
+        };
+        window.addEventListener('travelRouteChanged', this._travelRouteChangedHandler);
+    }
+
+    /**
+     * Render while preserving the scroll position of column 2's scroll container.
+     * Column 2 scrolls via .column-content (desktop) or #column-2 (mobile).
+     */
+    _renderPreservingScroll() {
+        const $col2Content = $('#column-2 .column-content');
+        const $col2 = $('#column-2');
+        const isMobile = window.innerWidth < 769;
+        const $scroller = isMobile ? $col2 : $col2Content;
+        const scrollTop = $scroller.length ? $scroller[0].scrollTop : 0;
+
+        // Set a one-shot scroll restore that fires after loadContent completes
+        this._pendingScrollRestore = scrollTop;
+        this._pendingScrollTarget = $scroller;
+
+        this.render();
+        this.attachEvents();
     }
 
     /**
@@ -177,6 +293,7 @@ class CombinedStatsSection extends CollapsibleSection {
             'bonus_experience_base': 'bonus_experience',
             'bonus_experience_add': 'bonus_experience',
             'bonus_experience_percent': 'bonus_experience',
+            'foraging_base_xp': 'bonus_experience',
             'steps_required': 'steps_required',
             'steps_add': 'steps_required',
             'flat_steps': 'steps_required',
@@ -187,7 +304,8 @@ class CombinedStatsSection extends CollapsibleSection {
             'item_finding': 'item_finding',
             'fine_material_finding': 'fine_material_finding',
             'find_collectibles': 'find_collectibles',
-            'collectible_finding': 'find_collectibles'
+            'collectible_finding': 'find_collectibles',
+            'find_linens': 'find_linens'
         };
 
         const iconName = iconMap[statName] || statName;
@@ -209,6 +327,14 @@ class CombinedStatsSection extends CollapsibleSection {
             return; // No change, don't re-render
         }
 
+        // Invalidate slot content cache — activity context changed
+        this._slotContentCache = { 1: null, 2: null };
+
+        // Clear input items and fine inputs when switching activities
+        this._inputItems = {};
+        this._useFineInputs = false;
+        store.state.column3.useFineInputs = false;
+
         // Fetch activity OR recipe to determine which type this is
         let isActivity = false;
         let isRecipe = false;
@@ -228,6 +354,7 @@ class CombinedStatsSection extends CollapsibleSection {
                         this.currentActivitySkill = activity.primary_skill;
                         this.currentActivityComponentSkills = activity.component_skills || [activity.primary_skill.toLowerCase()];
                         this.isTravel = !!activity.is_travel;
+                        this.currentRequiredKeywords = Object.keys(activity.requirements?.keyword_counts || {});
                         console.log('Set activity skill:', this.currentActivitySkill, 'components:', this.currentActivityComponentSkills, 'isTravel:', this.isTravel);
                         break;
                     }
@@ -243,11 +370,46 @@ class CombinedStatsSection extends CollapsibleSection {
                             // Clear activity state, set recipe state
                             this.currentActivity = null;
                             this.currentActivitySkill = null;
+                            this.currentRequiredKeywords = [];
                             this.currentRecipe = activityId;
                             this.currentRecipeSkill = recipe.skill;
+                            this.currentRecipeName = recipe.name || null;
                             console.log('Set recipe skill:', this.currentRecipeSkill);
                             break;
                         }
+                    }
+                }
+
+                // If still not found, try generic activity/recipe via view endpoint
+                if (!isActivity && !isRecipe && activityId.startsWith('generic::')) {
+                    try {
+                        const defId = activityId.replace('generic::', '');
+                        const viewData = await api.getGenericDefinitionView(defId);
+                        if (viewData) {
+                            const skill = viewData.primary_skill || viewData.skill;
+                            if (viewData.type === 'activity' || viewData.primary_skill) {
+                                isActivity = true;
+                                this.currentRecipe = null;
+                                this.currentRecipeSkill = null;
+                                this.currentActivity = activityId;
+                                this.currentActivitySkill = skill;
+                                this.currentActivityComponentSkills = viewData.component_skills || [skill.toLowerCase()];
+                                this.isTravel = !!viewData.is_travel;
+                                this.currentRequiredKeywords = Object.keys(viewData.requirements?.keyword_counts || {});
+                                console.log('Set generic activity skill:', skill);
+                            } else {
+                                isRecipe = true;
+                                this.currentActivity = null;
+                                this.currentActivitySkill = null;
+                                this.currentRequiredKeywords = [];
+                                this.currentRecipe = activityId;
+                                this.currentRecipeSkill = skill;
+                                this.currentRecipeName = viewData.name || null;
+                                console.log('Set generic recipe skill:', skill);
+                            }
+                        }
+                    } catch (e) {
+                        console.warn('Failed to fetch generic definition view:', e);
                     }
                 }
             } catch (error) {
@@ -265,6 +427,7 @@ class CombinedStatsSection extends CollapsibleSection {
                 this.currentActivitySkill = null;
                 this.currentActivityComponentSkills = null;
                 this.isTravel = false;
+                this.currentRequiredKeywords = [];
                 // Keep recipe state intact
             }
             // If recipe is null in store but activity is set, clear only recipe
@@ -279,6 +442,7 @@ class CombinedStatsSection extends CollapsibleSection {
                 this.currentActivitySkill = null;
                 this.currentActivityComponentSkills = null;
                 this.isTravel = false;
+                this.currentRequiredKeywords = [];
                 this.currentRecipe = null;
                 this.currentRecipeSkill = null;
             }
@@ -301,10 +465,11 @@ class CombinedStatsSection extends CollapsibleSection {
      * @param {string|null} activityId - Activity ID or null
      * @param {string|string[]|null} location - Location name, array of region names, or null
      */
-    async setActivityAndLocation(activityId, location) {
+    async setActivityAndLocation(activityId, location, inputItems = null, useFineInputs = false) {
         console.log('=== setActivityAndLocation() called ===');
         console.log('Activity:', activityId);
         console.log('Location:', location);
+        console.log('Input items provided:', inputItems ? Object.keys(inputItems).length : 0);
 
         // Set activity first (without rendering)
         if (activityId !== undefined) {
@@ -313,6 +478,10 @@ class CombinedStatsSection extends CollapsibleSection {
             const isSameRecipe = this.currentRecipe === activityId && !this.currentActivity;
 
             if (!isSameActivity && !isSameRecipe && activityId) {
+                // Clear input items initially (will be re-applied after async work)
+                this._inputItems = {};
+                this._useFineInputs = false;
+
                 try {
                     // Try activities first
                     const actResponse = await $.get('/api/activities');
@@ -326,6 +495,7 @@ class CombinedStatsSection extends CollapsibleSection {
                             this.currentActivitySkill = activity.primary_skill;
                             this.currentActivityComponentSkills = activity.component_skills || [activity.primary_skill.toLowerCase()];
                             this.isTravel = !!activity.is_travel;
+                            this.currentRequiredKeywords = Object.keys(activity.requirements?.keyword_counts || {});
                             found = true;
                             break;
                         }
@@ -335,6 +505,7 @@ class CombinedStatsSection extends CollapsibleSection {
                     if (!found) {
                         this.isTravel = false;
                         this.currentActivityComponentSkills = null;
+                        this.currentRequiredKeywords = [];
                         const recResponse = await $.get('/api/recipes');
                         for (const recipes of Object.values(recResponse.by_skill)) {
                             const recipe = recipes.find(r => r.id === activityId);
@@ -343,14 +514,73 @@ class CombinedStatsSection extends CollapsibleSection {
                                 this.currentActivitySkill = null;
                                 this.currentRecipe = activityId;
                                 this.currentRecipeSkill = recipe.skill;
+                                this.currentRecipeName = recipe.name || null;
+                                found = true;
                                 break;
                             }
+                        }
+                    }
+
+                    // If still not found, try generic activity/recipe via view endpoint
+                    if (!found && activityId.startsWith('generic::')) {
+                        try {
+                            const defId = activityId.replace('generic::', '');
+                            const viewData = await api.getGenericDefinitionView(defId);
+                            if (viewData) {
+                                const skill = viewData.primary_skill || viewData.skill;
+                                if (viewData.type === 'activity' || viewData.primary_skill) {
+                                    this.currentRecipe = null;
+                                    this.currentRecipeSkill = null;
+                                    this.currentActivity = activityId;
+                                    this.currentActivitySkill = skill;
+                                    this.currentActivityComponentSkills = viewData.component_skills || [skill.toLowerCase()];
+                                    this.isTravel = !!viewData.is_travel;
+                                    this.currentRequiredKeywords = Object.keys(viewData.requirements?.keyword_counts || {});
+                                } else {
+                                    this.currentActivity = null;
+                                    this.currentActivitySkill = null;
+                                    this.currentRequiredKeywords = [];
+                                    this.currentRecipe = activityId;
+                                    this.currentRecipeSkill = skill;
+                                    this.currentRecipeName = viewData.name || null;
+                                }
+                                found = true;
+                            }
+                        } catch (e) {
+                            console.warn('Failed to fetch generic definition view:', e);
                         }
                     }
                 } catch (error) {
                     console.error('Failed to fetch activity/recipe skill:', error);
                 }
+
+                // Re-apply input items AFTER async work completes.
+                // This prevents a race condition where setActivity(null) (fired
+                // by the recipe-info-section clearing its recipe) clears
+                // _inputItems during the await above.
+                if (inputItems && Object.keys(inputItems).length > 0) {
+                    this._inputItems = {};
+                    for (const [idx, item] of Object.entries(inputItems)) {
+                        if (item && item.stats) {
+                            this._inputItems[parseInt(idx)] = item;
+                        }
+                    }
+                    this._useFineInputs = useFineInputs;
+                }
             }
+        }
+
+        // Always (re-)apply input items regardless of whether the activity
+        // changed — covers the Equip flow from crafting tree where the same
+        // activity is already selected but new input items need to take effect.
+        if (inputItems && Object.keys(inputItems).length > 0) {
+            this._inputItems = {};
+            for (const [idx, item] of Object.entries(inputItems)) {
+                if (item && item.stats) {
+                    this._inputItems[parseInt(idx)] = item;
+                }
+            }
+            this._useFineInputs = useFineInputs;
         }
 
         // Set location (without rendering)
@@ -376,6 +606,13 @@ class CombinedStatsSection extends CollapsibleSection {
      * @param {boolean} skipRender - If true, don't trigger render (for batching updates)
      */
     setLocation(location, skipRender = false) {
+        // First call after page load — captures the post-init synchronous
+        // render gap (column3 + recipe/activity dropdown population) that
+        // the [PERF] init phases couldn't attribute. One-shot guard.
+        if (window.__walkscapePerf && !window.__walkscapePerf._first_set_location_seen) {
+            window.__walkscapePerf._first_set_location_seen = true;
+            window.__walkscapePerf.measure('first_setLocation_from_init', 'init_start');
+        }
         console.log('=== setLocation() called ===');
         console.log('New location:', location);
         console.log('Current location:', this.currentLocation);
@@ -410,6 +647,95 @@ class CombinedStatsSection extends CollapsibleSection {
     }
 
     /**
+     * Sync currentLocation from store.state.column3.selectedLocation, resolving the
+     * location's regions (e.g., Syrenthia → ['syrenthia', 'underwater']) so region-
+     * scoped gear bonuses apply. Called from the column3.selectedLocation subscription.
+     *
+     * Skipped in comparison mode — that path uses selectedService + gsXContext for
+     * per-slot location handling.
+     *
+     * Runs even when no recipe/activity is loaded yet so that on session restore the
+     * location is ready for the pending setRecipeContext call to match.
+     */
+    async _syncLocationFromStore() {
+        if (store.state.gearsets?.comparisonMode) return;
+
+        const locId = store.state.column3?.selectedLocation;
+
+        // Null location — clear if set
+        if (!locId) {
+            if (this.currentLocation !== null) {
+                this.setLocation(null);
+            }
+            return;
+        }
+
+        // Resolve regions so e.g. underwater bonuses apply when selecting Syrenthia.
+        // Prefer the recipe/service endpoint (matches single view's selectLocation path);
+        // fall back to the global locations endpoint for no-service recipes or activities.
+        let regions = null;
+        try {
+            if (this.currentRecipe && !String(this.currentRecipe).startsWith('generic::')) {
+                const svcResp = await $.get(`/api/services/for-recipe/${this.currentRecipe}`);
+                for (const service of svcResp.services || []) {
+                    if (!service.locations) continue;
+                    const locData = service.locations.find(l => l.location?.id === locId);
+                    if (locData && locData.location.regions && locData.location.regions.length > 0) {
+                        regions = locData.location.regions;
+                        break;
+                    }
+                }
+            }
+            if (!regions) {
+                const locResp = await $.get('/api/locations');
+                for (const region of locResp.regions || []) {
+                    const loc = (region.locations || []).find(l => l.id === locId);
+                    if (loc) {
+                        regions = (loc.regions && loc.regions.length > 0) ? loc.regions : [locId];
+                        break;
+                    }
+                }
+            }
+        } catch (e) {
+            console.error('_syncLocationFromStore: failed to resolve regions, falling back to raw id:', e);
+        }
+        const newLoc = regions || [locId];
+
+        // If no recipe/activity is loaded yet (e.g., during session restore before
+        // onRecipeChange completes), just prime currentLocation without triggering a
+        // render — the pending setRecipeContext call will do the render once the
+        // recipe loads. Otherwise, setLocation handles the no-op + render logic.
+        if (!this.currentRecipe && !this.currentActivity) {
+            this.currentLocation = newLoc;
+            return;
+        }
+        this.setLocation(newLoc);
+    }
+
+    /**
+     * Set an input item for the activity (hook for Column 3 input slots)
+     * Input items with stats contribute to the activity calculation.
+     * @param {number} idx - Input item index
+     * @param {Object|null} item - Item object with stats, or null to clear
+     */
+    setInputItem(idx, item) {
+        if (item) {
+            this._inputItems[idx] = item;
+        } else {
+            delete this._inputItems[idx];
+        }
+        this.render();
+        this.attachEvents();
+    }
+
+    setFineInputs(useFine) {
+        console.log('[FINE-DEBUG] setFineInputs called:', useFine);
+        this._useFineInputs = !!useFine;
+        this.render();
+        // Do NOT call attachEvents() here — it re-triggers the checkbox handler
+    }
+
+    /**
      * Set the current service context (hook for Column 3)
      * Requirements: 6.12, 7.3
      * 
@@ -426,6 +752,11 @@ class CombinedStatsSection extends CollapsibleSection {
         }
         this.currentService = service;
         console.log('Updated currentService to:', this.currentService);
+
+        // Update required keywords from new service
+        this._getServiceRequiredKeywords(service).then(keywords => {
+            this.currentRequiredKeywords = keywords;
+        });
 
         // Clear any pending debounced renders
         if (this.renderTimeout) {
@@ -453,6 +784,13 @@ class CombinedStatsSection extends CollapsibleSection {
         console.log('Service:', serviceId);
         console.log('Location:', locationId);
 
+        // Invalidate slot content cache — recipe context changed
+        this._slotContentCache = { 1: null, 2: null };
+
+        // Clear input items and fine inputs when switching to recipe context
+        this._inputItems = {};
+        this._useFineInputs = false;
+
         // Check if context is unchanged
         const recipeUnchanged = this.currentRecipe === recipeId;
         const serviceUnchanged = this.currentService === serviceId;
@@ -465,22 +803,42 @@ class CombinedStatsSection extends CollapsibleSection {
 
         // Set recipe using existing setActivity logic
         if (recipeId) {
-            try {
-                const recResponse = await $.get('/api/recipes');
-                for (const recipes of Object.values(recResponse.by_skill)) {
-                    const recipe = recipes.find(r => r.id === recipeId);
-                    if (recipe) {
-                        // Clear activity state, set recipe state
+            // Handle generic recipes
+            if (recipeId.startsWith('generic::')) {
+                try {
+                    const defId = recipeId.replace('generic::', '');
+                    const viewData = await api.getGenericDefinitionView(defId);
+                    if (viewData) {
                         this.currentActivity = null;
                         this.currentActivitySkill = null;
                         this.currentRecipe = recipeId;
-                        this.currentRecipeSkill = recipe.skill;
-                        console.log('Set recipe skill:', this.currentRecipeSkill);
-                        break;
+                        this.currentRecipeSkill = viewData.skill || viewData.primary_skill || null;
+                        this.currentRecipeName = viewData.name || null;
+                        console.log('Set generic recipe skill:', this.currentRecipeSkill);
                     }
+                } catch (e) {
+                    console.error('Failed to fetch generic recipe skill:', e);
                 }
-            } catch (error) {
-                console.error('Failed to fetch recipe skill:', error);
+            } else {
+                try {
+                    const recResponse = await $.get('/api/recipes');
+                    for (const recipes of Object.values(recResponse.by_skill)) {
+                        const recipe = recipes.find(r => r.id === recipeId);
+                        if (recipe) {
+                            // Clear activity state, set recipe state
+                            this.currentActivity = null;
+                            this.currentActivitySkill = null;
+                            this.currentRequiredKeywords = [];  // Will be set from service below
+                            this.currentRecipe = recipeId;
+                            this.currentRecipeSkill = recipe.skill;
+                            this.currentRecipeName = recipe.name || null;
+                            console.log('Set recipe skill:', this.currentRecipeSkill);
+                            break;
+                        }
+                    }
+                } catch (error) {
+                    console.error('Failed to fetch recipe skill:', error);
+                }
             }
         } else {
             this.currentRecipe = null;
@@ -491,7 +849,10 @@ class CombinedStatsSection extends CollapsibleSection {
         this.currentService = serviceId;
         this.currentLocation = locationId;
 
-        console.log('Updated context - Recipe:', this.currentRecipe, 'Service:', this.currentService, 'Location:', this.currentLocation);
+        // Populate required keywords from service requirements (e.g., diving gear for underwater services)
+        this.currentRequiredKeywords = await this._getServiceRequiredKeywords(serviceId);
+
+        console.log('Updated context - Recipe:', this.currentRecipe, 'Service:', this.currentService, 'Location:', this.currentLocation, 'RequiredKeywords:', this.currentRequiredKeywords);
 
         // Clear any pending debounced renders
         if (this.renderTimeout) {
@@ -504,7 +865,33 @@ class CombinedStatsSection extends CollapsibleSection {
     }
 
     /**
-     * Calculate combined stats from all equipped items
+     * Fetch required keywords from a service's requirements (e.g., 'diving gear' for underwater services).
+     * Returns an array of keyword strings, or [] if no service or no keyword requirements.
+     */
+    async _getServiceRequiredKeywords(serviceId) {
+        if (!serviceId) return [];
+        try {
+            const serviceResponse = await $.get('/api/services');
+            // Find service by ID or by location service_id
+            let service = serviceResponse.services.find(s => s.id === serviceId);
+            if (!service) {
+                for (const svc of serviceResponse.services) {
+                    if (svc.locations && svc.locations.some(loc => loc.service_id === serviceId)) {
+                        service = svc;
+                        break;
+                    }
+                }
+            }
+            if (service && service.requirements && service.requirements.keyword_counts) {
+                return Object.keys(service.requirements.keyword_counts);
+            }
+        } catch (e) {
+            console.warn('Failed to fetch service keywords:', e);
+        }
+        return [];
+    }
+
+    /**
      * Requirements: 6.1, 6.10
      * 
      * Aggregates stats from:
@@ -517,12 +904,20 @@ class CombinedStatsSection extends CollapsibleSection {
      */
     async calculateStats() {
         const stats = {};
-        const currentGear = store.state.gearsets?.current || {};
+        const currentGear = store.getActiveGearset() || {};
         const character = store.state.character || {};
+
+        // Guard: if gearset is not a valid object (e.g., during async restore), bail out
+        if (!currentGear || typeof currentGear !== 'object') {
+            return stats;
+        }
 
         // Clear contributors cache at the start of calculation to prevent duplicates
         // This ensures each calculateStats() call starts fresh
         console.log('=== calculateStats() START ===');
+        console.log('[FINE-DEBUG] _useFineInputs:', this._useFineInputs);
+        console.log('[FINE-DEBUG] _inputItems count:', Object.keys(this._inputItems || {}).length);
+        console.log('[FINE-DEBUG] stack:', new Error().stack.split('\n').slice(1, 5).join(' <- '));
 
         // Initialize contributorsByStat if it doesn't exist
         if (!this.contributorsByStat) {
@@ -531,20 +926,83 @@ class CombinedStatsSection extends CollapsibleSection {
 
         console.log('contributorsByStat before clear:', Object.keys(this.contributorsByStat).length, 'stats');
         this.contributorsByStat = {};
+        this._currentCalcId = (this._currentCalcId || 0) + 1;
+        const myCalcId = this._currentCalcId;
         console.log('contributorsByStat after clear:', Object.keys(this.contributorsByStat).length, 'stats');
+
+        // Travel activities have no location dropdown, so currentLocation is null
+        // and every location-scoped travel bonus (e.g. Medieval sneakers
+        // "!underwater", Lily pad rope "gdte", Map of Trellin "trellin") would be
+        // wrongly flagged "doesn't apply". Resolve the active travel route's
+        // per-segment START-location regions so we can mirror the backend
+        // /api/travel/stats matcher (region membership + "!" negation, applied if
+        // ANY segment matches). See _travelLocationMatches() below.
+        this._travelSegmentRegions = null;
+        if (this.isTravel) {
+            this._travelSegmentRegions = await this._getTravelRouteSegmentRegions();
+            // Bail out if a newer calculateStats started during the await
+            if (myCalcId !== this._currentCalcId) {
+                return stats;
+            }
+        }
 
         console.log('Calculating combined stats, equipped items:', Object.keys(currentGear).filter(k => currentGear[k]).length);
 
         // Get catalog to look up item details
         try {
+            // Use cached catalog — item definitions don't change during a session.
+            // Cache is already invalidated on character import (import-modal.js).
             const catalog = await api.getCatalog();
+
+            // Bail out if a newer calculateStats has started while we were awaiting
+            if (myCalcId !== this._currentCalcId) {
+                console.log('[RENDER-DEBUG] calculateStats STALE (newer calc started), bailing out');
+                return stats;
+            }
             const catalogItems = catalog.items || [];
             const collectibles = catalog.collectibles || [];
 
             console.log('Catalog loaded with', catalogItems.length, 'items and', collectibles.length, 'collectibles');
 
+            // Trigger one-time normalization of UUID-format itemId values in currentGear.
+            // This fixes sessions where currentGear was saved with full UUIDs instead of short ids.
+            if (store && !store._currentGearNormalized) {
+                store._currentGearNormalized = true;
+                let normalized = false;
+                for (const [slot, slotItem] of Object.entries(store.state.gearsets.current || {})) {
+                    if (!slotItem || !slotItem.itemId) continue;
+                    // If the item is already enriched (has name/rarity), skip
+                    if (slotItem.name && slotItem.rarity) continue;
+                    // Find by short id first, then by UUID
+                    let catalogItem = catalogItems.find(item => item.id === slotItem.itemId);
+                    if (!catalogItem) {
+                        catalogItem = catalogItems.find(item => item.uuid === slotItem.itemId);
+                    }
+                    if (catalogItem) {
+                        // Enrich with full catalog data, preserving quality
+                        const quality = slotItem.quality || null;
+                        let enriched = { ...catalogItem, itemId: catalogItem.id };
+                        if (quality && catalogItem.type === 'crafted_item') {
+                            const qualityMap = { 'common': 'Normal', 'uncommon': 'Good', 'rare': 'Great', 'epic': 'Excellent', 'legendary': 'Perfect', 'ethereal': 'Eternal' };
+                            enriched.quality = qualityMap[quality] || quality;
+                            enriched.rarity = quality;
+                        }
+                        store.state.gearsets.current[slot] = enriched;
+                        normalized = true;
+                    }
+                }
+                if (normalized) {
+                    console.log('Normalized and enriched currentGear items from catalog');
+                    store._notifySubscribers('gearsets.current');
+                    store._saveCurrentGear();
+                }
+            }
+
             // Aggregate stats from all equipped items
+            console.log('[RENDER-DEBUG] currentGear slots:', Object.keys(currentGear).join(', '));
+            console.log('[RENDER-DEBUG] currentGear slot count:', Object.keys(currentGear).length);
             for (const [slot, slotItem] of Object.entries(currentGear)) {
+                if (slotItem && slotItem.itemId) console.log(`[RENDER-DEBUG]   ${slot}: ${slotItem.itemId} (${slotItem.name || '?'})`);
                 if (!slotItem || !slotItem.itemId) continue;
 
                 // Find full item data in catalog
@@ -552,6 +1010,12 @@ class CombinedStatsSection extends CollapsibleSection {
                 // but the catalog only has the base item (e.g., "fruit_cake")
                 let fullItem = catalogItems.find(item => item.id === slotItem.itemId);
                 let isFineConsumable = false;
+
+                // Fallback: some saved gearsets store the full UUID as itemId (e.g. "item-warm_beanie-26728220-...")
+                // instead of the short id (e.g. "warm_beanie"). Try matching by uuid as well.
+                if (!fullItem && slotItem.itemId) {
+                    fullItem = catalogItems.find(item => item.uuid === slotItem.itemId);
+                }
 
                 if (!fullItem && (slotItem.is_fine || slotItem.itemId.endsWith('_fine'))) {
                     const baseId = slotItem.itemId.replace(/_fine$/, '');
@@ -562,6 +1026,74 @@ class CombinedStatsSection extends CollapsibleSection {
                     }
                 }
 
+                // Bug b788d037 follow-up: tree-node Equip writes the BASE
+                // itemId (e.g. "sweet_carrot_pie") for Fine consumables and
+                // marks is_fine=true on the slot data. The catalog lookup
+                // above SUCCEEDS (returns the base entry), so the Fine
+                // fallback (`!fullItem` branch) never fires and
+                // isFineConsumable stays false — the combined-stats
+                // section then displays the regular stats (6% DA) instead
+                // of the Fine stats (9% DA) even though the equipped icon
+                // looks correctly Fine.
+                //
+                // Fix: also flip isFineConsumable when the slot is marked
+                // is_fine and the catalog entry has a stats_fine sibling.
+                // No-op for non-consumable slots (gear/tools/rings have
+                // is_fine=false).
+                if (!isFineConsumable
+                        && slotItem.is_fine
+                        && fullItem
+                        && fullItem.stats_fine) {
+                    isFineConsumable = true;
+                }
+
+                if (!fullItem) {
+                    // Check if this is a generic item (including fine versions with _fine suffix)
+                    let genericItemId = slotItem.itemId || '';
+                    let isGenericFine = false;
+                    if (genericItemId.endsWith('_fine')) {
+                        genericItemId = genericItemId.replace(/_fine$/, '');
+                        isGenericFine = true;
+                    }
+                    if (slotItem.is_generic || genericItemId.startsWith('generic::item::')) {
+                        const genericId = genericItemId.replace('generic::item::', '');
+                        const genericItems = store.state.genericItems || [];
+                        const gi = genericItems.find(g => g.id === genericId);
+                        if (gi) {
+                            const isConsumable = gi.slot === 'consumable';
+                            const isCollectible = gi.slot === 'collectible';
+                            const isCrafted = isCollectible ? false : (gi.is_crafted || isConsumable);
+                            // For fine generic consumables, use Fine quality stats
+                            let stats = gi.stats || {};
+                            let statsFine = null;
+                            if (isConsumable && gi.quality_stats) {
+                                stats = gi.quality_stats['Normal'] || gi.stats || {};
+                                statsFine = gi.quality_stats['Fine'] || null;
+                            }
+                            if (isGenericFine && statsFine) {
+                                isFineConsumable = true;
+                                stats = statsFine;
+                            }
+                            fullItem = {
+                                id: slotItem.itemId,
+                                name: gi.name,
+                                slot: gi.slot,
+                                keywords: gi.keywords || [],
+                                rarity: isCrafted ? 'common' : (gi.rarity || 'common'),
+                                type: isCollectible ? 'collectible' : (isConsumable ? 'consumable' : (isCrafted ? 'crafted_item' : 'item')),
+                                stats: stats,
+                                stats_fine: statsFine,
+                                stats_by_quality: (!isConsumable && gi.quality_stats) ? gi.quality_stats : null,
+                                gated_stats: gi.gated_stats || {},
+                                is_generic: true,
+                                icon: gi.icon || '⚡',
+                                icon_color: gi.icon_color || null,
+                                icon_path: gi.icon_path || null,
+                            };
+                        }
+                    }
+                }
+
                 if (!fullItem) {
                     console.warn(`Item not found in catalog: ${slotItem.itemId}`);
                     continue;
@@ -569,10 +1101,54 @@ class CombinedStatsSection extends CollapsibleSection {
 
                 console.log(`Processing ${slot}: ${fullItem.name}${isFineConsumable ? ' (Fine)' : ''}`);
 
+                // Debug: log catalog stats keys for Ghost trap pack
+                if (fullItem.name && fullItem.name.toLowerCase().includes('ghost trap')) {
+                    console.log(`  CATALOG LOOKUP for ${fullItem.name}: stats keys =`, Object.keys(fullItem.stats || {}));
+                    console.log(`  CATALOG LOOKUP full stats:`, JSON.stringify(fullItem.stats));
+                    console.log(`  slotItem stats keys:`, Object.keys(slotItem.stats || {}));
+                    console.log(`  slotItem full stats:`, JSON.stringify(slotItem.stats));
+                    console.log(`  fullItem === slotItem?`, fullItem === slotItem);
+                    console.log(`  fullItem.id:`, fullItem.id, `slotItem.itemId:`, slotItem.itemId);
+                }
                 // Get item stats and rarity
                 // For fine consumables, use stats_fine from the base catalog item
                 let itemStats = isFineConsumable ? (fullItem.stats_fine || fullItem.stats || {}) : (fullItem.stats || {});
                 let itemRarity = isFineConsumable ? 'fine' : (fullItem.rarity || 'common');
+
+                // For pets, use level-specific stats from the equipped level
+                if (fullItem.type === 'pet' && fullItem.levels) {
+                    const overrides = store.state.ui?.user_overrides || {};
+                    const petOverride = (overrides.items && overrides.items[fullItem.id]) || {};
+                    const petBase = store.state.items[fullItem.id] || {};
+                    const petLevel = petOverride.level !== undefined ? petOverride.level : (petBase.level !== undefined ? petBase.level : (slotItem.level || 0));
+                    const levelData = fullItem.levels[String(petLevel)];
+                    itemStats = levelData?.stats || {};
+
+                    // If "use ability" is checked, aggregate ability stats as a SEPARATE contributor
+                    // so it shows as its own line (e.g., "The Hunt Is On +6% WE") instead of merged
+                    if (slotItem.useAbility && levelData?.abilities) {
+                        const abilityWithStats = levelData.abilities.find(a => a.ability_stats && Object.keys(a.ability_stats).length > 0);
+                        if (abilityWithStats) {
+                            // Build a separate item data object for the ability contributor
+                            const petOverrides2 = (store.state.ui?.user_overrides?.items || {})[fullItem.id] || {};
+                            const petBase2 = store.state.items[fullItem.id] || {};
+                            const petVariant2 = petOverrides2.variant !== undefined ? petOverrides2.variant : (petBase2.variant || 'normal');
+                            const abilityItemData = {
+                                ...fullItem,
+                                name: abilityWithStats.name,
+                                icon_path: abilityWithStats.icon
+                                    ? `/assets/icons/abilities/${abilityWithStats.icon}.svg`
+                                    : getPetIconPath(fullItem.name, petLevel, petVariant2, fullItem.max_level || 0),
+                                rarity: itemRarity,
+                                _isAbility: true,
+                            };
+                            this.aggregateStatsWithContributors(stats, abilityWithStats.ability_stats, slot, abilityItemData);
+                            console.log(`  Pet ${fullItem.name} ability "${abilityWithStats.name}" aggregated separately`);
+                        }
+                    }
+
+                    console.log(`  Pet ${fullItem.name} level ${petLevel}, stats:`, itemStats);
+                }
 
                 // For crafted items, use quality-specific stats and rarity
                 if (fullItem.type === 'crafted_item' && fullItem.stats_by_quality) {
@@ -615,6 +1191,19 @@ class CombinedStatsSection extends CollapsibleSection {
                     name: isFineConsumable ? fullItem.name + ' (Fine)' : fullItem.name,
                     rarity: itemRarity
                 };
+
+                // For pets, override icon_path with level+variant-aware icon, and use custom name if set
+                if (fullItem.type === 'pet') {
+                    const petOverrides = (store.state.ui?.user_overrides?.items || {})[fullItem.id] || {};
+                    const petBase = store.state.items[fullItem.id] || {};
+                    const petLevel = petOverrides.level !== undefined ? petOverrides.level : (petBase.level !== undefined ? petBase.level : (slotItem.level || 0));
+                    const petVariant = petOverrides.variant !== undefined ? petOverrides.variant : (petBase.variant || 'normal');
+                    const petCustomName = petOverrides.petName !== undefined ? petOverrides.petName : (petBase.petName || '');
+                    itemData.icon_path = getPetIconPath(fullItem.name, petLevel, petVariant, fullItem.max_level || 0);
+                    if (petCustomName) {
+                        itemData.name = `${petCustomName} (${fullItem.name})`;
+                    }
+                }
 
                 // Aggregate stats and track contributors
                 for (const [skill, locationStats] of Object.entries(itemStats)) {
@@ -713,7 +1302,19 @@ class CombinedStatsSection extends CollapsibleSection {
                     console.log(`  Item has skill level gated stats`);
 
                     for (const [gateSkill, thresholds] of Object.entries(fullItem.gated_stats.skill_level)) {
-                        const charLevel = character.skills?.[gateSkill.toLowerCase()] || 0;
+                        // 2026-06-16 (jwbail): honor the column-1 skill-level
+                        // override (store.state.ui.user_overrides.skills) before
+                        // falling back to the imported level — matching the
+                        // total_skill_level / activity_completion gates below.
+                        // Without this, a level-gated item stat (e.g. the
+                        // screwdriver's +4% DR at Crafting 50) never activated
+                        // when the user bumped the level in column 1, so col-3's
+                        // steps/item ignored it.
+                        const _gs = gateSkill.toLowerCase();
+                        const _ovSkills = store.state.ui?.user_overrides?.skills || {};
+                        const charLevel = (_ovSkills[_gs] !== undefined)
+                            ? _ovSkills[_gs]
+                            : (character.skills?.[_gs] || 0);
 
                         for (const [threshold, skillStats] of Object.entries(thresholds)) {
                             const requiredLevel = parseInt(threshold, 10);
@@ -821,6 +1422,94 @@ class CombinedStatsSection extends CollapsibleSection {
                         );
                     }
                 }
+
+                // Handle obtained-collectibles gated stats (Collection ring:
+                // cumulative tiers at 10/20/30/40/50/60 collectibles owned).
+                if (fullItem.gated_stats && fullItem.gated_stats.total_collectibles) {
+                    const overrideTC = store.state.ui?.user_overrides?.total_collectibles;
+                    // character.collectibles is the ARRAY of owned collectible IDs; count via length.
+                    const _coll = character.collectibles;
+                    const collectiblesOwned = overrideTC !== undefined
+                        ? overrideTC
+                        : (Array.isArray(_coll) ? _coll.length : (_coll || 0));
+                    for (const [threshold, tcStats] of Object.entries(fullItem.gated_stats.total_collectibles)) {
+                        const tcMet = collectiblesOwned >= parseInt(threshold, 10);
+                        this.aggregateStatsWithContributors(
+                            stats,
+                            tcStats,
+                            `${slot} (${threshold} Collectibles)`,
+                            itemData,
+                            tcMet
+                        );
+                    }
+                }
+
+                // Handle travel steps gated stats
+                if (fullItem.gated_stats && fullItem.gated_stats.travel_steps) {
+                    console.log(`  Item has travel steps gated stats`);
+                    const customStats = store.state.ui?.custom_stats || {};
+                    const itemNameNormalized = fullItem.name.toLowerCase().replace(/ /g, '_').replace(/'/g, '');
+
+                    for (const [threshold, travelStats] of Object.entries(fullItem.gated_stats.travel_steps)) {
+                        const customStatId = `${itemNameNormalized}_travel_steps_${threshold}`;
+                        const requirementMet = customStats[customStatId] || false;
+
+                        if (requirementMet) {
+                            console.log(`  ✓ Travel steps requirement met: ${threshold}`);
+                        } else {
+                            console.log(`  ✗ Travel steps requirement not met: ${threshold}`);
+                        }
+
+                        this.aggregateStatsWithContributors(
+                            stats,
+                            travelStats,
+                            `${slot} (${parseInt(threshold).toLocaleString()} travel steps)`,
+                            itemData,
+                            requirementMet
+                        );
+                    }
+                }
+
+                // Handle activity-gated stats (stats that only apply while
+                // doing a specific activity, e.g. Zippy kicksled's -5 steps
+                // on Sledding). 2026-06-18 (jwbail): previously not handled
+                // here at all, so these bonuses never showed in Combined
+                // Stats. They must apply ONLY when the current activity is
+                // the gated one — never globally. Gate keys are the activity
+                // name lowercased (with spaces); normalize to the id form
+                // (`/api/activities` id = name.lower() with spaces→'_') to
+                // compare against this.currentActivity.
+                if (fullItem.gated_stats && fullItem.gated_stats.activity) {
+                    for (const [activityName, activityStats] of Object.entries(fullItem.gated_stats.activity)) {
+                        const gateId = activityName.toLowerCase()
+                            .replace(/ /g, '_')
+                            .replace(/\(/g, '')
+                            .replace(/\)/g, '')
+                            .replace(/-/g, '_')
+                            .replace(/'/g, '');
+                        const curAct = this.currentActivity;
+                        const activityMatches = !!curAct &&
+                            (curAct === gateId || curAct === `generic::${gateId}`);
+
+                        if (activityMatches) {
+                            console.log(`  ✓ Activity-gated stats apply (current activity: ${activityName})`);
+                        } else {
+                            console.log(`  ✗ Activity-gated stats inactive (only during ${activityName})`);
+                        }
+
+                        // forceApplied = activityMatches: applied (and added to
+                        // totals) only while that activity is selected; otherwise
+                        // shown as an unapplied/dimmed contributor so the user can
+                        // see the conditional bonus exists.
+                        this.aggregateStatsWithContributors(
+                            stats,
+                            activityStats,
+                            `${slot} (during ${activityName})`,
+                            itemData,
+                            activityMatches
+                        );
+                    }
+                }
             }
 
             // Add collectible stats
@@ -864,6 +1553,64 @@ class CombinedStatsSection extends CollapsibleSection {
                 this.aggregateStatsWithContributors(stats, collectibleStats, 'Collectible', collectible);
             }
 
+            // Also aggregate generic collectibles (custom user-created collectibles)
+            const genericItems = store.state.genericItems || [];
+            for (const gi of genericItems) {
+                if (gi.slot !== 'collectible') continue;
+                const stateId = `generic::item::${gi.id}`;
+                const overrides = store.state.ui?.user_overrides?.items?.[stateId] || {};
+                const baseState = store.state.items?.[stateId] || {};
+                const has = overrides.has !== undefined ? overrides.has : baseState.has;
+                const hide = overrides.hide !== undefined ? overrides.hide : baseState.hide;
+                if (!has || hide) continue;
+                const giStats = gi.stats || {};
+                const giItem = {
+                    id: stateId,
+                    name: gi.name,
+                    icon: gi.icon || '⚡',
+                    icon_color: gi.icon_color,
+                    icon_path: gi.icon_path || null,
+                    is_generic: true,
+                };
+                this.aggregateStatsWithContributors(stats, giStats, 'Collectible', giItem);
+            }
+
+            // Add input item stats (for activities with input items)
+            if (this._inputItems) {
+                for (const [idx, inputItem] of Object.entries(this._inputItems)) {
+                    if (!inputItem || !inputItem.stats) continue;
+                    const inputStats = typeof inputItem.stats === 'string' ? JSON.parse(inputItem.stats) : inputItem.stats;
+                    if (!inputStats || typeof inputStats !== 'object') continue;
+                    const inputItemData = {
+                        name: inputItem.name || 'Input Item',
+                        icon_path: inputItem.icon_path || null,
+                        rarity: inputItem.rarity || 'common',
+                        icon: inputItem.icon || '📥',
+                        icon_color: inputItem.icon_color,
+                        is_generic: !!inputItem.is_generic,
+                    };
+                    this.aggregateStatsWithContributors(stats, inputStats, 'Input', inputItemData);
+                }
+            }
+
+            // Add global fine input bonus when "Fine Inputs" is checked AND there are input items
+            if (this._useFineInputs && Object.keys(this._inputItems || {}).length > 0) {
+                const fineBonus = {
+                    global: {
+                        global: {
+                            work_efficiency: 40.0,
+                            double_rewards: 10.0,
+                            bonus_xp_percent: 100.0,
+                            fine_material_finding: 200.0,
+                        }
+                    }
+                };
+                this.aggregateStatsWithContributors(stats, fineBonus, 'Input', {
+                    name: 'Fine Input Bonus',
+                    icon_path: '/assets/icons/attributes/fine_material_finding.svg',
+                });
+            }
+
             console.log('Combined stats:', stats);
 
             // Add service stats (for recipes)
@@ -873,93 +1620,136 @@ class CombinedStatsSection extends CollapsibleSection {
             console.log('currentRecipe:', this.currentRecipe);
             console.log('currentActivity:', this.currentActivity);
 
-            if (this.currentService && this.currentRecipe) {
+            if (this.currentService && this.currentService !== '__none__' && this.currentRecipe) {
                 console.log('✓ Processing service stats for service:', this.currentService, 'recipe:', this.currentRecipe);
 
                 try {
-                    // Fetch service details
-                    const serviceResponse = await $.get(`/api/services/for-recipe/${this.currentRecipe}`);
-                    console.log('Service API response:', serviceResponse);
+                    // Handle generic service IDs
+                    if (this.currentService.startsWith('generic::')) {
+                        try {
+                            const defId = this.currentService.replace('generic::', '');
+                            const svcData = await api.getGenericDefinitionView(defId);
+                            if (svcData && svcData.stats) {
+                                const serviceItem = {
+                                    name: `🔧 ${svcData.name || 'Generic Service'}`,
+                                    icon_path: null,
+                                    rarity: 'common'
+                                };
+                                // Parse stats — generic services store flat stats like {work_efficiency: 5.0}
+                                let flatStats = svcData.stats;
+                                if (typeof flatStats === 'string') flatStats = JSON.parse(flatStats);
+                                this.aggregateStatsWithContributors(stats, flatStats, 'Service', serviceItem, true);
+                                console.log('✓ Generic service stats aggregated:', flatStats);
+                            }
+                        } catch (e) {
+                            console.error('Failed to load generic service stats:', e);
+                        }
+                    } else {
+                        // Fetch wiki service details
+                        let serviceResponse;
+                        if (this.currentRecipe.startsWith('generic::')) {
+                            const allSvcs = await $.get('/api/services');
+                            serviceResponse = { services: allSvcs.services || [] };
+                        } else {
+                            serviceResponse = await $.get(`/api/services/for-recipe/${this.currentRecipe}`);
+                        }
+                        console.log('Service API response:', serviceResponse);
 
-                    // The currentService might be a full ID like "basic_workshop_halfling_campgrounds"
-                    // but the API returns grouped services with IDs like "basic_workshop"
-                    // Search through locations for matching service_id
+                        let service = null;
+                        let locationData = null;
 
-                    let service = null;
-                    let locationData = null;
+                        service = serviceResponse.services.find(s => s.id === this.currentService);
 
-                    // First, try exact match on grouped service ID
-                    service = serviceResponse.services.find(s => s.id === this.currentService);
+                        if (!service) {
+                            console.log('Service not found by ID, searching through locations...');
+                            console.log('Looking for service_id:', this.currentService);
 
-                    // If not found, search through locations for matching service_id
-                    if (!service) {
-                        console.log('Service not found by ID, searching through locations...');
-                        console.log('Looking for service_id:', this.currentService);
+                            for (const svc of serviceResponse.services) {
+                                console.log('Checking service:', svc.name, 'id:', svc.id);
+                                console.log('  Has locations?', !!svc.locations);
 
-                        for (const svc of serviceResponse.services) {
-                            console.log('Checking service:', svc.name, 'id:', svc.id);
-                            console.log('  Has locations?', !!svc.locations);
+                                if (svc.locations) {
+                                    console.log('  Locations:', svc.locations.map(l => ({
+                                        service_id: l.service_id,
+                                        location: l.location?.name
+                                    })));
 
-                            if (svc.locations) {
-                                console.log('  Locations:', svc.locations.map(l => ({
-                                    service_id: l.service_id,
-                                    location: l.location?.name
-                                })));
-
-                                const matchingLocation = svc.locations.find(loc => loc.service_id === this.currentService);
-                                if (matchingLocation) {
-                                    service = svc;
-                                    locationData = matchingLocation;
-                                    console.log('✓ Found service via location match:', svc.name, 'at', matchingLocation.location.name);
-                                    break;
+                                    const matchingLocation = svc.locations.find(loc => loc.service_id === this.currentService);
+                                    if (matchingLocation) {
+                                        service = svc;
+                                        locationData = matchingLocation;
+                                        console.log('✓ Found service via location match:', svc.name, 'at', matchingLocation.location.name);
+                                        break;
+                                    }
                                 }
                             }
                         }
-                    }
 
-                    if (service) {
-                        console.log(`✓ Found service: ${service.name}`, service);
-                        console.log('locationData:', locationData);
+                        if (service) {
+                            console.log(`✓ Found service: ${service.name}`, service);
+                            console.log('locationData:', locationData);
 
-                        // Use location-specific stats if we found a matching location
-                        const serviceStats = locationData ? (locationData.stats || {}) : (service.stats || {});
-                        const isUnlocked = locationData ? locationData.is_unlocked : service.is_unlocked;
+                            const serviceStats = locationData ? (locationData.stats || {}) : (service.stats || {});
+                            const gatedStats = locationData ? (locationData.gated_stats || {}) : (service.gated_stats || {});
+                            const isUnlocked = locationData ? locationData.is_unlocked : service.is_unlocked;
 
-                        console.log('locationData.stats:', locationData?.stats);
-                        console.log('service.stats:', service.stats);
-                        console.log('Selected serviceStats:', serviceStats);
-                        console.log('Service is_unlocked:', isUnlocked);
-                        console.log('About to aggregate service stats. Stats object:', JSON.stringify(serviceStats, null, 2));
+                            console.log('locationData.stats:', locationData?.stats);
+                            console.log('service.stats:', service.stats);
+                            console.log('Selected serviceStats:', serviceStats);
+                            console.log('Service gated_stats:', gatedStats);
+                            console.log('Service is_unlocked:', isUnlocked);
+                            console.log('About to aggregate service stats. Stats object:', JSON.stringify(serviceStats, null, 2));
 
-                        // Build service icon path from name (lowercase)
-                        let iconName = service.name.replace(/ /g, '_').toLowerCase();  // Replace spaces and lowercase
-                        if (!service.name.toLowerCase().startsWith('basic') && service.is_basic) {
-                            iconName += '_(basic)';  // e.g., "alight_kitchen_(basic)"
-                        } else if (service.is_advanced) {
-                            iconName += '_(advanced)';  // e.g., "cursed_sawmill_(advanced)"
+                            let iconName = service.name.replace(/ /g, '_').toLowerCase();
+                            if (!service.name.toLowerCase().startsWith('basic') && service.is_basic) {
+                                iconName += '_(basic)';
+                            } else if (service.is_advanced) {
+                                iconName += '_(advanced)';
+                            }
+                            const serviceIconPath = `/assets/icons/services/${iconName}.svg`;
+
+                            const serviceItem = {
+                                name: service.name + (locationData ? ` (${locationData.location.name})` : ''),
+                                icon_path: serviceIconPath,
+                                rarity: 'common'
+                            };
+
+                            this.aggregateStatsWithContributors(
+                                stats,
+                                serviceStats,
+                                'Service',
+                                serviceItem,
+                                isUnlocked
+                            );
+
+                            // Apply reputation-gated bonuses
+                            const repGates = gatedStats.reputation || {};
+                            const reputation = store.state.character?.reputation || {};
+                            for (const [faction, thresholds] of Object.entries(repGates)) {
+                                const charRep = reputation[faction] || 0;
+                                // Sort threshold keys numerically and apply all that are met
+                                // Keys are strings in JSON (e.g. "5", "10"), convert to numbers for comparison
+                                const sortedKeys = Object.keys(thresholds).sort((a, b) => Number(a) - Number(b));
+                                for (const key of sortedKeys) {
+                                    if (charRep >= Number(key)) {
+                                        const thresholdStats = thresholds[key];
+                                        console.log(`✓ Applying rep gate: ${faction} >= ${key} (have ${charRep}):`, thresholdStats);
+                                        this.aggregateStatsWithContributors(
+                                            stats,
+                                            thresholdStats,
+                                            'Service',
+                                            serviceItem,
+                                            isUnlocked
+                                        );
+                                    }
+                                }
+                            }
+
+                            console.log('✓ Service stats aggregated (incl. rep gates):', serviceStats);
+                        } else {
+                            console.warn(`✗ Service not found in response: ${this.currentService}`);
+                            console.warn('Available services:', serviceResponse.services.map(s => s.id));
                         }
-                        const serviceIconPath = `/assets/icons/services/${iconName}.svg`;
-
-                        // Create a pseudo-item for the service to track as contributor
-                        const serviceItem = {
-                            name: service.name + (locationData ? ` (${locationData.location.name})` : ''),
-                            icon_path: serviceIconPath,
-                            rarity: 'common'
-                        };
-
-                        // Aggregate stats and track contributors
-                        this.aggregateStatsWithContributors(
-                            stats,
-                            serviceStats,
-                            'Service',
-                            serviceItem,
-                            isUnlocked  // Only apply if service is unlocked
-                        );
-
-                        console.log('✓ Service stats aggregated:', serviceStats);
-                    } else {
-                        console.warn(`✗ Service not found in response: ${this.currentService}`);
-                        console.warn('Available services:', serviceResponse.services.map(s => s.id));
                     }
                 } catch (error) {
                     console.error('✗ Failed to fetch service stats:', error);
@@ -975,10 +1765,22 @@ class CombinedStatsSection extends CollapsibleSection {
             console.error('Failed to calculate stats:', error);
         }
 
+        // Bail out if a newer calculateStats has started while we were awaiting (post-try guard)
+        if (myCalcId !== this._currentCalcId) {
+            console.log('[RENDER-DEBUG] calculateStats STALE after try block, bailing out');
+            return stats;
+        }
+
         // Add level bonuses for WE and QO
         // Requirements: 7.6
         if (this.currentActivity || this.currentRecipe) {
             const levelBonuses = await this.calculateLevelBonuses();
+
+            // Bail out if a newer calculateStats has started while we were awaiting level bonuses
+            if (myCalcId !== this._currentCalcId) {
+                console.log('[RENDER-DEBUG] calculateStats STALE after calculateLevelBonuses, bailing out');
+                return stats;
+            }
 
             // Add WE level bonus
             if (levelBonuses.work_efficiency > 0) {
@@ -1089,12 +1891,22 @@ class CombinedStatsSection extends CollapsibleSection {
         try {
             if (selectedActivity && !isRecipe) {
                 // It's an activity
-                const response = await $.get('/api/activities');
                 let activity = null;
 
-                for (const activities of Object.values(response.by_skill)) {
-                    activity = activities.find(a => a.id === selectedActivity);
-                    if (activity) break;
+                if (selectedActivity.startsWith('generic::')) {
+                    // Generic activity — fetch from view endpoint
+                    try {
+                        const defId = selectedActivity.replace('generic::', '');
+                        activity = await $.get(`/api/generic-definition-view/${defId}`);
+                    } catch (e) {
+                        console.error('Failed to load generic activity for level bonus:', e);
+                    }
+                } else {
+                    const response = await $.get('/api/activities');
+                    for (const activities of Object.values(response.by_skill)) {
+                        activity = activities.find(a => a.id === selectedActivity);
+                        if (activity) break;
+                    }
                 }
 
                 if (activity) {
@@ -1135,12 +1947,22 @@ class CombinedStatsSection extends CollapsibleSection {
                 }
             } else if (selectedRecipe && isRecipe) {
                 // It's a recipe
-                const response = await $.get('/api/recipes');
                 let recipe = null;
 
-                for (const recipes of Object.values(response.by_skill)) {
-                    recipe = recipes.find(r => r.id === selectedRecipe);
-                    if (recipe) break;
+                if (selectedRecipe.startsWith('generic::')) {
+                    // Generic recipe — fetch from view endpoint
+                    try {
+                        const defId = selectedRecipe.replace('generic::', '');
+                        recipe = await $.get(`/api/generic-definition-view/${defId}`);
+                    } catch (e) {
+                        console.error('Failed to load generic recipe for level bonus:', e);
+                    }
+                } else {
+                    const response = await $.get('/api/recipes');
+                    for (const recipes of Object.values(response.by_skill)) {
+                        recipe = recipes.find(r => r.id === selectedRecipe);
+                        if (recipe) break;
+                    }
                 }
 
                 if (recipe) {
@@ -1264,7 +2086,7 @@ class CombinedStatsSection extends CollapsibleSection {
      */
     async getContributingItems(statName) {
         const contributors = [];
-        const currentGear = store.state.gearsets?.current || {};
+        const currentGear = store.getActiveGearset() || {};
 
         try {
             const catalog = await api.getCatalog();
@@ -1275,7 +2097,11 @@ class CombinedStatsSection extends CollapsibleSection {
                 if (!slotItem || !slotItem.itemId) continue;
 
                 // Find full item data
-                const fullItem = catalogItems.find(item => item.id === slotItem.itemId);
+                let fullItem = catalogItems.find(item => item.id === slotItem.itemId);
+                // Fallback: match by UUID for gearsets that store UUID as itemId
+                if (!fullItem && slotItem.itemId) {
+                    fullItem = catalogItems.find(item => item.uuid === slotItem.itemId);
+                }
                 if (!fullItem) continue;
 
                 // Get item stats
@@ -1411,7 +2237,8 @@ class CombinedStatsSection extends CollapsibleSection {
             'no_materials_consumed', 'bonus_xp', 'bonus_xp_percent',
             'bonus_experience_percent', 'steps_percent', 'steps_pct',
             'chest_finding', 'item_finding', 'fine_material_finding',
-            'find_collectibles', 'collectible_finding', 'find_gems', 'find_bird_nests'
+            'find_collectibles', 'collectible_finding', 'find_gems', 'find_bird_nests',
+            'find_linens'
         ];
 
         // Flat stats (no %)
@@ -1419,6 +2246,7 @@ class CombinedStatsSection extends CollapsibleSection {
             'quality_outcome',
             'bonus_xp_base', 'bonus_xp_add',
             'bonus_experience_base', 'bonus_experience_add',
+            'foraging_base_xp',
             'steps_required', 'steps_add', 'flat_steps',
             'inventory_space'
         ];
@@ -1461,8 +2289,8 @@ class CombinedStatsSection extends CollapsibleSection {
         // Set rendering flag
         this.isRendering = true;
 
-        console.log('Column 2 render() called');
-        console.trace('render() call stack');
+        console.log('[RENDER-DEBUG] render() called');
+        console.trace('[RENDER-DEBUG] render stack');
 
         // Render shell first
         const iconHtml = this.props.icon ? `<img src="${this.props.icon}" alt="${this.props.title}" class="icon">` : '';
@@ -1498,15 +2326,41 @@ class CombinedStatsSection extends CollapsibleSection {
 
         const renderTimestamp = Date.now();
         this._renderQueue.push(renderTimestamp);
-        console.log('loadContent() called, render ID:', renderTimestamp);
+        console.log('[RENDER-DEBUG] loadContent() called, render ID:', renderTimestamp, '_inputItems:', Object.keys(this._inputItems || {}).length, '_useFineInputs:', this._useFineInputs);
 
         try {
             const contentHtml = await this.renderContent();
 
             // Only apply if this is still the latest render
             if (this._renderQueue[this._renderQueue.length - 1] === renderTimestamp) {
+                console.log('[RENDER-DEBUG] loadContent APPLYING render ID:', renderTimestamp, 'contributorsByStat keys:', Object.keys(this.contributorsByStat || {}).length);
+                const weContribs = this.contributorsByStat['work_efficiency'] || [];
+                console.log('[RENDER-DEBUG] WE contributors:', weContribs.length, weContribs.map(c => `${c.item?.name}(${c.value})`).join(', '));
                 this.$element.find('.collapsible-content').html(contentHtml);
                 console.log('loadContent() complete, render ID:', renderTimestamp);
+
+                // Cache rendered content for instant slot switching in comparison mode
+                if (store.state.gearsets.comparisonMode) {
+                    const slot = store.state.gearsets.activeGearsetSlot || 1;
+                    this._slotContentCache[slot] = contentHtml;
+                    this._slotContributorsCache[slot] = { ...this.contributorsByStat };
+                    this._slotExpandedStatsCache[slot] = new Set(this.expandedStats);
+                    // Save gear hash for cache invalidation on gear change
+                    const currentGear = slot === 1 ? store.state.gearsets.current : store.state.gearsets.gearset2;
+                    if (!this._slotGearHash) this._slotGearHash = {};
+                    this._slotGearHash[slot] = JSON.stringify(Object.entries(currentGear || {}).map(([k, v]) => [k, v?.itemId, v?.useAbility]).sort());
+                }
+
+                // Restore scroll position if a _renderPreservingScroll is pending
+                if (this._pendingScrollRestore !== undefined && this._pendingScrollTarget) {
+                    const scrollTop = this._pendingScrollRestore;
+                    const $scroller = this._pendingScrollTarget;
+                    this._pendingScrollRestore = undefined;
+                    this._pendingScrollTarget = undefined;
+                    requestAnimationFrame(() => {
+                        if ($scroller.length) $scroller[0].scrollTop = scrollTop;
+                    });
+                }
 
                 // Only fire callbacks if this render actually completed
                 // This prevents cancelled renders from triggering Column 3 updates
@@ -1574,6 +2428,10 @@ class CombinedStatsSection extends CollapsibleSection {
             const totalValue = totalStats[statName] || 0;
             // Only include if at least one is non-zero
             if (Math.abs(appliedValue) > 0.001 || Math.abs(totalValue) > 0.001) {
+                // If hiding unapplicable stats, skip rows with no applied value
+                if (this.hideUnapplicableStats && Math.abs(appliedValue) < 0.001) {
+                    continue;
+                }
                 filteredStats[statName] = appliedValue;
             }
         }
@@ -1599,7 +2457,7 @@ class CombinedStatsSection extends CollapsibleSection {
         }).join('');
 
         return `
-            <div class="combined-stats-container">
+            <div class="combined-stats-container" data-pin-id="combined-stats-container">
                 ${statsHtml}
             </div>
         `;
@@ -1671,14 +2529,17 @@ class CombinedStatsSection extends CollapsibleSection {
         const appliedContributors = contributors.filter(c => c.applied);
         const unappliedContributors = contributors.filter(c => !c.applied);
 
-        // Render applied first, then unapplied
+        // Render applied first, then unapplied (unless hidden)
         const appliedHtml = appliedContributors.map(contributor => {
             return this.renderContributor(statName, contributor);
         }).join('');
 
-        const unappliedHtml = unappliedContributors.map(contributor => {
-            return this.renderContributor(statName, contributor);
-        }).join('');
+        let unappliedHtml = '';
+        if (!this.hideUnapplicableStats) {
+            unappliedHtml = unappliedContributors.map(contributor => {
+                return this.renderContributor(statName, contributor);
+            }).join('');
+        }
 
         return appliedHtml + unappliedHtml;
     }
@@ -1692,7 +2553,7 @@ class CombinedStatsSection extends CollapsibleSection {
      * @returns {string} HTML for contributor
      */
     renderContributor(statName, contributor) {
-        const { source, item, value, applied } = contributor;
+        const { source, item, value, applied, skill, location } = contributor;
         const valueStr = this.formatStatValue(statName, value);
         const valueClass = this.getStatValueClass(statName, value);
         const appliedClass = applied ? 'applied' : 'unapplied';
@@ -1701,11 +2562,32 @@ class CombinedStatsSection extends CollapsibleSection {
         const rarity = item?.rarity || 'common';
         const rarityClass = `rarity-${rarity.toLowerCase()}`;
 
+        // Build condition text (e.g., "While doing Gathering skills in Spectral location")
+        let conditionHtml = '';
+        if (skill !== 'global' || location !== 'global') {
+            const condition = formatStatCondition(skill, location);
+            if (condition && condition !== 'Global') {
+                conditionHtml = `<span class="contributor-condition">${condition}</span>`;
+            }
+        }
+
+        // Handle generic item emoji icon (unless icon_path is set)
+        let contributorIconHtml;
+        if (item?.is_generic && item?.icon_path) {
+            contributorIconHtml = `<img src="${item.icon_path}" alt="${itemName}" class="contributor-icon ${rarityClass}" onerror="this.style.display='none'">`;
+        } else if (item?.is_generic && item?.icon) {
+            const iconStyle = item.icon_color ? `${window.emojiTintStyle(item.icon_color)}` : '';
+            contributorIconHtml = `<span class="contributor-icon-emoji ${rarityClass}">${window.tintedEmoji(item.icon, item.icon_color)}</span>`;
+        } else {
+            const petScaled = iconPath.includes('/pets/') || iconPath.includes('/pet_eggs/') ? ' pet-icon-scaled' : '';
+            contributorIconHtml = `<img src="${iconPath}" alt="${itemName}" class="contributor-icon ${rarityClass}${petScaled}">`;
+        }
+
         return `
             <div class="stat-contributor ${appliedClass}">
                 <span class="contributor-value ${valueClass}">${valueStr}</span>
-                <img src="${iconPath}" alt="${itemName}" class="contributor-icon ${rarityClass}">
-                <span class="contributor-name ${applied ? '' : 'unapplied-text'}">${itemName}</span>
+                ${contributorIconHtml}
+                <span class="contributor-name ${applied ? '' : 'unapplied-text'}">${itemName}${conditionHtml}</span>
             </div>
         `;
     }
@@ -1762,6 +2644,79 @@ class CombinedStatsSection extends CollapsibleSection {
     }
 
     /**
+     * Build (once, cached) a map of location id -> region tag list from
+     * /api/locations. Used to resolve travel-route segment regions.
+     * @returns {Promise<Object>} { locId: [region, ...] }
+     */
+    async _getLocationRegionsMap() {
+        if (this._locationRegionsMap) return this._locationRegionsMap;
+        const map = {};
+        try {
+            const resp = await $.get('/api/locations');
+            for (const region of (resp.regions || [])) {
+                for (const loc of (region.locations || [])) {
+                    if (!loc || !loc.id) continue;
+                    const regions = (loc.regions && loc.regions.length > 0) ? loc.regions : [loc.id];
+                    map[String(loc.id).toLowerCase()] = regions.map(r => String(r).toLowerCase());
+                }
+            }
+        } catch (e) {
+            console.warn('combined-stats: failed to load /api/locations for travel region map:', e);
+        }
+        this._locationRegionsMap = map;
+        return map;
+    }
+
+    /**
+     * Resolve the active travel route's per-segment START-location region lists.
+     * Mirrors the backend /api/travel/stats, which computes each segment's stats
+     * from its start location. Returns an array of region-arrays (one per
+     * segment), or null when no route is loaded.
+     * @returns {Promise<string[][]|null>}
+     */
+    async _getTravelRouteSegmentRegions() {
+        const route = window.currentTravelRoute;
+        if (!route || !Array.isArray(route.segments) || route.segments.length === 0) {
+            return null;
+        }
+        const locMap = await this._getLocationRegionsMap();
+        const segRegions = [];
+        for (const seg of route.segments) {
+            const startId = String(seg.start || '').toLowerCase();
+            if (!startId) continue;
+            const regions = locMap[startId] || [startId];
+            segRegions.push(regions.map(r => String(r).toLowerCase()));
+        }
+        return segRegions.length > 0 ? segRegions : null;
+    }
+
+    /**
+     * Decide whether a location-scoped stat applies to the current travel route.
+     * Mirrors the backend _location_matches (util/stats_mixin.py):
+     *   - 'global'      -> always applies
+     *   - '!region'     -> applies to a segment NOT in that region
+     *   - 'region'      -> applies to a segment in that region (membership)
+     * A travel bonus applies if it matches ANY segment's start location, since
+     * each matching segment contributes to the route stats shown in Travel info.
+     * @param {string} locationKey - e.g. 'global', 'gdte', 'trellin', '!underwater'
+     * @returns {boolean}
+     */
+    _travelLocationMatches(locationKey) {
+        const key = String(locationKey || '').toLowerCase();
+        if (key === 'global') return true;
+        const segs = this._travelSegmentRegions;
+        if (!segs || segs.length === 0) return false;
+
+        const isNegated = key.startsWith('!');
+        const regionName = isNegated ? key.slice(1) : key;
+
+        return segs.some(segRegions => {
+            const inRegion = segRegions.includes(regionName);
+            return isNegated ? !inRegion : inRegion;
+        });
+    }
+
+    /**
      * Aggregate stats and track contributors
      * @param {Object} totalStats - Total stats object to update
      * @param {Object} itemStats - Item stats to add {skill: {location: {stat: value}}}
@@ -1774,6 +2729,16 @@ class CombinedStatsSection extends CollapsibleSection {
         for (const [skill, locationStats] of Object.entries(itemStats)) {
             for (const [location, statsByLocation] of Object.entries(locationStats)) {
                 for (const [statName, statValue] of Object.entries(statsByLocation)) {
+                    if (!statName || statName === 'undefined') continue;
+                    // Debug: log Ghost trap pack stats to verify catalog data
+                    if (item.name && item.name.toLowerCase().includes('ghost trap')) {
+                        console.log(`=== GHOST TRAP PACK DEBUG ===`);
+                        console.log(`  skill: ${skill}, location: ${location}, stat: ${statName}, value: ${statValue}`);
+                        console.log(`  currentRecipeSkill: ${this.currentRecipeSkill}`);
+                        console.log(`  currentLocation: ${JSON.stringify(this.currentLocation)}`);
+                        console.log(`  Full itemStats:`, JSON.stringify(itemStats));
+                    }
+
                     // Determine if this stat is applied based on context
                     let isApplied;
 
@@ -1789,29 +2754,75 @@ class CombinedStatsSection extends CollapsibleSection {
                         // - skill is 'global' (always applies)
                         // - OR skill matches the current activity/recipe's primary skill
                         // - OR skill matches one of the activity's component skills (e.g., traveling for travel)
+                        // - OR skill is a skill group that contains the current skill
                         let skillMatches = skillLower === 'global';
 
+                        // Skill group definitions
+                        const SKILL_GROUPS = {
+                            'gathering': ['fishing', 'foraging', 'hunting', 'mining', 'woodcutting'],
+                            'artisan': ['carpentry', 'cooking', 'crafting', 'smithing', 'tailoring', 'trinketry'],
+                            'utility': ['agility', 'traveling'],
+                        };
+
                         if (!skillMatches && this.currentActivitySkill) {
+                            const actSkillLower = this.currentActivitySkill.toLowerCase();
                             // Check if skill matches activity's primary skill
-                            skillMatches = (skillLower === this.currentActivitySkill.toLowerCase());
+                            skillMatches = (skillLower === actSkillLower);
+
+                            // Check if skill is a group that contains the activity skill
+                            if (!skillMatches && SKILL_GROUPS[skillLower]) {
+                                skillMatches = SKILL_GROUPS[skillLower].includes(actSkillLower);
+                            }
 
                             // Also check component skills (e.g., for traveling: ['agility', 'traveling'])
                             if (!skillMatches && this.currentActivityComponentSkills) {
-                                skillMatches = this.currentActivityComponentSkills.some(cs =>
-                                    skillLower === cs.toLowerCase()
-                                );
+                                skillMatches = this.currentActivityComponentSkills.some(cs => {
+                                    const csLower = cs.toLowerCase();
+                                    if (skillLower === csLower) return true;
+                                    // Check if skill group contains the component skill
+                                    if (SKILL_GROUPS[skillLower]) return SKILL_GROUPS[skillLower].includes(csLower);
+                                    return false;
+                                });
                             }
                         } else if (!skillMatches && this.currentRecipeSkill) {
+                            const recSkillLower = this.currentRecipeSkill.toLowerCase();
                             // Check if skill matches recipe's skill
-                            skillMatches = (skillLower === this.currentRecipeSkill.toLowerCase());
+                            skillMatches = (skillLower === recSkillLower);
+
+                            // Check if skill is a group that contains the recipe skill
+                            if (!skillMatches && SKILL_GROUPS[skillLower]) {
+                                skillMatches = SKILL_GROUPS[skillLower].includes(recSkillLower);
+                            }
+
+                            // Smelting sub-skill: bar-smelting recipes are categorized
+                            // as "smithing" but also pick up "smelting"-scoped stats
+                            // (e.g. Tortoise L4 "+2 bonus XP while doing Smelting
+                            // recipes"). Only applies to the recipe subset in
+                            // SMELTING_RECIPE_NAMES — other smithing recipes are
+                            // unaffected.
+                            if (!skillMatches && skillLower === 'smelting' && recSkillLower === 'smithing'
+                                    && this.currentRecipeName && SMELTING_RECIPE_NAMES.has(this.currentRecipeName)) {
+                                skillMatches = true;
+                            }
                         }
 
                         // Location matches if:
                         // - location is 'global' (always applies)
+                        // - OR (travel) the scope matches the route's segments
                         // - OR location matches the current selected location
                         let locationMatches = locationLower === 'global';
 
-                        if (!locationMatches && this.currentLocation) {
+                        if (!locationMatches && this.isTravel && this._travelSegmentRegions && this._travelSegmentRegions.length > 0) {
+                            // Travel: mirror the backend /api/travel/stats matcher.
+                            // A location-scoped travel bonus applies if it applies
+                            // to ANY route segment's start location (region
+                            // membership, with "!" negation). This fixes bonuses
+                            // like Medieval sneakers (!underwater), Trusty tent,
+                            // Lily pad rope (gdte), and Map of Trellin (trellin)
+                            // showing as "doesn't apply" in Combined Stats even
+                            // though the Travel info section counts them.
+                            locationMatches = this._travelLocationMatches(location);
+                        } else if (!locationMatches && this.currentLocation) {
                             // Normalize currentLocation to array
                             const currentLocations = Array.isArray(this.currentLocation)
                                 ? this.currentLocation
@@ -1858,7 +2869,10 @@ class CombinedStatsSection extends CollapsibleSection {
                         item: {
                             name: item.name,
                             icon_path: item.icon_path,
-                            rarity: item.rarity || 'common'
+                            rarity: item.rarity || 'common',
+                            is_generic: item.is_generic || false,
+                            icon: item.icon || null,
+                            icon_color: item.icon_color || null,
                         },
                         value: statValue,
                         applied: isApplied,

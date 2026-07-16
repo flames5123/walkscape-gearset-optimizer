@@ -27,6 +27,7 @@ class FilterCheckboxes extends Component {
         // Subscribe to checkbox state changes
         this.subscribe('ui.column2.showOwnedOnly', () => this.render());
         this.subscribe('ui.column2.showApplicableOnly', () => this.render());
+        this.subscribe('ui.column2.showHiddenItems', () => this.render());
 
         this.render();
         this.attachEvents();
@@ -57,6 +58,7 @@ class FilterCheckboxes extends Component {
     render() {
         const showOwnedOnly = store.state.ui.column2.showOwnedOnly;
         const showApplicableOnly = store.state.ui.column2.showApplicableOnly;
+        const showHiddenItems = store.state.ui.column2.showHiddenItems || false;
 
         const html = `
             <div class="filter-checkboxes">
@@ -76,7 +78,16 @@ class FilterCheckboxes extends Component {
                         id="show-applicable-only"
                         ${showApplicableOnly ? 'checked' : ''}
                     />
-                    <span>Only show items with applicable stats (NOT WORKING)</span>
+                    <span>Only show items with applicable stats</span>
+                </label>
+                <label class="filter-checkbox-label">
+                    <input 
+                        type="checkbox" 
+                        class="filter-checkbox" 
+                        id="show-hidden-items"
+                        ${showHiddenItems ? 'checked' : ''}
+                    />
+                    <span>Show hidden items</span>
                 </label>
             </div>
         `;
@@ -96,6 +107,12 @@ class FilterCheckboxes extends Component {
         // "Only show items with applicable stats" checkbox
         this.$element.on('change', '#show-applicable-only', () => {
             this.toggleShowApplicableOnly();
+        });
+
+        // "Show hidden items" checkbox
+        this.$element.on('change', '#show-hidden-items', () => {
+            const current = store.state.ui.column2.showHiddenItems || false;
+            store.update('ui.column2.showHiddenItems', !current);
         });
     }
 }

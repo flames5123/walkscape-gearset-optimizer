@@ -250,13 +250,29 @@ class ImportModal extends Component {
 
                 // Clear user overrides on import (fresh character data)
                 // Use direct API call to ensure it's saved before reload
+                // Preserve user-only preferences that are NOT derivable from the game export:
+                //   - variant / petName: pet customization
+                //   - hide / hide_fine / hide_ring1 / hide_ring2: Quick-view visibility toggles
+                const existingItemOverrides = store.state.ui?.user_overrides?.items || {};
+                const preservedItemOverrides = {};
+                for (const [itemId, itemOverride] of Object.entries(existingItemOverrides)) {
+                    const preserved = {};
+                    if (itemOverride.variant !== undefined) preserved.variant = itemOverride.variant;
+                    if (itemOverride.petName !== undefined) preserved.petName = itemOverride.petName;
+                    if (itemOverride.hide !== undefined) preserved.hide = itemOverride.hide;
+                    if (itemOverride.hide_fine !== undefined) preserved.hide_fine = itemOverride.hide_fine;
+                    if (itemOverride.hide_ring1 !== undefined) preserved.hide_ring1 = itemOverride.hide_ring1;
+                    if (itemOverride.hide_ring2 !== undefined) preserved.hide_ring2 = itemOverride.hide_ring2;
+                    if (Object.keys(preserved).length > 0) preservedItemOverrides[itemId] = preserved;
+                }
+
                 const clearOverrides = {
                     skills: {},
                     skills_xp: {},
                     reputation: {},
                     achievement_points: undefined,
                     coins: undefined,
-                    items: {}  // Clear item overrides too
+                    items: preservedItemOverrides  // Keep pet variant/name + hide flags; clear everything else
                 };
 
                 // Update local state immediately
@@ -287,6 +303,11 @@ class ImportModal extends Component {
                 // Call onImportSuccess callback if provided
                 if (this.props.onImportSuccess) {
                     this.props.onImportSuccess(response, hasSeenCustomStats);
+                }
+                // Fire stats-report stale-detection broadcast (immediate; no debounce
+                // because import is a discrete one-shot event).
+                if (window.statsReportBroadcastStateChange) {
+                    window.statsReportBroadcastStateChange({immediate: true});
                 }
             })
             .fail((xhr, status, error) => {
@@ -354,6 +375,38 @@ class ImportModal extends Component {
         setTimeout(() => {
             $overlay.addClass('show');
         }, 10);
+
+        // Convenience: if the user already copied their character export JSON,
+        // pre-fill the textarea so they don't have to paste manually. Called
+        // synchronously from the button-click gesture so the browser grants
+        // clipboard-read permission. Best-effort: silently no-ops on unsupported
+        // browsers (Firefox blocks readText) or denied permission (iOS Safari).
+        this.autofillFromClipboard();
+    }
+
+    /**
+     * Best-effort: read the clipboard and, if it looks like a character export
+     * JSON object, populate the (empty) import textarea. Never throws, never
+     * shows an error — failure just leaves the field blank (prior behavior).
+     */
+    autofillFromClipboard() {
+        try {
+            if (!navigator.clipboard || typeof navigator.clipboard.readText !== 'function') {
+                return;
+            }
+            navigator.clipboard.readText().then((text) => {
+                if (typeof text !== 'string') return;
+                const trimmed = text.trim();
+                // Character export is a JSON object -> starts with '{'.
+                if (trimmed[0] !== '{') return;
+                const $textarea = this.$element.find('.import-textarea');
+                // Don't clobber anything the user has already typed.
+                if (!$textarea.length || $textarea.val().trim()) return;
+                $textarea.val(trimmed);
+            }).catch(() => { /* permission denied / unsupported — ignore */ });
+        } catch (e) {
+            /* ignore — clipboard access is a convenience, not required */
+        }
     }
 }
 

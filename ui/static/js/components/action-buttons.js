@@ -17,6 +17,8 @@
 import Component from './base.js';
 import store from '../state.js';
 import api from '../api.js';
+import { getPetIconPath } from '../utils/pet-utils.js';
+import { GearSlotGrid } from './gear-slot-grid.js';
 
 class ActionButtons extends Component {
     /**
@@ -29,6 +31,19 @@ class ActionButtons extends Component {
 
         this.importPopupOpen = false;
         this.importText = '';
+
+        // Re-render when comparison mode changes (to show/hide copy button)
+        this.subscribe('gearsets.comparisonMode', () => {
+            this.render();
+            this.attachEvents();
+        });
+        // Re-render when active gearset changes (to update copy button label)
+        this.subscribe('gearsets.current', () => {
+            if (store.state.gearsets.comparisonMode) {
+                this.render();
+                this.attachEvents();
+            }
+        });
 
         this.render();
         this.attachEvents();
@@ -109,26 +124,63 @@ class ActionButtons extends Component {
                     slotName = `ring${index + 1}`;
                 } else if (slotType === 'tool') {
                     slotName = `tool${index}`;
+                } else if (slotType === 'consumable') {
+                    slotName = 'consumable';
+                } else if (slotType === 'pet') {
+                    slotName = 'pet';
+                } else if (slotType === 'activityInput') {
+                    continue; // Skip activity inputs for now
                 } else {
                     slotName = slotType;
                 }
 
                 console.log(`Mapped slot type "${slotType}" index ${index} to slot name "${slotName}"`);
 
+                // Special handling for pets — official format uses pet name as id, level as quality
+                if (slotType === 'pet') {
+                    const petId = uuid; // e.g. "camel"
+                    const petLevel = parseInt(quality) || 0;
+                    // Find pet in catalog by id (pet name lowercase)
+                    const petItem = catalogItems.find(item => item.id === petId && item.type === 'pet');
+                    if (petItem) {
+                        const levelData = petItem.levels ? petItem.levels[String(petLevel)] : null;
+                        const overrides = store.state.ui?.user_overrides?.items?.[petId] || {};
+                        const baseState = store.state.items?.[petId] || {};
+                        const variant = overrides.variant || baseState.variant || 'normal';
+                        slots[slotName] = {
+                            itemId: petItem.id,
+                            uuid: petItem.uuid || petItem.id,
+                            name: petItem.name,
+                            icon_path: getPetIconPath(petItem.name, petLevel, variant, petItem.max_level || 0),
+                            rarity: 'common',
+                            keywords: petItem.keywords || [],
+                            type: 'pet',
+                            level: petLevel,
+                            variant: variant,
+                            levels: petItem.levels,
+                            stats: levelData?.stats || {},
+                        };
+                        console.log(`  Pet imported: ${petItem.name} at level ${petLevel}`);
+                    } else {
+                        console.warn(`Pet not found in catalog: ${petId}`);
+                    }
+                    continue;
+                }
+
                 // Look up full item data from catalog
                 const fullItem = catalogItems.find(item => item.uuid === uuid);
 
                 if (!fullItem) {
+                    // Check if this is a generic item — will be restored from generic_slots
+                    if (uuid && uuid.startsWith('generic::')) {
+                        console.log(`  Generic item ${uuid} — will restore from generic_slots`);
+                        continue;
+                    }
                     console.warn(`Item not found in catalog: ${uuid}`);
                     continue;
                 }
 
                 console.log(`Found item in catalog: ${fullItem.name}`);
-
-                if (!fullItem) {
-                    console.warn(`Item not found in catalog: ${uuid}`);
-                    continue;
-                }
 
                 // Convert export quality (rarity names) to quality names for crafted items
                 let qualityName = null;
@@ -175,12 +227,111 @@ class ActionButtons extends Component {
                 };
             }
 
+            // Check for tools in locked slots and skip them
+            const skippedTools = [];
+            const characterLevel = window.calculateCharacterLevel
+                ? window.calculateCharacterLevel(store.state.character)
+                : 1;
+            const unlockedToolSlots = GearSlotGrid.getUnlockedToolSlots(characterLevel);
+
+            for (const slotName of Object.keys(slots)) {
+                if (slotName.startsWith('tool')) {
+                    const slotIndex = parseInt(slotName.replace('tool', ''), 10);
+                    if (slotIndex >= unlockedToolSlots) {
+                        const item = slots[slotName];
+                        const toolNum = slotIndex + 1;
+                        skippedTools.push(`${item.name || 'Unknown'} in Tool ${toolNum}`);
+                        delete slots[slotName];
+                    }
+                }
+            }
+
             // Update all slots in store
             for (const [slotName, itemData] of Object.entries(slots)) {
                 store.updateGearSlot(slotName, itemData);
             }
 
-            // Clear empty slots
+            // Restore generic items from custom extension field (not in catalog)
+            const restoredGenericSlots = new Set();
+            if (gearsetData.generic_slots) {
+                console.log('Restoring generic_slots:', Object.keys(gearsetData.generic_slots));
+
+                // Build a map of slot → quality from the items array
+                const itemsQualityMap = {};
+                for (const item of gearsetData.items || []) {
+                    if (!item.item || item.item === 'null') continue;
+                    try {
+                        const itemData = JSON.parse(item.item);
+                        if (itemData.id && itemData.id.startsWith('generic::')) {
+                            let slotName = item.type;
+                            if (slotName === 'tool') slotName = `tool${item.index}`;
+                            else if (slotName === 'ring') slotName = `ring${item.index + 1}`;
+                            itemsQualityMap[slotName] = itemData.quality;
+                        }
+                    } catch (e) { /* skip */ }
+                }
+
+                for (const [slotName, itemData] of Object.entries(gearsetData.generic_slots)) {
+                    if (slotName === '_pet_meta') continue; // Handled below
+                    if (!itemData) continue;
+
+                    // Skip generic tools in locked slots
+                    if (slotName.startsWith('tool')) {
+                        const slotIndex = parseInt(slotName.replace('tool', ''), 10);
+                        if (slotIndex >= unlockedToolSlots) {
+                            const toolNum = slotIndex + 1;
+                            skippedTools.push(`${itemData.name || 'Unknown'} in Tool ${toolNum}`);
+                            continue;
+                        }
+                    }
+
+                    // Resolve from store (source of truth) instead of using stale embedded data
+                    const genericId = (itemData.itemId || itemData.uuid || '').replace('generic::item::', '');
+                    const storeItem = genericId ? (store.state.genericItems || []).find(gi => gi.id === genericId) : null;
+
+                    const rarityToQuality = { 'common': 'Normal', 'uncommon': 'Good', 'rare': 'Great', 'epic': 'Excellent', 'legendary': 'Perfect', 'ethereal': 'Eternal' };
+                    const itemRarity = itemsQualityMap[slotName] || itemData.rarity || 'common';
+                    const qualityName = itemData.quality || rarityToQuality[itemRarity] || 'Normal';
+
+                    if (storeItem) {
+                        const resolved = {
+                            ...itemData,
+                            itemId: itemData.itemId || `generic::item::${genericId}`,
+                            icon_path: storeItem.icon_path || itemData.icon_path,
+                            icon: storeItem.icon || itemData.icon,
+                            icon_color: storeItem.icon_color || itemData.icon_color,
+                            stats: storeItem.stats || itemData.stats || {},
+                            quality_stats: storeItem.quality_stats || itemData.quality_stats,
+                            stats_by_quality: storeItem.quality_stats || itemData.quality_stats,
+                            keywords: storeItem.keywords || itemData.keywords || [],
+                            rarity: itemRarity,
+                            quality: qualityName,
+                            slot: storeItem.slot || itemData.slot,
+                            type: storeItem.is_crafted ? 'crafted_item' : 'item',
+                            is_crafted: storeItem.is_crafted,
+                            is_generic: true,
+                        };
+                        store.updateGearSlot(slotName, resolved);
+                        console.log(`  ✓ Restored generic slot ${slotName}: ${storeItem.name} quality=${qualityName} (from store)`);
+                    } else {
+                        store.updateGearSlot(slotName, { ...itemData, quality: qualityName, rarity: itemRarity });
+                        console.log(`  ✓ Restored generic slot ${slotName}: ${itemData.name} quality=${qualityName} (from embedded data)`);
+                    }
+                    restoredGenericSlots.add(slotName);
+                }
+
+                // Restore pet level/variant/useAbility metadata for wiki pets
+                if (gearsetData.generic_slots._pet_meta && slots['pet']) {
+                    const meta = gearsetData.generic_slots._pet_meta;
+                    slots['pet'].level = meta.level;
+                    slots['pet'].variant = meta.variant;
+                    slots['pet'].useAbility = meta.useAbility || false;
+                    store.updateGearSlot('pet', slots['pet']);
+                    console.log(`  Restored pet meta: level=${meta.level}, variant=${meta.variant}, useAbility=${meta.useAbility || false}`);
+                }
+            }
+
+            // Clear empty slots (skip slots restored from catalog or generic_slots)
             const allSlots = [
                 'head', 'cape', 'back', 'hands', 'chest', 'neck',
                 'primary', 'legs', 'secondary', 'ring1', 'ring2', 'feet',
@@ -189,7 +340,7 @@ class ActionButtons extends Component {
             ];
 
             for (const slot of allSlots) {
-                if (!slots[slot]) {
+                if (!slots[slot] && !restoredGenericSlots.has(slot)) {
                     store.updateGearSlot(slot, null);
                 }
             }
@@ -197,6 +348,15 @@ class ActionButtons extends Component {
             // Close popup and show success
             this.hideImportPopup();
             api.showSuccess('Gear set imported successfully');
+
+            // Show warning for any tools that were skipped due to locked slots
+            if (skippedTools.length > 0) {
+                const toolList = skippedTools.join(', ');
+                api.showWarning(
+                    `Skipped ${skippedTools.length} tool${skippedTools.length > 1 ? 's' : ''} from imported gearset (slot not unlocked): ${toolList}`,
+                    { duration: 10000 }
+                );
+            }
 
         } catch (error) {
             console.error('Failed to import gearset:', error);
@@ -253,8 +413,9 @@ class ActionButtons extends Component {
         }
 
         try {
-            // Encode current gear
-            const exportString = this.encodeGearset(store.state.gearsets.current);
+            // Encode active gear (respects comparison mode slot)
+            const activeGear = store.getActiveGearset();
+            const exportString = this.encodeGearset(activeGear);
 
             // Copy to clipboard
             await navigator.clipboard.writeText(exportString);
@@ -298,15 +459,27 @@ class ActionButtons extends Component {
         // The backend expects the rarity code.
         const getExportQuality = (item) => item?.rarity || 'common';
 
+        // Helper: get the UUID to use in the export.
+        // For generic items, use gear_set_export from the definition if available.
+        const getExportUuid = (item) => {
+            if (item?.is_generic && item?.itemId?.startsWith('generic::item::')) {
+                const genericId = item.itemId.replace('generic::item::', '');
+                const gi = (store.state.genericItems || []).find(g => g.id === genericId);
+                if (gi?.gear_set_export) return gi.gear_set_export;
+            }
+            return item?.uuid || null;
+        };
+
         // Add gear slots
         for (const [slotName, slotType] of Object.entries(slotTypeMap)) {
             const item = gearset[slotName];
-            if (item && item.uuid) {
+            const exportUuid = getExportUuid(item);
+            if (item && exportUuid) {
                 items.push({
                     type: slotType,
                     index: 0,
                     item: JSON.stringify({
-                        id: item.uuid,
+                        id: exportUuid,
                         quality: getExportQuality(item),
                         tag: null
                     }),
@@ -326,12 +499,13 @@ class ActionButtons extends Component {
         for (let ringNum = 1; ringNum <= 2; ringNum++) {
             const slotName = `ring${ringNum}`;
             const item = gearset[slotName];
-            if (item && item.uuid) {
+            const exportUuid = getExportUuid(item);
+            if (item && exportUuid) {
                 items.push({
                     type: 'ring',
                     index: ringNum - 1,
                     item: JSON.stringify({
-                        id: item.uuid,
+                        id: exportUuid,
                         quality: getExportQuality(item),
                         tag: null
                     }),
@@ -351,12 +525,13 @@ class ActionButtons extends Component {
         for (let toolNum = 0; toolNum < 6; toolNum++) {
             const slotName = `tool${toolNum}`;
             const item = gearset[slotName];
-            if (item && item.uuid) {
+            const exportUuid = getExportUuid(item);
+            if (item && exportUuid) {
                 items.push({
                     type: 'tool',
                     index: toolNum,
                     item: JSON.stringify({
-                        id: item.uuid,
+                        id: exportUuid,
                         quality: getExportQuality(item),
                         tag: null
                     }),
@@ -372,15 +547,15 @@ class ActionButtons extends Component {
             }
         }
 
-        // Add pet slot
+        // Add pet slot (official format: id=pet name lowercase, quality=level number)
         const petItem = gearset['pet'];
-        if (petItem && petItem.uuid) {
+        if (petItem && petItem.itemId) {
             items.push({
                 type: 'pet',
                 index: 0,
                 item: JSON.stringify({
-                    id: petItem.uuid,
-                    quality: getExportQuality(petItem),
+                    id: petItem.itemId,
+                    quality: String(petItem.level || 0),
                     tag: null
                 }),
                 errors: []
@@ -394,10 +569,58 @@ class ActionButtons extends Component {
             });
         }
 
-        // Note: Consumables are not included in WalkScape export format
+        // Add consumable slot
+        const consumable = gearset['consumable'];
+        if (consumable && consumable.uuid) {
+            items.push({
+                type: 'consumable',
+                index: 0,
+                item: JSON.stringify({
+                    id: consumable.uuid,
+                    quality: getExportQuality(consumable),
+                    tag: null
+                }),
+                errors: []
+            });
+        }
 
-        // Create gearset JSON
+        // Add activityInput slot (official format compatibility)
+        items.push({
+            type: 'activityInput',
+            index: 0,
+            item: 'null',
+            errors: []
+        });
+
+        // Generic items don't need generic_slots — resolved from store by generic::item::UUID on load
+        // Only store pet meta and consumable for round-trip (not in standard items array)
+        const genericSlots = {};
+
+        // Also include pet slot data (level, variant, stats, useAbility) even for wiki pets
+        const petItem2 = gearset['pet'];
+        if (petItem2 && !petItem2.is_generic) {
+            if (!genericSlots['_pet_meta']) {
+                genericSlots['_pet_meta'] = {
+                    level: petItem2.level,
+                    variant: petItem2.variant,
+                    useAbility: petItem2.useAbility || false,
+                };
+            }
+        }
+
+        // Include consumable slot data for round-trip
+        const consumableItem = gearset['consumable'];
+        if (consumableItem && !consumableItem.is_generic) {
+            if (!genericSlots['consumable']) {
+                genericSlots['consumable'] = consumableItem;
+            }
+        }
+
+        // Create gearset JSON (with generic_slots extension for round-trip support)
         const gearsetJson = { items: items };
+        if (Object.keys(genericSlots).length > 0) {
+            gearsetJson.generic_slots = genericSlots;
+        }
 
         // Compress and encode
         const jsonStr = JSON.stringify(gearsetJson);
@@ -424,6 +647,25 @@ class ActionButtons extends Component {
 
         // Show success toast
         api.showSuccess('Unequipped all gear');
+    }
+
+    /**
+     * Copy the active gearset to the other comparison slot
+     */
+    copyToOtherSet() {
+        const activeSlot = store.state.gearsets.activeGearsetSlot || 1;
+        if (activeSlot === 1) {
+            // Copy current → gearset2
+            store.state.gearsets.gearset2 = { ...store.state.gearsets.current };
+            store._notifySubscribers('gearsets.gearset2');
+            api.showSuccess('Copied Gear Set 1 → Gear Set 2');
+        } else {
+            // Copy gearset2 → current
+            store.state.gearsets.current = { ...store.state.gearsets.gearset2 };
+            store._notifySubscribers('gearsets.current');
+            store._saveCurrentGear();
+            api.showSuccess('Copied Gear Set 2 → Gear Set 1');
+        }
     }
 
     /**
@@ -465,11 +707,16 @@ class ActionButtons extends Component {
      * Requirements: 5.1, 5.3, 5.5
      */
     render() {
+        const comparisonMode = store.state.gearsets.comparisonMode;
+        const activeSlot = store.state.gearsets.activeGearsetSlot || 1;
+        const copyLabel = activeSlot === 1 ? 'Copy to Set 2' : 'Copy to Set 1';
+
         const html = `
             <div class="action-buttons">
                 <button class="action-button import-button-main">Import</button>
                 <button class="action-button export-button">Export</button>
                 <button class="action-button unequip-all-button">Unequip All</button>
+                ${comparisonMode ? `<button class="action-button copy-to-other-btn">${copyLabel}</button>` : ''}
             </div>
             ${this.renderImportPopup()}
         `;
@@ -514,6 +761,11 @@ class ActionButtons extends Component {
         // Unequip All button click
         this.$element.on('click', '.unequip-all-button', () => {
             this.unequipAll();
+        });
+
+        // Copy to other set button click
+        this.$element.on('click', '.copy-to-other-btn', () => {
+            this.copyToOtherSet();
         });
 
         // Import from clipboard button

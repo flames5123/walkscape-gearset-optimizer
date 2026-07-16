@@ -36,10 +36,30 @@ def extract_attributes(td):
     stats = {}
     
     # Get the full text to parse
-    full_text = td.get_text()
+    # Use <br> tags to split into separate stat blocks, then get text from each
+    # This handles multi-stat cells like "+1% WE While doing Agility.<br>+1% WE While doing Mining."
+    # where get_text() concatenates everything into one line
+    stat_blocks = []
     
-    # Split by line breaks to process each stat block
-    lines = full_text.split('\n')
+    # Split the cell content by <br> tags
+    # Replace <br> with a unique separator, then split
+    for br in td.find_all('br'):
+        br.replace_with('\n---STAT_BREAK---\n')
+    
+    full_text = td.get_text()
+    blocks = full_text.split('---STAT_BREAK---')
+    
+    for block in blocks:
+        block = block.strip()
+        if block:
+            stat_blocks.append(block)
+    
+    # If no breaks found, treat the whole text as one block
+    if not stat_blocks:
+        stat_blocks = [full_text.strip()]
+    
+    # Process each stat block as a separate line
+    lines = stat_blocks
     
     i = 0
     while i < len(lines):
@@ -284,10 +304,11 @@ def generate_python_module(collectibles):
         # Add helper function for export name lookup
         '# Export name lookup',
         'COLLECTIBLES_BY_EXPORT_NAME = {}',
-        'for c in COLLECTIBLES:',
+        'for _c in COLLECTIBLES:',
         '    # Convert display name to export name format (snake_case)',
-        '    export_name = c.name.lower().replace(" ", "_").replace("-", "_").replace("\'", "").replace("(", "").replace(")", "")',
-        '    COLLECTIBLES_BY_EXPORT_NAME[export_name] = c',
+        '    export_name = _c.name.lower().replace(" ", "_").replace("-", "_").replace("\'", "").replace("(", "").replace(")", "")',
+        '    COLLECTIBLES_BY_EXPORT_NAME[export_name] = _c',
+        'del _c',
         '',
         'def by_export_name(export_name: str):',
         '    """Look up collectible by export name (snake_case format)"""',

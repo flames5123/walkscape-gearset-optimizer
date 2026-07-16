@@ -37,6 +37,7 @@ ATTRIBUTE_ICONS = [
     ('/images/6/64/Double_Action.svg', 'double_action.svg'),
     ('/images/a/a3/Double_Rewards.svg', 'double_rewards.svg'),
     ('/images/3/3f/Find_Bird_Nests.svg', 'find_bird_nests.svg'),
+    ('/images/3/3f/Find_Bird_Nests.svg', 'find_bird_nest.svg'),
     ('/images/2/28/Find_Collectibles.svg', 'find_collectibles.svg'),
     ('/images/1/14/Find_Gems.svg', 'find_gems.svg'),
     ('/images/d/df/Fine_Material_Finding.svg', 'fine_material_finding.svg'),

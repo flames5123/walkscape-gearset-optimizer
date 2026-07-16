@@ -37,22 +37,32 @@ def get_pending_migrations(applied, migrations_dir):
         return []
     
     all_migrations = sorted([
-        f.name for f in migrations_path.glob('*.sql')
+        f.name for f in migrations_path.glob('*')
+        if f.suffix in ('.sql', '.py') and not f.name.startswith('_') and f.name != 'README.md'
     ])
     
     return [m for m in all_migrations if m not in applied]
 
 def apply_migration(conn, filename, migrations_dir):
-    """Apply a single migration file."""
+    """Apply a single migration file (.sql or .py)."""
     filepath = Path(migrations_dir) / filename
     
     print(f"  Applying {filename}...")
     
-    with open(filepath, 'r') as f:
-        sql = f.read()
-    
-    # Execute the migration
-    conn.executescript(sql)
+    if filename.endswith('.py'):
+        # Python migration: import and call run(conn)
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(filename[:-3], filepath)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        if hasattr(mod, 'run'):
+            mod.run(conn)
+        else:
+            print(f"  ⚠️  {filename} has no run(conn) function, skipping execution")
+    else:
+        with open(filepath, 'r') as f:
+            sql = f.read()
+        conn.executescript(sql)
     
     # Record that it was applied
     conn.execute(
@@ -107,4 +117,9 @@ def run_migrations(db_path=None, migrations_dir=None):
         conn.close()
 
 if __name__ == '__main__':
-    run_migrations()
+    # When run standalone, ensure base tables exist first (DatabaseManager creates them)
+    from ui.database import DatabaseManager
+    import os
+    db_path = os.environ.get('DATABASE_PATH', DB_PATH)
+    DatabaseManager(db_path)  # Creates base tables if they don't exist
+    run_migrations(db_path=db_path)

@@ -4,13 +4,15 @@ Quality Outcome calculation for crafting.
 Based on: https://wiki.walkscape.app/wiki/Quality_Outcome_(Mechanics)
 """
 
-def calculate_quality_weights(recipe_level: int, quality_outcome: float):
+def calculate_quality_weights(recipe_level: int, quality_outcome: float, use_fine: bool = False, has_equipment_input: bool = False):
     """
     Calculate quality weights based on recipe level and quality outcome bonus.
     
     Args:
         recipe_level: Recipe level requirement
         quality_outcome: Total quality outcome bonus (from gear + service + level)
+        use_fine: Whether fine materials are being used
+        has_equipment_input: Whether recipe has equipment as an input (changes fine math)
         
     Returns:
         Dict with quality weights and percentages
@@ -83,6 +85,27 @@ def calculate_quality_weights(recipe_level: int, quality_outcome: float):
                 new_weight = max(new_weight, calculated_weights[next_quality])
         
         calculated_weights[quality] = new_weight
+    
+    # Apply fine materials effects
+    if use_fine:
+        # Calculate fine-shifted weights (shift everything up one tier)
+        shifted = {
+            'Good': calculated_weights['Normal'],
+            'Great': calculated_weights['Good'],
+            'Excellent': calculated_weights['Great'],
+            'Perfect': calculated_weights['Excellent'],
+            'Eternal': calculated_weights['Perfect'] + calculated_weights['Eternal'],
+            'Normal': 0.0
+        }
+        if has_equipment_input:
+            # Blend: 70% normal + 30% fine-shifted
+            for quality in calculated_weights:
+                calculated_weights[quality] = (
+                    calculated_weights[quality] * (1 - 0.3) + shifted[quality] * 0.3
+                )
+        else:
+            # Pure fine materials: full shift up one tier
+            calculated_weights.update(shifted)
     
     # Calculate percentages
     total_weight = sum(calculated_weights.values())

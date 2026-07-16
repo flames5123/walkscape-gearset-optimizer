@@ -120,14 +120,15 @@ def merge_folder_items_with_main_list(main_list: list, folder_items: list, name_
     
     print(f"\nMerging {len(folder_items)} folder items with {len(main_list)} main items...")
     
-    # Build set of existing names
-    existing_names = {item[name_key] for item in main_list}
+    # Build set of existing names (case-insensitive to avoid duplicates
+    # from filename casing differences, e.g. "Shiny ring" vs "Shiny Ring")
+    existing_names_lower = {item[name_key].lower() for item in main_list}
     
     added_count = 0
     skipped_count = 0
     
     for folder_item in folder_items:
-        if folder_item[name_key] not in existing_names:
+        if folder_item[name_key].lower() not in existing_names_lower:
             main_list.append(folder_item)
             print(f"  ✓ Added: {folder_item[name_key]}")
             added_count += 1
@@ -292,12 +293,23 @@ STAT_KEYWORDS = {
     'bonus experience': 'bonus_xp',  # Will be parsed as bonus_xp_add or bonus_xp_percent
     'bonus xp': 'bonus_xp',
     
+    # Base XP (flat XP added to a specific skill on any action)
+    # Pattern: "{skill} experience on any action"
+    'foraging experience on any action': 'foraging_base_xp',
+    
     # Finding stats
     'chest finding': 'chest_finding',
     'find bird nests': 'find_bird_nests',
+    'find bird nest': 'ItemFindingCategory.BIRD_NEST',
     'find collectibles': 'find_collectibles',
     'find gems': 'find_gems',
     'fine material finding': 'fine_material_finding',
+    # "That's A Wrap" passive: chance to roll the linens table twice.
+    # Exact wiki wording TBD until embargo lifts — map likely phrasings.
+    'find linens': 'find_linens',
+    'roll the linens table twice': 'find_linens',
+    'roll linens table twice': 'find_linens',
+    'linens table': 'find_linens',
     
     # Inventory
     'inventory space': 'inventory_space',
@@ -323,46 +335,6 @@ ACTIVITY_KEYWORDS = [
 ]
 
 
-# ============================================================================
-# SKILL AND LOCATION EXTRACTION HELPERS
-# ============================================================================
-
-def extract_skill_from_text(text: str) -> str:
-    """
-    Extract skill name from text like 'While doing Fishing' or 'Fishing'.
-    Also handles 'gathering skills' and 'artisan skills'.
-    
-    Returns:
-        Skill name in lowercase, or 'global' if no skill found
-    """
-    text_lower = text.lower()
-    
-    # Check for skill groups first
-    if 'gathering skills' in text_lower or 'gathering skill' in text_lower:
-        return 'gathering'
-    if 'artisan skills' in text_lower or 'artisan skill' in text_lower:
-        return 'artisan'
-    if 'utility skills' in text_lower or 'utility skill' in text_lower:
-        return 'utility'
-    
-    # Check for "while doing X" pattern
-    while_doing_match = re.search(r'while doing\s+(\w+)', text_lower)
-    if while_doing_match:
-        return while_doing_match.group(1)
-    
-    # Check for "while X" pattern (e.g., "While traveling")
-    while_match = re.search(r'while\s+(\w+)', text_lower)
-    if while_match:
-        skill = while_match.group(1).rstrip('.')
-        if skill in SKILL_KEYWORDS:
-            return skill
-    
-    # Check if any skill keyword appears in the text
-    for skill in SKILL_KEYWORDS:
-        if skill in text_lower:
-            return skill
-    
-    return 'global'
 
 
 def extract_location_from_text(text: str) -> tuple[str | None, bool]:
@@ -515,21 +487,42 @@ def normalize_stat_name(text: str) -> Optional[str]:
     return None
 
 
-def extract_skill_from_text(text: str) -> Optional[str]:
-    """Extract skill name from text like 'While doing Fishing'"""
+def extract_skill_from_text(text: str) -> str:
+    """
+    Extract skill name from text like 'While doing Fishing' or 'Fishing'.
+    Also handles 'gathering skills' and 'artisan skills'.
+    
+    Returns:
+        Skill name in lowercase, or 'global' if no skill found
+    """
     text_lower = text.lower()
     
+    # Check for skill groups first
+    if 'gathering skills' in text_lower or 'gathering skill' in text_lower:
+        return 'gathering'
+    if 'artisan skills' in text_lower or 'artisan skill' in text_lower:
+        return 'artisan'
+    if 'utility skills' in text_lower or 'utility skill' in text_lower:
+        return 'utility'
+    
+    # Check for "while doing X" pattern
+    while_doing_match = re.search(r'while doing\s+(\w+)', text_lower)
+    if while_doing_match:
+        return while_doing_match.group(1)
+    
+    # Check for "while X" pattern (e.g., "While traveling")
+    while_match = re.search(r'while\s+(\w+)', text_lower)
+    if while_match:
+        skill = while_match.group(1).rstrip('.')
+        if skill in SKILL_KEYWORDS:
+            return skill
+    
+    # Check if any skill keyword appears in the text
     for skill in SKILL_KEYWORDS:
         if skill in text_lower:
             return skill
     
-    return None
-
-
-def is_activity_stat(text: str) -> bool:
-    """Check if text refers to an activity (not a skill)"""
-    text_lower = text.lower()
-    return any(activity in text_lower for activity in ACTIVITY_KEYWORDS)
+    return 'global'
 
 
 # ============================================================================

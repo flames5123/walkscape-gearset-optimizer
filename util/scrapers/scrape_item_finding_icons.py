@@ -16,7 +16,6 @@ ICONS_DIR = Path('assets/icons/attributes')  # Store with other attribute icons
 
 # Icons to exclude (these are direct items, not categories)
 EXCLUDE_ICONS = {
-    'find_bird_nest.svg',
     'find_coin_pouch.svg',
 }
 

@@ -29,7 +29,10 @@ from util.optimization_utils import (
     is_gearset_complete,
     meets_activity_requirements,
     validate_tool_keywords,
-    validate_uuid_uniqueness
+    validate_uuid_uniqueness,
+    prune_dominated_items,
+    filter_pets_to_skill_xp_relevant,
+    item_satisfies_required_keyword,
 )
 from util.walkscape_constants import *
 
@@ -56,14 +59,47 @@ ACTIVITY = Activity.TREASURE_HUNT
 # Supports strings, Item, Material, Collectible, Consumable, etc.
 TARGET_ITEM = Collectible.TREASURE_HUNTER_TOKEN
 # TARGET_ITEM = None
+TARGET_DROP_RATE = 0  # User-provided base drop rate % for fine_item/collectible targets
+# Display-only switch (set transiently by ui/optimize_worker.compute_slot_alternatives).
+# When True, calculate_gearset_metrics also stashes the FULL per-drop steps
+# map (target_item=None) on metrics['_component_steps'] so the non-owned
+# upgrade popup can show a per-individual-drop breakdown ("List per item"
+# display mode). Off by default so normal scoring is unaffected.
+EMIT_COMPONENT_STEPS = False
 VERBOSE = True
 SLOTS_TO_TEST = []
 MAX_ITERATIONS = 100  # Max local search iterations
 ENABLE_2_SWAP = True  # Enable 2-swap testing (slower but may find better combinations)
+ENABLE_4_SWAP = True  # Enable 4-swap testing (runs after 2-swap converges)
 INCLUDE_CONSUMABLES = False  # Include consumables in optimization (set by UI)
                               # TODO: Implement consumable optimization for activities
                               # Currently only implemented for crafting
 CONSUMABLE_ITEMS = []  # List of consumable items to test (set by UI/worker)
+
+INCLUDE_PETS = False  # Include pets in optimization (set by UI)
+PET_ITEMS = []  # List of (PetInfo, level) tuples to test (set by UI/worker)
+
+# Instant-actions mode: when True, step-influencing stats (WE, flat steps, pct steps)
+# are zeroed before scoring. Used when a pet ability completes actions instantly.
+# Set by UI/worker when the instant-actions checkbox is checked.
+INSTANT_ACTIONS = False
+
+# Forced pet: when set (a PetInfo object), this pet is pre-equipped in the pet slot
+# and cannot be replaced by the optimizer. Used with INSTANT_ACTIONS.
+FORCED_PET = None
+
+# Locked slots: dict of slot_name → Item object. These slots cannot be changed by the optimizer.
+LOCKED_SLOTS = {}  # Set by UI/worker when "Lock current gear set slots" is enabled
+
+# User-selected location override. When set, the optimizer uses this location
+# instead of activity.locations[0]. This matters for multi-location activities
+# (e.g., Soup kitchen volunteering in Granfiddich vs Azurazera).
+SELECTED_LOCATION = None  # Set by UI/worker; Location object or None
+
+# Input item for activities that consume items (e.g., arrows for hunting).
+# When set, its stats are included in the activity metric calculations.
+INPUT_ITEM = None  # Set by UI/worker; resolved Item/Material object or None
+USE_FINE_INPUTS = False  # Whether to apply fine input bonuses
 
 # Debug specific 2-swap combinations
 DEBUG_2_SWAP = True
@@ -73,19 +109,112 @@ DEBUG_ITEMS = {
     'legs': ['Wilderness Pants', 'Merfolk']  # Items to watch in legs slot
 }
 
+# Tool debug: any tool whose keywords contain one of these substrings (case-insensitive)
+# will have its greedy/1-swap evaluation logged. Useful for diagnosing why a tool
+# was or wasn't picked. Example: ['fishing cage', 'fishing spear'] to debug
+# Lobster pot vs Spectral fishing cagespear.
+DEBUG_TOOL_KEYWORDS = ['fishing cage', 'fishing spear']
+
+
+def _tool_matches_debug_keywords(item):
+    """Return True if this item's keywords intersect DEBUG_TOOL_KEYWORDS."""
+    if not DEBUG_TOOL_KEYWORDS:
+        return False
+    kws = getattr(item, 'keywords', None)
+    if not kws:
+        return False
+    targets = [k.lower() for k in DEBUG_TOOL_KEYWORDS]
+    return any(any(t in kw.lower() for t in targets) for kw in kws)
+
+# ============================================================================
+# HELPERS
+# ============================================================================
+
+def _get_location(activity):
+    """Return the user-selected location, falling back to the activity's first location."""
+    if SELECTED_LOCATION is not None:
+        return SELECTED_LOCATION
+    return activity.locations[0] if activity.locations else None
+
 # ============================================================================
 # ACTIVITY-RELEVANT STAT FILTERING
 # ============================================================================
 
-# Stats that matter for activities (affect steps, XP, or loot)
-ACTIVITY_RELEVANT_STATS = {
+# Stats that ALWAYS matter for activities (affect steps, XP, or general loot)
+ACTIVITY_CORE_STATS = {
     'work_efficiency', 'double_action', 'double_rewards',
     'steps_add', 'steps_percent',
-    'chest_finding', 'fine_material_finding', 'find_collectibles',
-    'find_bird_nests', 'find_gems',
     'bonus_xp_add', 'bonus_xp_percent',
     'inventory_space',
-    'item_finding',
+    'item_finding', 'chest_finding'
+}
+
+# "Finding" stats that only matter when the activity drops that category.
+# Mapped from stat name → item_ref prefix(es) that indicate the activity has
+# drops of that type.
+def _loot_table_members(stat):
+    """rowItemIDs on the loot table backing item-finding ``stat`` (memoized).
+
+    The autogenerated loot tables ARE the source of truth: a finding stat's
+    membership is exactly the ``rowItemID`` set of the loot table keyed by the
+    same name (e.g. LOOT_TABLES['find_linens']). No separate membership file is
+    needed — loot_tables.py already carries the full rows.
+    """
+    if stat in _LOOT_TABLE_MEMBERS_CACHE:
+        return _LOOT_TABLE_MEMBERS_CACHE[stat]
+    members = frozenset()
+    try:
+        from util.autogenerated.loot_tables import LOOT_TABLES
+        tbl = LOOT_TABLES.get(stat)
+        if tbl:
+            members = frozenset(
+                r['rowItemID'].lower()
+                for r in tbl.get('tableRows', [])
+                if r.get('rowItemID')
+            )
+    except Exception:
+        members = frozenset()
+    _LOOT_TABLE_MEMBERS_CACHE[stat] = members
+    return members
+
+
+_LOOT_TABLE_MEMBERS_CACHE = {}
+
+
+def _loot_table_member(stat, ref, name_fallback=None):
+    """True if a drop belongs to the loot table backing item-finding ``stat``.
+
+    Membership is derived directly from loot_tables.LOOT_TABLES[stat] rows (the
+    loot table is the source of truth). A drop's rowItemID is the lowercased
+    suffix of its item_ref (e.g. 'Material.FLAX' -> 'flax'). If the table is
+    absent, fall back to a name-substring heuristic (``name_fallback``) so
+    nothing breaks.
+
+    Generic: any finding stat whose name matches a loot table id gets its
+    membership here automatically — no code change needed to add more.
+    """
+    if not ref:
+        return False
+    members = _loot_table_members(stat)
+    if members:
+        return ref.rsplit('.', 1)[-1].lower() in members
+    if name_fallback:
+        ref_l = ref.lower()
+        return any(n in ref_l for n in name_fallback)
+    return False
+
+
+FINDING_STAT_DROP_CHECKS = {
+    'find_collectibles':     lambda ref: ref and 'Collectible.' in ref,
+    'find_bird_nests':       lambda ref: ref and ('bird_nest' in ref.lower() or 'BIRD_NEST' in ref),
+    'find_gems':             lambda ref: ref and ('gem' in ref.lower()),
+    # find_linens: the "That's A Wrap" pet passive — global, Tailoring, 7% chance
+    # to roll the linens table twice (+7% expected linen-table drops). Membership
+    # is derived directly from loot_tables.LOOT_TABLES['find_linens']; pre-scrape
+    # it falls back to a 'linen' name heuristic.
+    'find_linens':           lambda ref: _loot_table_member('find_linens', ref, name_fallback=('linen',)),
+    'fine_material_finding': lambda ref: ref and 'Material.' in ref,
+    'chest_finding':         lambda ref: ref and 'Container.' in ref and 'BIRD_NEST' not in ref,
 }
 
 # Stats that ONLY matter for crafting (useless for activities)
@@ -94,15 +223,195 @@ CRAFTING_ONLY_STATS = {
 }
 
 
-def has_activity_relevant_stats(item, skill, location, character) -> bool:
-    """Check if item has any stats that matter for activities (not just crafting stats)."""
+def get_useful_finding_stats(activity) -> set:
+    """Determine which finding stats are actually useful for this activity.
+    
+    Checks the activity's drop tables to see which drop categories exist,
+    then returns only the finding stats that can actually affect drop rates.
+    For example, find_collectibles is useless if the activity drops no collectibles.
+    
+    Also includes finding stats for synthetic targets (fine_item, collectible)
+    when TARGET_ITEM is set to those values.
+    """
+    all_drops = activity.drop_table + activity.secondary_drop_table
+    useful = set()
+    
+    for stat_name, ref_check in FINDING_STAT_DROP_CHECKS.items():
+        for drop in all_drops:
+            if drop.item_name == 'Nothing':
+                continue
+            if ref_check(drop.item_ref):
+                useful.add(stat_name)
+                break  # Found at least one drop for this stat, move on
+    
+    # For synthetic targets, force the relevant finding stat
+    def _add_if_target_stats(target):
+        """Add ItemFindingCategory.<CAT> stat (and FMF for _fine variants)
+        so items whose only relevant stat is the IF category don't get
+        filtered out by has_activity_relevant_stats.
+
+        For aggregator targets (cat:coins, cat:coins_no_chests, cat:sea_shells)
+        every ItemFindingCategory.* on a piece of gear contributes to the
+        aggregate (its expansion drops sellable items / sea shells), so the
+        full set is added. Without this, prune_dominated_items would treat
+        a ring whose only relevant edge is +IF.GOLD_PIECES as dominated by
+        any ring with the same chest_finding plus a small DR — resulting in
+        e.g. Gold sun stone ring being silently pruned and Gold ruby ring
+        winning the cat:coins optimization (bug afede899).
+        """
+        if not isinstance(target, str):
+            return
+        if target in ('cat:coins', 'cat:coins_no_chests', 'cat:sea_shells'):
+            try:
+                from util.autogenerated.item_finding import ItemFindingCategory
+                for attr in dir(ItemFindingCategory):
+                    if attr.startswith('_'):
+                        continue
+                    if isinstance(getattr(ItemFindingCategory, attr, None), type(getattr(ItemFindingCategory, 'GOLD_PIECES', None))):
+                        useful.add(f'ItemFindingCategory.{attr}')
+            except ImportError:
+                pass
+            # Aggregator targets also benefit from chest_finding (chest drops
+            # add coin/shell value) and fine_material_finding (fine variants
+            # are rolled into the aggregate via Material.*_FINE.special_sell).
+            useful.add('chest_finding')
+            useful.add('fine_material_finding')
+            return
+        # Adventurers' Guild Tokens is a value aggregate (see
+        # ag_token_value.compute_agt_targets_for_activity): tokens come from
+        # selling the activity's drops, with fine variants worth more. So FMF
+        # (boosts fine value), the direct guild-token IF stat, and
+        # chest_finding (chest drops may carry AGT) are all relevant — mark
+        # them so FMF-only tools (e.g. Rusty spyglass) aren't filtered out.
+        if target == 'cat:if:adventurers_guild_tokens':
+            useful.add('fine_material_finding')
+            useful.add('chest_finding')
+            useful.add('ItemFindingCategory.ADVENTURERS_GUILD_TOKENS')
+            return
+        if not target.startswith('cat:if:'):
+            return
+        cat = target[len('cat:if:'):]
+        if cat.endswith('_fine'):
+            cat = cat[:-len('_fine')]
+            useful.add('fine_material_finding')
+        useful.add(f'ItemFindingCategory.{cat.upper()}')
+
+    if TARGET_ITEM is not None:
+        target_name = get_target_name(TARGET_ITEM)
+        if target_name == 'collectible':
+            useful.add('find_collectibles')
+            useful.add('collectible_finding')
+        elif target_name == 'fine_item':
+            useful.add('fine_material_finding')
+        elif target_name == 'primary_chest':
+            useful.add('chest_finding')
+        else:
+            _add_if_target_stats(TARGET_ITEM)
+
+    # Also consider per-entry targets on the priority list (X/Y grid UI).
+    # Without this, a SortingEntry targeting 'cat:if:adventurers_guild_tokens'
+    # wouldn't cause IFC.AGT items to be marked relevant, and the optimizer
+    # would filter the only items carrying that stat (Adventuring amulet/ring).
+    for raw in SORTING_PRIORITY:
+        if isinstance(raw, SortingEntry) and raw.target:
+            _add_if_target_stats(raw.target)
+    
+    return useful
+
+
+def _target_relevant_find_stats(activity) -> set:
+    """Bug 2d4f5491: the find stats made relevant by the CURRENT optimization
+    target (``TARGET_ITEM`` + any ``SortingEntry`` targets), NOT the whole drop
+    table.
+
+    Used to decide which global-find pets to keep in the candidate pool when
+    the skill-XP preference (bug e5145503) would otherwise drop them. Optimizing
+    a collectible on e.g. Alligator hunting should keep the Mummy (global
+    +find_collectibles) alongside the Tiger (Hunting-XP), so the optimizer can
+    pick whichever produces the collectible faster.
+    """
+    stats = set()
+
+    def add_for_ref(ref):
+        for stat_name, check in FINDING_STAT_DROP_CHECKS.items():
+            try:
+                if check(ref):
+                    stats.add(stat_name)
+            except Exception:
+                pass
+
+    def add_for_target(target):
+        if not isinstance(target, str):
+            return
+        tn = get_target_name(target)
+        if tn == 'collectible':
+            stats.add('find_collectibles')
+        elif tn == 'fine_item':
+            stats.add('fine_material_finding')
+        elif tn == 'primary_chest':
+            stats.add('chest_finding')
+        else:
+            # Concrete drop name → look up its ref in the activity drop table
+            # and match against the finding-stat ref checks.
+            for drop in (activity.drop_table + activity.secondary_drop_table):
+                if drop.item_name == target and drop.item_ref:
+                    add_for_ref(drop.item_ref)
+                    break
+
+    if TARGET_ITEM is not None:
+        add_for_target(TARGET_ITEM)
+    for raw in SORTING_PRIORITY:
+        if isinstance(raw, SortingEntry) and getattr(raw, 'target', None):
+            add_for_target(raw.target)
+    return stats
+
+
+def has_activity_relevant_stats(item, skill, location, character, useful_finding_stats=None) -> bool:
+    """Check if item has any stats that matter for this specific activity.
+    
+    Items whose only relevant stats are finding stats (e.g. find_collectibles)
+    that don't apply to the activity's drop table are filtered out.
+    
+    Items with set-piece gated stats also qualify if those stats would be
+    relevant — their gated bonuses can unlock when the full set is equipped,
+    and they'd be wrongly filtered out based on base stats alone.
+    """
     item_stats = item.get_stats_for_skill(skill, location=location, character=character)
-    if not item_stats:
-        return False
-    return any(
-        v != 0 and k in ACTIVITY_RELEVANT_STATS
-        for k, v in item_stats.items()
-    )
+    
+    # Build the effective relevant stats set for this activity
+    relevant = ACTIVITY_CORE_STATS
+    if useful_finding_stats is not None:
+        relevant = relevant | useful_finding_stats
+    else:
+        # Fallback: include all finding stats (shouldn't happen in normal flow)
+        relevant = relevant | set(FINDING_STAT_DROP_CHECKS.keys())
+    
+    if item_stats and any(v != 0 and k in relevant for k, v in item_stats.items()):
+        return True
+    
+    # Check set-piece gated stats: if any threshold for any set would grant a
+    # relevant stat, keep the item so the optimizer can consider set combinations.
+    gated = getattr(item, 'gated_stats', None)
+    if gated and 'set_pieces' in gated:
+        for set_name, thresholds in gated['set_pieces'].items():
+            for threshold, skill_stats in thresholds.items():
+                for sk, loc_stats in skill_stats.items():
+                    for loc_key, stat_dict in loc_stats.items():
+                        for stat_name, stat_value in stat_dict.items():
+                            if stat_value != 0 and stat_name in relevant:
+                                return True
+    
+    return False
+
+
+def get_activity_relevant_stats(activity) -> set:
+    """Return the full set of relevant stat names for an activity.
+    
+    Combines core stats with only the finding stats that match the
+    activity's actual drop table.  Used for both item filtering and
+    dominance pruning.
+    """
+    return ACTIVITY_CORE_STATS | get_useful_finding_stats(activity)
 
 
 # ============================================================================
@@ -110,8 +419,34 @@ def has_activity_relevant_stats(item, skill, location, character) -> bool:
 # ============================================================================
 
 def get_target_name(target) -> str:
-    """Extract name from target (handles both string and object)."""
+    """Extract name from target (handles both string, object, and category values).
+    
+    Maps category values (cat:*) to the internal target names used by the scoring logic.
+    """
     if isinstance(target, str):
+        # Map category values to internal target names
+        CATEGORY_MAP = {
+            'cat:normal_items': 'raw_rewards',
+            'cat:chests': 'primary_chest',
+            'cat:collectibles': 'collectible',
+            'cat:fine': 'fine_item',
+            'cat:gems': 'raw_rewards',       # Gems from activity — optimize for general rewards
+            'cat:gems_fine': 'fine_item',     # Fine gems — optimize for fine material finding
+        }
+        # Direct category mapping
+        if target in CATEGORY_MAP:
+            mapped = CATEGORY_MAP[target]
+            return mapped if mapped else target
+        # Item finding categories — keep the raw target so
+        # _compute_spr_for_target can read the ItemFindingCategory.<CAT>
+        # stat directly. Previously we collapsed to 'raw_rewards' here,
+        # which meant the scorer never adjusted for the IF stat and
+        # items whose only stat was the IF category (e.g. Adventuring
+        # amulet with only ItemFindingCategory.ADVENTURERS_GUILD_TOKENS)
+        # were filtered out of the optimizer's candidate pool, giving
+        # the user 0 drops per step for their chosen target.
+        if target.startswith('cat:if:'):
+            return target
         return target
     elif hasattr(target, 'name'):
         return target.name
@@ -122,12 +457,213 @@ def is_fine_material_target(target) -> bool:
     name = get_target_name(target)
     return "(Fine)" in name
 
+
+# ----------------------------------------------------------------------------
+# Per-target SPR computation
+#
+# For each target (category or specific item), we compute a target-specific
+# "steps per reward roll" value and stash it on the metrics dict under the
+# composite key "steps_per_reward_roll::<target>". This replaces the old
+# pattern of overwriting metrics['steps_per_reward_roll'] in-place, which
+# made it impossible to evaluate two targets (e.g. normal items AND chests)
+# on the same gearset during the same scoring pass.
+# ----------------------------------------------------------------------------
+
+def _compute_spr_for_target(target, base_spr, drop_rates, total_stats, target_drop_rate):
+    """Compute steps_per_reward_roll adjusted for a specific target.
+    
+    Mirrors the original per-target logic (primary_chest / fine_item /
+    collectible / specific drop lookup) but as a pure function that
+    takes a target and returns the adjusted SPR without mutating any
+    shared state.
+    
+    Args:
+        target: Raw target value — may be a string category ('cat:chests'),
+            a synthetic-target sentinel ('primary_chest'), an item name,
+            or an object with a .name attribute.
+        base_spr: The target-agnostic steps_per_reward_roll from
+            activity.get_expected_drop_rate.
+        drop_rates: Dict of drop_name -> steps_per_drop (from activity).
+        total_stats: Aggregated gearset stats dict.
+        target_drop_rate: User-provided base drop rate (%) for synthetic
+            fine_item and collectible targets. 0 → default 1.0%.
+    
+    Returns:
+        Float SPR value. Returns a large penalty (999999999.0) when the
+        target can't be resolved.
+    """
+    target_name = get_target_name(target)
+    
+    # 'raw_rewards' means target-agnostic — no adjustment.
+    if target_name == 'raw_rewards':
+        return base_spr
+    
+    if target_name == 'primary_chest':
+        chest_finding_pct = total_stats.get('chest_finding', 0)
+        base_chest_rate = 0.4  # 0.4% base
+        # base_spr IS steps_per_reward_roll (= steps_per_single_action /
+        # ((1+DA)(1+DR))). Chests drop at chest_rate per reward roll, so
+        # steps per chest = base_spr / (0.004 × (1+CF)). DO NOT multiply
+        # by (1+DR) — that would double-count DR, since (1+DR) is already
+        # divided out of base_spr. Matches the Walkscape wiki's Chest
+        # Finding (Mechanics) page: one chest roll per reward roll.
+        effective_rate = base_chest_rate * (1 + chest_finding_pct)
+        if effective_rate > 0:
+            return (base_spr * 100) / effective_rate
+        return 999999999.0
+    
+    if target_name == 'fine_item':
+        fmf_pct = total_stats.get('fine_material_finding', 0)
+        base_rate = target_drop_rate if target_drop_rate else 1.0
+        fine_rate = base_rate * 0.01 * (1 + fmf_pct)
+        if fine_rate > 0:
+            return (base_spr * 100) / fine_rate
+        return 999999999.0
+    
+    if target_name == 'collectible':
+        fc_pct = total_stats.get('find_collectibles', 0) or total_stats.get('collectible_finding', 0)
+        base_rate = target_drop_rate if target_drop_rate else 1.0
+        effective_rate = base_rate * (1 + fc_pct)
+        if effective_rate > 0:
+            return (base_spr * 100) / effective_rate
+        return 999999999.0
+
+    if target_name == 'linens':
+        # "That's A Wrap" passive: 7% chance to roll the linens table twice =>
+        # +7% expected linen drops. total_stats['find_linens'] is already a decimal
+        # (percent converted), so effective_rate = base_rate * (1 + find_linens).
+        fl_pct = total_stats.get('find_linens', 0)
+        base_rate = target_drop_rate if target_drop_rate else 1.0
+        effective_rate = base_rate * (1 + fl_pct)
+        if effective_rate > 0:
+            return (base_spr * 100) / effective_rate
+        return 999999999.0
+    
+    # Item Finding category targets (e.g. 'cat:if:adventurers_guild_tokens').
+    # The ItemFindingCategory.<CAT> stat on gear is the drop chance DIRECTLY
+    # in percentage points (e.g. Adventuring amulet = 1.0 means +1% per
+    # reward roll). base_spr is steps_per_reward_roll, so:
+    #   steps_per_drop = base_spr / (if_stat_pct / 100)
+    #                  = (base_spr * 100) / if_stat_pct
+    # Fine variants layer (1 + fine_material_finding) on top of a 1% base
+    # chance, applied to the regular drop rate.
+    if isinstance(target_name, str) and target_name.startswith('cat:if:'):
+        # Adventurers' Guild Tokens are a VALUE currency (like coins/shells),
+        # not a single item-finding drop: tokens come from selling the
+        # activity's drops to the guild, with fine variants worth more (FMF
+        # boosts them). compute_agt_targets_for_activity injects a
+        # value-aggregate steps_per_agt under this exact key into drop_rates;
+        # prefer it so the scorer ranks by total AGT value/step (matching the
+        # column-3 display) rather than the narrow single-drop IF rate below.
+        # All OTHER cat:if:* categories are genuine drop-count targets and keep
+        # the IF-stat formula (they are never injected into drop_rates).
+        aggregate = drop_rates.get(target_name)
+        if aggregate is not None:
+            return aggregate
+        cat = target_name[len('cat:if:'):]
+        is_fine = cat.endswith('_fine')
+        if is_fine:
+            cat = cat[:-len('_fine')]
+        stat_key = f'ItemFindingCategory.{cat.upper()}'
+        if_stat_percent = total_stats.get(stat_key, 0.0)
+        if is_fine:
+            fmf_pct = total_stats.get('fine_material_finding', 0)
+            # Fine drops at 1% of the regular rate, modified by FMF.
+            effective_rate = if_stat_percent * 0.01 * (1 + fmf_pct)
+        else:
+            effective_rate = if_stat_percent
+        if effective_rate > 0:
+            return (base_spr * 100) / effective_rate
+        return 999999999.0
+    
+    if target_name in drop_rates:
+        # Direct lookup. For 'Sea shell' specifically, callers should
+        # already have routed to 'cat:sea_shells' (the synthetic shell
+        # aggregator) via get_target_name in ui/optimize_worker.py — see
+        # util/shell_value.compute_shell_targets_for_activity which
+        # injects the aggregated steps_per_shell into drop_rates and
+        # folds in fine sea shells (10x) and shell-bearing chests.
+        return drop_rates[target_name]
+    
+    # Not found — penalty
+    return 999999999.0
+
+
+# ----------------------------------------------------------------------------
+# (Removed 2026-05-31) _FINE_FOLD_MULTIPLIER map. Replaced by the
+# 'cat:sea_shells' synthetic aggregator in util/shell_value.py, which
+# combines direct sea shell drops, fine sea shell drops (10x), and
+# shell-bearing chests (Coral chest, Sunken chest, Chest of Syrenthia)
+# into a single steps-per-shell value injected into drop_rates.
+# ----------------------------------------------------------------------------
+
+
+def _effective_targets_for_scoring():
+    """Collect every unique target that scoring needs to evaluate.
+    
+    Sources (in order):
+      1. Each SortingEntry in SORTING_PRIORITY whose enum is
+         STEPS_PER_REWARD_ROLL and that carries a target.
+      2. The legacy module-level TARGET_ITEM (used by the CLI and by
+         worker paths that still set a single headline target for
+         display). Included as the "raw target object" so specific item
+         targets resolve properly in drop_rates lookups.
+    
+    Yields tuples of (raw_target, target_name, composite_key) where:
+      - raw_target: the untransformed target (string category, 'cat:...',
+        item object, etc.) suitable for passing to _compute_spr_for_target.
+      - target_name: the canonicalized name from get_target_name(raw_target).
+      - composite_key: the metrics-dict key to write under, keyed by the
+        *raw* target string when the priority entry drove it, or the
+        target_name when TARGET_ITEM drove it. This must match what
+        SortingEntry.metric_key produces so the comparator can find it.
+    
+    Deduplicated by composite_key; the first occurrence wins so the UI
+    row order determines which target gets the headline value.
+    """
+    seen = set()
+    
+    # 1. Entries from the priority list (UI-driven, source of truth)
+    for raw in SORTING_PRIORITY:
+        # Bare Sorting enum → no per-entry target.
+        if not isinstance(raw, SortingEntry):
+            continue
+        if raw.sort.metric_key != 'steps_per_reward_roll':
+            continue
+        if not raw.target:
+            continue
+        composite = f"steps_per_reward_roll::{raw.target}"
+        if composite in seen:
+            continue
+        seen.add(composite)
+        yield raw.target, get_target_name(raw.target), composite
+    
+    # 2. Legacy module-level TARGET_ITEM (CLI / display fallback).
+    # Stored under its canonical target_name so the bare metric key
+    # receives the headline value.
+    if TARGET_ITEM is not None:
+        target_name = get_target_name(TARGET_ITEM)
+        if target_name != 'raw_rewards':
+            composite = f"steps_per_reward_roll::{target_name}"
+            if composite not in seen:
+                seen.add(composite)
+                yield TARGET_ITEM, target_name, composite
+
+
 def calculate_gearset_metrics(gearset_dict: dict, activity, character, final: bool = False, consumable=None) -> Dict[str, float]:
     """
     Calculate metrics for a complete gearset using Activity's get_expected_drop_rate.
     
     This function aggregates stats and calls activity.get_expected_drop_rate(verbose=True)
     which returns comprehensive metrics including all efficiency calculations.
+    
+    Per-target evaluation (the fix for duplicable SORTING_PRIORITY entries):
+    Every target referenced by SORTING_PRIORITY — as well as the legacy
+    module-level TARGET_ITEM — is evaluated independently and stored on
+    the returned metrics dict under the composite key
+    "steps_per_reward_roll::<target>". The bare "steps_per_reward_roll"
+    key also gets set to the first (headline) target's value so display
+    code and older callers keep working unchanged.
     
     Args:
         gearset_dict: Slot -> Item mapping
@@ -149,7 +685,7 @@ def calculate_gearset_metrics(gearset_dict: dict, activity, character, final: bo
     
     # Aggregate all stats using shared function
     skill = activity.primary_skill.lower()
-    location = activity.locations[0] if activity.locations else None
+    location = _get_location(activity)
     
     total_stats = aggregate_gearset_stats(
         items=items,
@@ -157,39 +693,279 @@ def calculate_gearset_metrics(gearset_dict: dict, activity, character, final: bo
         location=location,
         character=character, 
         include_level_bonus=False,
-        include_collectibles=False
+        # 2026-05-26 (jwbail): flipped from False to True. Previously
+        # this had to be False because activity.get_expected_drop_rate
+        # internally read character.collectibles and merged them into
+        # its own stats — passing pre-merged collectibles would
+        # double-count. Now that get_expected_drop_rate accepts
+        # include_collectibles_from_character=False (set below) and
+        # trusts `stats` for collectibles, we MUST pre-merge them
+        # here, otherwise collectibles never get counted at all.
+        # Symptom of the broken middle state: fast-mode worker score
+        # for Sea fishing (Spear) coins came in at 191.56 vs column-3
+        # display 196.2 — the ~5 coins/1k delta was the collectibles'
+        # FMF/CF/find_* contribution silently dropping out of the
+        # worker's optimizer score (column-3 still applies them
+        # because cachedStats is gear+collectibles+consumable+input).
+        include_collectibles=True,
+        # 2026-06-18 (jwbail): thread the activity so activity-gated item
+        # stats (e.g. Zippy kicksled's -5 steps on Sledding) apply for THIS
+        # activity only. The resolver gates by exact activity name, so this
+        # can never leak the bonus to other activities.
+        activity=activity,
     )
     
+    # Instant-actions mode: zero out step-influencing stats before scoring.
+    # WE, flat steps, and pct steps are irrelevant when actions complete instantly.
+    # DA, DR, BXP, FMF, NMC, QO, CF, IF and all other stats are unaffected.
+    if INSTANT_ACTIONS:
+        total_stats = dict(total_stats)  # shallow copy — do not mutate original
+        total_stats['work_efficiency'] = 0.0
+        total_stats['steps_add'] = 0
+        total_stats['steps_percent'] = 0.0
+    
+    # Instant-actions mode: zero out step-influencing stats before scoring.
+    # WE, flat steps, and pct steps are irrelevant when actions complete instantly.
+    # DA, DR, and all other non-step stats are preserved.
+    if INSTANT_ACTIONS:
+        total_stats = dict(total_stats)  # shallow copy — don't mutate original
+        total_stats['work_efficiency'] = 0.0
+        total_stats['steps_add'] = 0
+        total_stats['steps_percent'] = 0.0
+    
     # Use activity's get_expected_drop_rate with verbose=True to get all metrics
+    # 2026-05-21: when TARGET_ITEM is a synthetic 'cat:*' category
+    # (e.g. cat:coins), pass target_item=None so the activity returns
+    # the FULL drop_rates dict — synthetic categories aren't real
+    # drop names, and passing them as target_item would filter every
+    # row out, leaving compute_coin_targets_for_activity nothing to
+    # work with. _compute_spr_for_target / compute_coin_targets handle
+    # the synthetic resolution downstream.
+    _gxr_target = TARGET_ITEM
+    if isinstance(_gxr_target, str) and _gxr_target.startswith('cat:'):
+        _gxr_target = None
     drop_rates, metrics = activity.get_expected_drop_rate(
         total_stats, 
         location=location, 
-        target_item=TARGET_ITEM,
+        target_item=_gxr_target,
         verbose=True,
-        character=character
+        character=character,
+        input_item=INPUT_ITEM,
+        # 2026-05-26 (jwbail): total_stats already has collectibles merged
+        # in via aggregate_gearset_stats(include_collectibles=True). Tell
+        # get_expected_drop_rate to skip its internal collectible re-add to
+        # avoid double-counting WE/DA/DR/FMF/CF/etc. Without this, the
+        # stored stats_report coins/1k disagrees with column-3 display by
+        # ~0.45 on activities with many fine drops.
+        include_collectibles_from_character=False,
     )
+
+    # 2026-05-21: inject synthetic coin targets ('cat:coins',
+    # 'cat:coins_no_chests') into drop_rates so SORTING_PRIORITY
+    # targets pointing at those values resolve correctly.
+    # Mirrors util/activity_optimizer.py:calculate_activity_metrics
+    # (the simpler activity-stats path) — without this, setting
+    # TARGET_ITEM='cat:coins' produced 999999.0 because
+    # _compute_spr_for_target's drop_rates lookup found nothing.
+    # Each value stored is steps_per_coin (lower is better);
+    # downstream display divides 1000 by it for coins/1k steps.
+    try:
+        from util.coin_value import compute_coin_targets_for_activity
+        coin_targets = compute_coin_targets_for_activity(
+            activity, drop_rates, total_stats,
+        )
+        drop_rates.update(coin_targets)
+    except Exception:
+        # Non-fatal — coin scoring just falls through to the legacy
+        # behavior. Other targets (XP, chests, etc.) are unaffected.
+        pass
+
+    # 2026-05-31: inject the synthetic 'cat:sea_shells' aggregator
+    # mirroring the coin injection above. compute_shell_targets_for_activity
+    # rolls up direct sea shell drops (incl. IF expansion via flatpack
+    # shark / shell snatcher), fine sea shell drops (folded back to
+    # normals at 10x via Material.SEA_SHELL_FINE.special_sell), and
+    # shell-bearing chests (Coral chest, Sunken chest, Chest of Syrenthia)
+    # into a single steps_per_shell value. Replaces the old
+    # _FINE_FOLD_MULTIPLIER branch in _compute_spr_for_target.
+    try:
+        from util.shell_value import compute_shell_targets_for_activity
+        shell_targets = compute_shell_targets_for_activity(
+            activity, drop_rates, total_stats,
+        )
+        drop_rates.update(shell_targets)
+    except Exception:
+        pass
+
+    # 2026-07-05: inject the synthetic Adventurers' Guild Token value
+    # aggregate ('cat:if:adventurers_guild_tokens') mirroring the coin/shell
+    # injections above. AGT is a value currency: you earn tokens by selling
+    # the activity's drops to the guild (special_sell), and fine variants sell
+    # for more, so FMF raises real AGT/step. compute_agt_targets_for_activity
+    # rolls up every drop's AGT special-sell value (base + FMF-boosted fine +
+    # direct Currency.ADVENTURERS_GUILD_TOKEN item-finding drops) into a single
+    # steps_per_agt value keyed under the exact 'cat:if:adventurers_guild_tokens'
+    # target the UI emits. _compute_spr_for_target reads it back so the scorer
+    # ranks by AGT VALUE (matching the column-3 display) instead of the narrow
+    # single-item IF drop rate.
+    try:
+        from util.ag_token_value import compute_agt_targets_for_activity
+        agt_targets = compute_agt_targets_for_activity(
+            activity, drop_rates, total_stats,
+        )
+        drop_rates.update(agt_targets)
+    except Exception:
+        pass
+
+    # Preserve the target-agnostic SPR under the bare key. This stays
+    # as the target-agnostic headline value for display ("Steps per
+    # reward roll: 254") and serves as the lookup value for any legacy
+    # callers that still read metrics['steps_per_reward_roll'] directly.
+    # Per-target values are stored at composite keys; we no longer
+    # overwrite the bare key.
+    base_spr = metrics.get('steps_per_reward_roll', 0.0)
     
-    # If targeting a specific item, override steps_per_reward_roll
-    if TARGET_ITEM is not None:
-        try:
-            # Extract target name (handle both string and object)
-            target_name = get_target_name(TARGET_ITEM)
+    # Compute a SPR for each unique target referenced by scoring and
+    # store it at its composite key so is_better can compare entries
+    # independently.
+    try:
+        if not hasattr(calculate_gearset_metrics, '_call_count'):
+            calculate_gearset_metrics._call_count = 0
+        calculate_gearset_metrics._call_count += 1
+        _should_log = calculate_gearset_metrics._call_count <= 3 or final
+        
+        any_target = False
+        for raw_target, target_name, composite_key in _effective_targets_for_scoring():
+            any_target = True
+            spr = _compute_spr_for_target(
+                target=raw_target,
+                base_spr=base_spr,
+                drop_rates=drop_rates,
+                total_stats=total_stats,
+                target_drop_rate=TARGET_DROP_RATE,
+            )
+            metrics[composite_key] = spr
             
-            if target_name in drop_rates:
-                # Override steps_per_reward_roll with steps per specific item
-                metrics['steps_per_reward_roll'] = drop_rates[target_name]
-            else:
-                # Target item not in drop table
-                if VERBOSE:
-                    print(f"  Warning: {target_name} not found in drop rates (available: {list(drop_rates.keys())})")
-                # Use a penalty value
-                metrics['steps_per_reward_roll'] = 999999999.0
-        except Exception as e:
-            # If calculation fails, use a very high penalty value
-            if VERBOSE:
-                print(f"  Warning: Could not calculate drop rate: {e}")
-            metrics['steps_per_reward_roll'] = 999999999.0
-    
+            if _should_log:
+                print(
+                    f"  [SCORE #{calculate_gearset_metrics._call_count}] "
+                    f"target={target_name!r} key={composite_key!r} SPR={spr:.2f}"
+                )
+        
+        if _should_log and any_target:
+            print(
+                f"  [SCORE #{calculate_gearset_metrics._call_count}] "
+                f"WE={total_stats.get('work_efficiency',0):.4f} "
+                f"DA={total_stats.get('double_action',0):.4f} "
+                f"DR={total_stats.get('double_rewards',0):.4f} "
+                f"FC={total_stats.get('find_collectibles',0)} "
+                f"CF={total_stats.get('chest_finding',0)} "
+                f"FMF={total_stats.get('fine_material_finding',0)}"
+            )
+
+        # 2026-05-26 (jwbail): final-scoring coin breakdown for debugging
+        # the stats-report worker vs column-3 display parity. Gated on
+        # `final=True` so it only logs on the saved gearset (not every
+        # search step). Mirrors column-3's [COINS-DEBUG] dump so the two
+        # paths can be diffed line-by-line.
+        if final:
+            try:
+                _act_name = getattr(activity, 'name', '?')
+                # Pull the cat:coins synthetic and per-drop coin contributions.
+                _spc = drop_rates.get('cat:coins')
+                _coins_per_1k = (1000.0 / _spc) if (_spc and _spc > 0) else 0.0
+                print(
+                    f"  [WORKER-COINS-DEBUG] activity={_act_name!r} "
+                    f"final coins/1k={_coins_per_1k:.4f} steps_per_coin={_spc}"
+                )
+                print(
+                    f"  [WORKER-COINS-DEBUG]   total_stats finding bonuses: "
+                    f"FMF={total_stats.get('fine_material_finding',0)} "
+                    f"CF={total_stats.get('chest_finding',0)} "
+                    f"FC={total_stats.get('find_collectibles',0)} "
+                    f"FBN={total_stats.get('find_bird_nests',0)} "
+                    f"FG={total_stats.get('find_gems',0)} "
+                    f"WE={total_stats.get('work_efficiency',0):.4f} "
+                    f"DA={total_stats.get('double_action',0):.4f} "
+                    f"DR={total_stats.get('double_rewards',0):.4f}"
+                )
+                # Sanity: is collectible contribution included? Print a
+                # sentinel stat that should reflect collectible totals.
+                # (Just dump the keys for now so the user can paste back.)
+                print(
+                    f"  [WORKER-COINS-DEBUG]   IF stats: "
+                    + ", ".join(
+                        f"{k}={v}"
+                        for k, v in total_stats.items()
+                        if isinstance(k, str) and k.startswith('ItemFindingCategory.')
+                    )
+                )
+                # Per-drop contributions — re-run compute_coin_targets's
+                # iteration so each drop's coin_value × items/step is
+                # visible. Only items with non-zero contribution.
+                from util.coin_value import (
+                    _collect_activity_drops_with_equipment,
+                    get_drop_coin_value,
+                    get_drop_fine_coin_value,
+                )
+                _all_drops = _collect_activity_drops_with_equipment(
+                    activity, total_stats or {}, None, None
+                )
+                _seen = set()
+                _running = 0.0
+                for _d in _all_drops:
+                    if _d.item_name == 'Nothing' or _d.item_name in _seen:
+                        continue
+                    _seen.add(_d.item_name)
+                    _steps = drop_rates.get(_d.item_name)
+                    if not _steps or _steps <= 0:
+                        continue
+                    _cv = get_drop_coin_value(_d) or 0
+                    _fc = get_drop_fine_coin_value(_d) or 0
+                    _base = (1000.0 / _steps) * _cv if _cv > 0 else 0
+                    _fine_steps = drop_rates.get(f'{_d.item_name} (Fine)')
+                    _fine = (1000.0 / _fine_steps) * _fc if (_fine_steps and _fc > 0) else 0
+                    _tot = _base + _fine
+                    if _tot > 0:
+                        _running += _tot
+                        print(
+                            f"  [WORKER-COINS-DEBUG]     {_d.item_name!r} "
+                            f"steps={_steps:.2f} base_coin={_cv} fine_coin={_fc} "
+                            f"base={_base:.4f} fine={_fine:.4f} TOTAL={_tot:.4f}"
+                        )
+                print(f"  [WORKER-COINS-DEBUG]   running sum={_running:.4f} (vs cat:coins={_coins_per_1k:.4f})")
+            except Exception as _coin_log_err:
+                print(f"  [WORKER-COINS-DEBUG] log error: {_coin_log_err}")
+    except Exception as e:
+        print(f"  WARNING: Could not calculate target-specific drop rates: {e}")
+        import traceback
+        traceback.print_exc()
+        # Penalty on each configured target so the gearset is deprioritized.
+        for raw_target, target_name, composite_key in _effective_targets_for_scoring():
+            metrics[composite_key] = 999999999.0
+
+    # Display-only: stash the FULL per-drop steps map so the non-owned
+    # upgrade popup can render a per-individual-drop breakdown. Uses the
+    # SAME total_stats the scoring call above used (collectibles already
+    # merged) and target_item=None to get every drop incl. fine variants
+    # ("<name> (Fine)" keys). Gated on EMIT_COMPONENT_STEPS so it only
+    # runs for the bounded set of accepted alternatives, never the main
+    # local search.
+    if EMIT_COMPONENT_STEPS:
+        try:
+            full_drop_rates, _ = activity.get_expected_drop_rate(
+                total_stats,
+                location=location,
+                target_item=None,
+                verbose=True,
+                character=character,
+                input_item=INPUT_ITEM,
+                include_collectibles_from_character=False,
+            )
+            metrics['_component_steps'] = full_drop_rates
+        except Exception:
+            metrics['_component_steps'] = {}
+
     if final: 
         # Needed to get the collectibles in the final dispaly 
         items_for_final = [item for slot, item in gearset_dict.items() if item is not None and slot != 'consumable']
@@ -201,9 +977,13 @@ def calculate_gearset_metrics(gearset_dict: dict, activity, character, final: bo
             location=location,
             character=character, 
             include_level_bonus=False,
-            include_collectibles=True
+            include_collectibles=True,
+            activity=activity,
         )
     
+    # Alias current_steps with a unique key so it doesn't conflict with recipe's current_steps
+    metrics['current_steps_activity'] = metrics.get('current_steps', 0)
+
     return metrics, total_stats
 
 # ============================================================================
@@ -234,7 +1014,7 @@ def calculate_optimization_floors(activity, character, consumable=None):
     print(f"{'='*70}")
     
     skill = activity.primary_skill.lower()
-    location = activity.locations[0] if activity.locations else None
+    location = _get_location(activity)
     
     # Step 1: Calculate baseline with empty gearset
     # Build empty gearset with all slots set to None
@@ -247,6 +1027,8 @@ def calculate_optimization_floors(activity, character, consumable=None):
         empty_gearset[f'tool{i}'] = None
     if CONSUMABLE_ITEMS:
         empty_gearset['consumable'] = None
+    if PET_ITEMS:
+        empty_gearset['pet'] = None
     
     baseline_metrics, _ = calculate_gearset_metrics(
         empty_gearset, activity, character, consumable=consumable
@@ -264,10 +1046,14 @@ def calculate_optimization_floors(activity, character, consumable=None):
     original_priority = list(SORTING_PRIORITY)
     
     for sorting in SORTING_PRIORITY:
-        weight = SORTING_WEIGHTS.get(sorting, 100)
+        weight = sorting.weight if hasattr(sorting, 'weight') else SORTING_WEIGHTS.get(sorting, 100)
         if weight >= 100:
             # 100% weight metrics use dynamic floors, but we still need max_achievable
             # for informational purposes. Skip the greedy pass — it's not needed.
+            max_metrics[sorting.metric_key] = baseline_metrics.get(sorting.metric_key, 0.0)
+            continue
+        if weight == 0:
+            # 0% weight metrics are ignored entirely — no floor, no greedy pass.
             max_metrics[sorting.metric_key] = baseline_metrics.get(sorting.metric_key, 0.0)
             continue
         
@@ -320,7 +1106,7 @@ def calculate_optimization_floors(activity, character, consumable=None):
     for sorting in SORTING_PRIORITY:
         key = sorting.metric_key
         floor = static_floors.get(key)
-        weight = SORTING_WEIGHTS.get(sorting, 100)
+        weight = sorting.weight if hasattr(sorting, 'weight') else SORTING_WEIGHTS.get(sorting, 100)
         if floor is None:
             print(f"  {sorting.display_name}: dynamic (100% weight)")
         else:
@@ -333,6 +1119,55 @@ def calculate_optimization_floors(activity, character, consumable=None):
 # ============================================================================
 # GREEDY INITIAL SOLUTION (from V9)
 # ============================================================================
+
+def _required_item_locked_slots(activity, character) -> dict:
+    """Force-equip an activity's mandatory item_requirements (e.g. Repair the
+    bank's Spectral saw) by treating each as a locked slot.
+
+    The greedy + local-search optimize purely on metrics, and
+    Activity.is_unlocked (the validity gate used during search) does NOT
+    enforce item_requirements, so a required-but-low-metric item (the Spectral
+    saw has negative work efficiency at low quality) is never selected. Pinning
+    it as a locked slot guarantees it stays in the gearset through every greedy
+    fill and swap phase (all of which skip locked slots).
+
+    Returns {} for activities with no item_requirements -> zero impact on every
+    other activity. Items the player does not own are skipped (the optimizer
+    only equips owned items).
+    """
+    if activity is None:
+        return {}
+    req_names = [
+        str(n).lower()
+        for n in (activity.requirements.get('item_requirements', []) or [])
+    ]
+    if not req_names:
+        return {}
+    owned_by_name = {}
+    for it, qty in character.items.items():
+        if qty and getattr(it, 'name', None):
+            owned_by_name.setdefault(it.name.lower(), it)
+    try:
+        tool_slots = character.get_tool_slots()
+    except Exception:
+        tool_slots = 0
+    out = {}
+    used_tool = 0
+    for nm in req_names:
+        it = owned_by_name.get(nm)
+        if it is None:
+            continue
+        islot = getattr(it, 'slot', None)
+        if islot in ('tools', 'tool'):
+            if used_tool < tool_slots:
+                out[f'tool{used_tool}'] = it
+                used_tool += 1
+        elif islot == 'ring':
+            out['ring2' if 'ring1' in out else 'ring1'] = it
+        elif islot:
+            out[islot] = it
+    return out
+
 
 def get_greedy_initial_solution(activity, character, consumable=None) -> dict:
     """
@@ -349,7 +1184,23 @@ def get_greedy_initial_solution(activity, character, consumable=None) -> dict:
     # Simple greedy: pick best item per slot
     gearset = {}
     skill = activity.primary_skill.lower()
-    location = activity.locations[0] if activity.locations else None
+    location = _get_location(activity)
+    
+    # Pre-fill locked slots
+    locked = dict(LOCKED_SLOTS) if LOCKED_SLOTS else {}
+    # When instant-actions mode is active, lock the pet slot
+    if FORCED_PET is not None:
+        locked['pet'] = FORCED_PET
+    # Force-equip mandatory item_requirements (e.g. Spectral saw for Repair the
+    # bank) as locked slots so the metric-based optimizer can't drop them.
+    # setdefault: user/instant-action locks take precedence.
+    for _rs, _ri in _required_item_locked_slots(activity, character).items():
+        locked.setdefault(_rs, _ri)
+    if locked:
+        for slot_name, item in locked.items():
+            gearset[slot_name] = item
+            print(f"  {slot_name}: {item.name} (LOCKED)")
+        print(f"Pre-filled {len(locked)} locked slots")
     
     # Get all items (filter by unlock status and activity-irrelevant items)
     all_items = []
@@ -357,6 +1208,13 @@ def get_greedy_initial_solution(activity, character, consumable=None) -> dict:
     irrelevant_stat_count = 0
     required_keywords = activity.requirements.get('keyword_counts', {})
     required_keyword_set = set(required_keywords.keys())
+    required_item_names = {
+        name.lower() for name in activity.requirements.get('item_requirements', [])
+    }
+    
+    # Determine which finding stats are actually useful for this activity's drops
+    useful_finding = get_useful_finding_stats(activity)
+    activity_relevant = get_activity_relevant_stats(activity)
     
     for item, qty in character.items.items():
         if qty > 0 and hasattr(item, 'get_stats_for_skill'):
@@ -366,11 +1224,34 @@ def get_greedy_initial_solution(activity, character, consumable=None) -> dict:
                     excluded_count += 1
                     continue
             
-            # Skip items with no activity-relevant stats UNLESS they satisfy a required keyword
-            has_relevant = has_activity_relevant_stats(item, skill, location, character)
-            has_required_keyword = required_keyword_set and item_has_any_keyword(item, required_keyword_set)
+            # Check skill level requirements for generic items (they don't have is_unlocked)
+            if hasattr(item, 'requirements') and isinstance(item.requirements, list):
+                meets_reqs = True
+                for req in item.requirements:
+                    if isinstance(req, dict) and req.get('type') == 'skill':
+                        req_skill = (req.get('skill') or '').lower()
+                        req_level = int(req.get('level', 0))
+                        if req_skill and req_level > 0:
+                            char_level = character.get_skill_level(req_skill) if hasattr(character, 'get_skill_level') else 0
+                            if char_level < req_level:
+                                meets_reqs = False
+                                break
+                if not meets_reqs:
+                    excluded_count += 1
+                    continue
             
-            if not has_relevant and not has_required_keyword:
+            # Skip items with no activity-relevant stats UNLESS they satisfy a required
+            # keyword OR are named as a specific item requirement (e.g., Spectral saw)
+            has_relevant = has_activity_relevant_stats(item, skill, location, character, useful_finding)
+            has_required_keyword = required_keyword_set and item_has_any_keyword(item, required_keyword_set)
+            is_required_item = (
+                required_item_names
+                and hasattr(item, 'name')
+                and item.name
+                and item.name.lower() in required_item_names
+            )
+            
+            if not has_relevant and not has_required_keyword and not is_required_item:
                 irrelevant_stat_count += 1
                 continue
             
@@ -378,28 +1259,152 @@ def get_greedy_initial_solution(activity, character, consumable=None) -> dict:
     
     print(f"Found {len(all_items)} items to choose from ({excluded_count} locked, {irrelevant_stat_count} activity-irrelevant filtered)")
     
+    # DEBUG: report on tools matching DEBUG_TOOL_KEYWORDS
+    if DEBUG_TOOL_KEYWORDS:
+        _debug_tools_all = [
+            (i.name, list(getattr(i, 'keywords', [])))
+            for i in all_items
+            if getattr(i, 'slot', None) in ('tools', 'tool')
+            and _tool_matches_debug_keywords(i)
+        ]
+        print(f"  DEBUG TOOL-KEYWORDS (watching {DEBUG_TOOL_KEYWORDS}):")
+        print(f"    In candidate pool ({len(_debug_tools_all)}): {_debug_tools_all}")
+        # Stats for each watched tool at this activity's skill+location
+        for _item in all_items:
+            if getattr(_item, 'slot', None) in ('tools', 'tool') and _tool_matches_debug_keywords(_item):
+                _s = _item.get_stats_for_skill(skill, location=location, character=character)
+                print(f"    Stats for {_item.name}: {_s}")
+                print(f"      requirements: {getattr(_item, 'requirements', [])}")
+    
+    # Dominance pruning: remove items strictly worse than another in the same slot
+    # Only prune gear and ring slots (not tools which need multiple unique items)
+    # Keyword-protected items (items that satisfy a required keyword) are protected
+    # from being pruned by non-keyword items, but they CAN be pruned by other
+    # keyword-protected items in the same slot (e.g., Oak skis dominates Pine skis)
+    gear_items = [item for item in all_items if hasattr(item, 'slot') and item.slot not in ('tools', 'tool')]
+    tool_items = [item for item in all_items if hasattr(item, 'slot') and item.slot in ('tools', 'tool')]
+    
+    required_keyword_set = set(required_keywords.keys())
+    keyword_protected = [item for item in gear_items if required_keyword_set and item_has_any_keyword(item, required_keyword_set)]
+    keyword_protected_ids = {id(item) for item in keyword_protected}
+    pruneable_gear = [item for item in gear_items if id(item) not in keyword_protected_ids]
+    
+    pre_prune_count = len(gear_items)
+    
+    # Prune non-keyword items normally
+    pruneable_gear = prune_dominated_items(pruneable_gear, skill, location, character, activity_relevant)
+    
+    # Also prune keyword-protected items against each other (within same slot)
+    # This ensures e.g. Oak skis (24% WE) prunes Pine skis (16% WE)
+    keyword_protected = prune_dominated_items(keyword_protected, skill, location, character, activity_relevant)
+    
+    gear_items = pruneable_gear + keyword_protected
+    pruned_count = pre_prune_count - len(gear_items)
+    if pruned_count > 0:
+        print(f"After dominance pruning: {len(gear_items) + len(tool_items)} items ({pruned_count} dominated gear/ring items removed)")
+    
+    # DEBUG: show which keyword-protected items survived/got pruned, and which
+    # items were pruneable. Helps diagnose cases where an item like
+    # silver_sun_stone_ring (Light source keyword) looks like it should be
+    # available but doesn't show up in the 2-swap candidate pool.
+    _kw_protected_surviving = {i.name for i in keyword_protected}
+    # Re-derive the pre-prune keyword set from all_items (all_items was already
+    # filtered but not yet dominance-pruned at this point)
+    _gear_all = [item for item in all_items if hasattr(item, 'slot') and item.slot not in ('tools', 'tool')]
+    _kw_all = [item for item in _gear_all if required_keyword_set and item_has_any_keyword(item, required_keyword_set)]
+    _kw_names_before = {i.name for i in _kw_all}
+    _kw_pruned = _kw_names_before - _kw_protected_surviving
+    if _kw_names_before:
+        print(f"  Keyword-protected items ({', '.join(sorted(required_keyword_set))}): {len(_kw_names_before)} before prune, {len(_kw_protected_surviving)} survived")
+        if _kw_pruned:
+            print(f"  Keyword-protected items pruned by dominance: {sorted(_kw_pruned)}")
+        # Per-slot breakdown of surviving keyword-protected items
+        _by_slot_kw = {}
+        for it in keyword_protected:
+            s = getattr(it, 'slot', '?')
+            _by_slot_kw.setdefault(s, []).append(it.name)
+        for s in sorted(_by_slot_kw.keys()):
+            print(f"    [{s}] keyword-protected survivors: {_by_slot_kw[s]}")
+    
+    all_items = gear_items + tool_items
+    # Sort by name then UUID for deterministic optimizer results regardless of inventory order
+    all_items.sort(key=lambda i: (getattr(i, 'name', ''), getattr(i, 'uuid', '')))
+    
+    # Debug: log items available per slot after pruning
+    _debug_slots = {}
+    for item in all_items:
+        s = getattr(item, 'slot', '?')
+        if s not in _debug_slots:
+            _debug_slots[s] = []
+        _debug_slots[s].append(item.name)
+    for s, names in sorted(_debug_slots.items()):
+        print(f"  [{s}] {len(names)} items: {', '.join(names[:10])}{'...' if len(names) > 10 else ''}")
+    
     # For each slot, pick best item
     gear_slots = ['head', 'cape', 'back', 'chest', 'primary', 'secondary',
                   'hands', 'legs', 'neck', 'feet', 'ring1', 'ring2']
     
     # Check activity requirements using unified keyword_counts
     # Get required keywords from activity
-    required_keywords = activity.requirements.get('keyword_counts', {})
+    required_keywords = dict(activity.requirements.get('keyword_counts', {}))
     
     # Track how many of each keyword we've added so far
     current_keyword_counts = {kw: 0 for kw in required_keywords.keys()}
     
+    # Pre-satisfy keywords that are fulfilled by the input item (e.g. arrows for hunting)
+    if INPUT_ITEM and hasattr(INPUT_ITEM, 'keywords'):
+        for kw in required_keywords.keys():
+            if item_has_keyword(INPUT_ITEM, kw):
+                current_keyword_counts[kw] += 1
+    elif not INPUT_ITEM and hasattr(activity, 'input_items') and activity.input_items:
+        # No input selected, but activity has input_items with keyword requirements.
+        # The player will always have the required input item in inventory to do the
+        # activity, so pre-satisfy those keyword requirements regardless of selection.
+        for ii in activity.input_items:
+            if getattr(ii, 'type', '') == 'keyword':
+                kw = getattr(ii, 'reference', '').lower()
+                if kw in current_keyword_counts:
+                    current_keyword_counts[kw] += getattr(ii, 'quantity', 1)
+
+    # Pre-satisfy keywords provided by a candidate pet's passive ability
+    # (e.g. Gecko Level 4 "Clever Climber" advertises provides_keyword='climbing gear').
+    # Only one pet can be equipped, so each keyword gets at most +1 from the pet slot.
+    _pet_candidates = []
+    if FORCED_PET is not None:
+        _pet_candidates = [FORCED_PET]
+    elif PET_ITEMS:
+        _pet_candidates = list(PET_ITEMS)
+    _pet_keyword_credits = set()  # keywords that rely on the pet slot to satisfy requirements
+    for kw, required in required_keywords.items():
+        if current_keyword_counts.get(kw, 0) >= required:
+            continue
+        for _pet in _pet_candidates:
+            if pet_provides_keyword(_pet, kw):
+                current_keyword_counts[kw] += 1
+                _pet_keyword_credits.add(kw)
+                break
+    # Count keywords from locked slots
+    for slot_name, item in locked.items():
+        if item:
+            for kw in required_keywords.keys():
+                if item_satisfies_required_keyword(item, kw, activity):
+                    current_keyword_counts[kw] += 1
+    
     for slot in gear_slots:
+        # Skip locked slots
+        if slot in locked:
+            continue
+        
         item_slot = 'ring' if slot in ['ring1', 'ring2'] else slot
         
         # Check which keywords we still need
         needed_keywords = {kw for kw, required in required_keywords.items() 
                           if current_keyword_counts[kw] < required}
         
-        best_keyword_item = None  # Best item that has a needed keyword
-        best_keyword_metric = float('inf') if not SORTING_PRIORITY[0].is_reverse else float('-inf')
+        # Track best item per keyword (to prioritize keywords with highest deficit)
+        best_per_keyword = {}  # kw -> (item, metrics)
         best_free_item = None  # Best item regardless of keywords
-        best_free_metric = float('inf') if not SORTING_PRIORITY[0].is_reverse else float('-inf')
+        best_free_metrics = None
         
         for item in all_items:
             if not hasattr(item, 'slot') or item.slot != item_slot:
@@ -414,35 +1419,29 @@ def get_greedy_initial_solution(activity, character, consumable=None) -> dict:
                 continue
             
             metrics, _ = calculate_gearset_metrics(test_gearset, activity, character, consumable=consumable)
-            metric_value = metrics[SORTING_PRIORITY[0].metric_key]
             
             # Check which needed keywords this item has
-            item_keywords = {kw for kw in needed_keywords if item_has_keyword(item, kw)}
+            item_keywords = {kw for kw in needed_keywords if item_satisfies_required_keyword(item, kw, activity)}
             
-            # Track best keyword item separately from best overall item
-            if item_keywords:
-                if SORTING_PRIORITY[0].is_reverse:
-                    if metric_value > best_keyword_metric:
-                        best_keyword_metric = metric_value
-                        best_keyword_item = item
-                else:
-                    if metric_value < best_keyword_metric:
-                        best_keyword_metric = metric_value
-                        best_keyword_item = item
+            # Track best item per keyword separately
+            for kw in item_keywords:
+                if kw not in best_per_keyword or Sorting.is_better(metrics, best_per_keyword[kw][1], SORTING_PRIORITY):
+                    best_per_keyword[kw] = (item, metrics)
             
             # Always track best overall item (keyword or not)
-            if SORTING_PRIORITY[0].is_reverse:
-                if metric_value > best_free_metric:
-                    best_free_metric = metric_value
-                    best_free_item = item
-            else:
-                if metric_value < best_free_metric:
-                    best_free_metric = metric_value
-                    best_free_item = item
+            if best_free_metrics is None or Sorting.is_better(metrics, best_free_metrics, SORTING_PRIORITY):
+                best_free_metrics = metrics
+                best_free_item = item
         
-        # Decision: if we still need keywords, prefer keyword item; otherwise pick best overall
-        if needed_keywords and best_keyword_item:
-            best_item = best_keyword_item
+        # Decision: if we still need keywords, prefer item for the keyword with highest deficit
+        # This ensures e.g. 'expert diving gear' (needs 3) is prioritized over 'light source' (needs 1)
+        if needed_keywords and best_per_keyword:
+            # Pick the keyword with the highest remaining deficit
+            priority_kw = max(
+                best_per_keyword.keys(),
+                key=lambda kw: required_keywords[kw] - current_keyword_counts[kw]
+            )
+            best_item = best_per_keyword[priority_kw][0]
         else:
             best_item = best_free_item
         
@@ -452,7 +1451,7 @@ def get_greedy_initial_solution(activity, character, consumable=None) -> dict:
         # Update keyword counts
         if best_item:
             for kw in required_keywords.keys():
-                if item_has_keyword(best_item, kw):
+                if item_satisfies_required_keyword(best_item, kw, activity):
                     current_keyword_counts[kw] += 1
         
         if best_item:
@@ -472,17 +1471,20 @@ def get_greedy_initial_solution(activity, character, consumable=None) -> dict:
     for i in range(tool_slots):
         slot = f'tool{i}'
         
+        # Skip locked slots
+        if slot in locked:
+            continue
+        
         # Check which keywords we still need
         needed_keywords = {kw for kw, required in required_keywords.items() 
                           if current_keyword_counts[kw] < required}
         
-        best_keyword_tool = None
-        best_keyword_metric = float('inf') if not SORTING_PRIORITY[0].is_reverse else float('-inf')
+        best_per_keyword_tool = {}  # kw -> (item, metrics)
         best_free_tool = None
-        best_free_metric = float('inf') if not SORTING_PRIORITY[0].is_reverse else float('-inf')
+        best_free_metrics = None
         
         for item in all_items:
-            if not hasattr(item, 'slot') or item.slot != 'tools':
+            if not hasattr(item, 'slot') or item.slot not in ('tools', 'tool'):
                 continue
             
             # Test this tool
@@ -494,44 +1496,96 @@ def get_greedy_initial_solution(activity, character, consumable=None) -> dict:
                 continue
             
             metrics, _ = calculate_gearset_metrics(test_gearset, activity, character, consumable=consumable)
-            metric_value = metrics[SORTING_PRIORITY[0].metric_key]
             
             # Check which needed keywords this item has
-            item_keywords = {kw for kw in needed_keywords if item_has_keyword(item, kw)}
+            item_keywords = {kw for kw in needed_keywords if item_satisfies_required_keyword(item, kw, activity)}
             
-            # Track best keyword tool separately
+            # Track best tool per keyword separately
             if item_keywords:
-                if SORTING_PRIORITY[0].is_reverse:
-                    if metric_value > best_keyword_metric:
-                        best_keyword_metric = metric_value
-                        best_keyword_tool = item
-                else:
-                    if metric_value < best_keyword_metric:
-                        best_keyword_metric = metric_value
-                        best_keyword_tool = item
+                # DEBUG: log hunting bow candidates during greedy
+                if any('hunting' in k.lower() for k in getattr(item, 'keywords', [])):
+                    _spr = metrics.get('steps_per_reward_roll', 0)
+                    _prev_entry = best_per_keyword_tool.get('hunting bow')
+                    _prev_spr = _prev_entry[1].get('steps_per_reward_roll', 0) if _prev_entry else 'N/A'
+                    _is_new_best_kw = _prev_entry is None or Sorting.is_better(metrics, _prev_entry[1], SORTING_PRIORITY)
+                    _txps = metrics.get('total_xp_per_step', 0)
+                    _prev_txps = _prev_entry[1].get('total_xp_per_step', 0) if _prev_entry else 'N/A'
+                    print(f"  DEBUG GREEDY {slot}: {item.name} SPR={_spr:.4f} prev_best_SPR={_prev_spr} is_new_best={_is_new_best_kw}")
+                    print(f"    total_xp_per_step={_txps:.6f} prev_best={_prev_txps}")
+                    _stats_debug = calculate_gearset_metrics(test_gearset, activity, character, consumable=consumable)[1]
+                    print(f"    WE={_stats_debug.get('work_efficiency',0):.4f} DA={_stats_debug.get('double_action',0):.4f} DR={_stats_debug.get('double_rewards',0):.4f} BXP_add={_stats_debug.get('bonus_xp_add',0):.2f}")
+                for kw in item_keywords:
+                    if kw not in best_per_keyword_tool or Sorting.is_better(metrics, best_per_keyword_tool[kw][1], SORTING_PRIORITY):
+                        best_per_keyword_tool[kw] = (item, metrics)
+            
+            # DEBUG: log any tool matching DEBUG_TOOL_KEYWORDS (even when item_keywords is empty)
+            if _tool_matches_debug_keywords(item):
+                _spr = metrics.get('steps_per_reward_roll', 0)
+                _txps = metrics.get('total_xp_per_step', 0)
+                _best_free_spr = best_free_metrics.get('steps_per_reward_roll', 'N/A') if best_free_metrics else 'N/A'
+                _would_be_new_free = best_free_metrics is None or Sorting.is_better(metrics, best_free_metrics, SORTING_PRIORITY)
+                print(f"  DEBUG GREEDY TOOL-KW {slot}: {item.name} kw={item.keywords} item_keywords_matched={item_keywords}")
+                print(f"    SPR={_spr:.4f} total_xp_per_step={_txps:.6f} beats_best_free={_would_be_new_free} (cur_best_free_SPR={_best_free_spr})")
+                _stats_debug = calculate_gearset_metrics(test_gearset, activity, character, consumable=consumable)[1]
+                print(f"    WE={_stats_debug.get('work_efficiency',0):.4f} DA={_stats_debug.get('double_action',0):.4f} DR={_stats_debug.get('double_rewards',0):.4f} FMF={_stats_debug.get('fine_material_finding',0):.4f} CF={_stats_debug.get('chest_finding',0):.4f}")
             
             # Always track best overall tool
-            if SORTING_PRIORITY[0].is_reverse:
-                if metric_value > best_free_metric:
-                    best_free_metric = metric_value
-                    best_free_tool = item
-            else:
-                if metric_value < best_free_metric:
-                    best_free_metric = metric_value
+            if best_free_metrics is None or Sorting.is_better(metrics, best_free_metrics, SORTING_PRIORITY):
+                best_free_metrics = metrics
+                best_free_tool = item
+            elif (best_free_tool is not None
+                  and not Sorting.is_better(best_free_metrics, metrics, SORTING_PRIORITY)):
+                # Exact tie on the scored objective. inventory_space is not
+                # part of any activity metric (calculate_gearset_metrics never
+                # reads it), so two inventory tools such as Catch bucket
+                # (+1 inv) and Zip pouch (+3 inv) score identically and the
+                # greedy would otherwise keep whichever sorts first by name
+                # ("Catch bucket"). Break the tie toward the tool with more
+                # inventory_space so a strictly-better inventory tool is never
+                # passed over for a dominated one. Bug 3304a9de: Box trapping
+                # (a Hunting activity, where the inventory tools' skill-scoped
+                # stats don't apply) recommended Catch bucket over Zip pouch /
+                # Log basket in the goals/stats report (fast mode skips the
+                # dumb-upgrade pass, and that pass is itself blocked here by
+                # the items' differing skill keywords). Fixing the greedy
+                # tie-break resolves it at the source for both fast and full
+                # optimization paths. More inventory is never worse for the
+                # player even though it is unscored, so this only ever swaps
+                # on an exact objective tie.
+                _cand_inv = (item.get_stats_for_skill(
+                    skill, location=location, character=character) or {}).get('inventory_space', 0) or 0
+                _best_inv = (best_free_tool.get_stats_for_skill(
+                    skill, location=location, character=character) or {}).get('inventory_space', 0) or 0
+                if _cand_inv > _best_inv:
+                    best_free_metrics = metrics
                     best_free_tool = item
         
-        # Decision: if we still need keywords, prefer keyword tool; otherwise pick best overall
-        if needed_keywords and best_keyword_tool:
-            selected_tool = best_keyword_tool
+        # Decision: if we still need keywords, prefer tool for the keyword with highest deficit
+        if needed_keywords and best_per_keyword_tool:
+            priority_kw = max(
+                best_per_keyword_tool.keys(),
+                key=lambda kw: required_keywords[kw] - current_keyword_counts[kw]
+            )
+            selected_tool = best_per_keyword_tool[priority_kw][0]
         else:
             selected_tool = best_free_tool
+        
+        # DEBUG: log greedy tool selection when DEBUG_TOOL_KEYWORDS is set
+        if DEBUG_TOOL_KEYWORDS:
+            _kw_tools_summary = {kw: (it.name, m.get('steps_per_reward_roll', 0)) for kw, (it, m) in best_per_keyword_tool.items()}
+            _free_name = best_free_tool.name if best_free_tool else 'None'
+            _free_spr = best_free_metrics.get('steps_per_reward_roll', 'N/A') if best_free_metrics else 'N/A'
+            _selected_name = selected_tool.name if selected_tool else 'None'
+            print(f"  DEBUG TOOL-KW SELECT {slot}: selected={_selected_name} (needed_kw={sorted(needed_keywords)})")
+            print(f"    best_per_keyword_tool: {_kw_tools_summary}")
+            print(f"    best_free_tool: {_free_name} (SPR={_free_spr})")
         
         gearset[slot] = selected_tool
         
         # Update keyword counts
         if selected_tool:
             for kw in required_keywords.keys():
-                if item_has_keyword(selected_tool, kw):
+                if item_satisfies_required_keyword(selected_tool, kw, activity):
                     current_keyword_counts[kw] += 1
         
         if selected_tool:
@@ -541,35 +1595,37 @@ def get_greedy_initial_solution(activity, character, consumable=None) -> dict:
     
     # Add consumable slot if consumables are available
     if CONSUMABLE_ITEMS:
+        # Filter consumables to only those with activity-relevant stats
+        useful_finding_cons = get_useful_finding_stats(activity)
+        relevant_consumables = [
+            c for c in CONSUMABLE_ITEMS
+            if has_activity_relevant_stats(c, skill, location, character, useful_finding_cons)
+        ]
+        filtered_count = len(CONSUMABLE_ITEMS) - len(relevant_consumables)
+        if filtered_count > 0:
+            print(f"  Filtered {filtered_count} consumables with no relevant stats for {activity.name}")
+        
         slot = 'consumable'
         gearset[slot] = None
-        best_value = None
+        best_metrics = None
         best_item = None
         
-        for item in CONSUMABLE_ITEMS:
+        for item in relevant_consumables:
             test_gearset = dict(gearset)
             test_gearset[slot] = item
             
             metrics, _ = calculate_gearset_metrics(test_gearset, activity, character, consumable=item)
-            metric_value = metrics[SORTING_PRIORITY[0].metric_key]
             
-            if best_value is None or (
-                (SORTING_PRIORITY[0].is_reverse and metric_value > best_value) or
-                (not SORTING_PRIORITY[0].is_reverse and metric_value < best_value)
-            ):
-                best_value = metric_value
+            if best_metrics is None or Sorting.is_better(metrics, best_metrics, SORTING_PRIORITY):
+                best_metrics = metrics
                 best_item = item
         
-        # Also test without consumable
+        # Also test without consumable — prefer None when metrics are equal
         test_gearset = dict(gearset)
         test_gearset[slot] = None
         metrics, _ = calculate_gearset_metrics(test_gearset, activity, character, consumable=None)
-        metric_value = metrics[SORTING_PRIORITY[0].metric_key]
         
-        if best_value is None or (
-            (SORTING_PRIORITY[0].is_reverse and metric_value > best_value) or
-            (not SORTING_PRIORITY[0].is_reverse and metric_value < best_value)
-        ):
+        if best_metrics is None or Sorting.is_better(metrics, best_metrics, SORTING_PRIORITY):
             best_item = None
         
         gearset[slot] = best_item
@@ -577,6 +1633,66 @@ def get_greedy_initial_solution(activity, character, consumable=None) -> dict:
             print(f"  consumable: {best_item.name}")
         else:
             print(f"  consumable: None")
+    
+    # Add pet slot if pets are available
+    if FORCED_PET is not None:
+        # Instant-actions mode: force-equip the specified pet, skip optimization
+        gearset['pet'] = FORCED_PET
+        print(f"  pet: {FORCED_PET.name} (Level {FORCED_PET.level}) [forced for instant-actions]")
+    elif PET_ITEMS:
+        slot = 'pet'
+        gearset[slot] = None
+        best_metrics = None
+        best_item = None
+
+        # If we pre-satisfied any keyword via a pet's passive ability, restrict
+        # the candidate pool to pets that actually provide ALL such keywords —
+        # otherwise leaving the pet slot empty (or picking a non-providing pet)
+        # would leave a hard requirement unmet.
+        _pet_pool = list(PET_ITEMS)
+        if _pet_keyword_credits:
+            _filtered = [
+                p for p in _pet_pool
+                if all(pet_provides_keyword(p, kw) for kw in _pet_keyword_credits)
+            ]
+            if _filtered:
+                _pet_pool = _filtered
+
+        # Bug e5145503: prefer a pet that gains XP for the active skill
+        # (e.g. Tiger for Hunting, Mummy for Tailoring) over a pet with
+        # marginally better raw stats — unless that XP-relevant pet is
+        # already at max level. Skipped when the pool is already pinned
+        # to specific pets by FORCED_PET (handled above) or by keyword
+        # credits (a hard requirement that must be satisfied first).
+        if not _pet_keyword_credits:
+            _pet_pool = filter_pets_to_skill_xp_relevant(
+                _pet_pool, skill,
+                keep_if_global_find_stats=_target_relevant_find_stats(activity))
+
+        for item in _pet_pool:
+            test_gearset = dict(gearset)
+            test_gearset[slot] = item
+            
+            metrics, _ = calculate_gearset_metrics(test_gearset, activity, character)
+            
+            if best_metrics is None or Sorting.is_better(metrics, best_metrics, SORTING_PRIORITY):
+                best_metrics = metrics
+                best_item = item
+        
+        # Also test without pet — but only if no keyword credits rely on the pet slot.
+        if not _pet_keyword_credits:
+            test_gearset = dict(gearset)
+            test_gearset[slot] = None
+            metrics, _ = calculate_gearset_metrics(test_gearset, activity, character)
+
+            if best_metrics is None or Sorting.is_better(metrics, best_metrics, SORTING_PRIORITY):
+                best_item = None
+        
+        gearset[slot] = best_item
+        if best_item:
+            print(f"  pet: {best_item.name} (Level {best_item.level})")
+        else:
+            print(f"  pet: None")
     
     print(f"\nInitial gearset has {sum(1 for item in gearset.values() if item)} items")
     return gearset
@@ -612,28 +1728,63 @@ def local_search_refine(initial_gearset: dict, activity, character, max_iteratio
     print(f"LOCAL SEARCH REFINEMENT (1-SWAP + 2-SWAP FALLBACK)")
     print(f"{'='*70}")
     
+    global SORTING_PRIORITY
     current_gearset = initial_gearset.copy()
     metric_key = SORTING_PRIORITY[0].metric_key
     
-    # Calculate floors if any weight < 100%
-    use_floors = SORTING_WEIGHTS and any(
-        SORTING_WEIGHTS.get(s, 100) < 100 for s in SORTING_PRIORITY
-    )
+    # Calculate floors if any entry has weight < 100%.
+    # SORTING_PRIORITY is a list of SortingEntry objects — read .weight directly.
+    # The legacy SORTING_WEIGHTS dict is keyed by Sorting enums and would never
+    # match a SortingEntry key, so we must not use it for this check.
+    def _entry_weight(e):
+        if hasattr(e, 'weight'):
+            return e.weight
+        return SORTING_WEIGHTS.get(e, 100) if SORTING_WEIGHTS else 100
+    use_floors = any(0 < _entry_weight(e) < 100 for e in SORTING_PRIORITY)
     static_floors = {}
     if use_floors:
         static_floors, _, _ = calculate_optimization_floors(activity, character, consumable=consumable)
-    
-    # Calculate initial metrics
+        # No re-greedy: start from the original gearset (which was built optimizing
+        # the full priority list including the threshold metric as #1). That gearset
+        # already meets the threshold, so local search can freely accept swaps that
+        # worsen the threshold metric as long as it stays above the breakpoint.
+
+    # Calculate initial metrics from the (possibly re-greedy'd) starting gearset
     current_metrics, current_stats = calculate_gearset_metrics(current_gearset, activity, character, consumable=consumable)
     current_value = current_metrics[metric_key]
-    
-    print(f"Initial {metric_key}: {current_value:.4f}")
-    
+
+    # ── Weight/floor diagnostic ──────────────────────────────────────────────
+    print(f"\n[WEIGHT-DEBUG] use_floors={use_floors}")
+    print(f"[WEIGHT-DEBUG] SORTING_PRIORITY ({len(SORTING_PRIORITY)} entries):")
+    for e in SORTING_PRIORITY:
+        w = _entry_weight(e)
+        key = e.metric_key
+        floor_val = static_floors.get(key)
+        if w == 0:
+            label = 'ignored'
+        elif w >= 100:
+            label = 'strict'
+        else:
+            if floor_val is not None:
+                cur = current_metrics.get(key, '?')
+                label = f'threshold={floor_val:.2f} (weight={w}%)  current={cur:.2f}' if isinstance(cur, float) else f'threshold={floor_val:.2f} (weight={w}%)'
+            else:
+                label = f'weight={w}% (no floor computed)'
+        print(f"  {e!r}  [{label}]")
+    # ────────────────────────────────────────────────────────────────────────
+
     # Get all items (filter by unlock status and activity-irrelevant items)
     skill = activity.primary_skill.lower()
-    location = activity.locations[0] if activity.locations else None
+    location = _get_location(activity)
     required_keywords = activity.requirements.get('keyword_counts', {})
     required_keyword_set = set(required_keywords.keys())
+    required_item_names = {
+        name.lower() for name in activity.requirements.get('item_requirements', [])
+    }
+    
+    # Determine which finding stats are actually useful for this activity's drops
+    useful_finding = get_useful_finding_stats(activity)
+    activity_relevant = get_activity_relevant_stats(activity)
     
     all_items = []
     for item, qty in character.items.items():
@@ -643,14 +1794,60 @@ def local_search_refine(initial_gearset: dict, activity, character, max_iteratio
                 if not item.is_unlocked(character, ignore_gear_requirements=True):
                     continue
             
-            # Skip items with no activity-relevant stats UNLESS they satisfy a required keyword
-            has_relevant = has_activity_relevant_stats(item, skill, location, character)
-            has_required_keyword = required_keyword_set and item_has_any_keyword(item, required_keyword_set)
+            # Check skill level requirements for generic items (they don't have is_unlocked)
+            if hasattr(item, 'requirements') and isinstance(item.requirements, list):
+                meets_reqs = True
+                for req in item.requirements:
+                    if isinstance(req, dict) and req.get('type') == 'skill':
+                        req_skill = (req.get('skill') or '').lower()
+                        req_level = int(req.get('level', 0))
+                        if req_skill and req_level > 0:
+                            char_level = character.get_skill_level(req_skill) if hasattr(character, 'get_skill_level') else 0
+                            if char_level < req_level:
+                                meets_reqs = False
+                                break
+                if not meets_reqs:
+                    continue
             
-            if not has_relevant and not has_required_keyword:
+            # Skip items with no activity-relevant stats UNLESS they satisfy a required
+            # keyword OR are named as a specific item requirement (e.g., Spectral saw)
+            has_relevant = has_activity_relevant_stats(item, skill, location, character, useful_finding)
+            has_required_keyword = required_keyword_set and item_has_any_keyword(item, required_keyword_set)
+            is_required_item = (
+                required_item_names
+                and hasattr(item, 'name')
+                and item.name
+                and item.name.lower() in required_item_names
+            )
+            
+            if not has_relevant and not has_required_keyword and not is_required_item:
                 continue
             
             all_items.append(item)
+    
+    # Dominance pruning (gear/rings only, not tools)
+    # Keyword-protected items can still be pruned against each other
+    gear_items = [item for item in all_items if hasattr(item, 'slot') and item.slot not in ('tools', 'tool')]
+    tool_items = [item for item in all_items if hasattr(item, 'slot') and item.slot in ('tools', 'tool')]
+    kw_protected = [item for item in gear_items if required_keyword_set and item_has_any_keyword(item, required_keyword_set)]
+    kw_protected_ids = {id(item) for item in kw_protected}
+    pruneable = [item for item in gear_items if id(item) not in kw_protected_ids]
+    pruneable = prune_dominated_items(pruneable, skill, location, character, activity_relevant)
+    kw_protected = prune_dominated_items(kw_protected, skill, location, character, activity_relevant)
+    gear_items = pruneable + kw_protected
+    all_items = gear_items + tool_items
+    # Sort by name then UUID for deterministic optimizer results regardless of inventory order
+    all_items.sort(key=lambda i: (getattr(i, 'name', ''), getattr(i, 'uuid', '')))
+    
+    # Debug: log items available per slot
+    _debug_slots = {}
+    for item in all_items:
+        s = getattr(item, 'slot', '?')
+        if s not in _debug_slots:
+            _debug_slots[s] = []
+        _debug_slots[s].append(item.name)
+    for s, names in sorted(_debug_slots.items()):
+        print(f"  [{s}] {len(names)} items: {', '.join(names[:8])}{'...' if len(names) > 8 else ''}")
     
     # Pre-organize items by slot for faster lookup
     items_by_slot = {}
@@ -658,17 +1855,66 @@ def local_search_refine(initial_gearset: dict, activity, character, max_iteratio
         if not hasattr(item, 'slot'):
             continue
         slot_type = item.slot
+        # Normalize 'tool' (singular, from generic items) to 'tools' (plural, used by optimizer)
+        if slot_type == 'tool':
+            slot_type = 'tools'
         if slot_type not in items_by_slot:
             items_by_slot[slot_type] = []
         items_by_slot[slot_type].append(item)
     
-    # Add consumable items as a slot type
+    # Add consumable items as a slot type (filtered for relevance)
     if CONSUMABLE_ITEMS:
-        items_by_slot['consumable'] = list(CONSUMABLE_ITEMS)
+        useful_finding_cons = get_useful_finding_stats(activity)
+        skill_name = activity.primary_skill.lower() if activity.primary_skill else 'global'
+        loc = _get_location(activity)
+        relevant_consumables = [
+            c for c in CONSUMABLE_ITEMS
+            if has_activity_relevant_stats(c, skill_name, loc, character, useful_finding_cons)
+        ]
+        items_by_slot['consumable'] = relevant_consumables
+    
+    # Add pet items as a slot type
+    if PET_ITEMS:
+        # Bug e5145503: same skill-XP preference applied here so that
+        # local-search 1-swap doesn't undo the greedy pick by swapping
+        # to a different pet (e.g. Camel) that scores marginally better
+        # on raw metrics. Skipped when FORCED_PET is set — the locked
+        # branch below already pins the slot to that pet.
+        if FORCED_PET is None:
+            items_by_slot['pet'] = filter_pets_to_skill_xp_relevant(
+                list(PET_ITEMS), skill,
+                keep_if_global_find_stats=_target_relevant_find_stats(activity)
+            )
+        else:
+            items_by_slot['pet'] = list(PET_ITEMS)
     
     slots = list(current_gearset.keys())
+    print(f"  DEBUG: Slot iteration order: {slots}")
     one_swap_count = 0
     two_swap_count = 0
+    locked = dict(LOCKED_SLOTS) if LOCKED_SLOTS else {}
+    # When instant-actions mode is active, lock the pet slot so it can't be replaced
+    if FORCED_PET is not None:
+        locked['pet'] = FORCED_PET
+    # Keep mandatory item_requirements (e.g. Spectral saw) pinned through every
+    # swap phase — all phases skip locked slots, so the required item stays.
+    for _rs, _ri in _required_item_locked_slots(activity, character).items():
+        if _rs in current_gearset and current_gearset.get(_rs) is _ri:
+            locked.setdefault(_rs, _ri)
+    
+    # DEBUG: Show items_by_slot['tools'] count and current tool1
+    _tools_count = len(items_by_slot.get('tools', []))
+    _tool_singular_count = len(items_by_slot.get('tool', []))
+    _tool_names = [it.name for it in items_by_slot.get('tools', [])]
+    _hunting_bows = [n for n in _tool_names if 'hunting' in n.lower() or 'adventuring' in n.lower()]
+    print(f"  DEBUG: items_by_slot['tools'] has {_tools_count} items")
+    if _tool_singular_count > 0:
+        print(f"  DEBUG: WARNING items_by_slot['tool'] (singular) has {_tool_singular_count} items: {[it.name for it in items_by_slot.get('tool', [])]}")
+    print(f"  DEBUG: Hunting bow candidates in tools bucket: {_hunting_bows}")
+    _cur_tool1 = current_gearset.get('tool1')
+    if _cur_tool1:
+        _t1_stats = _cur_tool1.get_stats_for_skill(skill, location=location, character=character)
+        print(f"  DEBUG: Current tool1: {_cur_tool1.name} (slot={_cur_tool1.slot}) stats={_t1_stats}")
     
     for iteration in range(max_iterations):
         if VERBOSE:
@@ -682,8 +1928,61 @@ def local_search_refine(initial_gearset: dict, activity, character, max_iteratio
         best_gearset_metrics = current_metrics
         
         # Phase 1: Try 1-swap (single item swaps) - greedy approach
+        # Separate gearset-level requirements (keywords) from character-level
+        # requirements (reputation, skills, AP). Character-level requirements
+        # can't be changed by swapping gear, so we always enforce keyword
+        # requirements but skip the full is_unlocked check when character
+        # requirements aren't met.
+        required_keywords_for_validation = dict(activity.requirements.get('keyword_counts', {})) if activity else {}
+        
+        # Build set of keywords satisfied by the input item (e.g. arrows for hunting)
+        _input_item_keywords = set()
+        if INPUT_ITEM and hasattr(INPUT_ITEM, 'keywords'):
+            _input_item_keywords = {kw.lower() for kw in INPUT_ITEM.keywords}
+        elif not INPUT_ITEM and hasattr(activity, 'input_items') and activity.input_items:
+            # No input selected — pre-satisfy keywords from input_items definitions
+            for ii in activity.input_items:
+                if getattr(ii, 'type', '') == 'keyword':
+                    kw = getattr(ii, 'reference', '').lower()
+                    if kw:
+                        _input_item_keywords.add(kw)
+        
+        def _check_keyword_requirements(gs_dict):
+            """Check if gearset satisfies keyword_counts requirements."""
+            for kw, required in required_keywords_for_validation.items():
+                if required <= 0:
+                    continue
+                count = sum(
+                    1 for s, it in gs_dict.items()
+                    if it and hasattr(it, 'keywords') and
+                    any(kw.lower() == k.lower() for k in it.keywords)
+                )
+                # Input item (e.g. arrows) can satisfy keyword requirements
+                if count < required and kw.lower() in _input_item_keywords:
+                    count += 1
+                if count < required:
+                    return False
+            # Enforce tool keyword minimum-skill-level requirements, e.g. a
+            # pickaxe that itself requires at least Mining level 60.
+            from util.optimization_utils import gearset_meets_keyword_level_requirements
+            gs_items = [it for it in gs_dict.values() if it is not None]
+            if not gearset_meets_keyword_level_requirements(gs_items, activity):
+                return False
+            return True
+        
         for slot in slots:
+            # Skip locked slots
+            if slot in locked:
+                continue
+            
             current_item = current_gearset[slot]
+            
+            # DEBUG: Log when we start testing tool0
+            if slot == 'tool0':
+                print(f"\n  DEBUG: Starting tool0 iteration. Current: {current_item.name if current_item else 'None'}")
+                print(f"    DEBUG: items_by_slot['tools'] count: {len(items_by_slot.get('tools', []))}")
+                _tool0_candidates = [it.name for it in items_by_slot.get('tools', []) if it != current_item]
+                print(f"    DEBUG: tool0 swap candidates (excl current): {_tool0_candidates[:10]}")
             
             # Debug for slots
             if VERBOSE and slot in SLOTS_TO_TEST:
@@ -707,6 +2006,19 @@ def local_search_refine(initial_gearset: dict, activity, character, max_iteratio
                 if new_item == current_item:
                     continue
                 
+                # DEBUG: Log all tool0/tool1 swap attempts for hunting bow items
+                _debug_this_swap = (slot in ('tool0', 'tool1') and hasattr(new_item, 'keywords') and 
+                                    any('hunting' in k.lower() for k in getattr(new_item, 'keywords', [])))
+                # Also debug when the incoming OR current tool matches DEBUG_TOOL_KEYWORDS
+                if not _debug_this_swap and slot.startswith('tool') and (
+                    _tool_matches_debug_keywords(new_item) or
+                    (current_item is not None and _tool_matches_debug_keywords(current_item))
+                ):
+                    _debug_this_swap = True
+                if _debug_this_swap:
+                    print(f"\n  DEBUG 1-SWAP {slot}: Testing {new_item.name} (slot={new_item.slot}, kw={new_item.keywords})")
+                    print(f"    DEBUG: Current {slot}: {current_item.name if current_item else 'None'} (kw={getattr(current_item, 'keywords', []) if current_item else []})")
+                
                 if VERBOSE and slot in SLOTS_TO_TEST:
                     valid_items_for_slot += 1
                     if valid_items_for_slot <= 10:
@@ -716,10 +2028,18 @@ def local_search_refine(initial_gearset: dict, activity, character, max_iteratio
                 test_gearset = current_gearset.copy()
                 test_gearset[slot] = new_item
                 
-                # Validate (check requirements only on complete gearsets)
-                if not is_gearset_valid(test_gearset, character, activity, check_requirements=True):
+                # Validate: always check UUID/keyword constraints + keyword requirements
+                if not is_gearset_valid(test_gearset, character, activity=None, check_requirements=False):
+                    if _debug_this_swap:
+                        print(f"    DEBUG: INVALID (constraint violation)")
                     if VERBOSE and slot in SLOTS_TO_TEST and valid_items_for_slot <= 10:
                         print(f"      -> INVALID (constraint violation)")
+                    continue
+                
+                # Always enforce keyword requirements (gearset-level, not character-level)
+                if not _check_keyword_requirements(test_gearset):
+                    if _debug_this_swap:
+                        print(f"    DEBUG: FAILED keyword requirements")
                     continue
                 
                 swaps_valid += 1
@@ -727,6 +2047,17 @@ def local_search_refine(initial_gearset: dict, activity, character, max_iteratio
                 # Calculate metrics
                 try:
                     test_metrics, test_stats = calculate_gearset_metrics(test_gearset, activity, character, consumable=consumable)
+                    
+                    if _debug_this_swap:
+                        print(f"    DEBUG: Metrics calculated. SPR: new={test_metrics.get('steps_per_reward_roll', 'N/A'):.4f} cur={current_metrics.get('steps_per_reward_roll', 'N/A'):.4f}")
+                        print(f"    DEBUG: total_xp_per_step: new={test_metrics.get('total_xp_per_step', 'N/A'):.6f} cur={current_metrics.get('total_xp_per_step', 'N/A'):.6f}")
+                        print(f"    DEBUG: primary_xp_per_step: new={test_metrics.get('primary_xp_per_step', 'N/A'):.6f} cur={current_metrics.get('primary_xp_per_step', 'N/A'):.6f}")
+                        print(f"    DEBUG: expected_steps_per_action: new={test_metrics.get('expected_steps_per_action', 'N/A'):.4f} cur={current_metrics.get('expected_steps_per_action', 'N/A'):.4f}")
+                        print(f"    DEBUG: Stats: WE={test_stats.get('work_efficiency', 0):.4f} DA={test_stats.get('double_action', 0):.4f} DR={test_stats.get('double_rewards', 0):.4f} BXP_add={test_stats.get('bonus_xp_add', 0):.2f}")
+                        for s in SORTING_PRIORITY[:3]:
+                            nv = s.get_sort_value(test_metrics)
+                            ov = s.get_sort_value(current_metrics)
+                            print(f"    DEBUG: {s.metric_key}: new_sort={nv:.6f} cur_sort={ov:.6f} better={nv < ov}")
                     
                     if VERBOSE and slot in SLOTS_TO_TEST and valid_items_for_slot <= 10:
                         test_value = test_metrics[metric_key]
@@ -741,6 +2072,9 @@ def local_search_refine(initial_gearset: dict, activity, character, max_iteratio
                     else:
                         is_better = Sorting.is_better(test_metrics, current_metrics, SORTING_PRIORITY)
                     
+                    if _debug_this_swap:
+                        print(f"    DEBUG: is_better={is_better} use_floors={use_floors}")
+                    
                     if is_better:
                         # Take first improvement immediately (greedy)
                         old_name = current_item.name if current_item else "None"
@@ -750,6 +2084,12 @@ def local_search_refine(initial_gearset: dict, activity, character, max_iteratio
                         current_value = test_metrics[metric_key]
                         improved = True
                         one_swap_count += 1
+                        
+                        # Always log tool swaps (keyword requirements can break)
+                        if slot.startswith('tool'):
+                            old_kws = getattr(current_item, 'keywords', []) if current_item else []
+                            new_kws = getattr(new_item, 'keywords', [])
+                            print(f"  [tool swap] {slot}: {old_name} {old_kws} → {new_item.name} {new_kws}")
                         
                         if VERBOSE:
                             print(f"  Improved! 1-swap {slot}: {old_name} → {new_item.name}")
@@ -775,9 +2115,83 @@ def local_search_refine(initial_gearset: dict, activity, character, max_iteratio
             
             two_swaps_tested = 0
             two_swaps_valid = 0
+            two_swaps_kw_filtered = 0  # Pairs skipped by keyword-preserving filter
+            
+            # Estimate total 2-swap combinations to avoid runaway computation
+            total_2swap_estimate = 0
+            for _i, _s1 in enumerate(slots):
+                if _s1 in locked:
+                    continue
+                _is1 = 'ring' if _s1.startswith('ring') else ('tools' if _s1.startswith('tool') else _s1)
+                _n1 = len(items_by_slot.get(_is1, []))
+                for _j, _s2 in enumerate(slots):
+                    if _j <= _i or _s2 in locked:
+                        continue
+                    _is2 = 'ring' if _s2.startswith('ring') else ('tools' if _s2.startswith('tool') else _s2)
+                    _n2 = len(items_by_slot.get(_is2, []))
+                    total_2swap_estimate += _n1 * _n2
+            
+            MAX_2SWAP_COMBINATIONS = 50000
+            # When the activity has required keywords, the keyword-preserving
+            # 2-swap filter (below) prunes most pairs automatically, so we bypass
+            # the raw-combination cap. Without this bypass, cases like "need 2
+            # light sources" skip the one phase that can actually find the fix
+            # (e.g. swap light-source head + non-light ring for a non-light head
+            # + light-source ring — a trade no 1-swap can discover).
+            _has_required_keywords = any(
+                v > 0 for v in activity.requirements.get('keyword_counts', {}).values()
+            ) if activity else False
+            skip_2swap = (
+                total_2swap_estimate > MAX_2SWAP_COMBINATIONS
+                and not _has_required_keywords
+            )
+            # Always initialize tradeoff set — referenced in the 2-swap loop even
+            # when the cap is bypassed (e.g. keyword-preserving filter path).
+            _tradeoff_items_act = set()
+            if skip_2swap:
+                print(f"  Skipping 2-swap phase: ~{total_2swap_estimate} combinations exceeds {MAX_2SWAP_COMBINATIONS} cap")
+            else:
+                # Smart filtering is a PERFORMANCE optimization for searches with too
+                # many raw combinations: it restricts 2-swap pairs to those involving a
+                # "tradeoff" item (both positive and negative relevant stats, or a
+                # set-piece gated item). Only apply it when the combination count
+                # actually exceeds the cap. When the search is small enough to run
+                # exhaustively, leaving _tradeoff_items_act empty lets the full 2-swap
+                # explore pure-positive swaps too — e.g. trading a small-stat keyword
+                # piece for a no-stat keyword item in a free slot (Oxygen tank @ back)
+                # plus a high-stat body piece (Elderhide tunic @ chest). Neither of
+                # those is a tradeoff item, so the filter would otherwise skip the pair
+                # and the optimizer would miss the better gearset.
+                if total_2swap_estimate > MAX_2SWAP_COMBINATIONS:
+                    if _has_required_keywords:
+                        print(f"  2-swap: ~{total_2swap_estimate} raw combinations (cap bypassed — keyword-preserving filter will prune)")
+                    _activity_skill = ACTIVITY.primary_skill.lower() if ACTIVITY.primary_skill else 'global'
+                    _activity_location = SELECTED_LOCATION
+                    for _it in all_items:
+                        if _it is None:
+                            continue
+                        _it_stats = _it.get_stats_for_skill(_activity_skill, location=_activity_location, character=character)
+                        if not _it_stats:
+                            continue
+                        _has_pos = any(v > 0 for v in _it_stats.values())
+                        _has_neg = any(v < 0 for v in _it_stats.values())
+                        if _has_pos and _has_neg:
+                            _tradeoff_items_act.add(id(_it))
+                        # Also include items with set_piece gated stats — their value is
+                        # non-linear (requires multiple pieces) so greedy misses them.
+                        elif hasattr(_it, 'gated_stats') and _it.gated_stats and 'set_pieces' in _it.gated_stats:
+                            _tradeoff_items_act.add(id(_it))
+                    if _tradeoff_items_act:
+                        print(f"  Smart 2-swap: {len(_tradeoff_items_act)} tradeoff items detected")
             
             # Use greedy approach: take first improvement and restart
             for i, slot1 in enumerate(slots):
+                if skip_2swap:
+                    break
+                # Skip locked slots
+                if slot1 in locked:
+                    continue
+                
                 current_item1 = current_gearset[slot1]
                 
                 # Determine slot type for slot1
@@ -792,6 +2206,10 @@ def local_search_refine(initial_gearset: dict, activity, character, max_iteratio
                 
                 for j, slot2 in enumerate(slots):
                     if j <= i:  # Skip same slot and already tested pairs
+                        continue
+                    
+                    # Skip locked slots
+                    if slot2 in locked:
                         continue
                     
                     current_item2 = current_gearset[slot2]
@@ -814,10 +2232,99 @@ def local_search_refine(initial_gearset: dict, activity, character, max_iteratio
                         print(f"    Available items for {slot1}: {len(items1)}")
                         print(f"    Available items for {slot2}: {len(items2)}")
                     
+                    # Pre-compute keyword counts from slots OTHER than slot1 and slot2.
+                    # Used below to enforce keyword-preserving 2-swaps: if swapping out
+                    # an item that provides a required keyword drops the count below
+                    # the requirement, the paired slot MUST swap in a replacement.
+                    # This lets 2-swap correctly explore pairs like
+                    # candlehat→hat_with_a_feather + silver_ruby_ring→silver_sun_stone_ring
+                    # where a light-source head is traded for a light-source ring.
+                    _kw_base_counts = {}
+                    for _kw in required_keywords_for_validation.keys():
+                        _kw_lower = _kw.lower()
+                        _cnt = 0
+                        for _s, _it in current_gearset.items():
+                            if _s == slot1 or _s == slot2:
+                                continue
+                            if _it is None or not hasattr(_it, 'keywords'):
+                                continue
+                            if any(_kw_lower == _k.lower() for _k in _it.keywords):
+                                _cnt += 1
+                        # Input item can also satisfy keyword requirements
+                        if _kw_lower in _input_item_keywords:
+                            _cnt += 1
+                        _kw_base_counts[_kw_lower] = _cnt
+                    
                     # Try every combination of items for these two slots
                     for new_item1 in items1:
                         if new_item1 == current_item1:
                             continue
+                        
+                        # Keyword-preserving filter: figure out which required keywords
+                        # the second slot MUST provide given this new_item1 choice.
+                        # If setting slot1=new_item1 already drops count below required,
+                        # then new_item2 MUST carry that keyword; otherwise no valid pair.
+                        _required_kws_for_item2 = []
+                        _skip_new_item1 = False
+                        for _kw_lower, _req in (
+                            (k.lower(), v) for k, v in required_keywords_for_validation.items()
+                        ):
+                            if _req <= 0:
+                                continue
+                            _has_in_1 = (
+                                new_item1 is not None and hasattr(new_item1, 'keywords')
+                                and any(_kw_lower == _k.lower() for _k in new_item1.keywords)
+                            )
+                            _count_with_1 = _kw_base_counts.get(_kw_lower, 0) + (1 if _has_in_1 else 0)
+                            _shortfall = _req - _count_with_1
+                            if _shortfall >= 2:
+                                # Even if new_item2 provides this keyword, we'd still be
+                                # short by at least 1 — no valid 2-swap exists for this
+                                # new_item1. Skip to next new_item1.
+                                _skip_new_item1 = True
+                                break
+                            if _shortfall == 1:
+                                # new_item2 MUST carry this keyword
+                                _required_kws_for_item2.append(_kw_lower)
+                        if _skip_new_item1:
+                            two_swaps_kw_filtered += len(items2)
+                            continue
+                        
+                        # Smart filter: skip if neither item in this pair is a tradeoff.
+                        # BUT: when the keyword-preserving filter is active for this
+                        # new_item1, we bypass the tradeoff filter so legitimate
+                        # pure-positive-stat items that carry required keywords (e.g.
+                        # silver_sun_stone_ring) aren't dropped.
+                        if (_tradeoff_items_act and not _required_kws_for_item2
+                                and new_item1 is not None and id(new_item1) not in _tradeoff_items_act):
+                            has_tradeoff_in_items2 = any(
+                                it2 is not None and id(it2) in _tradeoff_items_act
+                                for it2 in items2 if it2 != current_item2
+                            )
+                            if not has_tradeoff_in_items2:
+                                continue
+                        
+                        # DEBUG: If this swap is forced to bring a keyword-providing
+                        # item2 (e.g. swapping out a Light source), log the
+                        # candidates so we can diagnose why silver_sun_stone_ring
+                        # isn't being picked when it should be. Only print when
+                        # candidates exist — the zero-candidate case is just noise
+                        # (hundreds of slot pairs where the paired slot can't help).
+                        if _required_kws_for_item2:
+                            _cur1_name = current_item1.name if current_item1 else 'None'
+                            _new1_name = new_item1.name if new_item1 else 'None'
+                            _kw_carriers_in_2 = [
+                                it.name for it in items2
+                                if it is not None and hasattr(it, 'keywords')
+                                and all(
+                                    any(rk == k.lower() for k in it.keywords)
+                                    for rk in _required_kws_for_item2
+                                )
+                            ]
+                            if _kw_carriers_in_2:
+                                print(f"  [KW-FILTER] {slot1}: {_cur1_name} → {_new1_name} "
+                                      f"needs {_required_kws_for_item2} from {slot2}; "
+                                      f"candidates: {_kw_carriers_in_2}")
                         
                         # Check if this is a debug item for slot1
                         is_debug_item1 = is_debug_pair and any(name in new_item1.name for name in DEBUG_ITEMS.get(slot1, []))
@@ -825,6 +2332,32 @@ def local_search_refine(initial_gearset: dict, activity, character, max_iteratio
                         for new_item2 in items2:
                             if new_item2 == current_item2:
                                 continue
+                            
+                            # Keyword-preserving filter: if new_item1 dropped us below
+                            # a required keyword count, new_item2 MUST carry that keyword.
+                            if _required_kws_for_item2:
+                                if new_item2 is None or not hasattr(new_item2, 'keywords'):
+                                    two_swaps_kw_filtered += 1
+                                    continue
+                                _item2_kws_lower = {_k.lower() for _k in new_item2.keywords}
+                                if not all(_kw in _item2_kws_lower for _kw in _required_kws_for_item2):
+                                    two_swaps_kw_filtered += 1
+                                    continue
+                            
+                            # Smart filter: at least one must be a tradeoff item.
+                            # BUT: if the keyword-preserving filter is active for this
+                            # pair (we MUST bring a specific keyword via new_item2),
+                            # bypass the tradeoff filter. The keyword narrowing already
+                            # limits the search, and the items that carry the keyword
+                            # may legitimately be pure-positive-stat items (e.g.
+                            # silver_sun_stone_ring is a Light source + FMF ring, not a
+                            # tradeoff item). Without this bypass the keyword-fix swap
+                            # we're trying to enable gets silently dropped.
+                            if _tradeoff_items_act and not _required_kws_for_item2:
+                                i1_t = new_item1 is not None and id(new_item1) in _tradeoff_items_act
+                                i2_t = new_item2 is not None and id(new_item2) in _tradeoff_items_act
+                                if not i1_t and not i2_t:
+                                    continue
                             
                             # Check if this is a debug item for slot2
                             is_debug_item2 = is_debug_pair and any(name in new_item2.name for name in DEBUG_ITEMS.get(slot2, []))
@@ -842,8 +2375,10 @@ def local_search_refine(initial_gearset: dict, activity, character, max_iteratio
                             test_gearset[slot1] = new_item1
                             test_gearset[slot2] = new_item2
                             
-                            # Validate
-                            is_valid = is_gearset_valid(test_gearset, character, activity, check_requirements=True)
+                            # Validate: UUID/keyword constraints + keyword requirements
+                            is_valid = is_gearset_valid(test_gearset, character, activity=None, check_requirements=False)
+                            if is_valid:
+                                is_valid = _check_keyword_requirements(test_gearset)
                             
                             if is_debug_combo:
                                 print(f"      Valid: {is_valid}")
@@ -882,6 +2417,51 @@ def local_search_refine(initial_gearset: dict, activity, character, max_iteratio
                                 
                                 if is_debug_combo:
                                     print(f"      Is better: {is_better_result}")
+                                
+                                # TARGETED DEBUG: log the silver_sun_stone_ring + rootweave_mitts
+                                # pair specifically so we can see why it is not accepted. This
+                                # hits at most a handful of times per run since the pair is rare.
+                                _n1_lower = new_item1.name.lower() if new_item1 and hasattr(new_item1, 'name') else ''
+                                _n2_lower = new_item2.name.lower() if new_item2 and hasattr(new_item2, 'name') else ''
+                                _c1_lower = current_item1.name.lower() if current_item1 and hasattr(current_item1, 'name') else ''
+                                _c2_lower = current_item2.name.lower() if current_item2 and hasattr(current_item2, 'name') else ''
+                                _trace_involves_target = (
+                                    'silver sun stone' in _n1_lower or 'silver sun stone' in _n2_lower
+                                    or ('rootweave mitts' in _n1_lower and ('silver' in _n2_lower or 'sun stone' in _n2_lower))
+                                    or ('rootweave mitts' in _n2_lower and ('silver' in _n1_lower or 'sun stone' in _n1_lower))
+                                )
+                                if _trace_involves_target:
+                                    print(f"  [TARGET-TRACE] {slot1}: {current_item1.name if current_item1 else 'None'} → {new_item1.name}, "
+                                          f"{slot2}: {current_item2.name if current_item2 else 'None'} → {new_item2.name}")
+                                    print(f"    is_better={is_better_result}")
+                                    for sorting in SORTING_PRIORITY:
+                                        mk = sorting.metric_key
+                                        vc = current_metrics.get(mk, float('nan'))
+                                        vt = test_metrics.get(mk, float('nan'))
+                                        try:
+                                            delta = vt - vc
+                                            delta_str = f"Δ {delta:+.6f}"
+                                        except Exception:
+                                            delta_str = "Δ ?"
+                                        # reverse means "bigger is better"; use the Sorting helper
+                                        try:
+                                            sort_c = sorting.get_sort_value(current_metrics)
+                                            sort_t = sorting.get_sort_value(test_metrics)
+                                            better = sort_t < sort_c
+                                        except Exception:
+                                            sort_c = sort_t = float('nan')
+                                            better = False
+                                        print(f"      {sorting.display_name} ({mk}): {vc:.6f} → {vt:.6f} {delta_str} "
+                                              f"sort_cur={sort_c:.6f} sort_test={sort_t:.6f} test_lower={better}")
+                                    # Also log raw stat totals so we can sanity-check
+                                    _stat_keys = ('work_efficiency', 'double_action', 'double_rewards',
+                                                  'fine_material_finding', 'chest_finding', 'find_collectibles',
+                                                  'find_gems', 'find_bird_nests', 'find_linens',
+                                                  'steps_add', 'steps_percent')
+                                    _cur_raw = {k: current_stats.get(k, 0) for k in _stat_keys}
+                                    _test_raw = {k: test_stats.get(k, 0) for k in _stat_keys}
+                                    print(f"      cur_stats:  {_cur_raw}")
+                                    print(f"      test_stats: {_test_raw}")
                                 
                                 if is_better_result:
                                     # Take first improvement immediately (greedy)
@@ -923,14 +2503,142 @@ def local_search_refine(initial_gearset: dict, activity, character, max_iteratio
             
             if VERBOSE:
                 print(f"  Tested {two_swaps_tested} 2-swaps, {two_swaps_valid} valid")
+            # Always print keyword-filter effect if it ran (for debugging
+            # issues like "optimizer kept candlehat because 2-swap was capped")
+            if _has_required_keywords and two_swaps_kw_filtered > 0:
+                print(f"  2-swap keyword filter: pruned {two_swaps_kw_filtered} pairs "
+                      f"(kept {two_swaps_tested} tested, {two_swaps_valid} valid)")
+        
+        # Phase 3: If no 2-swap helped and 4-swap enabled, try 4-swaps
+        if not improved and ENABLE_4_SWAP:
+            if VERBOSE:
+                print(f"  No 2-swap improvements, trying 4-swaps...")
+            
+            four_swaps_tested = 0
+            four_swaps_valid = 0
+            
+            # Estimate total 4-swap combinations — cap aggressively
+            MAX_4SWAP_COMBINATIONS = 20000
+            unlocked_slots = [s for s in slots if s not in locked]
+            
+            # Build candidate items per slot (same as 2-swap)
+            def _get_items_for_slot(s):
+                if s.startswith('ring'):
+                    return items_by_slot.get('ring', [])
+                elif s.startswith('tool'):
+                    return items_by_slot.get('tools', [])
+                else:
+                    return items_by_slot.get(s, [])
+            
+            # Rough estimate: product of top-4 slot sizes
+            slot_sizes = sorted([len(_get_items_for_slot(s)) for s in unlocked_slots], reverse=True)
+            rough_estimate = 1
+            for sz in slot_sizes[:4]:
+                rough_estimate *= max(sz, 1)
+            
+            if rough_estimate > MAX_4SWAP_COMBINATIONS:
+                print(f"  Skipping 4-swap phase: ~{rough_estimate} combinations exceeds {MAX_4SWAP_COMBINATIONS} cap")
+            else:
+                print(f"  4-swap: ~{rough_estimate} estimated combinations across {len(unlocked_slots)} unlocked slots")
+                
+                for i1, slot1 in enumerate(unlocked_slots):
+                    items1 = _get_items_for_slot(slot1)
+                    for i2, slot2 in enumerate(unlocked_slots):
+                        if i2 <= i1:
+                            continue
+                        items2 = _get_items_for_slot(slot2)
+                        for i3, slot3 in enumerate(unlocked_slots):
+                            if i3 <= i2:
+                                continue
+                            items3 = _get_items_for_slot(slot3)
+                            for i4, slot4 in enumerate(unlocked_slots):
+                                if i4 <= i3:
+                                    continue
+                                items4 = _get_items_for_slot(slot4)
+                                
+                                cur1 = current_gearset[slot1]
+                                cur2 = current_gearset[slot2]
+                                cur3 = current_gearset[slot3]
+                                cur4 = current_gearset[slot4]
+                                
+                                for new1 in items1:
+                                    if new1 == cur1:
+                                        continue
+                                    for new2 in items2:
+                                        if new2 == cur2:
+                                            continue
+                                        for new3 in items3:
+                                            if new3 == cur3:
+                                                continue
+                                            for new4 in items4:
+                                                if new4 == cur4:
+                                                    continue
+                                                
+                                                four_swaps_tested += 1
+                                                
+                                                test_gearset = current_gearset.copy()
+                                                test_gearset[slot1] = new1
+                                                test_gearset[slot2] = new2
+                                                test_gearset[slot3] = new3
+                                                test_gearset[slot4] = new4
+                                                
+                                                if not is_gearset_valid(test_gearset, character, activity=None, check_requirements=False):
+                                                    continue
+                                                if not _check_keyword_requirements(test_gearset):
+                                                    continue
+                                                
+                                                four_swaps_valid += 1
+                                                
+                                                try:
+                                                    test_metrics, test_stats = calculate_gearset_metrics(test_gearset, activity, character, consumable=consumable)
+                                                    
+                                                    if use_floors:
+                                                        is_better_result = Sorting.is_better_with_floors(
+                                                            test_metrics, current_metrics, SORTING_PRIORITY,
+                                                            SORTING_WEIGHTS, static_floors
+                                                        )
+                                                    else:
+                                                        is_better_result = Sorting.is_better(test_metrics, current_metrics, SORTING_PRIORITY)
+                                                    
+                                                    if is_better_result:
+                                                        current_gearset = test_gearset
+                                                        current_metrics = test_metrics
+                                                        current_stats = test_stats
+                                                        current_value = test_metrics[metric_key]
+                                                        improved = True
+                                                        
+                                                        if VERBOSE:
+                                                            print(f"  Improved! 4-swap: {slot1}→{new1.name}, {slot2}→{new2.name}, {slot3}→{new3.name}, {slot4}→{new4.name}")
+                                                        
+                                                        break
+                                                except Exception:
+                                                    continue
+                                                
+                                                if improved:
+                                                    break
+                                            if improved:
+                                                break
+                                        if improved:
+                                            break
+                                    if improved:
+                                        break
+                                if improved:
+                                    break
+                            if improved:
+                                break
+                        if improved:
+                            break
+                    if improved:
+                        break
+                
+                print(f"  Tested {four_swaps_tested} 4-swaps, {four_swaps_valid} valid")
         
         if VERBOSE:
             print(f"  Total: {swaps_tested} 1-swaps tested, {swaps_valid} valid")
         
         # Apply improvement if found (either from 1-swap or 2-swap)
         if improved:
-            # Stats already updated in the phase that found improvement
-            pass
+            pass  # Keyword requirements are always enforced, no re-check needed
         else:
             if VERBOSE:
                 print(f"  No improvements found. Converged!")
@@ -938,6 +2646,445 @@ def local_search_refine(initial_gearset: dict, activity, character, max_iteratio
     
     print(f"\nFinal {metric_key}: {current_value:.4f}")
     print(f"Improvements: {one_swap_count} from 1-swap, {two_swap_count} from 2-swap")
+
+    # ====================================================================
+    # DROP-AWARE TIEBREAK PASS
+    # ====================================================================
+    # After convergence, try swapping each item one more time.  If a swap
+    # leaves ALL scoring metrics identical but improves ANY individual drop
+    # rate, take it.  This handles cases like Hand Warming Pack (+5% WE at
+    # cap) vs Golden Skydisc (+12% chest finding) where the primary/
+    # secondary/tertiary metrics are all unchanged but a specific drop
+    # (e.g. Agility Chest) gets meaningfully better.
+    #
+    # Also handles "wasted stat" tiebreaks: if metrics AND drops are equal,
+    # prefer the item that contributes more effective stats to the gearset
+    # (e.g. inventory_space > wasted WE at cap).
+    
+    tiebreak_swaps = 0
+    
+    # Snapshot the converged metrics BEFORE the tiebreak pass starts.
+    # Every candidate swap is compared against this anchor so cumulative
+    # drift can't accumulate across multiple tiebreak swaps. Without this
+    # anchor, each swap's "is metric equal" check uses the previous post-
+    # swap state, allowing small drifts to compound — e.g. SPR decaying
+    # from 7k → 12k while every individual step stayed within a (wide)
+    # threshold breakpoint.
+    initial_tiebreak_metrics = dict(current_metrics)
+    
+    def _get_drop_rates(gs):
+        """Get full drop rates dict for a gearset."""
+        items = [item for slot, item in gs.items() if item is not None and slot != 'consumable']
+        cons = gs.get('consumable') or consumable
+        if cons is not None:
+            items.append(cons)
+        skill_name = activity.primary_skill.lower()
+        loc = _get_location(activity)
+        ts = aggregate_gearset_stats(
+            items=items, skill=skill_name, location=loc,
+            character=character, include_level_bonus=False,
+            include_collectibles=False, activity=activity
+        )
+        dr, _ = activity.get_expected_drop_rate(
+            ts, location=loc, verbose=True, character=character, input_item=INPUT_ITEM
+        )
+        return dr
+    
+    def _no_metric_regression(m_new, m_anchor):
+        """Return True if m_new is not worse than m_anchor on any scoring metric.
+        
+        This is intentionally STRICTER than _metrics_equal/is_better_with_floors:
+        we don't allow any threshold-weighted metric to regress just because
+        it's still above its breakpoint. The tiebreak only gets to act when
+        scoring metrics are genuinely tied — improvements are fine, but even
+        a tiny regression on a priority metric disqualifies the swap.
+        
+        A small relative epsilon absorbs floating-point noise so swaps that
+        genuinely don't change the gearset's scoring stats aren't rejected
+        because of 1e-10 rounding differences.
+        """
+        import math
+        EPS_REL = 1e-9
+        EPS_ABS = 1e-12
+        for raw in SORTING_PRIORITY:
+            entry = Sorting._as_entry(raw) if hasattr(Sorting, '_as_entry') else raw
+            # Skip ignored (weight=0) entries
+            w = entry.weight if hasattr(entry, 'weight') else 100
+            if w == 0:
+                continue
+            new_val = entry.get_sort_value(m_new)
+            anchor_val = entry.get_sort_value(m_anchor)
+            if not math.isfinite(new_val) or not math.isfinite(anchor_val):
+                continue
+            # Lower sort value = better (get_sort_value already negated maximize metrics)
+            tolerance = max(EPS_ABS, abs(anchor_val) * EPS_REL)
+            if new_val > anchor_val + tolerance:
+                return False
+        return True
+    
+    def _classify_drop_name(name):
+        """Classify a drop name into one of: 'chest', 'fine', 'collectible', 'regular'.
+        
+        Used to filter drops by the user's sorting-priority categories so the
+        tiebreak only counts drops the user actually cares about.
+        """
+        if not name:
+            return 'regular'
+        # Fine variants come out of get_expected_drop_rate as "<name> (Fine)"
+        if name.endswith(' (Fine)'):
+            return 'fine'
+        lname = name.lower()
+        # Chests usually have 'chest' in the name; also common container words
+        if 'chest' in lname or 'crate' in lname or 'box' in lname:
+            return 'chest'
+        # Collectible detection: cross-reference activity.drop_table for Collectible refs
+        # Cached on first call to avoid recomputing per-drop-per-swap
+        return _drop_category_index.get(name, 'regular')
+    
+    # Build index of drop names → category once, using the activity's drop table
+    # to authoritatively classify collectibles and chests (name heuristics alone
+    # miss chests named without 'chest' like 'Treasure box' variants).
+    _drop_category_index = {}
+    try:
+        all_drops = list(activity.drop_table) + list(activity.secondary_drop_table)
+        for drop in all_drops:
+            dname = getattr(drop, 'item_name', None)
+            if not dname:
+                continue
+            ref = getattr(drop, 'item_ref', '') or ''
+            if ref.startswith('Collectible.'):
+                _drop_category_index[dname] = 'collectible'
+            elif ref.startswith('Container.'):
+                _drop_category_index[dname] = 'chest'
+    except Exception:
+        pass
+    
+    def _relevant_drop_names(drop_rates):
+        """Return the subset of drop_rates keys the user's sorting priorities care about.
+        
+        Reads SORTING_PRIORITY to find which target categories (chest/fine/
+        collectible/specific item) the user has asked to optimize, then selects
+        matching drops from the current drop_rates dict. If no categories are
+        selected (or all targets resolve to raw_rewards), returns all drop
+        names — this preserves the legacy "any drop counts" behavior for users
+        who haven't configured a target.
+        """
+        target_categories = set()  # from {'chest', 'fine', 'collectible', 'regular'}
+        specific_targets = set()   # exact drop names
+        
+        for raw in SORTING_PRIORITY:
+            if not isinstance(raw, SortingEntry):
+                continue
+            if raw.sort.metric_key != 'steps_per_reward_roll':
+                continue
+            if not raw.target:
+                continue
+            # Skip ignored entries
+            if getattr(raw, 'weight', 100) == 0:
+                continue
+            target_name = get_target_name(raw.target)
+            if target_name == 'primary_chest':
+                target_categories.add('chest')
+            elif target_name == 'fine_item':
+                target_categories.add('fine')
+            elif target_name == 'collectible':
+                target_categories.add('collectible')
+            elif target_name == 'raw_rewards':
+                # Raw rewards = regular (non-fine, non-chest, non-collectible)
+                target_categories.add('regular')
+            else:
+                # Specific item by name
+                specific_targets.add(target_name)
+        
+        # Also honor the legacy module-level TARGET_ITEM (CLI/display fallback)
+        if TARGET_ITEM is not None:
+            legacy_name = get_target_name(TARGET_ITEM)
+            if legacy_name == 'primary_chest':
+                target_categories.add('chest')
+            elif legacy_name == 'fine_item':
+                target_categories.add('fine')
+            elif legacy_name == 'collectible':
+                target_categories.add('collectible')
+            elif legacy_name and legacy_name != 'raw_rewards':
+                specific_targets.add(legacy_name)
+        
+        # No targets at all → fall back to legacy "any drop counts"
+        if not target_categories and not specific_targets:
+            return set(drop_rates.keys())
+        
+        relevant = set()
+        for dname in drop_rates.keys():
+            if dname in specific_targets:
+                relevant.add(dname)
+                continue
+            cat = _classify_drop_name(dname)
+            if cat in target_categories:
+                relevant.add(dname)
+        return relevant
+    
+    # Compute once — drops the user actually cares about. Assigned just
+    # below, after current_drop_rates is built.
+    
+    def _any_drop_improved(dr_new, dr_old, relevant_names=None):
+        """Check if any RELEVANT drop rate improved (lower steps = better).
+        
+        When relevant_names is provided, only drops in that set count as
+        improvements. This prevents the tiebreak from swapping in items that
+        only help drops the user didn't ask to optimize (e.g. swapping chest-
+        finding gear for fine-material-finding gear when the user explicitly
+        asked for 'cat:chests').
+        """
+        for name, new_steps in dr_new.items():
+            if relevant_names is not None and name not in relevant_names:
+                continue
+            old_steps = dr_old.get(name)
+            if old_steps is not None and new_steps < old_steps:
+                return True
+        return False
+    
+    def _effective_stat_count(gs, slot_name):
+        """Count bonus stats the item contributes that aren't captured by metrics.
+        
+        Since we're in the tiebreak pass (metrics are already confirmed equal),
+        we only need to count stats that DON'T affect scoring metrics but are
+        still useful (e.g., inventory_space). Stats like WE/DA/DR/steps/XP
+        are already captured by the metrics comparison — if they were different,
+        the metrics wouldn't be equal.
+        """
+        item = gs.get(slot_name)
+        if item is None:
+            return 0
+        skill_name = activity.primary_skill.lower()
+        loc = _get_location(activity)
+        item_stats = item.get_stats_for_skill(skill_name, location=loc, character=character)
+        if not item_stats:
+            return 0
+        
+        # Stats that affect scoring metrics (already captured by metrics comparison)
+        METRIC_STATS = {
+            'work_efficiency', 'double_action', 'double_rewards',
+            'steps_add', 'steps_percent',
+            'bonus_xp_add', 'bonus_xp_percent',
+            'chest_finding', 'fine_material_finding', 'find_collectibles',
+            'find_gems', 'find_bird_nests', 'find_linens', 'item_finding',
+        }
+        # Crafting-only stats that are useless for activities
+        CRAFTING_ONLY_STATS = {
+            'quality_outcome', 'no_materials_consumed',
+        }
+        # Also exclude any ItemFindingCategory.* stats (they affect drop rates)
+        
+        bonus = 0
+        for stat_name, stat_value in item_stats.items():
+            if stat_value != 0 and stat_name not in METRIC_STATS and stat_name not in CRAFTING_ONLY_STATS and not stat_name.startswith('ItemFindingCategory.'):
+                bonus += 1
+        
+        return bonus
+    
+    current_drop_rates = _get_drop_rates(current_gearset)
+    
+    # Resolve the user's target categories into a set of drop names that
+    # count as "relevant improvements" during the tiebreak. This prevents
+    # swaps that help drops outside the user's priority list (e.g. swapping
+    # chest-finding gear for FMF gear when the user asked for 'cat:chests').
+    tiebreak_relevant_drops = _relevant_drop_names(current_drop_rates)
+    # If the user specified explicit targets but none of them are in the
+    # current drop table, the set will be empty — fall back to "all drops"
+    # so the tiebreak still does something useful (instead of no-oping).
+    if not tiebreak_relevant_drops:
+        tiebreak_relevant_drops = set(current_drop_rates.keys())
+    
+    for slot in slots:
+        if slot in locked:
+            continue
+        current_item = current_gearset[slot]
+        
+        if slot.startswith('ring'):
+            item_slot = 'ring'
+        elif slot.startswith('tool'):
+            item_slot = 'tools'
+        elif slot == 'consumable':
+            item_slot = 'consumable'
+        else:
+            item_slot = slot
+        
+        best_swap = None
+        best_swap_drops = None
+        best_total_improvement = 0.0
+        best_stat_swap = None  # (new_item, test_metrics, stat_count) for stat-value tiebreak
+        current_stat_count = None  # Lazy-computed
+        
+        for new_item in items_by_slot.get(item_slot, []):
+            if new_item == current_item:
+                continue
+            
+            test_gearset = current_gearset.copy()
+            test_gearset[slot] = new_item
+            
+            # Validate: UUID/keyword constraints + keyword requirements
+            if not is_gearset_valid(test_gearset, character, activity=None, check_requirements=False):
+                continue
+            if not _check_keyword_requirements(test_gearset):
+                continue
+            
+            try:
+                test_metrics, _ = calculate_gearset_metrics(test_gearset, activity, character, consumable=consumable)
+            except Exception:
+                continue
+            
+            metrics_eq = _no_metric_regression(test_metrics, initial_tiebreak_metrics)
+            
+            # Debug: log back slot comparisons
+            if slot == 'back':
+                print(f"  [tiebreak debug] back: {current_item.name if current_item else 'None'} vs {new_item.name}")
+                print(f"    no_regression_vs_anchor: {metrics_eq}")
+                for sorting in SORTING_PRIORITY:
+                    va = sorting.get_sort_value(test_metrics)
+                    vb = sorting.get_sort_value(initial_tiebreak_metrics)
+                    print(f"    {sorting.metric_key}: new={va:.10f} anchor={vb:.10f} diff={va-vb:.2e}")
+            
+            if not metrics_eq:
+                continue
+            
+            # Metrics didn't regress — check if any RELEVANT drop improved.
+            # Only drops matching the user's target categories count here, so
+            # the tiebreak stays aligned with what the user asked to optimize.
+            test_drops = _get_drop_rates(test_gearset)
+            drops_improved = _any_drop_improved(test_drops, current_drop_rates, tiebreak_relevant_drops)
+            
+            # Debug: log back slot tiebreak details
+            if slot == 'back':
+                print(f"    drops_improved (relevant only): {drops_improved}")
+            
+            if drops_improved:
+                # Sum total improvement across only RELEVANT drops so we don't
+                # prefer a candidate because it happens to dump huge numbers
+                # into an irrelevant drop category.
+                total_improvement = sum(
+                    current_drop_rates.get(name, 0) - new_steps
+                    for name, new_steps in test_drops.items()
+                    if name in tiebreak_relevant_drops
+                    and current_drop_rates.get(name, 0) > new_steps
+                )
+                if total_improvement > best_total_improvement:
+                    best_total_improvement = total_improvement
+                    best_swap = (new_item, test_metrics)
+                    best_swap_drops = test_drops
+            else:
+                # Drops also equal — check stat-value tiebreak
+                # (prefer item with more effective stats, e.g. inventory_space > wasted WE)
+                if current_stat_count is None:
+                    current_stat_count = _effective_stat_count(current_gearset, slot)
+                new_stat_count = _effective_stat_count(test_gearset, slot)
+                
+                # Debug: log stat counts for back slot
+                if slot == 'back':
+                    skill_name = activity.primary_skill.lower()
+                    loc = _get_location(activity)
+                    cur_item_stats = current_item.get_stats_for_skill(skill_name, location=loc, character=character) if current_item else {}
+                    new_item_stats = new_item.get_stats_for_skill(skill_name, location=loc, character=character) if new_item else {}
+                    print(f"    stat_count: current={current_stat_count} new={new_stat_count}")
+                    print(f"    current item raw stats: {cur_item_stats}")
+                    print(f"    new item raw stats: {new_item_stats}")
+                
+                if new_stat_count > current_stat_count:
+                    if best_stat_swap is None or new_stat_count > best_stat_swap[2]:
+                        best_stat_swap = (new_item, test_metrics, new_stat_count)
+        
+        if best_swap is not None:
+            new_item, new_metrics = best_swap
+            old_name = current_item.name if current_item else "None"
+            
+            print(f"  Drop tiebreak {slot}: {old_name} → {new_item.name}")
+            # Show which drops improved
+            for name, new_steps in best_swap_drops.items():
+                old_steps = current_drop_rates.get(name, new_steps)
+                if new_steps < old_steps:
+                    print(f"    {name}: {old_steps:.1f} → {new_steps:.1f} steps")
+            
+            current_gearset[slot] = new_item
+            current_metrics = new_metrics
+            current_drop_rates = best_swap_drops
+            tiebreak_swaps += 1
+        elif best_stat_swap is not None:
+            # No drop improvement, but a stat-value tiebreak found a better item
+            new_item, new_metrics, new_stat_count = best_stat_swap
+            old_name = current_item.name if current_item else "None"
+            old_stat_count = _effective_stat_count(current_gearset, slot)
+            
+            print(f"  Stat tiebreak {slot}: {old_name} (eff={old_stat_count}) → {new_item.name} (eff={new_stat_count})")
+            
+            current_gearset[slot] = new_item
+            current_metrics = new_metrics
+            current_drop_rates = _get_drop_rates(current_gearset)
+            tiebreak_swaps += 1
+    
+    if tiebreak_swaps > 0:
+        print(f"Drop tiebreak pass: {tiebreak_swaps} swap(s) applied")
+    
+    # Debug: print final gearset after all passes
+    print(f"\n--- FINAL GEARSET (after local search + tiebreak) ---")
+    for slot in ['head', 'cape', 'back', 'chest', 'primary', 'secondary',
+                 'hands', 'legs', 'neck', 'feet', 'ring1', 'ring2'] + [f'tool{i}' for i in range(6)] + ['consumable', 'input', 'collectible']:
+        item = current_gearset.get(slot)
+        if item is not None:
+            kws = getattr(item, 'keywords', [])
+            print(f"  {slot}: {item.name}  keywords={kws}")
+        elif slot in current_gearset:
+            print(f"  {slot}: None")
+    # Check keyword requirements (input item satisfies its own keywords)
+    keyword_counts = activity.requirements.get('keyword_counts', {})
+    _input_kws = {kw.lower() for kw in getattr(INPUT_ITEM, 'keywords', [])} if INPUT_ITEM else set()
+    # If no input selected, pre-satisfy keywords from activity's input_items definitions
+    if not INPUT_ITEM and hasattr(activity, 'input_items') and activity.input_items:
+        for ii in activity.input_items:
+            if getattr(ii, 'type', '') == 'keyword':
+                kw = getattr(ii, 'reference', '').lower()
+                if kw:
+                    _input_kws.add(kw)
+    for kw, required in keyword_counts.items():
+        count = sum(1 for s, it in current_gearset.items() if it and hasattr(it, 'keywords') and any(kw.lower() == k.lower() for k in it.keywords))
+        if count < required and kw.lower() in _input_kws:
+            count += 1
+        status = "✓" if count >= required else "✗ MISSING"
+        print(f"  Keyword '{kw}': {count}/{required} {status}")
+
+    # Final "dumb" stat-dominance upgrade pass (bug db0613d9).
+    # If the user didn't configure a secondary target (e.g. chests), the
+    # regular optimizer can pick a strictly-worse item simply because the
+    # differentiator isn't in its objective. This pass catches free
+    # upgrades based on pure stat dominance — see util/dumb_upgrade_pass.py.
+    try:
+        from util.dumb_upgrade_pass import apply_dumb_stat_upgrade
+        required_item_names = {
+            name.lower()
+            for name in (activity.requirements.get('item_requirements', []) if activity else [])
+            if isinstance(name, str)
+        }
+        required_keywords = set((activity.requirements.get('keyword_counts', {}) or {}).keys()) if activity else set()
+        # Pass locked_slots so the dumb pass doesn't swap user-pinned
+        # items by stat dominance. Without this, tool0 happened to match
+        # the user's lock by coincidence (the optimizer's greedy already
+        # chose what they wanted), but tool1..tool4 got rewritten to
+        # whatever stat-dominated. Bug: "I locked all 5 tool slots, only
+        # tool0 was respected." The craft optimizer already passes this
+        # at optimize_craft_gearsets.py:1759 — keeping the two paths in
+        # sync.
+        current_gearset = apply_dumb_stat_upgrade(
+            current_gearset,
+            character,
+            skill=(activity.primary_skill.lower() if activity else 'agility'),
+            location=_get_location(activity) if activity else None,
+            include_nmc=False,
+            required_keywords=required_keywords,
+            required_item_names=required_item_names,
+            locked_slots=set(LOCKED_SLOTS.keys()) if LOCKED_SLOTS else None,
+        )
+    except Exception as _dumb_exc:
+        import traceback
+        print(f"  [dumb-upgrade-pass] skipped due to error: {_dumb_exc!r}")
+        traceback.print_exc()
+
     return current_gearset
 
 # ============================================================================
@@ -1006,11 +3153,14 @@ if __name__ == '__main__':
     # If targeting specific item, show that too
     if TARGET_ITEM is not None:
         target_name = get_target_name(TARGET_ITEM)
+        # Read from the target-specific composite key; fall back to bare.
+        composite_key = f"steps_per_reward_roll::{target_name}"
+        target_spr = final_metrics.get(composite_key, final_metrics.get('steps_per_reward_roll', 0.0))
         print(f"\n  Target Item: {target_name}")
         if is_fine_material_target(TARGET_ITEM):
-            print(f"  Steps per fine material: {final_metrics['steps_per_reward_roll']:.1f}")
+            print(f"  Steps per fine material: {target_spr:.1f}")
         else:
-            print(f"  Steps per item drop: {final_metrics['steps_per_reward_roll']:.1f}")
+            print(f"  Steps per item drop: {target_spr:.1f}")
     
     # Show ALL stats (gear + level bonus + collectibles)
     print(f"\nAll Stats (gear + level + collectibles):")
@@ -1022,6 +3172,7 @@ if __name__ == '__main__':
         'bonus_xp_percent', 'bonus_xp_add',
         'no_materials_consumed', 'quality_outcome',
         'fine_material_finding', 'find_collectibles', 'find_gems', 'find_bird_nests',
+        'find_linens',
         'chest_finding', 'inventory_space'
     ]
     

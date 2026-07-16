@@ -53,25 +53,47 @@ def parse_containers_list():
     soup = BeautifulSoup(html, 'html.parser')
     containers = []
     
-    # Find all tables with captions
+    # Find all wikitable tables under the "Chest Types" heading
+    # The wiki no longer uses <caption> tags — tables are grouped under <h2> headings
     tables = soup.find_all('table', class_='wikitable')
     
     for table in tables:
+        # Determine container type by checking the preceding heading
+        # Walk backwards to find the nearest h2/h3
+        container_type = None
+        
+        # First try: check for a caption (old format)
         caption = table.find('caption')
-        if not caption:
+        if caption:
+            caption_text = clean_text(caption.get_text())
+            if 'Skill Chests' in caption_text:
+                container_type = 'skill_chest'
+            elif 'Unique Openables' in caption_text:
+                container_type = 'unique_openable'
+        
+        # New format: find preceding heading
+        if not container_type:
+            prev = table.find_previous(['h2', 'h3'])
+            if prev:
+                heading_text = clean_text(prev.get_text())
+                # Skip tables under "Loot Rolls" or "Unavailable"
+                if 'Loot Rolls' in heading_text or 'Unavailable' in heading_text:
+                    continue
+                if 'Chest Types' in heading_text or 'Skill' in heading_text:
+                    container_type = 'skill_chest'
+        
+        if not container_type:
             continue
         
-        caption_text = clean_text(caption.get_text())
-        
-        # Check if this is Skill Chests or Unique Openables (ignore Regional Chests)
-        if 'Skill Chests' in caption_text:
-            print("\nParsing Skill Chests table...")
+        # Determine if this is a skill chest or unique openable table
+        # by checking if the table has a "Skill" column header
+        headers = [clean_text(th.get_text()) for th in table.find_all('th')]
+        if any('skill' in h.lower() for h in headers):
             container_type = 'skill_chest'
-        elif 'Unique Openables' in caption_text:
-            print("\nParsing Unique Openables table...")
+        elif any('source' in h.lower() or 'location' in h.lower() for h in headers):
             container_type = 'unique_openable'
-        else:
-            continue
+        
+        print(f"\nParsing table (type={container_type}, headers={headers[:4]})...")
         
         # Parse the table rows
         for row in table.find_all('tr')[1:]:  # Skip header

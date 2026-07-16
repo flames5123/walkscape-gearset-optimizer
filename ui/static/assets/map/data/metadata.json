@@ -1,0 +1,12 @@
+{
+  "source": "https://map.walkscape.app",
+  "data_urls": {
+    "locations": "https://map.walkscape.app/data/locations-1766468346.json",
+    "routes": "https://map.walkscape.app/data/routes-1766468346.json",
+    "activities": "https://map.walkscape.app/data/activities-1766468346.json",
+    "buildings": "https://map.walkscape.app/data/buildings-1766468346.json",
+    "services": "https://map.walkscape.app/data/services-1766468346.json"
+  },
+  "files_downloaded": 5,
+  "files_expected": 5
+}

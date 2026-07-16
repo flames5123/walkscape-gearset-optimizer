@@ -30,6 +30,19 @@ HARD_CODED_EXTRA_REGIONS = {
     'wraithwater': 'spectral',
 }
 
+# The wiki's displayed region name does not always match the internal region id
+# the rest of the app uses (REGION_CONFIG in ui/app.py, the JS REGIONS list, map
+# data factions, the travel optimizer, etc.). For example the wiki renamed
+# Wallisia's region to "Empire of Wallisia", which a naive scrape would turn into
+# 'empire_of_wallisia' -- a value not in REGION_CONFIG, so /api/locations silently
+# drops every Wallisia location from the travel dropdown (bug b7099123).
+# Map the wiki display name (lowercased) -> canonical region id here so a re-scrape
+# never reintroduces that mismatch. Matched as a substring of the captured name.
+REGION_NAME_ALIASES = {
+    'grand duchy of trellin-erdwise': 'gdte',
+    'empire of wallisia': 'wallisia',
+}
+
 def get_location_names_from_routes():
     """Extract unique location names from the routes page."""
     html = download_page(ROUTES_URL, ROUTES_CACHE, rescrape=RESCRAPE)
@@ -124,9 +137,15 @@ def parse_location_page(location_name, from_folder=False, cache_file_path=None):
         match = region_pattern.search(text)
         if match:
             region_text = match.group(1).strip().lower()
-            if 'grand duchy of trellin-erdwise' in region_text:
-                primary_region = 'gdte'
-            else:
+            # Map known wiki display names to the canonical region id used by the
+            # rest of the app (see REGION_NAME_ALIASES). Fall back to a simple
+            # whitespace->underscore slug for any region we don't alias.
+            primary_region = None
+            for alias, canonical in REGION_NAME_ALIASES.items():
+                if alias in region_text:
+                    primary_region = canonical
+                    break
+            if not primary_region:
                 primary_region = region_text.replace(' ', '_')
             break
     
@@ -227,7 +246,18 @@ def parse_location_page(location_name, from_folder=False, cache_file_path=None):
                         # Normalize specific known faction names
                         if 'halfling' in faction_name:
                             faction_name = 'halfling_rebels'
-                        
+
+                        # Normalize wiki region/faction display names to the
+                        # canonical region id (e.g. the faction link "Empire of
+                        # Wallisia" -> 'wallisia'). Without this, a re-scrape would
+                        # append 'empire_of_wallisia' as a secondary region tag even
+                        # though the primary region is correctly aliased (bug b7099123).
+                        _faction_spaced = faction_name.replace('_', ' ')
+                        for alias, canonical in REGION_NAME_ALIASES.items():
+                            if alias in _faction_spaced:
+                                faction_name = canonical
+                                break
+
                         # Add if not already in list and not empty
                         if faction_name and faction_name not in factions:
                             factions.append(faction_name)
@@ -383,3 +413,11 @@ if __name__ == '__main__':
     print(f"\nSuccessfully parsed {len(locations)} locations")
     
     generate_locations_module(locations)
+
+    # Refresh stats_report precomputed tables after scrape completes.
+    # See util/stats_report/ for details. No-op if sessions.db not present.
+    try:
+        from util.stats_report.precompute.scraper_hook import refresh_after_scrape
+        refresh_after_scrape()
+    except Exception as _e:
+        print(f"[stats_report precompute] hook failed: {_e}")

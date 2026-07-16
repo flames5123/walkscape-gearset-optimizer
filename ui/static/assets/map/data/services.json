@@ -1,0 +1,389 @@
+[
+  {
+    "id": "service-basic_forge-0eeda0aa-614d-4ce9-a5b4-0e5c4ea17d33",
+    "name": "Basic Forge",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Basic_Forge",
+    "icon": {
+      "url": "services/forge.png"
+    },
+    "skills": [
+      "smithing"
+    ]
+  },
+  {
+    "id": "service-advanced_forge-42312cfe-6b47-4742-b90f-896d345c3150",
+    "name": "Advanced Forge",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Advanced_Forge",
+    "icon": {
+      "url": "services/forge.png"
+    },
+    "skills": [
+      "smithing"
+    ]
+  },
+  {
+    "id": "service-basic_kitchen-084de2eb-c5ce-4c05-8958-9817def4975c",
+    "name": "Basic Kitchen",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Basic_Kitchen",
+    "icon": {
+      "url": "services/kitchen.png"
+    },
+    "skills": [
+      "cooking"
+    ]
+  },
+  {
+    "id": "service-advanced_kitchen-b6638f54-15d3-4501-b1eb-db17948fed71",
+    "name": "Advanced Kitchen",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Advanced_Kitchen",
+    "icon": {
+      "url": "services/kitchen.png"
+    },
+    "skills": [
+      "cooking"
+    ]
+  },
+  {
+    "id": "service-basic_workshop-56b7523f-2fa3-48e4-9ec9-3906baca7125",
+    "name": "Basic Workshop",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Basic_Workshop",
+    "icon": {
+      "url": "services/workshop.png"
+    },
+    "skills": [
+      "crafting"
+    ]
+  },
+  {
+    "id": "service-advanced_workshop-db7db31c-10d2-4b5d-9f51-8041860073b7",
+    "name": "Advanced Workshop",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Advanced_Workshop",
+    "icon": {
+      "url": "services/workshop.png"
+    },
+    "skills": [
+      "crafting"
+    ]
+  },
+  {
+    "id": "service-basic_sawmill-55763e83-972b-4964-a169-8b53beb8b507",
+    "name": "Basic Sawmill",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Basic_Sawmill",
+    "icon": {
+      "url": "services/sawmill.png"
+    },
+    "skills": [
+      "carpentry"
+    ]
+  },
+  {
+    "id": "service-advanced_sawmill-a79d34c2-d04e-4749-9611-4676c4f611e8",
+    "name": "Advanced Sawmill",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Advanced_Sawmill",
+    "icon": {
+      "url": "services/sawmill.png"
+    },
+    "skills": [
+      "carpentry"
+    ]
+  },
+  {
+    "id": "service-frozen_forge-2d87bb03-7676-4317-97e5-a52a046f04a0",
+    "name": "Frozen Forge",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Frozen_Forge",
+    "icon": {
+      "url": "services/forge_frozen.png"
+    },
+    "skills": [
+      "smithing"
+    ]
+  },
+  {
+    "id": "service-wardrobe-9fae8878-1963-4425-a273-fc08b8890b14",
+    "name": "Wardrobe",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Services#Wardrobes",
+    "icon": {
+      "url": "services/wardrobe.png"
+    },
+    "skills": []
+  },
+  {
+    "id": "service-mysterious-merchant",
+    "name": "Mysterious Merchant",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Mysterious_Merchant",
+    "icon": {
+      "url": "services/mysterious_merchant.png"
+    },
+    "skills": []
+  },
+  {
+    "id": "service-sawmill_of_barbantok-bcf66d09-179f-4979-90d3-65333a263ad6",
+    "name": "Sawmill of Barbantok (Basic)",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Services#Basic_Sawmills",
+    "icon": {
+      "url": "services/sawmill_barbantok.png"
+    },
+    "skills": [
+      "carpentry"
+    ]
+  },
+  {
+    "id": "service-tidal_workshop-75f6cf9e-a64b-499d-84e5-5a560d63bbd7",
+    "name": "Tidal Workshop (Advanced)",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Services#Advanced_Workshops",
+    "icon": {
+      "url": "services/workshop_tidal.png"
+    },
+    "skills": [
+      "crafting"
+    ]
+  },
+  {
+    "id": "service-underwater_kitchen-a4a2f23f-d7e5-4283-b5c5-0dc226de01ff",
+    "name": "Underwater Kitchen (Basic)",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Services#Basic_Kitchens",
+    "icon": {
+      "url": "services/kitchen_underwater.png"
+    },
+    "skills": [
+      "cooking"
+    ]
+  },
+  {
+    "id": "service-underwater_forge-cee810ee-6291-47b4-b34f-9a9df7afe183",
+    "name": "Underwater Forge (Basic)",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Services#Basic_Forges",
+    "icon": {
+      "url": "services/forge_underwater.png"
+    },
+    "skills": [
+      "smithing"
+    ]
+  },
+  {
+    "id": "service-underwater_sawmill-cb68e480-845e-40ae-9e8d-3053091287fe",
+    "name": "Underwater Sawmill (Basic)",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Services#Basic_Sawmills",
+    "icon": {
+      "url": "services/sawmill_underwater.png"
+    },
+    "skills": [
+      "carpentry"
+    ]
+  },
+  {
+    "id": "service-eberhart_mansion_kitchen-d83a009b-5975-4a6d-8a64-6b73bc99a538",
+    "name": "Eberhart Mansion Kitchen (Advanced)",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Services#Advanced_Kitchen",
+    "icon": {
+      "url": "services/kitchen_mansion.png"
+    },
+    "skills": [
+      "cooking"
+    ]
+  },
+  {
+    "id": "2c212f40-90db-4977-8955-82dd14ab0231",
+    "name": "Basic Trinketry Bench",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Basic_Trinketry_Bench",
+    "icon": {
+      "url": "services/trinketry_bench.png"
+    },
+    "skills": [
+      "trinketry"
+    ]
+  },
+  {
+    "id": "f423f748-2a23-4be4-bf94-5c4ff7f7e754",
+    "name": "Advanced Trinketry Bench",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Services#Advanced_Trinketry_Benches",
+    "icon": {
+      "url": "services/trinketry_bench.png"
+    },
+    "skills": [
+      "trinketry"
+    ]
+  },
+  {
+    "id": "ef87710d-69bd-4b04-9357-7f28120124fa",
+    "name": "Ruined Trinketry Bench (Basic)",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Services#Basic_Trinketry_Benches",
+    "icon": {
+      "url": "services/trinketry_bench_ruined.png"
+    },
+    "skills": [
+      "trinketry"
+    ]
+  },
+  {
+    "id": "f3f5e3e3-7dfd-4752-9e57-145c67827ffb",
+    "name": "Erdwiss Trinketry Factory (Advanced)",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Services#Advanced_Trinketry_Benches",
+    "icon": {
+      "url": "services/trinketry_bench_factory.png"
+    },
+    "skills": [
+      "trinketry"
+    ]
+  },
+  {
+    "id": "847bffa4-79c9-4e0e-b43e-e63185d9d669",
+    "name": "Saw-in-half mill (Advanced)",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Services#Advanced_Sawmills",
+    "icon": {
+      "url": "services/sawmill_halfling.png"
+    },
+    "skills": [
+      "carpentry"
+    ]
+  },
+  {
+    "id": "3fbb5e79-cfb0-4395-9401-071c6544be68",
+    "name": "Alight Kitchen (Basic)",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Services#Basic_Kitchens",
+    "icon": {
+      "url": "services/kitchen.png"
+    },
+    "skills": [
+      "cooking"
+    ]
+  },
+  {
+    "id": "80e8be26-cae3-4f4c-b345-ec9af8904c91",
+    "name": "Cursed Sawmill (Advanced)",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Cursed_Sawmill_(Advanced)",
+    "icon": {
+      "url": "services/cursed_sawmill.png"
+    },
+    "skills": [
+      "carpentry"
+    ]
+  },
+  {
+    "id": "e5e5ab14-04f1-4460-a4fe-a75e0bc5b18e",
+    "name": "Cursed Forge (Advanced)",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Cursed_Forge_(Advanced)",
+    "icon": {
+      "url": "services/cursed_forge.png"
+    },
+    "skills": [
+      "smithing"
+    ]
+  },
+  {
+    "id": "2b7b18b4-f28a-4fff-9d94-de26aa2adfd1",
+    "name": "Cursed Kitchen (Advanced)",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Cursed_Kitchen_(Advanced)",
+    "icon": {
+      "url": "services/cursed_kitchen.png"
+    },
+    "skills": [
+      "cooking"
+    ]
+  },
+  {
+    "id": "7b6761a1-9867-4f9a-bd0e-b0387e9906c3",
+    "name": "Cursed Workshop (Advanced)",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Cursed_Workshop_(Advanced)",
+    "icon": {
+      "url": "services/cursed_workshop.png"
+    },
+    "skills": [
+      "crafting"
+    ]
+  },
+  {
+    "id": "ce184133-01de-41c5-b3f6-d58402fcbe4a",
+    "name": "Heatstroke Metalworks (Advanced)",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Heatstroke_Metalworks_(Advanced)",
+    "icon": {
+      "url": "services/heatstroke_metalworks.png"
+    },
+    "skills": [
+      "smithing"
+    ]
+  },
+  {
+    "id": "ddd8bffb-0967-46d0-93bb-2f37b0bb459d",
+    "name": "Granular Faceting Facility (Advanced)",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Granular_Faceting_Facility_(Advanced)",
+    "icon": {
+      "url": "services/grainular_faceting_facility.png"
+    },
+    "skills": [
+      "trinketry"
+    ]
+  },
+  {
+    "id": "jobboard-azurazera_job_board-fdca07c9-3cdb-44a0-aed7-53b22678d8bf",
+    "name": "Azurazera job board",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Jarvonia_Job_Boards#Azurazera_Job_Board",
+    "icon": {
+      "url": "text/general_icons/job_boards.png"
+    },
+    "skills": []
+  },
+  {
+    "id": "jobboard-kallaheim_job_board-170b68d2-5d0f-4378-a8f0-b86112a5d60b",
+    "name": "Kallaheim job board",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Jarvonia_Job_Boards#Kallaheim_Job_Board",
+    "icon": {
+      "url": "text/general_icons/job_boards.png"
+    },
+    "skills": []
+  },
+  {
+    "id": "jobboard-vastalume_job_board-c5108b92-e057-4327-9c07-944aa2dbdb70",
+    "name": "Vastalume job board",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Syrenthia_Job_Boards#Vastalume_Job_Board",
+    "icon": {
+      "url": "text/general_icons/job_boards.png"
+    },
+    "skills": []
+  },
+  {
+    "id": "jobboard-granfiddich_job_board-4b949f54-7c9a-44e2-97a8-5f0499882358",
+    "name": "Granfiddich job board",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/GDTE_Job_Boards#Granfiddich_Job_Board",
+    "icon": {
+      "url": "text/general_icons/job_boards.png"
+    },
+    "skills": []
+  },
+  {
+    "id": "jobboard-blackspell_port_job_board-edd9ced4-d6ee-469d-bd75-cbbb41667492",
+    "name": "Blackspell Harbour job board",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/GDTE_Job_Boards#Blackspell_Port_Job_Board",
+    "icon": {
+      "url": "text/general_icons/job_boards.png"
+    },
+    "skills": []
+  },
+  {
+    "id": "521b90e7-0974-4ce0-94d6-71b841afe5f5",
+    "name": "Everhaven combined job board",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/GDTE_Job_Boards#Everhaven_Job_Board",
+    "icon": {
+      "url": "text/general_icons/job_boards.png"
+    },
+    "skills": []
+  },
+  {
+    "id": "1cb05d71-0033-4222-8bc8-f4cf8436e2c3",
+    "name": "Halfling Campgrounds job board",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/GDTE_Job_Boards#Halfling_Campgrounds_Job_Board",
+    "icon": {
+      "url": "text/general_icons/job_boards.png"
+    },
+    "skills": []
+  },
+  {
+    "id": "jobboard-tutorial_area-43c4e231-2f03-4acb-b976-e4a239ad3cf9",
+    "name": "Herbert's job board",
+    "wikiUrl": "https://wiki.walkscape.app/wiki/Jarvonia_Job_Boards#Herbert's_Job_Board",
+    "icon": {
+      "url": "text/general_icons/job_boards.png"
+    },
+    "skills": []
+  }
+]

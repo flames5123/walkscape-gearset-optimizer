@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  walkscape-ui:
+    build:
+      context: ..
+      dockerfile: ui/Dockerfile
+    container_name: walkscape-ui
+    ports:
+      - "6969:6969"
+    volumes:
+      # Mount sessions.db for persistence
+      - ./sessions.db:/app/ui/sessions.db
+      # Mount entire codebase for auto-reload on changes
+      - ..:/app
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PYTHONPATH=/app
+      # Enable uvicorn auto-reload
+      - UVICORN_RELOAD=true
+    restart: always
+    command: uvicorn ui.app:app --host 0.0.0.0 --port 6969 --reload
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6969/api/skills"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
