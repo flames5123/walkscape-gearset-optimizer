@@ -665,13 +665,6 @@ function renderComponents(itemsData, skillsData) {
     // Initialize comparison section
     window.gearsetComparisonSection = new GearsetComparisonSection($comparisonContainer);
 
-    // Recipe poll banner — inserted LAST so it wins the "directly below the
-    // recipe dropdown" adjacency spot. Prior .after() calls (optimize, the
-    // comparison toggle, the comparison section) placed each new element
-    // right under the recipe selector, each pushing the previous one down.
-    // Doing this insertion last means the banner lands between the dropdown
-    // and everything else (optimize button, quick settings, comparison view,
-    // etc.).
 
     // Initialize comparison controls in Column 2 (gearset 1/2 toggle)
     const $comparisonControls = $('#comparison-controls');
