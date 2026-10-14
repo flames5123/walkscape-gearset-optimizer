@@ -44,8 +44,12 @@ UI_FILES = (
     "ui/optimize_worker.py",
     "ui/crafting_tree.py",  # client-side crafting tree calculate (calculate_tree)
     "ui/stats_report_worker.py",  # client-side goals report (build_*_jobs + execute_job)
+    "ui/pet_effort.py",  # client-side Termite "Terminate" -> Carpentry XP (owned_termite_level, activity_has_logs_drop, compute_report_termite_carpentry). stats_report_worker imports these; without it the imports ImportError (caught defensively) and the local (Pyodide) run silently produced ZERO Carpentry rows while the server produced them (0/N carpentry, (!) never cleared).
     "ui/crafting_tree_optimize.py",  # client-side crafting tree node optimize (shared core)
     "ui/travel_optimize_worker.py",  # client-side travel optimize (run_travel_optimization)
+    "ui/crafting_tree_exact_driver.py",  # client-side EXACT B&B solver — Steps per Recipe (Fastest Craft) runs this in Pyodide; pure compute, no DB (all DB imports are function-local).
+    "ui/fastest_craft.py",  # client-side Steps per Recipe (Fastest Craft) orchestrator — run_fastest_craft(db=None, with_details=True) computes in the browser; persistence/banked/stale (the only DB-bound layer) is POSTed back to /api/fastest-craft/local-result for the server to apply.
+    "ui/catalog.py",  # fastest_craft._classify_output -> consumable_skill_tabs, and taxonomy; needed by the client-side FC compute.
 )
 
 # Non-.py data files the optimizers read at RUNTIME (via open()). These live

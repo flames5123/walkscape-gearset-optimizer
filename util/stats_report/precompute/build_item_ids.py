@@ -78,7 +78,7 @@ def _tier_to_crafted_key(tier: str) -> str:
 
 
 def build_item_ids(db, migration_id: str, changed_slugs: Optional[Set[str]] = None) -> int:
-    """Populate item_ids by INSERT-OR-IGNORE.
+    """Populate item_ids by diff-then-insert (append-only).
 
     Args:
         db: sqlite3 connection
@@ -90,9 +90,22 @@ def build_item_ids(db, migration_id: str, changed_slugs: Optional[Set[str]] = No
 
     Returns:
         Number of rows inserted (new (slug, quality) pairs).
+
+    Implementation note (2026-08-04, jwbail [fix:stale-detection]): this used
+    to `INSERT OR IGNORE` the ENTIRE catalog every run. With
+    `id INTEGER PRIMARY KEY AUTOINCREMENT` + `UNIQUE (import_name, quality)`,
+    every ignored duplicate STILL burns an AUTOINCREMENT value (sqlite_sequence
+    advances on the OR-IGNORE conflict), so MAX(id) raced ~1 catalog-worth
+    ahead on every rebuild — 1605 real rows but ids in the 6000s after ~4
+    rebuilds. We now diff the catalog against the rows already present and
+    plain-INSERT only the genuinely-new pairs, so no conflict is ever hit and
+    no id is burned. Existing ids are never touched (append-only invariant
+    preserved). We also no longer commit here — the caller (precompute_all /
+    precompute_changed) owns the commit, and the freshness signal is a
+    completion stamp written only after applicability finishes, so a partial
+    rebuild can never mark the catalog "fresh".
     """
     cursor = db.cursor()
-    inserted = 0
 
     # Determine sort order: alphabetical by (slug, quality_ordinal)
     quality_ordinal = {q: i for i, q in enumerate(QUALITY_TIERS)}
@@ -104,17 +117,42 @@ def build_item_ids(db, migration_id: str, changed_slugs: Optional[Set[str]] = No
     # Sort deterministically
     candidates.sort(key=lambda sq: (sq[0], quality_ordinal.get(sq[1], 99)))
 
-    # INSERT OR IGNORE preserves existing ids (append-only invariant)
-    for slug, quality in candidates:
+    # Diff against what already exists so we only INSERT genuinely-new pairs.
+    # No INSERT OR IGNORE => no UNIQUE conflict => no AUTOINCREMENT id burn.
+    cursor.execute("SELECT import_name, quality FROM item_ids")
+    existing = {(row[0], row[1]) for row in cursor.fetchall()}
+
+    new_pairs = [(s, q) for (s, q) in candidates if (s, q) not in existing]
+    inserted = 0
+    for slug, quality in new_pairs:
         cursor.execute(
-            "INSERT OR IGNORE INTO item_ids (import_name, quality, added_in_migration) "
+            "INSERT INTO item_ids (import_name, quality, added_in_migration) "
             "VALUES (?, ?, ?)",
             (slug, quality, migration_id),
         )
-        if cursor.rowcount > 0:
-            inserted += 1
+        inserted += 1
 
-    db.commit()
+    # Orphan prune (2026-08-11, jwbail [fix:stale-detection]) — FULL-catalog runs
+    # only. Drop rows whose (slug, quality) is no longer in the catalog: an item
+    # renamed to a new slug leaves its OLD slug as a dead duplicate row (append-
+    # only never removed it), so a pure rename shows as TWO rows (e.g.
+    # adventurers_guild_buckler + adventuring_buckler). Removed items linger the
+    # same way. Deleting these only removes DEAD ids — live items keep their ids,
+    # so freshly-computed bitmaps still align on every live item. A stored
+    # per-user bitmap that referenced the dead id flips that scope stale once
+    # (the item is now owned under the new slug/id), which is the intended
+    # signal. Guarded to full runs: a scoped (changed_slugs) run's candidate set
+    # is filtered and must NOT be treated as the whole catalog.
+    if changed_slugs is None:
+        catalog_pairs = {(s, q) for (s, q) in candidates}
+        stale = [(nm, q) for (nm, q) in existing if (nm, q) not in catalog_pairs]
+        for nm, q in stale:
+            cursor.execute(
+                "DELETE FROM item_ids WHERE import_name = ? AND quality = ?",
+                (nm, q),
+            )
+
+    # NOTE: intentionally NO db.commit() here — see docstring.
     return inserted
 
 

@@ -6,6 +6,8 @@
  */
 
 import { computeSwap, computeAlternativesSwap } from './utils/slot-reorder.js';
+import { normalizeFavorites, isFavorited as _isFavorited, toggleFavorite as _toggleFavorite, reorderFavoriteType as _reorderFavoriteType, reorderFavoritesAll as _reorderFavoritesAll } from './utils/favorites-ui.js';
+import { fetchOwnedByQuality } from './utils/owned-quality-breakdown.js';
 
 class StateStore {
     constructor() {
@@ -102,6 +104,12 @@ class StateStore {
                 has_seen_custom_stats: false,
                 has_seen_help: false,
                 custom_stats: {},
+                // Account-synced recipe/activity favorites — an ORDERED list of
+                // { type, id } entries (manual add / drag order). Persisted under
+                // ui_config.favorites via PATCH ui.favorites; surfaced as a
+                // collapsed "Favorites" category + heart toggles in the
+                // activity/recipe/combined dropdowns. Captured by undo/redo.
+                favorites: [],
                 user_overrides: {
                     skills: {},
                     skills_xp: {},
@@ -142,13 +150,39 @@ class StateStore {
      * @returns {Function} Unsubscribe function
      */
     subscribe(path, callback) {
-        if (!this.subscribers.has(path)) {
-            this.subscribers.set(path, []);
+        const key = this._pathKey(path);
+        if (!this.subscribers.has(key)) {
+            this.subscribers.set(key, []);
         }
-        this.subscribers.get(path).push(callback);
+        this.subscribers.get(key).push(callback);
 
         // Return unsubscribe function
         return () => this.unsubscribe(path, callback);
+    }
+
+    /**
+     * Normalize a path into an array of segments.
+     * A path may be a dot-separated string (legacy) OR an array of segments.
+     * The array form lets a single segment contain dots (e.g. an item id like
+     * "letter_from_a._a.") without being shattered by the '.' delimiter.
+     * @private
+     * @param {string|string[]} path
+     * @returns {string[]}
+     */
+    _pathParts(path) {
+        return Array.isArray(path) ? path : String(path).split('.');
+    }
+
+    /**
+     * Canonical string key for a path (used for subscriber map lookups and
+     * parent-path notification). Array paths join with '.' so they collide
+     * cleanly with the equivalent legacy string subscription.
+     * @private
+     * @param {string|string[]} path
+     * @returns {string}
+     */
+    _pathKey(path) {
+        return Array.isArray(path) ? path.join('.') : path;
     }
 
     /**
@@ -157,8 +191,9 @@ class StateStore {
      * @param {Function} callback - Callback to remove
      */
     unsubscribe(path, callback) {
-        if (this.subscribers.has(path)) {
-            const callbacks = this.subscribers.get(path);
+        const key = this._pathKey(path);
+        if (this.subscribers.has(key)) {
+            const callbacks = this.subscribers.get(key);
             const index = callbacks.indexOf(callback);
             if (index > -1) {
                 callbacks.splice(index, 1);
@@ -193,7 +228,7 @@ class StateStore {
      * @param {*} value - Value to set
      */
     _setPath(path, value) {
-        const parts = path.split('.');
+        const parts = this._pathParts(path);
         let obj = this.state;
 
         for (let i = 0; i < parts.length - 1; i++) {
@@ -213,7 +248,7 @@ class StateStore {
      * @returns {*} Value at path
      */
     _getPath(path) {
-        const parts = path.split('.');
+        const parts = this._pathParts(path);
         let obj = this.state;
 
         for (let i = 0; i < parts.length; i++) {
@@ -232,8 +267,9 @@ class StateStore {
      * @param {string} path - Path that changed
      */
     _notifySubscribers(path) {
-        if (this.subscribers.has(path)) {
-            this.subscribers.get(path).forEach(callback => {
+        const key = this._pathKey(path);
+        if (this.subscribers.has(key)) {
+            this.subscribers.get(key).forEach(callback => {
                 try {
                     callback();
                 } catch (error) {
@@ -243,7 +279,7 @@ class StateStore {
         }
 
         // Also notify parent paths (e.g., "items" when "items.X.has" changes)
-        const parts = path.split('.');
+        const parts = this._pathParts(path);
         for (let i = parts.length - 1; i > 0; i--) {
             const parentPath = parts.slice(0, i).join('.');
             if (this.subscribers.has(parentPath)) {
@@ -275,6 +311,11 @@ class StateStore {
             return;
         }
 
+        // Debounce key: canonical string form. The path itself is sent to the
+        // backend unchanged — array paths are transmitted as a JSON array so
+        // segments containing dots (e.g. item id "letter_from_a._a.") survive.
+        const syncKey = this._pathKey(path);
+
         // Debounce: Clear existing timeout for this path
         if (!this._syncTimeouts) {
             this._syncTimeouts = {};
@@ -283,17 +324,18 @@ class StateStore {
             this._syncPendingValues = {};
         }
 
-        if (this._syncTimeouts[path]) {
-            clearTimeout(this._syncTimeouts[path]);
+        if (this._syncTimeouts[syncKey]) {
+            clearTimeout(this._syncTimeouts[syncKey]);
         }
 
-        // Store the pending value for flush
-        this._syncPendingValues[path] = value;
+        // Store the pending value for flush (keep the real path so flush can
+        // transmit array paths faithfully instead of the collapsed key string)
+        this._syncPendingValues[syncKey] = { path, value };
 
         // Set new timeout - sync after 500ms of no changes
-        this._syncTimeouts[path] = setTimeout(() => {
+        this._syncTimeouts[syncKey] = setTimeout(() => {
             console.log('Syncing to backend:', { path, value, uuid: this.state.session.uuid });
-            delete this._syncPendingValues[path];
+            delete this._syncPendingValues[syncKey];
 
             $.ajax({
                 url: `/api/session/${this.state.session.uuid}/config`,
@@ -317,6 +359,11 @@ class StateStore {
      * @returns {Promise} Promise that resolves when state is loaded
      */
     loadSession(uuid) {
+        // Warm the live per-quality owned map in parallel with the session GET
+        // (idempotent, errors resolve to {}). It's a small request that finishes
+        // well before the UI builds the owned rows, so the Column-1 breakdown
+        // and the hover popovers render with per-quality data on first paint.
+        fetchOwnedByQuality();
         return $.get(`/api/session/${uuid}`)
             .done((data) => {
                 // Small summary always; full payload only when verbose debug is enabled.
@@ -344,6 +391,7 @@ class StateStore {
 
                 if (data.character_config) {
                     this.state.character = data.character_config;
+
 
                     // Store inventory value from server
                     this.state.character.inventory_value = data.inventory_value || 0;
@@ -600,6 +648,8 @@ class StateStore {
                         has_seen_custom_stats: data.ui_config.has_seen_custom_stats ?? this.state.ui.has_seen_custom_stats ?? false,
                         // Preserve has_seen_help if not explicitly set in ui_config
                         has_seen_help: data.ui_config.has_seen_help ?? this.state.ui.has_seen_help ?? false,
+                        // Account-synced favorites — normalize (dedupe, coerce arrays)
+                        favorites: normalizeFavorites(data.ui_config.favorites ?? this.state.ui.favorites),
                         column2: {
                             ...defaultColumn2,
                             // Restore persisted checkbox states from ui_config
@@ -618,16 +668,21 @@ class StateStore {
 
                     // Merge ui_config items (hide states, quality overrides) with character items
                     if (data.ui_config.items) {
-                        Object.keys(data.ui_config.items).forEach(itemId => {
+                        // Migrate renamed items (e.g. travelers_kit -> travellers_kit)
+                        // so persisted hide/quality overrides land on the new id
+                        // instead of orphaning under the stale old key.
+                        const exportAliases = data.export_aliases || {};
+                        Object.keys(data.ui_config.items).forEach(rawId => {
+                            const itemId = exportAliases[rawId] || rawId;
                             if (!this.state.items[itemId]) {
                                 this.state.items[itemId] = {};
                             }
                             // Merge hide and quality from ui_config
-                            if (data.ui_config.items[itemId].hide !== undefined) {
-                                this.state.items[itemId].hide = data.ui_config.items[itemId].hide;
+                            if (data.ui_config.items[rawId].hide !== undefined) {
+                                this.state.items[itemId].hide = data.ui_config.items[rawId].hide;
                             }
-                            if (data.ui_config.items[itemId].quality !== undefined) {
-                                this.state.items[itemId].quality = data.ui_config.items[itemId].quality;
+                            if (data.ui_config.items[rawId].quality !== undefined) {
+                                this.state.items[itemId].quality = data.ui_config.items[rawId].quality;
                             }
                         });
                     }
@@ -653,6 +708,10 @@ class StateStore {
                     if (data.ui_config.locked_alternatives) {
                         this.state.gearsets.lockedAlternatives = data.ui_config.locked_alternatives;
                         console.log('Restored locked alternatives from ui_config:', Object.keys(data.ui_config.locked_alternatives).length, 'slots');
+                    }
+                    if (data.ui_config.hidden_alternatives) {
+                        this.state.gearsets.hiddenAlternatives = data.ui_config.hidden_alternatives;
+                        console.log('Restored hidden alternatives from ui_config:', Object.keys(data.ui_config.hidden_alternatives).length, 'slots');
                     }
 
                     // Restore column3 selection (activity/recipe/service/location)
@@ -712,6 +771,7 @@ class StateStore {
                 this._notifySubscribers('character');
                 this._notifySubscribers('items');
                 this._notifySubscribers('ui');
+                this._notifySubscribers('ui.favorites');
                 this._notifySubscribers('gearsets');
                 this._notifySubscribers('column3.selectedActivity');
                 this._notifySubscribers('column3.selectedRecipe');
@@ -786,6 +846,7 @@ class StateStore {
                         slots: gearSet.slots_json,                       // undefined in summary mode
                         export_string: gearSet.export_string,            // undefined in summary mode
                         is_optimized: gearSet.is_optimized,
+                        suggestDismissed: gearSet.suggest_dismissed,
                         _summary_only: gearSet.slots_json === undefined, // sentinel for lazy fetch
                     };
                 });
@@ -870,6 +931,9 @@ class StateStore {
             if (this.state.gearsets.gearset2LockedAlternatives) {
                 this.state.gearsets.gearset2LockedAlternatives = null;
             }
+            if (this.state.gearsets.gearset2HiddenAlternatives) {
+                this.state.gearsets.gearset2HiddenAlternatives = null;
+            }
 
             // If slot is locked, re-snapshot to the new item (or clear if unequipped)
             if (this.state.gearsets.gearset2LockedSlots?.[slot]) {
@@ -905,6 +969,10 @@ class StateStore {
             this.state.gearsets.lockedAlternatives = null;
             this._syncToBackend('ui.locked_alternatives', null);
         }
+        if (this.state.gearsets.hiddenAlternatives) {
+            this.state.gearsets.hiddenAlternatives = null;
+            this._syncToBackend('ui.hidden_alternatives', null);
+        }
 
         // If slot is locked, re-snapshot to the new item (or clear if unequipped)
         if (this.state.gearsets.lockedSlots?.[slot]) {
@@ -929,6 +997,112 @@ class StateStore {
         this._notifySubscribers(`gearsets.current.${slot}`);
 
         // Auto-save current gear to backend
+        this._saveCurrentGear();
+    }
+
+    /**
+     * Bulk-update many gear slots with a SINGLE notify + save.
+     *
+     * Import writes ~20 slots at once. Calling updateGearSlot() per slot fired
+     * a full re-render + backend PATCH per slot — a ~20x render/PATCH storm
+     * that also opened a long window in which an async re-render could flip
+     * activeGearsetSlot mid-import, leaking a GS2 import into GS1 (bug
+     * 254643a3). This writes every slot to ONE resolved gearset, then notifies
+     * and saves once.
+     *
+     * @param {Object} slotItems - map of slotName -> item (null clears a slot)
+     * @param {Object} [opts]
+     * @param {1|2} [opts.forceSlot] - target gearset captured by the caller at
+     *   the start of the operation. When omitted, resolves live from
+     *   comparisonMode / activeGearsetSlot (matches updateGearSlot routing).
+     */
+    updateGearSlotsBulk(slotItems, opts = {}) {
+        const entries = Object.entries(slotItems || {});
+        if (entries.length === 0) {
+            return;
+        }
+
+        const target = opts.forceSlot
+            || ((this.state.gearsets.comparisonMode && this.state.gearsets.activeGearsetSlot === 2) ? 2 : 1);
+
+        const _lockSnapshot = (item) => ({
+            itemId: item.itemId || null,
+            quality: item.quality || null,
+            level: item.level !== undefined ? item.level : undefined
+        });
+
+        if (target === 2) {
+            const gs2 = this.state.gearsets.gearset2;
+            const locks2 = { ...(this.state.gearsets.gearset2LockedSlots || {}) };
+            let locksChanged = false;
+            for (const [slot, item] of entries) {
+                gs2[slot] = item;
+                if (this.state.gearsets.gearset2LockedSlots?.[slot]) {
+                    if (item === null) {
+                        delete locks2[slot];
+                    } else {
+                        locks2[slot] = _lockSnapshot(item);
+                    }
+                    locksChanged = true;
+                }
+            }
+
+            // Imported gear invalidates stale alternatives
+            if (this.state.gearsets.gearset2Alternatives) {
+                this.state.gearsets.gearset2Alternatives = null;
+            }
+            if (this.state.gearsets.gearset2LockedAlternatives) {
+                this.state.gearsets.gearset2LockedAlternatives = null;
+            }
+            if (this.state.gearsets.gearset2HiddenAlternatives) {
+                this.state.gearsets.gearset2HiddenAlternatives = null;
+            }
+            if (locksChanged) {
+                this.state.gearsets.gearset2LockedSlots = locks2;
+                this._notifySubscribers('gearsets.lockedSlots');
+                this._syncToBackend('ui.gearset2LockedSlots', locks2);
+            }
+
+            this._notifySubscribers('gearsets.gearset2');
+            this._saveGearset2();
+            return;
+        }
+
+        // target === 1 (current / GS1)
+        const cur = this.state.gearsets.current;
+        const locks = { ...(this.state.gearsets.lockedSlots || {}) };
+        let locksChanged = false;
+        for (const [slot, item] of entries) {
+            cur[slot] = item;
+            if (this.state.gearsets.lockedSlots?.[slot]) {
+                if (item === null) {
+                    delete locks[slot];
+                } else {
+                    locks[slot] = _lockSnapshot(item);
+                }
+                locksChanged = true;
+            }
+        }
+
+        if (this.state.gearsets.alternatives) {
+            this.state.gearsets.alternatives = null;
+            this._syncToBackend('ui.alternatives', null);
+        }
+        if (this.state.gearsets.lockedAlternatives) {
+            this.state.gearsets.lockedAlternatives = null;
+            this._syncToBackend('ui.locked_alternatives', null);
+        }
+        if (this.state.gearsets.hiddenAlternatives) {
+            this.state.gearsets.hiddenAlternatives = null;
+            this._syncToBackend('ui.hidden_alternatives', null);
+        }
+        if (locksChanged) {
+            this.state.gearsets.lockedSlots = locks;
+            this._notifySubscribers('gearsets.lockedSlots');
+            this._syncToBackend('ui.lockedSlots', this.state.gearsets.lockedSlots);
+        }
+
+        this._notifySubscribers('gearsets.current');
         this._saveCurrentGear();
     }
 
@@ -969,6 +1143,10 @@ class StateStore {
                 this.state.gearsets.gearset2LockedAlternatives =
                     computeAlternativesSwap(this.state.gearsets.gearset2LockedAlternatives, slotA, slotB);
             }
+            if (this.state.gearsets.gearset2HiddenAlternatives) {
+                this.state.gearsets.gearset2HiddenAlternatives =
+                    computeAlternativesSwap(this.state.gearsets.gearset2HiddenAlternatives, slotA, slotB);
+            }
 
             this._reSnapshotSlotLock('gearset2LockedSlots', slotA, gearset[slotA], 'ui.gearset2LockedSlots');
             this._reSnapshotSlotLock('gearset2LockedSlots', slotB, gearset[slotB], 'ui.gearset2LockedSlots');
@@ -992,6 +1170,11 @@ class StateStore {
             this.state.gearsets.lockedAlternatives = swappedLocked;
             this._syncToBackend('ui.locked_alternatives', swappedLocked);
         }
+        if (this.state.gearsets.hiddenAlternatives) {
+            const swappedHidden = computeAlternativesSwap(this.state.gearsets.hiddenAlternatives, slotA, slotB);
+            this.state.gearsets.hiddenAlternatives = swappedHidden;
+            this._syncToBackend('ui.hidden_alternatives', swappedHidden);
+        }
 
         this._reSnapshotSlotLock('lockedSlots', slotA, gearset[slotA], 'ui.lockedSlots');
         this._reSnapshotSlotLock('lockedSlots', slotB, gearset[slotB], 'ui.lockedSlots');
@@ -1001,6 +1184,7 @@ class StateStore {
         // Refresh any open slot popup so it shows the swapped slot's alternatives.
         this._notifySubscribers('gearsets.alternatives');
         this._notifySubscribers('gearsets.lockedAlternatives');
+        this._notifySubscribers('gearsets.hiddenAlternatives');
         this._saveCurrentGear();
     }
 
@@ -1069,6 +1253,108 @@ class StateStore {
             travelStart: this.state.column3.travelStart,
             travelEnd: this.state.column3.travelEnd
         };
+    }
+
+    /**
+     * Recipe/activity favorites API
+     * ------------------------------
+     * Favorites live at this.state.ui.favorites = { activities:[], recipes:[] }.
+     * They are account-synced (PATCH ui.favorites, debounced) and captured by
+     * undo/redo. Toggling notifies 'ui.favorites' subscribers (the dropdowns).
+     */
+
+    /** Is (type, id) currently favorited? @returns {boolean} */
+    isFavorite(type, id) {
+        return _isFavorited(this.state.ui?.favorites, type, id);
+    }
+
+    /**
+     * Toggle a favorite. Updates state, notifies subscribers, persists to the
+     * backend, and (by default) pushes an undo/redo snapshot.
+     * @param {'activity'|'recipe'} type
+     * @param {string} id
+     * @param {{pushUndo?: boolean, save?: boolean}} [opts]
+     */
+    toggleFavorite(type, id, opts = {}) {
+        const { pushUndo = true, save = true } = opts;
+        if (!id) return;
+        if (!this.state.ui) this.state.ui = {};
+        this.state.ui.favorites = _toggleFavorite(this.state.ui.favorites, type, id);
+        this._notifySubscribers('ui.favorites');
+        if (save) this._saveFavorites();
+        if (pushUndo && window.undoRedoManager) {
+            window.undoRedoManager.pushState();
+        }
+    }
+
+    /**
+     * Replace the entire favorites list (used by undo/redo restore and the
+     * combined dropdown's cross-type drag reorder).
+     * @param {Array<{type,id}>} favorites
+     * @param {{save?: boolean, pushUndo?: boolean}} [opts]
+     */
+    setFavorites(favorites, opts = {}) {
+        const { save = true, pushUndo = false } = opts;
+        if (!this.state.ui) this.state.ui = {};
+        this.state.ui.favorites = normalizeFavorites(favorites);
+        this._notifySubscribers('ui.favorites');
+        if (save) this._saveFavorites();
+        if (pushUndo && window.undoRedoManager) window.undoRedoManager.pushState();
+    }
+
+    /**
+     * Reorder favorites of a single type (drag reorder in the activity/recipe
+     * dropdowns) to match orderedIds; other-type entries keep their positions.
+     * @param {'activity'|'recipe'} type
+     * @param {string[]} orderedIds
+     * @param {{pushUndo?: boolean}} [opts]
+     */
+    reorderFavoriteType(type, orderedIds, opts = {}) {
+        const { pushUndo = true } = opts;
+        if (!this.state.ui) this.state.ui = {};
+        this.state.ui.favorites = _reorderFavoriteType(this.state.ui.favorites, type, orderedIds);
+        this._notifySubscribers('ui.favorites');
+        this._saveFavorites();
+        if (pushUndo && window.undoRedoManager) window.undoRedoManager.pushState();
+    }
+
+    /**
+     * Replace the full favorites order from a list of {type,id} (combined
+     * dropdown cross-type drag reorder).
+     * @param {Array<{type,id}>} orderedEntries
+     * @param {{pushUndo?: boolean}} [opts]
+     */
+    reorderFavoritesAll(orderedEntries, opts = {}) {
+        const { pushUndo = true } = opts;
+        if (!this.state.ui) this.state.ui = {};
+        this.state.ui.favorites = _reorderFavoritesAll(orderedEntries);
+        this._notifySubscribers('ui.favorites');
+        this._saveFavorites();
+        if (pushUndo && window.undoRedoManager) window.undoRedoManager.pushState();
+    }
+
+    /**
+     * Persist favorites to the backend (debounced auto-save).
+     * @private
+     */
+    _saveFavorites() {
+        if (!this.state.session.loaded || !this.state.session.uuid) {
+            return;
+        }
+        if (this._favoritesSaveTimeout) {
+            clearTimeout(this._favoritesSaveTimeout);
+        }
+        this._favoritesSaveTimeout = setTimeout(() => {
+            const favorites = normalizeFavorites(this.state.ui?.favorites);
+            $.ajax({
+                url: `/api/session/${this.state.session.uuid}/config`,
+                method: 'PATCH',
+                contentType: 'application/json',
+                data: JSON.stringify({ path: 'ui.favorites', value: favorites }),
+                success: () => console.log('Favorites auto-saved'),
+                error: (xhr, status, error) => console.error('Failed to auto-save favorites:', error)
+            });
+        }, 500);
     }
 
     /**
@@ -1207,15 +1493,15 @@ class StateStore {
 
         // Flush all debounced _syncToBackend calls
         if (this._syncTimeouts && this._syncPendingValues) {
-            for (const [path, timeoutId] of Object.entries(this._syncTimeouts)) {
+            for (const [key, timeoutId] of Object.entries(this._syncTimeouts)) {
                 clearTimeout(timeoutId);
-                const value = this._syncPendingValues[path];
-                if (value !== undefined) {
+                const pending = this._syncPendingValues[key];
+                if (pending !== undefined && pending.value !== undefined) {
                     promises.push($.ajax({
                         url: `/api/session/${this.state.session.uuid}/config`,
                         method: 'PATCH',
                         contentType: 'application/json',
-                        data: JSON.stringify({ path, value })
+                        data: JSON.stringify({ path: pending.path, value: pending.value })
                     }));
                 }
             }
@@ -1381,6 +1667,7 @@ class StateStore {
                                 slots: gs.slots_json,
                                 export_string: gs.export_string,
                                 is_optimized: gs.is_optimized,
+                                suggestDismissed: gs.suggest_dismissed,
                                 _summary_only: gs.slots_json === undefined,
                             };
                         }
@@ -1542,6 +1829,15 @@ class StateStore {
             } else {
                 this.state.gearsets.lockedAlternatives = null;
                 this._syncToBackend('ui.locked_alternatives', null);
+            }
+
+            // Extract hidden alternatives if present
+            if (newSlots._hidden_alternatives) {
+                this.state.gearsets.hiddenAlternatives = newSlots._hidden_alternatives;
+                this._syncToBackend('ui.hidden_alternatives', newSlots._hidden_alternatives);
+            } else {
+                this.state.gearsets.hiddenAlternatives = null;
+                this._syncToBackend('ui.hidden_alternatives', null);
             }
 
             // Notify subscribers
@@ -1798,7 +2094,9 @@ class StateStore {
                 if (level < 80) return 5;
                 return 6;
             };
-            const _unlockedToolSlots = _getUnlockedToolSlots(_charLevel);
+            const _unlockedToolSlots = (window.isUnlockAllEnabled && window.isUnlockAllEnabled())
+                ? 6
+                : _getUnlockedToolSlots(_charLevel);
 
             for (const slotName of Object.keys(slots)) {
                 if (slotName.startsWith('tool')) {
@@ -1871,6 +2169,15 @@ class StateStore {
             } else {
                 this.state.gearsets.lockedAlternatives = null;
                 this._syncToBackend('ui.locked_alternatives', null);
+            }
+
+            if (extraSlots && extraSlots._hidden_alternatives) {
+                this.state.gearsets.hiddenAlternatives = extraSlots._hidden_alternatives;
+                this._syncToBackend('ui.hidden_alternatives', extraSlots._hidden_alternatives);
+                console.log('Loaded hidden alternatives:', Object.keys(extraSlots._hidden_alternatives).length, 'slots');
+            } else {
+                this.state.gearsets.hiddenAlternatives = null;
+                this._syncToBackend('ui.hidden_alternatives', null);
             }
 
             // Notify subscribers - only notify the overall current once

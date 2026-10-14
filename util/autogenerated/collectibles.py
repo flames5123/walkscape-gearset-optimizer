@@ -34,12 +34,20 @@ COLLECTIBLES = [
         _stats={'mining': {'global': {'work_efficiency': 1.0}}, 'agility': {'global': {'work_efficiency': 1.0}}}
     ),
     CollectibleInstance(
+        name='Ancient stone tablet',
+        _stats={'global': {'desert': {'work_efficiency': 1.0}}}
+    ),
+    CollectibleInstance(
         name='Ancient trident',
         _stats={'fishing': {'global': {'work_efficiency': 1.0}}}
     ),
     CollectibleInstance(
         name='Anglerfish mask',
         _stats={'fishing': {'global': {'double_action': 1.0}}}
+    ),
+    CollectibleInstance(
+        name='Artificial sand grain',
+        _stats={'foraging': {'global': {'double_rewards': 1.0}}}
     ),
     CollectibleInstance(
         name='Artificial snowflake',
@@ -88,6 +96,10 @@ COLLECTIBLES = [
     CollectibleInstance(
         name='Floating coral',
         _stats={'fishing': {'global': {'fine_material_finding': 2.0}}}
+    ),
+    CollectibleInstance(
+        name='Fractured compass',
+        _stats={}
     ),
     CollectibleInstance(
         name='Halfmaw venom',
@@ -146,8 +158,16 @@ COLLECTIBLES = [
         _stats={}
     ),
     CollectibleInstance(
+        name='Petrified desert flower',
+        _stats={}
+    ),
+    CollectibleInstance(
         name='Rose quartz',
         _stats={'trinketry': {'global': {'work_efficiency': 2.0}}}
+    ),
+    CollectibleInstance(
+        name='Sand globe',
+        _stats={'global': {'global': {'find_collectibles': 2.0}}}
     ),
     CollectibleInstance(
         name='Seahorse fossil',
@@ -223,8 +243,10 @@ class Collectible:
     """Enum-style access to all collectibles."""
     _99_YEAR_OLD_WINE = COLLECTIBLES_BY_NAME['99-year-old wine']
     ANCIENT_ANKH = COLLECTIBLES_BY_NAME['Ancient ankh']
+    ANCIENT_STONE_TABLET = COLLECTIBLES_BY_NAME['Ancient stone tablet']
     ANCIENT_TRIDENT = COLLECTIBLES_BY_NAME['Ancient trident']
     ANGLERFISH_MASK = COLLECTIBLES_BY_NAME['Anglerfish mask']
+    ARTIFICIAL_SAND_GRAIN = COLLECTIBLES_BY_NAME['Artificial sand grain']
     ARTIFICIAL_SNOWFLAKE = COLLECTIBLES_BY_NAME['Artificial snowflake']
     BLACK_EYE_PEAK_WILDERNESS_PERMIT = COLLECTIBLES_BY_NAME['Black eye peak wilderness permit']
     BLUE_LOTUS_BUTTERFLY = COLLECTIBLES_BY_NAME['Blue lotus butterfly']
@@ -237,6 +259,7 @@ class Collectible:
     EXPEDITION_JOURNAL = COLLECTIBLES_BY_NAME['Expedition journal']
     FLAME_OF_AZURA = COLLECTIBLES_BY_NAME['Flame of Azura']
     FLOATING_CORAL = COLLECTIBLES_BY_NAME['Floating coral']
+    FRACTURED_COMPASS = COLLECTIBLES_BY_NAME['Fractured compass']
     HALFMAW_VENOM = COLLECTIBLES_BY_NAME['Halfmaw venom']
     HAUNTED_TEDDY_BEAR = COLLECTIBLES_BY_NAME['Haunted teddy bear']
     JAR_OF_DIRT = COLLECTIBLES_BY_NAME['Jar of dirt']
@@ -251,7 +274,9 @@ class Collectible:
     MYSTERIOUS_NORTHERN_MAP = COLLECTIBLES_BY_NAME['Mysterious northern map']
     OLD_WAR_SWORD = COLLECTIBLES_BY_NAME['Old war sword']
     PETRIFIED_BRANCH = COLLECTIBLES_BY_NAME['Petrified branch']
+    PETRIFIED_DESERT_FLOWER = COLLECTIBLES_BY_NAME['Petrified desert flower']
     ROSE_QUARTZ = COLLECTIBLES_BY_NAME['Rose quartz']
+    SAND_GLOBE = COLLECTIBLES_BY_NAME['Sand globe']
     SEAHORSE_FOSSIL = COLLECTIBLES_BY_NAME['Seahorse fossil']
     SHINY_BROKEN_SKYDISC = COLLECTIBLES_BY_NAME['Shiny broken skydisc']
     SIGIL_OF_THE_ORDAINED = COLLECTIBLES_BY_NAME['Sigil of the Ordained']

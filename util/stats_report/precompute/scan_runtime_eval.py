@@ -56,11 +56,18 @@ def scan_runtime_eval(db, changed_slugs: Optional[Set[str]] = None) -> int:
             if cs:
                 reason = "custom_stat"
             else:
-                # Some items have gated_stats keyed by 'activity_completion' that
-                # rely on character.custom_stats UI toggles — also runtime eval.
+                # Some items have gated_stats that must be evaluated per-character
+                # at request time (not expressible as static dominators): the
+                # activity_completion custom-stat toggle, and gated EQUIPMENT
+                # whose stats live under a character-derivable gate
+                # (explore_realm / item_ownership / total_collectibles). Without
+                # this, those items have empty base stats -> no dominators row ->
+                # compute_effective_owned_bitmap Phase 1 drops them, so they were
+                # invisible to stale detection (2026-08-11, jwbail).
                 gs = getattr(v, "gated_stats", None) or {}
-                if "activity_completion" in gs:
-                    reason = "custom_stat"
+                from .build_dominators import GATED_SCOPE_TYPES
+                if "activity_completion" in gs or any(g in gs for g in GATED_SCOPE_TYPES):
+                    reason = "gated_stat"
 
         if reason is None:
             # If changed_slugs is provided and this item was previously in the

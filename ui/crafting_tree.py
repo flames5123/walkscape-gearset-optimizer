@@ -230,6 +230,103 @@ def _rewrite_to_fine(item_ref: str, use_fine: bool) -> str:
     return item_ref
 
 
+# ============================================================================
+# OWNED-QUANTITY RESOLUTION (use-banked-materials feature)
+# ============================================================================
+
+def _node_input_is_fine(node: dict) -> bool:
+    """True if the node's effective input item (user pin overrides auto-pick)
+    is a Fine variant.
+
+    The hunting fine-input bonus should reflect what is ACTUALLY in the input
+    slot, so a manually-equipped Fine input applies the bonus immediately —
+    without waiting for a re-optimize (bug a9002eed follow-up #2). The global
+    ``use_fine_inputs`` toggle drives the auto-pick's fineness; this covers the
+    manual-pin case (and any auto-pick that resolved fine).
+    """
+    gc = (node or {}).get('gear_config') or {}
+    for source in (gc.get('user_input_items'), gc.get('selected_input_items')):
+        if not isinstance(source, dict):
+            continue
+        for info in source.values():
+            if not isinstance(info, dict):
+                continue
+            if info.get('is_fine'):
+                return True
+            name = info.get('name') or ''
+            if isinstance(name, str) and name.endswith('(Fine)'):
+                return True
+            for ref_key in ('input_reference', 'export_name', 'itemId', 'id'):
+                ref = info.get(ref_key)
+                if isinstance(ref, str) and (ref.endswith('_FINE') or ref.endswith('_fine')):
+                    return True
+    return False
+
+
+def _slug_item_name(name: str) -> str:
+    """Slug an item display name into the `owned_quantities` key form.
+
+    Mirrors the exact transform app.py's inventory parser uses to key
+    `owned_quantities` (name.lower, spaces->'_', drop parens, hyphens->'_',
+    drop apostrophes). Because a fine variant's display name is
+    'Stone (Fine)', this naturally slugs to 'stone_fine' — the same key the
+    parser produces for owned fine stock — so a single lookup covers both
+    normal and fine items with no special-casing.
+    """
+    if not name:
+        return ''
+    return (name.lower().replace(' ', '_').replace('(', '').replace(')', '')
+            .replace('-', '_').replace("'", ''))
+
+
+def _owned_quantity_for_ref(
+    item_ref: str,
+    session_data: Optional[dict],
+    use_fine: bool = False,
+) -> int:
+    """Total owned quantity for an item ref from the session inventory.
+
+    Reads `session_data['owned_quantities']` — a map of item-name slug ->
+    total quantity owned (inventory + bank + gear, summed across all quality
+    tiers), built server-side in app.py. Used by the "use banked materials"
+    feature to subtract owned stock from each non-root node's demand.
+
+    When `use_fine` is set the ref is fine-rewritten first so a fine node
+    matches its owned fine stock (whose slug ends in '_fine'); normal and
+    fine items are tracked under separate keys, so this matches the exact
+    variant the node represents (item + fine, summed across qualities).
+
+    Returns 0 when there's no session, no owned map, or the item isn't owned.
+    """
+    if not session_data or not item_ref:
+        return 0
+    owned_map = session_data.get('owned_quantities') or {}
+    if not owned_map:
+        return 0
+    effective_ref = _rewrite_to_fine(item_ref, use_fine)
+    obj = _resolve_item_ref(effective_ref)
+    name = getattr(obj, 'name', None) if obj is not None else None
+    if not name:
+        # Fall back to a slug derived from the ref's tail when the object
+        # can't be resolved (defensive; keeps a best-effort match).
+        name = effective_ref.split('.')[-1].replace('_', ' ')
+    slug = _slug_item_name(name)
+    qty = owned_map.get(slug, 0)
+    try:
+        return max(0, int(qty))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _owned_quantity_for_node(
+    node: dict,
+    session_data: Optional[dict],
+    use_fine: bool = False,
+) -> int:
+    """Owned quantity for a tree node's item (see `_owned_quantity_for_ref`)."""
+    return _owned_quantity_for_ref(node.get('item_id', ''), session_data, use_fine)
+
+
 def _get_region_for_location(location_obj) -> Optional[str]:
     """Get the primary region for a location object.
 
@@ -561,6 +658,217 @@ def _check_locked_gearset_conflicts(
     if not missing_parts:
         return None
     return "Locked gear missing keyword: " + ", ".join(missing_parts)
+
+
+def _owned_equipment_by_keyword(session_data: Optional[dict]) -> Dict[str, list]:
+    """Resolve the character's owned_items to equipment objects, grouped by
+    lowercased keyword (e.g. 'hatchet' -> [Iron hatchet, Tarsilium hatchet, ...]).
+
+    Used by _check_node_requirement_status to answer "does the player own ANY
+    tool of keyword X meeting the activity's keyword-level requirement?".
+    Best-effort — any resolution failure just omits that item.
+    """
+    out: Dict[str, list] = {}
+    if not session_data:
+        return out
+    owned = session_data.get('owned_items', []) or []
+    try:
+        from util.autogenerated.export_names import get_item_from_export_name
+    except Exception:
+        return out
+    seen = set()
+    for export_name in owned:
+        base = export_name
+        for suffix in ('_common', '_uncommon', '_rare', '_epic', '_legendary', '_ethereal'):
+            if export_name.endswith(suffix):
+                base = export_name[:-len(suffix)]
+                break
+        if base in seen:
+            continue
+        seen.add(base)
+        try:
+            item = get_item_from_export_name(base, item_type='equipment')
+        except Exception:
+            item = None
+        if not item or not getattr(item, 'keywords', None):
+            continue
+        for kw in item.keywords:
+            out.setdefault(str(kw).lower(), []).append(item)
+    return out
+
+
+def _equipped_items_from_node(node: dict) -> list:
+    """Decode the node's optimized/selected gearset export and return the list
+    of equipped equipment items (all slots). Empty list when there's no
+    gearset. Best-effort — decode failures return []. This is what lets the
+    'does not meet requirements' note also fire for gear the USER equipped or
+    selected (their pick lands on gear_config.optimized_export)."""
+    gc = node.get('gear_config') or {}
+    export = gc.get('optimized_export')
+    if not export:
+        return []
+    try:
+        from util.gearset_utils import Gearset
+        gs = Gearset(export)
+    except Exception:
+        return []
+    items = []
+    for slot in ('head', 'cape', 'back', 'chest', 'primary', 'secondary', 'hands',
+                 'legs', 'neck', 'feet', 'ring1', 'ring2',
+                 'tool0', 'tool1', 'tool2', 'tool3', 'tool4', 'tool5'):
+        it = getattr(gs, f'_{slot}', None)
+        if it is not None:
+            items.append(it)
+    return items
+
+
+def _item_meets_skill_level(item, skill: str, level: int) -> bool:
+    """True if `item` carries a skill requirement for `skill` at >= `level`."""
+    for r in (getattr(item, 'requirements', None) or []):
+        try:
+            if (r.get('type') == 'skill'
+                    and str(r.get('skill', '')).lower() == str(skill).lower()
+                    and (r.get('level', 0) or 0) >= level):
+                return True
+        except AttributeError:
+            continue
+    return False
+
+
+def _check_node_requirement_status(node: dict, session_data: Optional[dict],
+                                   game_data: Optional[dict]) -> Optional[str]:
+    """Return the DETAIL text for a 'Does not meet requirements' note, or None.
+
+    Surfaces — for BOTH auto-optimized routing AND user-equipped/selected gear —
+    when the character cannot actually perform this node's activity/recipe:
+
+      1. Primary-skill level requirement (character level too low).
+      2. Tool keyword-level requirements (e.g. "Cut ectoplasm trees" needs a
+         hatchet that itself requires Woodcutting 50+; a Tarsilium hatchet at
+         WC 40 does NOT qualify). Fires when the node's equipped tool for a
+         required keyword is too low-tier, OR (no equipped tool of that keyword)
+         the character owns no qualifying tool.
+      3. Keyword presence (owns/equips no tool of a required keyword at all).
+
+    Returns None for bank/shop nodes (bought, not performed) and when every
+    requirement is satisfied. Never raises.
+    """
+    try:
+        st = node.get('source_type')
+        if st in ('bank', 'shop'):
+            return None
+        # No character context → assume feasible (mirrors _get_skill_level's
+        # default-max behavior); never show a scary note when we can't know
+        # what the player owns.
+        if not session_data:
+            return None
+        ut = node.get('underlying_source_type') or st
+        uid = node.get('underlying_source_id') or node.get('source_id')
+        if ut == 'chest':
+            uid = node.get('parent_activity_id') or uid
+            ut = 'activity'
+        if ut not in ('activity', 'recipe') or not uid:
+            return None
+
+        obj = None
+        primary_skill = None
+        req_level = None
+        if ut == 'activity':
+            acts = (game_data or {}).get('activities') if isinstance(game_data, dict) else None
+            if isinstance(acts, dict):
+                obj = acts.get(uid)
+            if obj is None:
+                from util.autogenerated.activities import ACTIVITIES_BY_NAME
+                obj = ACTIVITIES_BY_NAME.get(uid)
+            if obj is not None:
+                primary_skill = getattr(obj, 'primary_skill', None)
+                sreq = getattr(obj, 'skill_requirements', None) or {}
+                if primary_skill:
+                    req_level = sreq.get(primary_skill) or sreq.get(str(primary_skill))
+        else:
+            from util.autogenerated.recipes import RECIPES_BY_NAME
+            obj = RECIPES_BY_NAME.get(uid)
+            if obj is not None:
+                primary_skill = getattr(obj, 'skill', None)
+                req_level = getattr(obj, 'level', None)
+        if obj is None:
+            return None
+
+        problems = []
+
+        # 1. Primary-skill level requirement.
+        if primary_skill and req_level:
+            have = _get_skill_level(primary_skill, session_data)
+            if have < req_level:
+                problems.append(f"{primary_skill} level {req_level} (you have {have})")
+
+        reqs = getattr(obj, 'requirements', None) or {}
+        klr = reqs.get('keyword_level_requirements', []) or []
+        kc = reqs.get('keyword_counts', {}) or {}
+
+        # Keywords satisfied by INPUT items (arrows/plants/fabric) are held in
+        # the input slot, not a gear slot — exclude them from the tool check.
+        input_kw = set()
+        for ii in (getattr(obj, 'input_items', None) or []):
+            if getattr(ii, 'type', None) == 'keyword':
+                input_kw.add(str(getattr(ii, 'reference', '')).lower())
+
+        owned_by_kw = _owned_equipment_by_keyword(session_data)
+        equipped = _equipped_items_from_node(node)
+
+        def _kw_items(pool, kw):
+            return [it for it in pool
+                    if kw in {str(k).lower() for k in (getattr(it, 'keywords', None) or [])}]
+
+        # 2. Tool keyword-level requirements.
+        klr_kws = set()
+        for r in klr:
+            kw = str(r.get('keyword', '')).lower()
+            if not kw or kw in input_kw:
+                continue
+            klr_kws.add(kw)
+            skill = r.get('skill', primary_skill)
+            lvl = int(r.get('level', 0) or 0)
+            kw_label = kw.replace('_', ' ').title()
+            equipped_kw = _kw_items(equipped, kw)
+            if equipped_kw:
+                if not any(_item_meets_skill_level(it, skill, lvl) for it in equipped_kw):
+                    nm = getattr(equipped_kw[0], 'name', kw_label)
+                    problems.append(f"equipped {nm} is not a {skill} {lvl}+ {kw_label.lower()}")
+                continue
+            owned_kw = owned_by_kw.get(kw, [])
+            if not any(_item_meets_skill_level(it, skill, lvl) for it in owned_kw):
+                best = None
+                best_lvl = -1
+                for it in owned_kw:
+                    for ir in (getattr(it, 'requirements', None) or []):
+                        try:
+                            if ir.get('type') == 'skill' and str(ir.get('skill', '')).lower() == str(skill).lower():
+                                if (ir.get('level', 0) or 0) > best_lvl:
+                                    best_lvl = ir.get('level', 0) or 0
+                                    best = it
+                        except AttributeError:
+                            continue
+                if best is not None:
+                    problems.append(
+                        f"a {kw_label.lower()} requiring {skill} {lvl}+ "
+                        f"(best owned: {getattr(best, 'name', kw_label)}, {skill} {best_lvl})")
+                else:
+                    problems.append(f"a {kw_label.lower()} requiring {skill} {lvl}+ (none owned)")
+
+        # 3. Bare keyword presence (no level component).
+        for kw, cnt in kc.items():
+            kwl = str(kw).lower()
+            if kwl in input_kw or kwl in klr_kws:
+                continue
+            if not _kw_items(equipped, kwl) and not owned_by_kw.get(kwl):
+                problems.append(f"a {kwl.replace('_', ' ').title().lower()} (none owned)")
+
+        if not problems:
+            return None
+        return "needs " + "; ".join(problems)
+    except Exception:
+        return None
 
 
 def _is_recipe_spoiler(recipe, services_dict: dict, unlocked_regions: set) -> bool:
@@ -1018,7 +1326,7 @@ def descendant_ids(nodes: List[dict], node_id: str) -> Set[str]:
     return ids
 
 
-def route_candidates(available_sources: list, skip_shops: bool = True) -> list:
+def route_candidates(available_sources: list, skip_shops: bool = True, skip_chests: bool = True) -> list:
     """Return the distinct, user-usable sources a Best(auto) node could pick
     between, for gear-aware route resolution.
 
@@ -1026,6 +1334,15 @@ def route_candidates(available_sources: list, skip_shops: bool = True) -> list:
       - drop 'best'/'bank' meta entries
       - drop spoiler-locked sources (user can't reach them)
       - drop 'shop' entries when skip_shops is set
+      - drop 'chest' entries when skip_chests is set
+
+    Forced fallback: if the skip toggles would remove EVERY usable source
+    (i.e. the item is only reachable via chests and/or shops the user asked
+    to skip), we cannot leave the Best(auto) node unresolved. In that case we
+    fall back to the skipped sources, PREFERRING SHOP over CHEST when both are
+    present. Callers detect this "forced" state (the resolved source is a
+    chest/shop while the corresponding skip toggle is on) and flag a ⚠️
+    source_warning on the node.
 
     De-duplication: a multi-material-group recipe appears once per group in
     `available_sources` (plus a material_group_index == -1 "Best (auto)"
@@ -1036,7 +1353,9 @@ def route_candidates(available_sources: list, skip_shops: bool = True) -> list:
     candidate, preferring the recipe-level Best(auto) (material_group_index
     == -1) entry when present.
     """
-    cands: list = []
+    # Deduplicate all real (non-meta, non-spoiler) sources first so both the
+    # preferred set and the forced-fallback set are already collapsed.
+    all_cands: list = []
     seen: dict = {}
     for s in (available_sources or []):
         t = s.get('type')
@@ -1044,16 +1363,27 @@ def route_candidates(available_sources: list, skip_shops: bool = True) -> list:
             continue
         if s.get('is_spoiler'):
             continue
-        if t == 'shop' and skip_shops:
-            continue
         key = (t, s.get('source_id'), s.get('parent_activity_id'), s.get('chest_source'))
         if key not in seen:
-            seen[key] = len(cands)
-            cands.append(s)
+            seen[key] = len(all_cands)
+            all_cands.append(s)
         elif s.get('material_group_index') == -1:
             # Prefer the recipe-level "Best (auto)" group entry.
-            cands[seen[key]] = s
-    return cands
+            all_cands[seen[key]] = s
+
+    # Preferred set: honor the skip toggles.
+    preferred = [s for s in all_cands
+                 if not (s.get('type') == 'shop' and skip_shops)
+                 and not (s.get('type') == 'chest' and skip_chests)]
+    if preferred:
+        return preferred
+
+    # Forced fallback: every usable source is a shop/chest the user asked to
+    # skip. Prefer SHOP over CHEST (user request) so the tree lands on the
+    # cheaper-to-obtain source when both are skipped.
+    shops = [s for s in all_cands if s.get('type') == 'shop']
+    chests = [s for s in all_cands if s.get('type') == 'chest']
+    return shops or chests
 
 
 def _refresh_spoiler_reasons(tree_nodes: List[dict], game_data: dict, session_data: Optional[dict]) -> None:
@@ -1161,6 +1491,82 @@ def _refresh_spoiler_reasons(tree_nodes: List[dict], game_data: dict, session_da
                 if reason:
                     svc['spoiler_reason'] = reason
 
+
+def _refresh_available_sources(
+    tree_nodes: List[dict],
+    game_data: dict,
+    session_data: Optional[dict],
+    spoiler_protection: bool = True,
+) -> None:
+    """Merge newly-available sources into each saved node's available_sources.
+
+    A crafting tree is persisted with the available_sources menu that
+    get_available_sources() produced at build time. When the game data later
+    gains a NEW source for a material — e.g. a patch adds the "Adobe jumping"
+    agility activity that drops rough gems — a tree saved before the patch keeps
+    its stale menu and never offers the new source, so the optimizer can neither
+    display nor route through it (bug: "Crafting tree optimizer is missing adobe
+    jumping as a source for gems").
+
+    For every node this recomputes the fresh source list for its item and
+    APPENDS any real (non-meta) source whose identity isn't already present,
+    inserting new entries just before the trailing 'bank' meta entry so they
+    render among the other real sources. Existing entries are left untouched and
+    in place, and the user's chosen source (which lives on the node itself, not
+    in this menu) is never disturbed. Idempotent: a tree already carrying every
+    current source is left unchanged.
+    """
+    if not tree_nodes:
+        return
+
+    def _identity(s: dict) -> tuple:
+        # Structural identity of a source entry across every type emitted by
+        # get_available_sources: recipe (source_id[+material_group_index]),
+        # activity (source_id+location), chest (source_id+parent_activity_id/
+        # parent_recipe_id+chest_source), shop (source_id+region).
+        return (
+            s.get('type'),
+            s.get('source_id'),
+            s.get('location'),
+            s.get('parent_activity_id'),
+            s.get('parent_recipe_id'),
+            s.get('chest_source'),
+            s.get('material_group_index'),
+            s.get('region'),
+        )
+
+    for node in tree_nodes:
+        item_ref = node.get('item_id')
+        if not item_ref:
+            continue
+        existing = node.get('available_sources')
+        if existing is None:
+            continue
+        try:
+            fresh = get_available_sources(
+                item_ref, game_data, session_data, spoiler_protection
+            )
+        except Exception:
+            # Never let a single bad node break tree recompute.
+            continue
+        have = {_identity(s) for s in existing}
+        # Only ADD real (non-meta) sources. 'best'/'bank' meta entries already
+        # exist in saved trees and drive default/selection semantics, so adding
+        # them could change how the node resolves.
+        new_sources = [
+            s for s in fresh
+            if s.get('type') not in ('best', 'bank')
+            and _identity(s) not in have
+        ]
+        if not new_sources:
+            continue
+        insert_at = next(
+            (i for i, s in enumerate(existing) if s.get('type') == 'bank'),
+            len(existing),
+        )
+        node['available_sources'] = (
+            existing[:insert_at] + new_sources + existing[insert_at:]
+        )
 
 
 # ============================================================================
@@ -1969,9 +2375,22 @@ def _pick_best_underlying_source(
             scored.append((float('inf'), s))
     if scored:
         scored.sort(key=lambda pair: pair[0])
-        return scored[0][1]
-    # Fallback: first in priority order.
-    for priority_type in ('recipe', 'activity', 'chest'):
+        best_score, best_cand = scored[0]
+        # Shop-over-chest preference: chests are never cost-scored (they sit at
+        # inf), so a chest only "wins" here when no recipe/activity produces the
+        # item — i.e. the item is effectively chest/shop-only. In that forced
+        # case prefer a SHOP if one exists: buying is simpler than farming a
+        # chest, and this keeps the build-time pick consistent with
+        # route_candidates()'s shop-preferred forced fallback (so the displayed
+        # tree and the optimizer agree). Recipe/activity winners are unaffected.
+        if best_score == float('inf') and best_cand.get('type') == 'chest':
+            shop = next((s for s in available_sources if s.get('type') == 'shop'), None)
+            if shop is not None:
+                return shop
+        return best_cand
+    # Fallback: first in priority order. Shop is preferred over chest here too
+    # (same forced shop-over-chest rule as route_candidates).
+    for priority_type in ('recipe', 'activity', 'shop', 'chest'):
         for s in available_sources:
             if s.get('type') != priority_type:
                 continue
@@ -3191,6 +3610,70 @@ def _resolve_node_stat_location(node: dict, game_data: Optional[dict] = None,
     return None
 
 
+def _resolve_node_skill(node: dict, game_data: Optional[dict] = None) -> Optional[str]:
+    """Resolve the skill name used for a node's stat lookups.
+
+    Mirrors the skill resolution inside calculate_node_metrics and
+    extract_node_action_vector (recipe.skill for recipe nodes,
+    activity.primary_skill for activity/chest nodes) so the collectible-stat
+    strip in _get_gear_stats uses the SAME skill the consumer re-adds with,
+    guaranteeing the strip and re-add cancel to a single count.
+    """
+    if not game_data:
+        return None
+    source_type = node.get('source_type', '')
+    if source_type == 'recipe':
+        recipe = game_data.get('recipes', {}).get(node.get('source_id'))
+        return recipe.skill if recipe else None
+    if source_type in ('activity', 'chest'):
+        act_id = (node.get('source_id') if source_type == 'activity'
+                  else node.get('parent_activity_id'))
+        activity = game_data.get('activities', {}).get(act_id) if act_id else None
+        return activity.primary_skill if activity else None
+    return None
+
+
+class _CTCharacterContext:
+    """Minimal character-like context for evaluating character-gated item stats
+    in the crafting-tree DISPLAY path.
+
+    _decode_gearset_stats aggregates item.get_stats_for_skill() to show a node's
+    gear stats. Some gear bonuses are gated behind character facts —
+    notably explore_realm (e.g. Quickdraw map's +16% WE / +4% DA, unlocked by
+    the `explored_realm_<region>` custom stat), plus access_region /
+    activity_completion / reputation / skill_level gates. Those gates need a
+    `character`; StatsMixin._add_gated_stats reads character.custom_stats,
+    character.reputation, and character.get_skill_level(). Without one, the
+    display fell back to the mutable my_config sample character and silently
+    dropped the bonus (bug 64eae6fa: node showed 30.75% WE instead of 46.75%).
+
+    We deliberately do NOT build a real Character: its __init__ mutates
+    thread-local walkscape_globals (AP / skill / wealth / custom_stats) as a
+    side effect, which can clobber the real character mid-decode. This shim
+    exposes ONLY the attributes _add_gated_stats reads. `items` is omitted so
+    the item_ownership branch (hasattr-guarded) is skipped, matching prior
+    display behavior.
+    """
+
+    def __init__(self, session_data: Optional[dict]):
+        sd = session_data if isinstance(session_data, dict) else {}
+        # None (not {}) means "no custom_stats available" — _add_gated_stats
+        # then per-gate falls back to my_config, matching pre-fix behavior.
+        self.custom_stats = sd.get('custom_stats')
+        self.reputation = sd.get('reputation') or {}
+        self._skills = sd.get('skills') or {}
+
+    def get_skill_level(self, skill_name):
+        if not skill_name:
+            return DEFAULT_SKILL_LEVEL
+        lv = self._skills.get(skill_name)
+        if lv is None:
+            lv = self._skills.get(str(skill_name).lower())
+        if lv is None:
+            lv = self._skills.get(str(skill_name).capitalize())
+        return lv if lv is not None else DEFAULT_SKILL_LEVEL
+
+
 def _get_gear_stats(node: dict, session_data: Optional[dict] = None,
                     game_data: Optional[dict] = None) -> Dict[str, float]:
     """Resolve gear stats for a node based on its gear_config.
@@ -3208,7 +3691,29 @@ def _get_gear_stats(node: dict, session_data: Optional[dict] = None,
     # not the user's pin. Without this, the per-slot lock never moves
     # the displayed WE/DR/DA values until the user clicks Optimize.
     if gear_config.get('optimized_stats') and not locked_slots:
-        return dict(gear_config['optimized_stats'])
+        cached = dict(gear_config['optimized_stats'])
+        # Bug 3c7ae3c8: the optimizer worker BAKES collectible bonuses INTO
+        # optimized_stats — aggregate_gearset_stats() and
+        # calculate_gearset_metrics() both default include_collectibles=True.
+        # But every consumer of _get_gear_stats (calculate_node_metrics and
+        # extract_node_action_vector) adds collectibles a SECOND time via
+        # _get_collectible_stats, so returning the raw cached dict
+        # double-counts them (e.g. character "oranges": ancient_ankh +1% mining
+        # WE and marks +1% mining double_action showed up twice on the
+        # auto-optimized "Mine ectoplasm rocks" node). The gear-only
+        # _decode_gearset_stats path below does NOT bake collectibles in, so it
+        # relies on that same single downstream add. To keep both paths
+        # consistent — gear-only in, collectibles added exactly once by the
+        # consumer — subtract the collectible contribution here using the SAME
+        # skill + location the consumer will re-add, so the strip and re-add
+        # cancel to a single count regardless of how the worker resolved them.
+        _skill = _resolve_node_skill(node, game_data)
+        _loc = _resolve_node_stat_location(node, game_data, session_data)
+        _coll = _get_collectible_stats(session_data, _skill, location=_loc)
+        for _k, _v in _coll.items():
+            if _k in cached:
+                cached[_k] = cached[_k] - _v
+        return cached
 
     # If we have an optimized export string, decode it and calculate stats
     if gear_config.get('optimized_export'):
@@ -3236,6 +3741,32 @@ def _get_gear_stats(node: dict, session_data: Optional[dict] = None,
                 gear_config['optimized_export'],
                 node, game_data,
                 locked_slots=effective_locked if effective_locked else None,
+                session_data=session_data,
+            )
+        except Exception:
+            pass
+
+    # Locks-only fallback: the user has pinned slots — via the slot popup, an
+    # "Unequip", or by selecting a REGULAR (non-optimized) saved gearset — on a
+    # node that has no optimized_export yet. The two branches above only apply
+    # locked_slots WHEN an export already exists, so without this the pins were
+    # silently dropped and the node fell back to base stats that never updated
+    # when the user changed gear (bug 865e0944: node stuck at the -6.25% base
+    # WE regardless of the equipped gearset / slot pin). Decode an EMPTY gearset
+    # with the locks so the pinned items' stats are honored, mirroring the
+    # optimized_export branch's pet/consumable overlay.
+    if locked_slots:
+        try:
+            effective_locked = dict(locked_slots)
+            opt_pet = gear_config.get('optimized_pet')
+            opt_cons = gear_config.get('optimized_consumable')
+            if opt_pet and 'pet' not in effective_locked:
+                effective_locked['pet'] = opt_pet
+            if opt_cons and 'consumable' not in effective_locked:
+                effective_locked['consumable'] = opt_cons
+            return _decode_gearset_stats(
+                '', node, game_data,
+                locked_slots=effective_locked,
                 session_data=session_data,
             )
         except Exception:
@@ -3273,6 +3804,20 @@ def _decode_gearset_stats(export_string: str, node: dict,
         try:
             from util.autogenerated.equipment import Item
             for slot_name, slot_info in locked_slots.items():
+                # Explicit unequip: the slot popup writes locked_slots[slot] =
+                # None ("Unequip" click). CLEAR the slot on the decoded gearset
+                # so the optimizer's packed export item is REMOVED. Previously
+                # this `continue`d, leaving the export's item in place, so
+                # unequipping a slot had NO effect on the displayed stats
+                # (user: "unequipped the diving torso and the stats didn't
+                # change"). Gear/tool/ring/neck are Gearset attrs; pet and
+                # consumable are only ever ADDED via extra_locked_items, so a
+                # None there is already a no-op (they simply aren't added).
+                if slot_info is None:
+                    _clear_attr = f'_{slot_name}'
+                    if hasattr(gearset, _clear_attr):
+                        setattr(gearset, _clear_attr, None)
+                    continue
                 if not slot_info:
                     continue
                 item_id = slot_info.get('itemId') if isinstance(slot_info, dict) else None
@@ -3294,15 +3839,15 @@ def _decode_gearset_stats(export_string: str, node: dict,
                 if slot_name == 'pet':
                     try:
                         from util.autogenerated.pets import PETS_BY_NAME
+                        from util.pet_lookup import resolve_pet_levels
                         species = (slot_info.get('name') or '').strip()
                         # itemId for pets is the lowercased name
                         # (e.g. 'dog', 'camel'); fall back to that
                         # when the explicit name field is missing.
                         if not species:
                             species = str(item_id).replace('_', ' ').title()
-                        species_cap = species.capitalize()
                         level = int(slot_info.get('level') or 0)
-                        pet_levels = PETS_BY_NAME.get(species_cap)
+                        pet_levels = resolve_pet_levels(species)
                         if pet_levels and level > 0:
                             locked_item = pet_levels.get_level(level)
                     except Exception:
@@ -3329,6 +3874,31 @@ def _decode_gearset_stats(export_string: str, node: dict,
                         locked_item = Item.by_uuid(item_id, (quality or 'common').lower())
                     except Exception:
                         locked_item = None
+                    if locked_item is None:
+                        # MANUAL slot picks from the popup send the catalog
+                        # SLUG (e.g. 'merfolk_dance_circlet') as itemId, not the
+                        # UUID Item.by_uuid needs — so by_uuid returned None and
+                        # the pick was silently dropped, leaving the slot's
+                        # prior item in place (user: "equipping any other item
+                        # picks the item that was there"). Mirror the optimizer
+                        # worker's resolver: fall back to the export-name (slug)
+                        # lookup, then resolve crafted-item quality tiers.
+                        try:
+                            from util.autogenerated.export_names import get_item_from_export_name
+                            from util.autogenerated.equipment import CraftedItem
+                            resolved = get_item_from_export_name(item_id, 'equipment')
+                            if resolved is not None and isinstance(resolved, CraftedItem):
+                                _rmap = {'normal': 'common', 'good': 'uncommon',
+                                         'great': 'rare', 'excellent': 'epic',
+                                         'perfect': 'legendary', 'eternal': 'ethereal'}
+                                _rarity = _rmap.get((quality or '').lower(), (quality or 'common').lower())
+                                _qattr = {'common': 'NORMAL', 'uncommon': 'GOOD',
+                                          'rare': 'GREAT', 'epic': 'EXCELLENT',
+                                          'legendary': 'PERFECT', 'ethereal': 'ETERNAL'}.get(_rarity, 'NORMAL')
+                                resolved = getattr(resolved, _qattr, None) or getattr(resolved, 'NORMAL', None)
+                            locked_item = resolved
+                        except Exception:
+                            locked_item = None
                 if not locked_item:
                     continue
                 slot_attr = f'_{slot_name}'
@@ -3423,10 +3993,22 @@ def _decode_gearset_stats(export_string: str, node: dict,
         return {}
 
     # Manually aggregate stats from items (avoid needing character object)
+    # Resolve achievement-point-gated items (e.g. the Omni-tool) against the
+    # scored character's AP so they don't fall back to the mutable thread-local
+    # global, which can be clobbered mid-decode and silently drop AP-gated stats
+    # (bug d773a4d7).
+    _ap = session_data.get('achievement_points') if isinstance(session_data, dict) else None
+    # Character context so character-gated item stats resolve in the display —
+    # notably explore_realm (Quickdraw map, gated on explored_realm_<region>).
+    # Without it these bonuses silently dropped from the node stats (bug
+    # 64eae6fa). Shim, not a real Character (avoids thread-local side effects).
+    _char_ctx = _CTCharacterContext(session_data) if isinstance(session_data, dict) else None
     total_stats = {}
     for item in items:
         try:
-            item_stats = item.get_stats_for_skill(skill_name, location=location)
+            item_stats = item.get_stats_for_skill(skill_name, location=location,
+                                                  achievement_points=_ap,
+                                                  character=_char_ctx)
             for stat_name, stat_value in item_stats.items():
                 total_stats[stat_name] = total_stats.get(stat_name, 0.0) + stat_value
         except Exception:
@@ -3485,6 +4067,45 @@ def _resolve_input_item_ref(input_item_meta: dict):
     return None
 
 
+class _SkillLevelShim:
+    """Minimal character stand-in for `get_expected_drop_rate`.
+
+    Bug 226b348b (2026-07-13): the crafting-tree activity/chest node
+    metrics called `activity.get_expected_drop_rate(stats, character=None)`.
+    With `character=None` the method falls back to `my_config.get_character()`
+    — a HARDCODED default character (not the session's) — so the level bonus
+    (levels_above × 1.25% WE) was computed from the wrong skill level, and
+    with the DEFAULT `include_collectibles_from_character=True` it re-added
+    that default character's collectibles ON TOP of `stats`, which already
+    carries the SESSION's collectibles (merged in calculate_node_metrics via
+    _get_collectible_stats). The double-count + wrong level made the tree
+    report 403.55 steps/fine ectoplasm rock where the standalone activity
+    optimizer (canonical) reported ~408.
+
+    The standalone path pre-merges collectibles and calls with
+    `include_collectibles_from_character=False`, using the real character
+    only for `get_skill_level`. get_expected_drop_rate uses `character` for
+    exactly two things: `get_skill_level(primary_skill)` (level bonus) and
+    `character.collectibles` (gated behind include_collectibles_from_character).
+    So a shim that returns the tree's already-resolved skill level and turns
+    the collectible re-add off is sufficient to match the standalone. The
+    tree already passes the primary skill's level (from _get_skill_level(
+    session_data)); get_expected_drop_rate only ever queries the primary
+    skill, so returning that level for any query is correct.
+    """
+    __slots__ = ('_level', 'collectibles')
+
+    def __init__(self, skill_level):
+        try:
+            self._level = int(skill_level)
+        except (TypeError, ValueError):
+            self._level = 1
+        self.collectibles = []  # never read (include_collectibles=False)
+
+    def get_skill_level(self, _skill_name=None):
+        return self._level
+
+
 def _get_activity_drop_steps(activity, item_ref: str, stats: Dict[str, float],
                              skill_level: int) -> Optional[float]:
     """Calculate steps per item from an activity's drop table.
@@ -3501,10 +4122,17 @@ def _get_activity_drop_steps(activity, item_ref: str, stats: Dict[str, float],
 
     # Try using the activity's built-in method
     try:
+        # Match the standalone activity optimizer's call (bug 226b348b):
+        # `stats` already has the SESSION's collectibles pre-merged (see
+        # calculate_node_metrics -> _get_collectible_stats), so pass a skill
+        # shim carrying the real resolved level and
+        # include_collectibles_from_character=False to avoid re-adding a
+        # DEFAULT character's collectibles + wrong level bonus.
         drop_rates = activity.get_expected_drop_rate(
             stats=stats,
             target_item=item_obj,
-            character=None,  # Will use default
+            character=_SkillLevelShim(skill_level),
+            include_collectibles_from_character=False,
         )
         item_name = item_obj.name if hasattr(item_obj, 'name') else item_ref
         steps = drop_rates.get(item_name)
@@ -3561,10 +4189,15 @@ def _get_chest_steps_per_item(
     # First find the chest drop rate in the parent activity
     chest_steps = None
     try:
+        # Same parity fix as _get_activity_drop_steps (bug 226b348b):
+        # `stats` already carries the session collectibles, so use a skill
+        # shim + include_collectibles_from_character=False instead of the
+        # default-character fallback that double-counted them.
         drop_rates = parent_activity.get_expected_drop_rate(
             stats=stats,
             target_item=container.name,
-            character=None,
+            character=_SkillLevelShim(skill_level),
+            include_collectibles_from_character=False,
         )
         chest_steps = drop_rates.get(container.name)
     except Exception:
@@ -4219,7 +4852,18 @@ def extract_node_action_vector(
         # items.
         underlying_type = node.get('underlying_source_type')
         underlying_id = node.get('underlying_source_id')
-        if underlying_type and underlying_id:
+        # Guard against re-entering the 'best' branch: a shop-only Best(auto)
+        # node under skip_shops (e.g. Simple wrench) has no resolvable non-shop
+        # candidate, and its underlying_source_type can itself be the degenerate
+        # 'best' (or '__best__' id). Recursing on that re-enters this exact
+        # branch forever -> RecursionError ("action vector error: maximum
+        # recursion depth exceeded") which aborts the whole LP solve (bug
+        # d9272bd4). Only recurse into a CONCRETE underlying source; otherwise
+        # treat the node as bank-like (owned/free input), which also matches
+        # "a shop-only item is just bought, not farmed".
+        if (underlying_type and underlying_id
+                and underlying_type != 'best'
+                and underlying_id != '__best__'):
             resolved_node = dict(node)
             resolved_node['source_type'] = underlying_type
             resolved_node['source_id'] = underlying_id
@@ -4325,6 +4969,14 @@ def extract_node_action_vector(
     for k, v in collectible_stats.items():
         stats[k] = stats.get(k, 0.0) + v
 
+    # Hunting fine-input flat bonus (keep the LP's steps/yield coefficients in
+    # sync with calculate_node_metrics). Fires on the global toggle OR when the
+    # node's effective input is a Fine variant (bug a9002eed follow-up #2).
+    if source_type in ('activity', 'chest') and activity and (
+            global_settings.get('use_fine_inputs', False) or _node_input_is_fine(node)):
+        from util.fine_inputs import apply_fine_input_bonus
+        apply_fine_input_bonus(stats, activity, True)
+
     # Service stats for recipe nodes
     selected_service_name = None
     if source_type == 'recipe' and recipe and skill_name:
@@ -4371,20 +5023,32 @@ def extract_node_action_vector(
     level_bonus_qo = max(0, skill_level - activity_level)
     QO_effective = QO + level_bonus_qo
     if is_root and target_quality != 'Normal' and item_ref.startswith('Item.'):
-        try:
-            from util.quality_outcome import calculate_quality_weights
-            qw = calculate_quality_weights(activity_level, QO_effective, use_fine=use_fine,
-                                            has_equipment_input=has_equipment_input)
-            percentages = qw.get('percentages', {})
-            target_idx = QUALITY_TIERS.index(target_quality) if target_quality in QUALITY_TIERS else 0
-            p_valid_quality = sum(
-                percentages.get(q, 0.0) / 100.0
-                for q in QUALITY_TIERS[target_idx:]
-            )
-            if p_valid_quality <= 1e-5:
-                p_valid_quality = 1e-5
-        except Exception:
-            p_valid_quality = 1.0
+        if source_type == 'recipe':
+            try:
+                from util.quality_outcome import calculate_quality_weights
+                qw = calculate_quality_weights(activity_level, QO_effective, use_fine=use_fine,
+                                                has_equipment_input=has_equipment_input)
+                percentages = qw.get('percentages', {})
+                target_idx = QUALITY_TIERS.index(target_quality) if target_quality in QUALITY_TIERS else 0
+                p_valid_quality = sum(
+                    percentages.get(q, 0.0) / 100.0
+                    for q in QUALITY_TIERS[target_idx:]
+                )
+                if p_valid_quality <= 1e-5:
+                    p_valid_quality = 1e-5
+            except Exception:
+                p_valid_quality = 1.0
+        else:
+            # Bug c22def60: activity/chest DROPS are always Normal quality, so
+            # a drop source cannot produce an above-Normal (Good..Eternal)
+            # equipment target at all. The crafting quality-outcome
+            # distribution only models a CRAFT roll; applying it to a fishing
+            # drop let the LP satisfy an Eternal copper-pickaxe demand with a
+            # tiny fished-drop yield, producing a ~500k-step magnet-fishing
+            # recommendation. Zero out the valid-quality yield so the LP treats
+            # the drop source as unable to supply the target and routes demand
+            # to the recipe instead.
+            p_valid_quality = 0.0
 
     steps_per_action = _calculate_steps_per_action(
         base_steps, max_efficiency, skill_level, activity_level, WE, flat, pct
@@ -4723,15 +5387,39 @@ def solve_crafting_tree_lp(
         seen_pseudo_items.add(item_ref)
         all_items.add(item_ref)
 
+    # "Use banked materials": add owned stock as a bounded, zero-cost supply
+    # for every NON-ROOT item ref (the root is never reduced — the user sets
+    # its quantity above). Each owned supply variable yields +1 of its item at
+    # cost 0, capped at the owned count, so the solver produces only the
+    # shortfall. These variables are NOT reported in the shopping list (you
+    # already own them). Owned-off or empty inventory → no supplies → no-op.
+    use_owned = bool(global_settings.get('use_owned_quantities', True))
+    owned_supplies = []  # list of (item_ref, owned_qty) tuples
+    if use_owned and session_data and (session_data.get('owned_quantities') or {}):
+        seen_owned: Set[str] = set()
+        for v in vectors:
+            ref = v.get('target_item_id')
+            # Skip the root target (never reduced) and de-dupe per item.
+            if not ref or ref == root_target_ref or ref in seen_owned:
+                continue
+            seen_owned.add(ref)
+            # `ref` is already fine-rewritten by extract_node_action_vector,
+            # so pass use_fine=False to avoid a redundant second rewrite.
+            owned_qty = _owned_quantity_for_ref(ref, session_data, use_fine=False)
+            if owned_qty and owned_qty > 0:
+                owned_supplies.append((ref, float(owned_qty)))
+                all_items.add(ref)
+
     # Now apply the all-bank pre-check: skip LP only when there's nothing
     # the solver could ever do (no action nodes AND no pseudo-shops).
     if all_bank and not pseudo_shops:
         return (False, 'no action nodes (all bank)', {})
 
-    # Total variables: tree_nodes + pseudo_shops
+    # Total variables: tree_nodes + pseudo_shops + owned_supplies
     N_tree = len(vectors)
     N_pseudo = len(pseudo_shops)
-    N_total = N_tree + N_pseudo
+    N_owned = len(owned_supplies)
+    N_total = N_tree + N_pseudo + N_owned
 
     # Objective (costs): to minimize total steps. Pseudo-shops contribute
     # shop_price per unit as a coin cost; we add them into the objective too
@@ -4740,7 +5428,8 @@ def solve_crafting_tree_lp(
     # the understanding that our "total_steps" reported downstream subtracts
     # the pseudo-shop contribution and reports them separately as shopping
     # costs.
-    c = [v['cost'] for v in vectors] + [price for _ref, price in pseudo_shops]
+    c = [v['cost'] for v in vectors] + [price for _ref, price in pseudo_shops] \
+        + [0.0 for _ref, _qty in owned_supplies]
 
     # Constraints: Σ yields_i(k) × x_i >= demand(k), for each item k.
     # In linprog form: A_ub @ x <= b_ub. Negate both sides.
@@ -4752,12 +5441,18 @@ def solve_crafting_tree_lp(
         # Pseudo-shops yield +1 of their item per unit
         for p_ref, _ in pseudo_shops:
             row.append(-1.0 if p_ref == k else 0.0)
+        # Owned supplies yield +1 of their item per unit (zero-cost).
+        for o_ref, _ in owned_supplies:
+            row.append(-1.0 if o_ref == k else 0.0)
         A_ub.append(row)
         demand = root_target_amount if k == root_target_ref else 0.0
         b_ub.append(-demand)
 
-    # Bounds: tree nodes use _bounds_for_node; pseudo-shops are unbounded.
-    bounds = [_bounds_for_node(n) for n in tree_nodes] + [(0.0, None)] * N_pseudo
+    # Bounds: tree nodes use _bounds_for_node; pseudo-shops are unbounded;
+    # owned supplies are capped at the owned count.
+    bounds = [_bounds_for_node(n) for n in tree_nodes] \
+        + [(0.0, None)] * N_pseudo \
+        + [(0.0, qty) for _ref, qty in owned_supplies]
 
     try:
         res = linprog(c, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method='highs')
@@ -5292,6 +5987,7 @@ def calculate_node_metrics(
     # "Best (auto)" — try all non-bank sources and pick lowest steps/item
     if source_type == 'best':
         skip_shops = global_settings.get('skip_shops', True)
+        skip_chests = global_settings.get('skip_chests', True)
         best_result = None
         best_steps = float('inf')
         best_label = None
@@ -5311,17 +6007,25 @@ def calculate_node_metrics(
         # + smithing gear).
         effective_underlying_type = node.get('underlying_source_type')
         effective_underlying_id = node.get('underlying_source_id')
+        _has_resolved = bool(effective_underlying_type and effective_underlying_id)
         for src in node.get('available_sources', []):
             if src['type'] in ('bank', 'best'):
                 continue
-            if src['type'] == 'shop' and skip_shops:
-                continue
-            # Only evaluate the source matching the built children. Any other
-            # candidate's trial would be computed with mismatched child data.
-            if effective_underlying_type and effective_underlying_id:
+            # When the tree-build resolver already pinned an underlying source
+            # (honoring skip_shops/skip_chests + forced fallback), TRUST it —
+            # evaluate only that source and don't re-skip it, so a forced
+            # shop/chest fallback (the item's only source) survives here.
+            # When nothing is resolved yet, apply the skip toggles so we don't
+            # land on a shop/chest unless it's genuinely the only option.
+            if _has_resolved:
                 if src.get('type') != effective_underlying_type:
                     continue
                 if src.get('source_id') != effective_underlying_id:
+                    continue
+            else:
+                if src['type'] == 'shop' and skip_shops:
+                    continue
+                if src['type'] == 'chest' and skip_chests:
                     continue
             # Temporarily set the node to this source
             saved = {k: node.get(k) for k in ('source_type', 'source_id', 'parent_activity_id',
@@ -5481,6 +6185,15 @@ def calculate_node_metrics(
                     except (TypeError, ValueError):
                         continue
 
+    # Hunting fine-input flat bonus. Applies when the user enables "Use fine
+    # inputs" globally OR when the node's effective input item is itself a Fine
+    # variant (manual pin / auto-pick) — so equipping a Fine input reflects its
+    # value immediately, without a re-optimize (bug a9002eed follow-up #2).
+    if source_type in ('activity', 'chest') and activity and (
+            global_settings.get('use_fine_inputs', False) or _node_input_is_fine(node)):
+        from util.fine_inputs import apply_fine_input_bonus
+        apply_fine_input_bonus(stats, activity, True)
+
     # Add service stats for recipe nodes
     selected_service_name = None
     selected_service_id = node.get('selected_service_id')
@@ -5596,31 +6309,44 @@ def calculate_node_metrics(
     level_bonus_qo = max(0, skill_level - activity_level)
     QO_effective = QO + level_bonus_qo
     if is_root and target_quality != 'Normal' and item_is_equipment:
-        try:
-            from util.quality_outcome import calculate_quality_weights
-            # Check if recipe has equipment inputs (for fine material 70/30 blend)
-            has_equipment_input = False
-            if recipe and recipe.materials:
-                for group in recipe.materials:
-                    for qty, mat in group:
-                        mat_ref = _get_item_ref_string(mat)
-                        if mat_ref and mat_ref.startswith('Item.'):
-                            has_equipment_input = True
+        if source_type == 'recipe':
+            try:
+                from util.quality_outcome import calculate_quality_weights
+                # Check if recipe has equipment inputs (for fine material 70/30 blend)
+                has_equipment_input = False
+                if recipe and recipe.materials:
+                    for group in recipe.materials:
+                        for qty, mat in group:
+                            mat_ref = _get_item_ref_string(mat)
+                            if mat_ref and mat_ref.startswith('Item.'):
+                                has_equipment_input = True
+                                break
+                        if has_equipment_input:
                             break
-                    if has_equipment_input:
-                        break
-            qw = calculate_quality_weights(activity_level, QO_effective, use_fine=use_fine, has_equipment_input=has_equipment_input)
-            percentages = qw.get('percentages', {})
-            # Sum probabilities for target quality and above
-            target_idx = QUALITY_TIERS.index(target_quality) if target_quality in QUALITY_TIERS else 0
-            quality_prob = sum(
-                percentages.get(q, 0.0) / 100.0
-                for q in QUALITY_TIERS[target_idx:]
-            )
-            if quality_prob <= 0.00001:
-                quality_prob = 0.00001
-        except Exception:
-            quality_prob = 1.0
+                qw = calculate_quality_weights(activity_level, QO_effective, use_fine=use_fine, has_equipment_input=has_equipment_input)
+                percentages = qw.get('percentages', {})
+                # Sum probabilities for target quality and above
+                target_idx = QUALITY_TIERS.index(target_quality) if target_quality in QUALITY_TIERS else 0
+                quality_prob = sum(
+                    percentages.get(q, 0.0) / 100.0
+                    for q in QUALITY_TIERS[target_idx:]
+                )
+                if quality_prob <= 0.00001:
+                    quality_prob = 0.00001
+            except Exception:
+                quality_prob = 1.0
+        else:
+            # Bug c22def60: activity/chest DROPS are always Normal quality —
+            # you cannot fish up or loot a Good/Great/.../Eternal copper
+            # pickaxe. The crafting quality-outcome distribution
+            # (calculate_quality_weights) only models a CRAFT roll, so
+            # applying it to a drop source produced a tiny-but-nonzero
+            # probability that inflated the step count to absurd values
+            # (e.g. "500k steps in magnet fishing" for an Eternal copper
+            # pickaxe). A drop source simply cannot satisfy an above-Normal
+            # quality target — mark it infeasible so the recipe is chosen
+            # instead. quality_prob == 0 → steps_per_item == inf below.
+            quality_prob = 0.0
 
     # Level-based WE bonus (same as in _calculate_steps_per_action)
     levels_above = max(0, skill_level - activity_level)
@@ -5891,7 +6617,7 @@ def calculate_node_metrics(
     # ==========================================
     elif source_type == 'activity' and activity:
         steps_from_drops = _get_activity_drop_steps(activity, item_ref, stats, skill_level)
-        if steps_from_drops and steps_from_drops > 0:
+        if steps_from_drops and steps_from_drops > 0 and quality_prob > 0:
             steps_per_item = steps_from_drops / quality_prob
             result['steps_per_item'] = steps_per_item
             result['total_steps'] = steps_per_item
@@ -5994,7 +6720,7 @@ def calculate_node_metrics(
             chest_steps = _get_chest_steps_per_item(container, parent_activity, item_ref, stats, skill_level)
             label_prefix = f"Activity: {parent_activity.name}" if parent_activity else "Activity chest"
 
-        if chest_steps and chest_steps > 0:
+        if chest_steps and chest_steps > 0 and quality_prob > 0:
             steps_per_item = chest_steps / quality_prob
             result['steps_per_item'] = steps_per_item
             result['total_steps'] = steps_per_item
@@ -6044,6 +6770,20 @@ def calculate_node_metrics(
         else:
             result['steps_per_item'] = float('inf')
             result['total_steps'] = float('inf')
+
+    # Requirement feasibility note. Runs for every source type (auto-optimized
+    # AND user-equipped/selected gear): flags when the character can't actually
+    # perform this node's activity/recipe with their level or owned/equipped
+    # tools (e.g. "Cut ectoplasm trees" needs a WC50+ hatchet; a Tarsilium
+    # hatchet at WC40 doesn't qualify). Surfaced on the node card as a
+    # "Does not meet requirements" note. Best-effort; never blocks metrics.
+    try:
+        _req_warn = _check_node_requirement_status(node, session_data, game_data)
+        result['requirement_warning'] = _req_warn
+        gc = node.setdefault('gear_config', {})
+        gc['requirement_warning'] = _req_warn
+    except Exception:
+        pass
 
     return result
 
@@ -6097,6 +6837,11 @@ def calculate_tree(
     # so the frontend title= attributes are always populated.
     if not skip_recompute:
         _refresh_spoiler_reasons(tree_nodes, game_data, session_data)
+        # Backfill sources that the game data has gained since this tree was
+        # saved (e.g. a patch adds the "Adobe jumping" activity as a new rough-
+        # gem source). Without this, a pre-patch tree keeps its stale menu and
+        # the optimizer can never display or route through the new source.
+        _refresh_available_sources(tree_nodes, game_data, session_data)
 
     target_quantity = global_settings.get('target_quantity', 1)
     daily_steps = global_settings.get('daily_steps', 30000)
@@ -6226,27 +6971,120 @@ def calculate_tree(
     # the next craft, which means rounding up to 8 (4 full crafts' worth).
     # Users reported 7 flax for 5 twine feeling wrong — 8 reads as "4
     # complete 2-flax crafts" and is the stockpile they actually need.
-    root_node['effective_quantity'] = effective_qty
-    # Children cascade from target_quantity (integer), NOT effective_qty.
+    #
+    # "Use banked materials" (use_owned_quantities, default ON): subtract the
+    # count of each item the character already owns from every NON-ROOT node's
+    # demand. The root is never reduced (the user sets its quantity above). We
+    # run the cascade TWICE:
+    #   Pass A (pure): node['total_quantity'] — demand with no owned reduction.
+    #   Pass B (owned): node['effective_quantity'] — demand after subtracting
+    #     owned stock, cascaded so owning an intermediate craft also shrinks
+    #     its children's demand.
+    # The per-node delta (total_quantity - effective_quantity) × the node's
+    # per-unit self contribution is then removed from the summary totals so
+    # the master numbers track the reduced production. Owned-off (or no
+    # inventory) makes Pass B identical to Pass A → byte-for-byte no-op.
+    use_owned = bool(global_settings.get('use_owned_quantities', True))
+    _use_fine_for_owned = bool(global_settings.get('use_fine', False))
+
+    def _cascade_child_eff(_eff, _ratio, _req):
+        _child_eff = _eff * _ratio
+        # Ceil to the next multiple of base_requirement_amount so the
+        # number represents a whole-craft stockpile. For req_amount=1
+        # (activity leaves, 1-for-1 recipes) this is plain ceil(x)
+        # which matches the old display behavior. For req_amount>=2
+        # (e.g. twine recipe: 2 flax per craft) it bumps up to the
+        # nearest craftable quantity.
+        if _req > 0 and _child_eff > 0 and _child_eff != float('inf'):
+            _child_eff = math.ceil(_child_eff / _req) * _req
+        return _child_eff
+
+    # Pass A — pure demand cascade (no owned reduction) → total_quantity.
+    root_node['total_quantity'] = effective_qty
     _stack = [(root_node['node_id'], target_quantity)]
     while _stack:
         _nid, _eff = _stack.pop()
-        _m = metrics_cache.get(_nid) or {}
-        _ratios = _m.get('input_ratios', {}) or {}
+        _ratios = (metrics_cache.get(_nid) or {}).get('input_ratios', {}) or {}
         for _child in children_map.get(_nid, []):
             _ratio = _ratios.get(_child['node_id'], 0.0) or 0.0
-            _child_eff = _eff * _ratio
-            # Ceil to the next multiple of base_requirement_amount so the
-            # number represents a whole-craft stockpile. For req_amount=1
-            # (activity leaves, 1-for-1 recipes) this is plain ceil(x)
-            # which matches the old display behavior. For req_amount>=2
-            # (e.g. twine recipe: 2 flax per craft) it bumps up to the
-            # nearest craftable quantity.
             _req = _child.get('base_requirement_amount', 1) or 1
-            if _req > 0 and _child_eff > 0 and _child_eff != float('inf'):
-                _child_eff = math.ceil(_child_eff / _req) * _req
-            _child['effective_quantity'] = _child_eff
+            _child_eff = _cascade_child_eff(_eff, _ratio, _req)
+            _child['total_quantity'] = _child_eff
             _stack.append((_child['node_id'], _child_eff))
+
+    # Pass B — owned-reduced demand cascade → effective_quantity. Root is
+    # never reduced; each non-root node's demand drops by the owned count of
+    # its item, and the reduced value cascades to its children.
+    root_node['effective_quantity'] = effective_qty
+    root_node['owned_quantity'] = 0
+    _stack = [(root_node['node_id'], target_quantity)]
+    while _stack:
+        _nid, _eff = _stack.pop()
+        _ratios = (metrics_cache.get(_nid) or {}).get('input_ratios', {}) or {}
+        for _child in children_map.get(_nid, []):
+            _ratio = _ratios.get(_child['node_id'], 0.0) or 0.0
+            _req = _child.get('base_requirement_amount', 1) or 1
+            _child_eff = _cascade_child_eff(_eff, _ratio, _req)
+            _owned = 0
+            if (use_owned and _child_eff == _child_eff  # not NaN
+                    and _child_eff != float('inf') and _child_eff > 0):
+                _owned = _owned_quantity_for_node(
+                    _child, session_data, _use_fine_for_owned)
+                _owned = min(_owned, int(_child_eff))
+            _child['owned_quantity'] = _owned
+            _net_eff = max(0.0, _child_eff - _owned) if _owned > 0 else _child_eff
+            _child['effective_quantity'] = _net_eff
+            _stack.append((_child['node_id'], _net_eff))
+
+    # Owned-material savings — the per-node delta between pure demand
+    # (total_quantity) and owned-reduced demand (effective_quantity), scaled
+    # by each node's per-unit self contribution. Because a descendant's
+    # total_quantity is the pure (un-reduced) demand while its
+    # effective_quantity already reflects any parent-induced reduction, the
+    # delta captures BOTH the node's own owned stock and the shrinkage
+    # inherited from owning an ancestor craft. Subtracted from the summary
+    # totals below so the master numbers match the reduced per-card values.
+    owned_steps_saved = 0.0
+    owned_actions_saved = 0.0
+    owned_xp_saved: Dict[str, float] = {}
+    owned_drops_saved: Dict[str, float] = {}
+    owned_shopping_saved: Dict[str, float] = {}
+    if use_owned:
+        for _n in tree_nodes:
+            if _n is root_node or _n.get('parent_id') is None:
+                continue
+            _tot = _n.get('total_quantity')
+            _net = _n.get('effective_quantity')
+            if _tot is None or _net is None:
+                continue
+            if _tot == float('inf') or _net == float('inf'):
+                continue
+            _delta = _tot - _net
+            if _delta <= 0:
+                continue
+            _cm = metrics_cache.get(_n['node_id']) or {}
+            _ss = _cm.get('self_steps')
+            if _ss is None:
+                _ss = _cm.get('total_steps', 0.0)
+            _sa = _cm.get('self_actions')
+            if _sa is None:
+                _sa = _cm.get('total_actions', 0.0)
+            if _ss and _ss != float('inf'):
+                owned_steps_saved += _ss * _delta
+            if _sa and _sa != float('inf'):
+                owned_actions_saved += _sa * _delta
+            for _sk, _xpv in (_cm.get('self_xp') or {}).items():
+                owned_xp_saved[_sk] = owned_xp_saved.get(_sk, 0.0) + (_xpv or 0.0) * _delta
+            for _dref, _dv in (_cm.get('self_drops_gained') or {}).items():
+                owned_drops_saved[_dref] = owned_drops_saved.get(_dref, 0.0) + (_dv or 0.0) * _delta
+            # Bank/shop leaf nodes: the owned units drop straight out of the
+            # shopping list (you already have them in the bank).
+            if _n.get('source_type') in ('bank', 'shop'):
+                _sref = _n.get('item_id', '')
+                if _n.get('source_type') == 'bank':
+                    _sref = _rewrite_to_fine(_sref, _use_fine_for_owned)
+                if _sref:
+                    owned_shopping_saved[_sref] = owned_shopping_saved.get(_sref, 0.0) + _delta
 
     # Build summary by scaling root metrics. Bug 15110e01:
     # buffer (target × (1+buffer)) applies to ROOT's own contribution only,
@@ -6272,6 +7110,13 @@ def calculate_tree(
         root_metrics.get('total_actions', 0.0) * target_quantity
         + root_self_actions * buffer_overhead
     )
+    # "Use banked materials": remove the steps/actions we no longer perform
+    # because owned stock covers part of the non-root demand. Clamp at 0 so
+    # over-owning never yields a negative total.
+    if total_steps not in (float('inf'),) and owned_steps_saved:
+        total_steps = max(0.0, total_steps - owned_steps_saved)
+    if total_actions not in (float('inf'),) and owned_actions_saved:
+        total_actions = max(0.0, total_actions - owned_actions_saved)
 
     # XP per skill: split via root's self_xp (only the root's own skill
     # contribution gets the buffer; descendant xp scales with target_qty).
@@ -6282,6 +7127,10 @@ def calculate_tree(
             xpv * target_quantity
             + root_self_xp.get(sk, 0.0) * buffer_overhead
         )
+    # Owned stock means fewer actions → less XP earned from those actions.
+    for sk, saved in owned_xp_saved.items():
+        if sk in xp_by_skill:
+            xp_by_skill[sk] = max(0.0, xp_by_skill[sk] - saved)
 
     # Shopping list: at root, this is purely children-contributed (the
     # root recipe's materials are added via children's input_ratios).
@@ -6300,6 +7149,12 @@ def calculate_tree(
                 # For simplicity, subtract banked from total needed
                 banked = n['banked_quantity']
                 shopping_list_raw[item_ref] = max(0, shopping_list_raw[item_ref] - banked)
+
+    # "Use banked materials": drop owned bank/shop leaf units from the
+    # shopping list (you already have them).
+    for item_ref, saved in owned_shopping_saved.items():
+        if item_ref in shopping_list_raw:
+            shopping_list_raw[item_ref] = max(0, shopping_list_raw[item_ref] - saved)
 
     shopping_list = []
     for item_ref, qty in shopping_list_raw.items():
@@ -6481,6 +7336,11 @@ def calculate_tree(
         consumed = float(root_raw_consumed.get(drop_ref, 0.0) or 0.0)
         if consumed > 0:
             scaled_qty -= consumed * target_quantity
+        # "Use banked materials": fewer actions run → fewer byproduct
+        # side drops from those actions.
+        _owned_drop = owned_drops_saved.get(drop_ref, 0.0)
+        if _owned_drop:
+            scaled_qty -= _owned_drop
         if scaled_qty <= 0:
             continue
         # Coins (chests synthesize 'Currency.COINS', activities use the
@@ -6770,6 +7630,61 @@ def calculate_tree(
         summary['lock_warnings'] = lock_warnings
 
     # ------------------------------------------------------------------
+    # Forced-source warnings (Skip Chests / Skip Shops).
+    #
+    # When skip_chests / skip_shops are on, the auto resolver drops chest /
+    # shop routes. But some materials are ONLY reachable via a chest and/or
+    # shop — there is no craftable/farmable alternative. Those nodes can't be
+    # left unresolved, so route_candidates()/_pick_best_underlying_source()
+    # fall back to the skipped source (SHOP preferred over CHEST). Flag each
+    # such node with a ⚠️ source_warning so the user knows the skip toggle was
+    # overridden for it, and aggregate into summary.source_warnings for the
+    # summary banner. Derived purely from available_sources + the skip flags,
+    # so it's robust regardless of how source_type was ultimately set (a
+    # concrete user pick leaves a non-skipped alternative and won't warn).
+    _sw_skip_shops = global_settings.get('skip_shops', True)
+    _sw_skip_chests = global_settings.get('skip_chests', True)
+    source_warnings = []
+    for n in tree_nodes:
+        gc = n.get('gear_config')
+        if gc is None:
+            gc = n['gear_config'] = {}
+        # Clean slate so toggling a skip flag off clears a stale warning.
+        gc['source_warning'] = None
+        # Banked (owned) items need no farming — nothing to warn about.
+        if n.get('source_type') == 'bank':
+            continue
+        avail = n.get('available_sources') or []
+        real = [s for s in avail
+                if s.get('type') not in ('best', 'bank') and not s.get('is_spoiler')]
+        if not real:
+            continue
+        preferred = [s for s in real
+                     if not (s.get('type') == 'shop' and _sw_skip_shops)
+                     and not (s.get('type') == 'chest' and _sw_skip_chests)]
+        if preferred:
+            continue  # a non-skipped source exists — no forced fallback
+        # Forced: every real source is a skipped shop/chest. Shop preferred.
+        has_shop = any(s.get('type') == 'shop' for s in real)
+        has_chest = any(s.get('type') == 'chest' for s in real)
+        if has_shop and _sw_skip_shops:
+            warn = ("Only available from shops — no craftable/farmable source "
+                    "exists, so it uses a shop despite Skip Shops.")
+        elif has_chest and _sw_skip_chests:
+            warn = ("Only available from chests — no craftable/farmable source "
+                    "exists, so it's optimized as a chest despite Skip Chests.")
+        else:
+            continue
+        gc['source_warning'] = warn
+        source_warnings.append({
+            'node_id': n.get('node_id'),
+            'item_name': n.get('item_name'),
+            'message': warn,
+        })
+    if source_warnings:
+        summary['source_warnings'] = source_warnings
+
+    # ------------------------------------------------------------------
     # Aggregate non-owned/locked upgrades across the whole tree so the
     # summary can render a "Non-owned/Locked Upgrades" section that
     # collapses per-item with a per-node breakdown of where each
@@ -7014,6 +7929,62 @@ def _aggregate_tree_upgrades(tree_nodes, effective_qty=1.0):
         return total
 
     aggregated = {}
+    # Ring items occupy TWO equippable slots (ring1 + ring2). A SINGLE copy of
+    # a ring can only fill ONE slot per node, so summing both ring slots into
+    # one figure overstates the saving (user report 2026-09-21: "one whole ring
+    # saves 655 steps, but it can't replace both rings at once"). To fix this
+    # WITHOUT dropping the two-copy scenario (you CAN wear the same ring in both
+    # slots if you own two), ring items are split into two aggregate entries:
+    #   copies=1 ("×1"): best single ring slot per node (min delta), summed.
+    #   copies=2 ("×2"): BOTH ring slots per node summed (needs two copies).
+    # The ×2 entry is dropped in the final pass when no node ever had two ring
+    # upgrade rows (then ×2 == ×1 and the badge would be noise). `copies_tag`
+    # is 0 for non-ring items (no badge, unchanged behavior).
+    # Keyed True when some node contributed two ring rows for a given base key.
+    ring_has_two = {}
+
+    def _roll_candidate(cand, copies_tag):
+        """Fold ONE candidate node-row into its aggregate entry. `copies_tag`
+        (0 non-ring, 1 ring-×1, 2 ring-×2) is part of the entry key so the two
+        ring variants accumulate independently. Mirrors the locked/hidden
+        stickiness + missing-requirement union of the original roll-up."""
+        name = cand['name']
+        quality = cand['quality']
+        uuid = cand['uuid']
+        rarity = cand['rarity']
+        key = (uuid or name, quality or '', copies_tag)
+        entry = aggregated.get(key)
+        if entry is None:
+            entry = {
+                'name': name,
+                'uuid': uuid,
+                'quality': quality,
+                'rarity': rarity,
+                # copies is surfaced to the frontend as a "×N" badge; 0/None
+                # means "not a multi-slot ring split" -> no badge.
+                'copies': copies_tag if copies_tag else None,
+                'is_locked': cand['group_kind'] == 'locked',
+                'is_hidden': cand['group_kind'] == 'hidden',
+                'is_owned': bool(cand.get('is_owned', False)),
+                'missing_requirements': set(),
+                'total_delta': 0.0,
+                'nodes': [],
+            }
+            aggregated[key] = entry
+        if cand['group_kind'] == 'locked':
+            entry['is_locked'] = True
+            for req in cand['missing_requirements']:
+                if req:
+                    entry['missing_requirements'].add(str(req))
+        if cand['group_kind'] == 'hidden':
+            entry['is_hidden'] = True
+            entry['is_owned'] = bool(cand.get('is_owned', False))
+            for req in cand['missing_requirements']:
+                if req:
+                    entry['missing_requirements'].add(str(req))
+        entry['total_delta'] += cand['node_row']['delta']
+        entry['nodes'].append(cand['node_row'])
+
     # Set True as soon as any alt is rescaled against whole-tree subtree
     # steps (which already bake in effective_qty). Controls whether the
     # final loop applies the legacy effective_qty multiply.
@@ -7080,6 +8051,7 @@ def _aggregate_tree_upgrades(tree_nodes, effective_qty=1.0):
         for group_kind, group in (
             ('nonowned', sa.get('alternatives') or {}),
             ('locked', sa.get('locked_alternatives') or {}),
+            ('hidden', sa.get('hidden_alternatives') or {}),
         ):
             if not isinstance(group, dict):
                 continue
@@ -7164,6 +8136,7 @@ def _aggregate_tree_upgrades(tree_nodes, effective_qty=1.0):
                     cand_payload = {
                         'name': name, 'uuid': uuid, 'quality': quality,
                         'rarity': rarity, 'group_kind': group_kind,
+                        'is_owned': bool(alt.get('is_owned', False)),
                         'missing_requirements': alt.get('missing_requirements') or [],
                         'node_row': {
                             'node_id': node_id,
@@ -7211,32 +8184,44 @@ def _aggregate_tree_upgrades(tree_nodes, effective_qty=1.0):
         # aggregate entries. Each candidate contributes EXACTLY ONE
         # node-row to the entry — no per-slot duplication, no
         # locked/non-owned double-counting.
+        #
+        # Ring split: a ring can appear in both ring1 and ring2 for THIS node
+        # (the RING EXCEPTION above keeps both). One copy fills only one slot,
+        # so we roll the best single ring row into the ×1 entry and BOTH ring
+        # rows into the ×2 entry. Non-ring candidates roll straight into their
+        # (copies_tag=0) entry unchanged.
+        _by_base_key = {}
         for cand in candidates.values():
-            name = cand['name']
-            quality = cand['quality']
-            uuid = cand['uuid']
-            rarity = cand['rarity']
-            key = (uuid or name, quality or '')
-            entry = aggregated.get(key)
-            if entry is None:
-                entry = {
-                    'name': name,
-                    'uuid': uuid,
-                    'quality': quality,
-                    'rarity': rarity,
-                    'is_locked': cand['group_kind'] == 'locked',
-                    'missing_requirements': set(),
-                    'total_delta': 0.0,
-                    'nodes': [],
-                }
-                aggregated[key] = entry
-            if cand['group_kind'] == 'locked':
-                entry['is_locked'] = True
-                for req in cand['missing_requirements']:
-                    if req:
-                        entry['missing_requirements'].add(str(req))
-            entry['total_delta'] += cand['node_row']['delta']
-            entry['nodes'].append(cand['node_row'])
+            _bk = (cand['uuid'] or cand['name'], cand['quality'] or '')
+            _by_base_key.setdefault(_bk, []).append(cand)
+
+        for _bk, _cands in _by_base_key.items():
+            _ring = [c for c in _cands
+                     if str(c['node_row'].get('slot') or '').startswith('ring')]
+            _other = [c for c in _cands
+                      if not str(c['node_row'].get('slot') or '').startswith('ring')]
+            for cand in _other:
+                _roll_candidate(cand, 0)
+            if _ring:
+                # ×1: single best (most-negative delta) ring slot this node.
+                _best = min(_ring, key=lambda c: c['node_row'].get('delta', 0.0))
+                _roll_candidate(_best, 1)
+                # ×2: both ring slots this node (only distinct when 2 exist).
+                for cand in _ring:
+                    _roll_candidate(cand, 2)
+                if len(_ring) >= 2:
+                    ring_has_two[_bk] = True
+
+    # Ring ×2 pruning: drop each ×2 entry whose base key never had a node with
+    # two ring upgrade rows (then ×2 == ×1 and the badge is noise), and clear
+    # the ×1 sibling's copies tag so a lone ring shows no "×1" badge.
+    for _bkq in {(k[0], k[1]) for k in list(aggregated.keys())}:
+        _k1 = (_bkq[0], _bkq[1], 1)
+        _k2 = (_bkq[0], _bkq[1], 2)
+        if _k2 in aggregated and not ring_has_two.get(_bkq):
+            del aggregated[_k2]
+            if _k1 in aggregated:
+                aggregated[_k1]['copies'] = None
 
     # Legacy per-one-target deltas need scaling up to whole-build totals to
     # match the headline total_steps. But when the whole-tree subtree base

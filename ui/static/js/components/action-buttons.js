@@ -85,6 +85,20 @@ class ActionButtons extends Component {
             return;
         }
 
+        // Auto-detect a character export pasted into the gear-set import box.
+        // A gearset export is a base64-gzip string, so it NEVER starts with '{';
+        // a character export is a JSON object, so it ALWAYS starts with '{'.
+        // (Same discriminator import-modal.js uses for clipboard autofill.)
+        // If the user pasted character data here — via "Import from Clipboard"
+        // or by hand — hand it off to the character-import flow (which saves the
+        // character and reloads the page) instead of failing "Invalid gearset
+        // format".
+        if (this.looksLikeCharacterData(exportString)) {
+            this.hideImportPopup();
+            this.delegateToCharacterImport(exportString);
+            return;
+        }
+
         // Check if pako is loaded
         if (typeof window.pako === 'undefined') {
             api.showError('Compression library not loaded. Please refresh the page.');
@@ -96,6 +110,18 @@ class ActionButtons extends Component {
             // Decode the gearset export string
             const gearsetData = this.decodeGearset(exportString);
 
+            // Capture the target gearset ONCE at import start. Every slot write
+            // below is accumulated and flushed via a single store.updateGearSlotsBulk
+            // to THIS captured slot, so the import is atomic even if an async
+            // re-render flips activeGearsetSlot mid-import. Combined with the
+            // attachEvents() handler dedup, this fixes GS2 imports leaking into
+            // GS1 (bug 254643a3).
+            const targetSlot = (store.state.gearsets?.comparisonMode && store.state.gearsets?.activeGearsetSlot === 2) ? 2 : 1;
+            console.log(`[import-target] START comparisonMode=${store.state.gearsets?.comparisonMode} `
+                + `activeGearsetSlot=${store.state.gearsets?.activeGearsetSlot} `
+                + `→ writes go to ${targetSlot === 2 ? 'GS2' : 'GS1'} `
+                + `items=${gearsetData?.items?.length ?? 0}`);
+
             // Get catalog to look up items
             const catalog = await api.getCatalog();
             const catalogItems = catalog.items || [];
@@ -104,7 +130,7 @@ class ActionButtons extends Component {
             const slots = {};
 
             for (const itemData of gearsetData.items) {
-                console.log('Processing import item:', itemData);
+                if (window.__walkscapeVerboseDebug) console.log('Processing import item:', itemData);
 
                 if (itemData.item === 'null') {
                     continue;
@@ -134,7 +160,7 @@ class ActionButtons extends Component {
                     slotName = slotType;
                 }
 
-                console.log(`Mapped slot type "${slotType}" index ${index} to slot name "${slotName}"`);
+                if (window.__walkscapeVerboseDebug) console.log(`Mapped slot type "${slotType}" index ${index} to slot name "${slotName}"`);
 
                 // Special handling for pets — official format uses pet name as id, level as quality
                 if (slotType === 'pet') {
@@ -160,7 +186,7 @@ class ActionButtons extends Component {
                             levels: petItem.levels,
                             stats: levelData?.stats || {},
                         };
-                        console.log(`  Pet imported: ${petItem.name} at level ${petLevel}`);
+                        if (window.__walkscapeVerboseDebug) console.log(`  Pet imported: ${petItem.name} at level ${petLevel}`);
                     } else {
                         console.warn(`Pet not found in catalog: ${petId}`);
                     }
@@ -180,7 +206,7 @@ class ActionButtons extends Component {
                     continue;
                 }
 
-                console.log(`Found item in catalog: ${fullItem.name}`);
+                if (window.__walkscapeVerboseDebug) console.log(`Found item in catalog: ${fullItem.name}`);
 
                 // Convert export quality (rarity names) to quality names for crafted items
                 let qualityName = null;
@@ -246,10 +272,11 @@ class ActionButtons extends Component {
                 }
             }
 
-            // Update all slots in store
-            for (const [slotName, itemData] of Object.entries(slots)) {
-                store.updateGearSlot(slotName, itemData);
-            }
+            // NOTE: writes are deferred. `slots` accumulates every resolved
+            // item (catalog items here, generic restores + pet meta + empty
+            // clears below); it is flushed in ONE store.updateGearSlotsBulk call
+            // at the end of this method so the import triggers a single notify +
+            // save instead of ~20 (kills the render/PATCH storm and the GS1 race).
 
             // Restore generic items from custom extension field (not in catalog)
             const restoredGenericSlots = new Set();
@@ -311,11 +338,11 @@ class ActionButtons extends Component {
                             is_crafted: storeItem.is_crafted,
                             is_generic: true,
                         };
-                        store.updateGearSlot(slotName, resolved);
-                        console.log(`  ✓ Restored generic slot ${slotName}: ${storeItem.name} quality=${qualityName} (from store)`);
+                        slots[slotName] = resolved;
+                        if (window.__walkscapeVerboseDebug) console.log(`  ✓ Restored generic slot ${slotName}: ${storeItem.name} quality=${qualityName} (from store)`);
                     } else {
-                        store.updateGearSlot(slotName, { ...itemData, quality: qualityName, rarity: itemRarity });
-                        console.log(`  ✓ Restored generic slot ${slotName}: ${itemData.name} quality=${qualityName} (from embedded data)`);
+                        slots[slotName] = { ...itemData, quality: qualityName, rarity: itemRarity };
+                        if (window.__walkscapeVerboseDebug) console.log(`  ✓ Restored generic slot ${slotName}: ${itemData.name} quality=${qualityName} (from embedded data)`);
                     }
                     restoredGenericSlots.add(slotName);
                 }
@@ -326,8 +353,8 @@ class ActionButtons extends Component {
                     slots['pet'].level = meta.level;
                     slots['pet'].variant = meta.variant;
                     slots['pet'].useAbility = meta.useAbility || false;
-                    store.updateGearSlot('pet', slots['pet']);
-                    console.log(`  Restored pet meta: level=${meta.level}, variant=${meta.variant}, useAbility=${meta.useAbility || false}`);
+                    // slots['pet'] is flushed with the rest in the bulk write below.
+                    if (window.__walkscapeVerboseDebug) console.log(`  Restored pet meta: level=${meta.level}, variant=${meta.variant}, useAbility=${meta.useAbility || false}`);
                 }
             }
 
@@ -341,9 +368,16 @@ class ActionButtons extends Component {
 
             for (const slot of allSlots) {
                 if (!slots[slot] && !restoredGenericSlots.has(slot)) {
-                    store.updateGearSlot(slot, null);
+                    slots[slot] = null;
                 }
             }
+
+            // Single atomic, batched write of every resolved slot to the slot
+            // captured at START — one notify + one save (no per-slot storm, no
+            // mid-import slot flip). See bug 254643a3.
+            console.log(`[import-target] WRITING ${Object.keys(slots).length} slots to `
+                + `${targetSlot === 2 ? 'GS2' : 'GS1'} (forceSlot=${targetSlot}, single bulk update)`);
+            store.updateGearSlotsBulk(slots, { forceSlot: targetSlot });
 
             // Close popup and show success
             this.hideImportPopup();
@@ -362,6 +396,69 @@ class ActionButtons extends Component {
             console.error('Failed to import gearset:', error);
             api.showError('Invalid gearset format');
         }
+    }
+
+    /**
+     * Detect whether pasted text is a character export (JSON object) rather than
+     * a gearset export (base64-gzip string). Gearset exports never start with
+     * '{' (base64 alphabet excludes it); character exports always do. We also
+     * confirm it actually parses to a plain object so a stray '{' typo doesn't
+     * misroute. Never throws.
+     * @param {string} text
+     * @returns {boolean}
+     */
+    looksLikeCharacterData(text) {
+        const trimmed = (text || '').trim();
+        if (trimmed[0] !== '{') {
+            return false;
+        }
+        try {
+            const parsed = JSON.parse(trimmed);
+            return !!parsed && typeof parsed === 'object' && !Array.isArray(parsed);
+        } catch (e) {
+            return false;
+        }
+    }
+
+    /**
+     * Hand pasted character JSON off to the character-import flow. Reuses the
+     * shared ImportModal (window.importModal) so we get the exact same behavior
+     * as the normal character import: backend validation, catalog invalidation,
+     * user-override reset, and a full page reload on success — plus visible
+     * error feedback if the JSON is malformed. Falls back to a direct API import
+     * if the modal isn't mounted for some reason.
+     * @param {string} jsonText - character export JSON string
+     */
+    delegateToCharacterImport(jsonText) {
+        api.showSuccess('Detected character data — importing…');
+
+        const modal = window.importModal;
+        if (modal && typeof modal.show === 'function' && typeof modal.handleImport === 'function') {
+            // Open the character import modal, pre-fill it with the pasted JSON,
+            // and run its standard validate+submit path. handleImport() reads the
+            // textarea synchronously here, so the modal's async clipboard autofill
+            // cannot clobber the value. On success submitImport() reloads the page.
+            modal.show();
+            modal.$element.find('.import-textarea').val(jsonText);
+            modal.handleImport();
+            return;
+        }
+
+        // Defensive fallback: modal not available — import directly, then reload.
+        const uuid = store.state.session && store.state.session.uuid;
+        if (!uuid) {
+            api.showError('Could not import character data (no active session).');
+            return;
+        }
+        api.importCharacter(uuid, jsonText)
+            .done(() => {
+                api.showSuccess('Character data imported successfully!');
+                api.invalidateCatalog();
+                window.location.reload();
+            })
+            .fail(() => {
+                api.showError('Failed to import character data.');
+            });
     }
 
     /**
@@ -748,53 +845,64 @@ class ActionButtons extends Component {
      * Attach event handlers
      */
     attachEvents() {
+        // Remove any previously-bound handlers before re-binding. attachEvents()
+        // is called from the constructor AND from two store subscriptions
+        // (gearsets.comparisonMode, gearsets.current), and render() uses
+        // .html() which does NOT clear delegated handlers on the persistent
+        // container. Without this .off(), every comparison-toggle / GS1 change
+        // stacked another full set of click handlers, so a single Import click
+        // fired importGearSet() dozens of times — a ~20x-per-handler render/save
+        // storm that also flipped activeGearsetSlot mid-import and leaked GS2
+        // imports into GS1 (bug 254643a3). Namespacing lets us dedupe cleanly.
+        this.$element.off('.actionBtns');
+
         // Import button click
-        this.$element.on('click', '.import-button-main', () => {
+        this.$element.on('click.actionBtns', '.import-button-main', () => {
             this.showImportPopup();
         });
 
         // Export button click
-        this.$element.on('click', '.export-button', () => {
+        this.$element.on('click.actionBtns', '.export-button', () => {
             this.exportGearSet();
         });
 
         // Unequip All button click
-        this.$element.on('click', '.unequip-all-button', () => {
+        this.$element.on('click.actionBtns', '.unequip-all-button', () => {
             this.unequipAll();
         });
 
         // Copy to other set button click
-        this.$element.on('click', '.copy-to-other-btn', () => {
+        this.$element.on('click.actionBtns', '.copy-to-other-btn', () => {
             this.copyToOtherSet();
         });
 
         // Import from clipboard button
-        this.$element.on('click', '.import-from-clipboard-button', () => {
+        this.$element.on('click.actionBtns', '.import-from-clipboard-button', () => {
             this.importFromClipboard();
         });
 
         // Import popup - close button
-        this.$element.on('click', '.close-button', () => {
+        this.$element.on('click.actionBtns', '.close-button', () => {
             this.hideImportPopup();
         });
 
         // Import popup - cancel button
-        this.$element.on('click', '.cancel-button', () => {
+        this.$element.on('click.actionBtns', '.cancel-button', () => {
             this.hideImportPopup();
         });
 
         // Import popup - import button
-        this.$element.on('click', '.import-button', () => {
+        this.$element.on('click.actionBtns', '.import-button', () => {
             this.importGearSet();
         });
 
         // Import popup - textarea input
-        this.$element.on('input', '.import-textarea', (e) => {
+        this.$element.on('input.actionBtns', '.import-textarea', (e) => {
             this.importText = $(e.target).val();
         });
 
         // Import popup - click overlay to close
-        this.$element.on('click', '.import-popup-overlay', (e) => {
+        this.$element.on('click.actionBtns', '.import-popup-overlay', (e) => {
             if ($(e.target).hasClass('import-popup-overlay')) {
                 this.hideImportPopup();
             }

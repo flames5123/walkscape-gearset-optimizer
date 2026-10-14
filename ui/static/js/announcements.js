@@ -129,29 +129,69 @@ function renderMessage(text) {
     // Only match when underscores are at word boundaries so variable_names don't italicize.
     html = html.replace(/(^|[\s(>])_([^_\n]+?)_(?=[\s)<.,!?;:]|$)/g, '$1<em>$2</em>');
 
-    // Convert bullet lists: lines starting with "* " become <ul>/<li>
-    // Split on newlines, group consecutive bullet lines into <ul> blocks
+    // Line-oriented block handling:
+    //   - ATX headings: "# ".."###### " -> <h1>..<h6> (inline styles so no CSS
+    //     changes are needed; sizes tuned to fit the announcements modal).
+    //   - Bullet lists: lines starting with "* " grouped into <ul>/<li>.
+    // Split on newlines and walk line by line.
+    const HEADING_STYLES = {
+        1: 'font-size: max(var(--min-text, 5px), calc(1.4rem * var(--text-scale, 1)));font-weight:600;margin:0.5em 0 0.3em;line-height:1.25',
+        2: 'font-size: max(var(--min-text, 5px), calc(1.2rem * var(--text-scale, 1)));font-weight:600;margin:0.5em 0 0.3em;line-height:1.25',
+        3: 'font-size: max(var(--min-text, 5px), calc(1.05rem * var(--text-scale, 1)));font-weight:600;margin:0.5em 0 0.3em;line-height:1.25',
+        4: 'font-size: max(var(--min-text, 5px), calc(0.95rem * var(--text-scale, 1)));font-weight:600;margin:0.5em 0 0.3em;line-height:1.25',
+        5: 'font-size: max(var(--min-text, 5px), calc(0.88rem * var(--text-scale, 1)));font-weight:600;margin:0.5em 0 0.3em;line-height:1.25',
+        6: 'font-size: max(var(--min-text, 5px), calc(0.82rem * var(--text-scale, 1)));font-weight:600;margin:0.5em 0 0.3em;line-height:1.25',
+    };
     const lines = html.split('\n');
     const result = [];
-    let inList = false;
+    // Nested bullet lists: the leading spaces before "* " set the nesting depth
+    // (4 spaces per level). Track the number of open <ul>s and whether an <li>
+    // is still open, so a deeper bullet nests INSIDE its parent <li>.
+    let openUls = 0;
+    let liOpen = false;
+    const closeLists = () => {
+        if (liOpen) { result.push('</li>'); liOpen = false; }
+        while (openUls > 0) {
+            result.push('</ul>');
+            openUls--;
+            if (openUls > 0) result.push('</li>');  // close the enclosing parent <li>
+        }
+    };
 
     for (const line of lines) {
+        const leading = line.length - line.trimStart().length;
         const trimmed = line.trimStart();
-        if (trimmed.startsWith('* ')) {
-            if (!inList) {
-                result.push('<ul class="announcement-list">');
-                inList = true;
+        // ATX heading: 1-6 leading '#' then a space then content. Trailing
+        // '#' (closing sequence) is stripped. '#' is not HTML-escaped, so the
+        // marker survives the earlier escape/bold/italic passes intact.
+        const heading = trimmed.match(/^(#{1,6})\s+(.+?)\s*#*\s*$/);
+        if (heading) {
+            closeLists();
+            const level = heading[1].length;
+            result.push(`<h${level} class="announcement-heading" style="${HEADING_STYLES[level]}">${heading[2]}</h${level}>`);
+        } else if (trimmed.startsWith('* ')) {
+            const want = Math.floor(leading / 4) + 1;  // number of <ul>s this item sits under
+            if (want > openUls) {
+                // Deeper: nest new <ul>(s) inside the currently-open <li>.
+                while (openUls < want) { result.push('<ul class="announcement-list">'); openUls++; }
+            } else {
+                // Same level or shallower: close the current <li>, then unwind to
+                // the target depth (closing each closed ul's parent <li> too).
+                if (liOpen) { result.push('</li>'); liOpen = false; }
+                while (openUls > want) {
+                    result.push('</ul>');
+                    openUls--;
+                    if (openUls > 0) result.push('</li>');
+                }
             }
-            result.push(`<li>${trimmed.slice(2)}</li>`);
+            result.push(`<li>${trimmed.slice(2)}`);  // opened here, closed lazily
+            liOpen = true;
         } else {
-            if (inList) {
-                result.push('</ul>');
-                inList = false;
-            }
+            closeLists();
             result.push(line);
         }
     }
-    if (inList) result.push('</ul>');
+    closeLists();
 
     // Join and convert remaining newlines to <br>
     html = result.join('\n').replace(/\n/g, '<br>');
@@ -164,6 +204,14 @@ function renderMessage(text) {
     html = html.replace(/<\/ul>\s*<br>/gi, '</ul>');
     html = html.replace(/<br>(\s*<li)/gi, '$1');
     html = html.replace(/<\/li>\s*<br>/gi, '</li>');
+    // Nested lists close <li>/<ul> on their own result lines, which inserts a
+    // stray <br> just before the closing tag — strip those too.
+    html = html.replace(/<br>(\s*<\/li>)/gi, '$1');
+    html = html.replace(/<br>(\s*<\/ul>)/gi, '$1');
+
+    // Headings are block-level with their own margins — drop adjacent <br>.
+    html = html.replace(/<br>(\s*<h[1-6])/gi, '$1');
+    html = html.replace(/(<\/h[1-6]>)\s*<br>/gi, '$1');
 
     return html;
 }

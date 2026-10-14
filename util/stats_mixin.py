@@ -83,6 +83,9 @@ class StatsMixin:
         - 'set_pieces': {set_name: {threshold: {skill: {location: {stat: value}}}}}
         - 'item_ownership': {item_name: {skill: {location: {stat: value}}}} - stats when owning another item
         - 'travel_steps': {threshold: {skill: {location: {stat: value}}}} - stats gated by total travel steps
+        - 'explore_realm': {realm_slug: {skill: {location: {stat: value}}}} - stats gated by fully exploring a realm
+        - 'keyword_in_inventory': {keyword: {skill: {location: {stat: value}}}} - stats requiring any item with the keyword; assumed always active (inventory not available at scoring time), shown as a gate note in the UI
+        - 'total_wealth': {threshold: {skill: {location: {stat: value}}}} - stats requiring the player's total wealth (value of all items) to be >= N (e.g. Golden Frog); gated on the wealth set at Character init, matching the UI
     - self.requirements: List (optional, for unlock requirements like reputation, skill level)
     
     Note: 'activity' gates are NOT included in normal stat calculations - they're for
@@ -588,11 +591,56 @@ class StatsMixin:
         activity_key = activity.name if hasattr(activity, 'name') else (activity if activity else None)
         set_key = frozenset(set_piece_counts.items()) if set_piece_counts else None
 
-        cache_key = (id(self), skill_key, location_key, activity_key, set_key)
+        # STABLE identity key — NOT id(self). Non-composite quality/level
+        # variants (e.g. "Elderhide tunic (Perfect)", "Omni-tool (265)") have
+        # has_instance=False, so they were treated as cacheable, but the Gearset
+        # decode builds a FRESH object per call for each variant. id(self) is a
+        # memory address that Python reuses after GC, so a lookup for one variant
+        # could hit a cache entry stored by a DIFFERENT item that previously held
+        # that address — returning the wrong item's stats. This made the node
+        # metric non-deterministic: the same gearset export produced
+        # double_action 0.25 / 0.24 / 0.19 on repeated evaluations, so "exact"
+        # crafting-tree sets scored worse than the heuristic (bug d773a4d7).
+        # Key on the item's logical identity instead: uuid + name. The bare uuid
+        # is shared across quality/level variants of the same base item, so we
+        # include name (which carries the "(Perfect)" / "(265)" suffix that
+        # distinguishes what the variant's stats actually are). Fall back to
+        # no-cache when a stable identity isn't available.
+        _uuid = getattr(self, 'uuid', None)
+        _name = getattr(self, 'name', None)
+        _stable_id = (_uuid, _name) if _uuid is not None else None
+        cache_key = (_stable_id, skill_key, location_key, activity_key, set_key)
+
+        # item_ownership gates depend on the CHARACTER's owned items, which the
+        # cache key deliberately omits (character is excluded to keep the key
+        # hashable/simple). Caching such an item on its shared catalog singleton
+        # would leak one character's ownership result to every other character
+        # keyed only by (id, skill, location) — e.g. Map of Arenum's per-region
+        # double_action appearing (or vanishing) for a session depending purely
+        # on which character was scored first (bug fb67b12c). Evaluate these
+        # fresh every call, like composites.
+        _char_dependent = (
+            # Achievement-point-gated items (AchievementItem, e.g. the Omni-tool,
+            # whose double_action/find stats unlock at AP thresholds). The
+            # character's achievement_points are deliberately excluded from the
+            # cache key, so caching one AP tier's result would leak it to a
+            # character at a different AP tier. Evaluate fresh every call.
+            bool(getattr(self, 'achievement_stats', None))
+            or (
+                isinstance(getattr(self, 'gated_stats', None), dict)
+                and ('item_ownership' in self.gated_stats
+                     or 'explore_realm' in self.gated_stats
+                     or 'access_region' in self.gated_stats
+                     or 'activity_completion' in self.gated_stats
+                     or 'travel_steps' in self.gated_stats
+                     or 'total_wealth' in self.gated_stats)
+            )
+        )
+        _cacheable = not _is_composite and not _char_dependent and _stable_id is not None
 
         # Check cache (stable catalog singletons only -- see note above).
         # LRU: touch on hit so hot stable entries survive ephemeral churn.
-        if not _is_composite:
+        if _cacheable:
             cached = _STATS_CACHE.get(cache_key)
             if cached is not None:
                 _STATS_CACHE.move_to_end(cache_key)
@@ -602,7 +650,7 @@ class StatsMixin:
         result = self._calculate_stats_uncached(skill, location, activity, set_piece_counts, character)
 
         # Store in cache with an LRU bound (never for ephemeral composites).
-        if not _is_composite:
+        if _cacheable:
             _STATS_CACHE[cache_key] = result
             if len(_STATS_CACHE) > _STATS_CACHE_MAX:
                 _STATS_CACHE.popitem(last=False)  # evict oldest
@@ -687,7 +735,24 @@ class StatsMixin:
         if character is None:
             try:
                 from my_config import get_character
+                import util.walkscape_globals as _wg
+                # get_character() builds a hardcoded SAMPLE character, and
+                # Character.__init__ CLOBBERS the thread-local globals
+                # (achievement_points / total_skill_level / total_wealth /
+                # total_collectibles / custom_stats) as a side effect. During real
+                # scoring that corrupts the actual character's context — e.g. it
+                # reset achievement_points 265 -> sample 164 mid crafting-tree
+                # decode, so the next get_all_items baked the Omni-tool below its
+                # AP-200 threshold and dropped its double_action, making the node
+                # metric non-deterministic (bug d773a4d7). Snapshot and restore the
+                # globals around the sample build so it can't leak into the caller.
+                _saved = (_wg.get_achievement_points(), _wg.get_total_skill_level(),
+                          _wg.get_total_wealth(), _wg.get_total_collectibles(),
+                          _wg.get_custom_stats())
                 character = get_character()
+                (_wg.set_achievement_points(_saved[0]), _wg.set_total_skill_level(_saved[1]),
+                 _wg.set_total_wealth(_saved[2]), _wg.set_total_collectibles(_saved[3]),
+                 _wg.set_custom_stats(_saved[4]))
             except ImportError:
                 return combined  # Character not available, skip all gated stats
         
@@ -831,6 +896,36 @@ class StatsMixin:
                         if skill.matches_skill(stat_skill):
                             combined = self._add_location_stats(locations, location, combined)
         
+        # Check keyword_in_inventory gates (stats that require owning ANY item
+        # carrying a given keyword, e.g. quivers + 'arrows').
+        # Structure: {'keyword_in_inventory': {keyword: {skill: {location: {stat: value}}}}}
+        # NOTE: We do not reliably have the character's full inventory at scoring
+        # time, so we ASSUME the keyword requirement is always satisfied and
+        # always apply the stats. The gate is still surfaced in the UI (rendered
+        # as a "Requires: <keyword> in inventory" note) so the user knows the
+        # bonus is conditional — but it is never withheld from the optimizer.
+        if "keyword_in_inventory" in self.gated_stats:
+            for required_keyword, kw_stats in self.gated_stats["keyword_in_inventory"].items():
+                for stat_skill, locations in kw_stats.items():
+                    if skill.matches_skill(stat_skill):
+                        combined = self._add_location_stats(locations, location, combined)
+
+        # Check total_wealth gates (stats that require the player's total wealth
+        # — value of all items — to be at least N, e.g. the Golden Frog's per-
+        # stat tiers). Gated on the character's wealth (set at Character init
+        # from coins + item values), matching the col2 combined stats + slot
+        # popup. Only tiers the wealth meets are applied.
+        # Structure: {'total_wealth': {threshold: {skill: {location: {stat: value}}}}}
+        if "total_wealth" in self.gated_stats:
+            import util.walkscape_globals
+            total_wealth = util.walkscape_globals.get_total_wealth()
+            for threshold, threshold_stats in self.gated_stats["total_wealth"].items():
+                if total_wealth < int(threshold):
+                    continue
+                for stat_skill, locations in threshold_stats.items():
+                    if skill.matches_skill(stat_skill):
+                        combined = self._add_location_stats(locations, location, combined)
+
         # Check travel_steps gates (stats gated by total travel steps walked)
         # Structure: {'travel_steps': {threshold: {skill: {location: {stat: value}}}}}
         if "travel_steps" in self.gated_stats:
@@ -855,6 +950,34 @@ class StatsMixin:
                 
                 if has_completed:
                     for stat_skill, locations in threshold_stats.items():
+                        if skill.matches_skill(stat_skill):
+                            combined = self._add_location_stats(locations, location, combined)
+        
+        # Check explore_realm gates (global bonuses unlocked by fully exploring
+        # a realm, e.g. Globetrotter's backpack / Quickdraw map).
+        # Structure: {'explore_realm': {realm_slug: {skill: {location: {stat: value}}}}}
+        # Gated on the character-wide custom stat `explored_realm_<slug>`
+        # (realm exploration is a character fact shared across all items, so the
+        # key is realm-scoped, NOT item-scoped). Defaults to False (not
+        # explored) — before this gate existed the stat applied unconditionally.
+        if "explore_realm" in self.gated_stats:
+            for realm_slug, realm_stats in self.gated_stats["explore_realm"].items():
+                custom_stat_id = f"explored_realm_{realm_slug}"
+
+                has_explored = False
+                if character and hasattr(character, 'custom_stats') and character.custom_stats is not None:
+                    has_explored = character.custom_stats.get(custom_stat_id, False)
+                else:
+                    # Fall back to my_config (EXPLORED_REALM_JARVONIA, etc.)
+                    try:
+                        import my_config
+                        var_name = f"EXPLORED_REALM_{str(realm_slug).upper()}"
+                        has_explored = getattr(my_config, var_name, False)
+                    except (ImportError, AttributeError):
+                        pass
+
+                if has_explored:
+                    for stat_skill, locations in realm_stats.items():
                         if skill.matches_skill(stat_skill):
                             combined = self._add_location_stats(locations, location, combined)
         

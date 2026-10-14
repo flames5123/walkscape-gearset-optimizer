@@ -79,6 +79,13 @@ DB_WRITE_RETRY_DELAY = 1.0            # Seconds between retries
 # this CR.
 _OPTIMIZER_LOCK = threading.Lock()
 
+# Run-scoped MITM frontier cache for recipe-chest exact solves. The tool/gear/
+# ring Pareto frontiers depend only on (character, skill, location, reqs, pools)
+# — not on the recipe's base_steps/kappa — so all recipes of a skill at the same
+# service reuse one build (~4-5x for tool-heavy skills). Cleared at the start of
+# each worker run so a different character/run never reuses a stale frontier.
+_RECIPE_FRONTIER_CACHE = {}
+
 # Per-run memoization for the stale-detection write (_write_stats_report_result_row).
 # That function runs once per job; without these caches it (a) rebuilt the
 # IDENTICAL character snapshot from the full session (a large inventory JSON
@@ -95,50 +102,119 @@ _STALE_MEMO_LOCK = threading.Lock()
 _STALE_SNAPSHOT_CACHE = {}   # session_uuid -> CharacterStateSnapshot
 _STALE_BITMAP_CACHE = {}     # (skill, location, service, quality_mode) -> bytes
 _STALE_RECIPE_CTX_CACHE = {} # session_uuid -> (unlocked_regions, locked_locations, services_by_name)
+# 2026-08-31 (jwbail): run-level "Always use active applicable pet ability"
+# flag. Set by run_worker() (server) / optimize-local-worker.js (browser) at
+# the start of a run; read by _extract_pet_consumable_meta to mark the chosen
+# pet's slot with useAbility so Equip checks column-2's per-pet ability box.
+_USE_PET_ABILITY = False
+# When True, consumables the user hid (column-1 hide) are still considered by
+# the goals-report optimizer (still subject to the fine + min-owned rules).
+# Set per-run in run_worker; the local Pyodide path sets it directly.
+_USE_HIDDEN_CONSUMABLES = False
+# "Include unavailable" dimensions. Each dimension, when True, un-hides
+# activities the goals report would normally exclude because they are gated
+# ONLY by that dimension (union semantics: an activity gated by several
+# dimensions appears only when EVERY gating dimension is enabled). Set per-run
+# in run_worker from the EFFECTIVE flags (includeUnavailable && unavailBy<Dim>);
+# the local Pyodide path sets srw._INCL_UNAVAIL directly. The default (no flags
+# passed) reproduces the pre-feature behavior exactly: inputs included-with-
+# warning, everything else excluded.
+_INCL_UNAVAIL = {'level': False, 'location': False, 'gear': False,
+                 'inputs': True, 'other': False}
 
 
-# Set by run_worker (server path) so the exact-optimizer safety-valve comparison
-# can be recorded to sessions.db. None on the LOCAL/Pyodide path (no server DB) —
-# there the comparison is still emitted to the console via the [VALVE_CMP] line.
-_VALVE_LOG_DB_PATH = None
+def _normalize_incl_unavail(d):
+    """Normalize an include-unavailable flag dict to the full 5-key shape.
+
+    Returns {'level','location','gear','inputs','other'} booleans. ``inputs``
+    defaults True and every other dimension defaults False when the input is
+    None or omits the key — this is the legacy/no-flags behavior (inputs
+    included-with-warning, all other unavailable activities hidden)."""
+    base = {'level': False, 'location': False, 'gear': False,
+            'inputs': True, 'other': False}
+    if isinstance(d, dict):
+        for k in base:
+            if k in d:
+                base[k] = bool(d[k])
+    return base
 
 
-def _log_valve_comparison(job, activity, exact_r, refine_r, winner):
-    """Record one safety-valve comparison (exact incumbent vs greedy+refine).
+def _incl(dim):
+    """True if the given include-unavailable dimension is enabled this run.
 
-    ALWAYS emits a structured [VALVE_CMP] stdout line (captured on both server
-    and forwarded-console/Pyodide). Best-effort INSERT into the
-    exact_valve_comparisons table server-side. Fully guarded — never breaks the
-    report. Lets us later prove whether the incumbent ever loses to the
-    hill-climb (delta<0); if it never does, the hill-climb can be dropped.
+    inputs defaults True, every other dimension defaults False — so a worker
+    invoked without any flags reproduces today's behavior."""
+    cfg = globals().get('_INCL_UNAVAIL')
+    if isinstance(cfg, dict) and dim in cfg:
+        return bool(cfg[dim])
+    return dim == 'inputs'
+
+
+def _sr_effective_ignored(hidden_items):
+    """IGNORED_ITEMS for the goals-report optimizer. Strips hidden CONSUMABLES
+    (items with a ``duration`` attr) when "Use hidden consumables" is on, so
+    they can actually be picked; hidden gear/tools stay ignored."""
+    ig = set(hidden_items) if hidden_items else set()
+    if ig and globals().get('_USE_HIDDEN_CONSUMABLES', False):
+        ig = {x for x in ig if not hasattr(x, 'duration')}
+    return ig
+# (run_id, activity_name, location, fast) -> (gearset, budget_exhausted). Chests
+# of one activity share the optimal gearset, so solve once and reuse.
+_CHEST_SOLVE_CACHE = {}
+
+# target_items exact-solve reuse. Key includes a find-SIGNATURE so only
+# (item, activity) scopes whose applicable find-gear is identical share a
+# solve. See _ti_find_signature. Cleared per run (also keyed by run_id).
+_TI_SOLVE_CACHE = {}
+# Memoized reverse map: item_ref -> frozenset('ItemFindingCategory.<CAT>').
+# Built at runtime from util.autogenerated.item_finding so a game-data regen
+# (new IF categories / new member items) flows in with NO code change.
+_TI_ITEM_IFC_MAP = None
+
+
+def _reapply_character_thread_local_globals(character):
+    """Re-apply the character's thread-local walkscape_globals in THIS thread.
+
+    util/walkscape_globals.py stores achievement_points / total_skill_level /
+    custom_stats / total_collectibles in threading.local(). Character.__init__
+    writes them in whichever thread loaded the character (the main request
+    thread), but ThreadPoolExecutor workers get a DIFFERENT threading.local()
+    whose values fall back to defaults (0 / 0 / {} / 0). The optimizer reads
+    these via walkscape_globals.get_*() during stat aggregation, so any global
+    left at its default silently strips the corresponding bonuses on every
+    piece of gear evaluated in the worker thread.
+
+    Symptoms this guards against:
+      * total_skill_level=0 → level-multiplier + total-skill-gated set bonuses
+        (e.g. Treasure hunter set's per-piece find_collectibles) are stripped
+        (original 2026-05-25 fix).
+      * total_collectibles=0 (bug feaa0b46) → CollectibleOwned-gated gear (the
+        item collection ring) resolves to EMPTY stats, is filtered out by
+        has_activity_relevant_stats, and the optimizer picks a strictly
+        dominated ring (e.g. Great gold jade ring over the collection ring).
+        The "regular" optimizer runs in the request thread where the global is
+        set, hence the user-reported divergence.
+
+    Mirrors util/character_export_util.py's Character load, which is the single
+    source of truth for how each global is derived from the character.
     """
-    import datetime
-    aname = getattr(activity, 'name', '?')
-    skill = getattr(activity, 'primary_skill', None) or getattr(job, 'skill_name', None) or '?'
-    sess = getattr(job, 'session_uuid', None) or '?'
-    delta = (exact_r - refine_r)
-    print(f"[VALVE_CMP] activity={aname!r} skill={skill} "
-          f"exact_r={exact_r:.6f} refine_r={refine_r:.6f} delta={delta:.6f} "
-          f"winner={winner} budget={getattr(__import__('util.exact_activity_xp_optimizer', fromlist=['_EXACT_NODE_BUDGET']), '_EXACT_NODE_BUDGET', '?')}")
-    db_path = _VALVE_LOG_DB_PATH
-    if not db_path:
-        return
-    try:
-        import sqlite3
-        con = sqlite3.connect(db_path)
-        con.execute(
-            "CREATE TABLE IF NOT EXISTS exact_valve_comparisons ("
-            "id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, session_uuid TEXT, "
-            "activity TEXT, skill TEXT, exact_r REAL, refine_r REAL, delta REAL, winner TEXT)")
-        con.execute(
-            "INSERT INTO exact_valve_comparisons "
-            "(ts, session_uuid, activity, skill, exact_r, refine_r, delta, winner) "
-            "VALUES (?,?,?,?,?,?,?,?)",
-            (datetime.datetime.utcnow().isoformat(), str(sess), str(aname), str(skill),
-             float(exact_r), float(refine_r), float(delta), str(winner)))
-        con.commit(); con.close()
-    except Exception as _e:
-        print(f"[VALVE_CMP] table insert skipped: {_e}")
+    import util.walkscape_globals as _wg
+    _ap = getattr(character, 'achievement_points', None)
+    if _ap is not None:
+        _wg.set_achievement_points(_ap)
+    _tsl = getattr(character, '_total_skill_level', None)
+    if _tsl is not None:
+        _wg.set_total_skill_level(_tsl)
+    _cs = getattr(character, 'custom_stats', None)
+    if _cs is not None:
+        _wg.set_custom_stats(_cs)
+    # Prefer the raw export list length (matches character_export_util) so
+    # brand-new/unknown collectibles still count; fall back to the parsed list.
+    _cr = getattr(character, '_collectibles_raw', None)
+    if _cr is None:
+        _cr = getattr(character, 'collectibles', None)
+    if _cr is not None:
+        _wg.set_total_collectibles(len(_cr))
 
 
 def _reset_stale_memo():
@@ -147,6 +223,65 @@ def _reset_stale_memo():
         _STALE_SNAPSHOT_CACHE.clear()
         _STALE_BITMAP_CACHE.clear()
         _STALE_RECIPE_CTX_CACHE.clear()
+    # Chest-solve reuse cache: an activity's chests share one optimal gearset
+    # (chest_finding is universal), so we solve once per (run, activity,
+    # location) and reuse across its chests. Cleared per run (also keyed by
+    # run_id, so cross-run collisions are impossible even if a clear is missed).
+    _CHEST_SOLVE_CACHE.clear()
+    _TI_SOLVE_CACHE.clear()
+
+
+def _scoped_owned_bitmap(snapshot, skill, loc, quality_mode, req_kw, conn):
+    """Compute the effective-owned dominance bitmap, memoized ON THE SNAPSHOT
+    instance instead of a module-global.
+
+    History (bug 8990f0e4 / the 2026-09-01 bitmap disable): the memo used to be
+    the module-global ``_STALE_BITMAP_CACHE`` keyed only by
+    ``(skill, loc, quality_mode, req_kw)`` and guarded by ``_STALE_MEMO_LOCK``.
+    Under the threaded worker two different characters' runs share the process,
+    so a run that cached a bitmap for e.g. ``(mining, ..., activity)`` could hand
+    that SAME bitmap to another character's write for the identical scope key --
+    storing a bitmap for the WRONG owned set. The stored bitmap then never
+    matched the correct recompute, so the bitmap comparison produced a 100%
+    false-positive re-optimize loop that never cleared -- which is why it was
+    disabled and only the metric hash was compared. But the metric hash does not
+    capture owned gear, so gaining a better gear piece (e.g. the Heavy pick
+    handle for an Ore target scope) stopped re-flagging anything.
+
+    Scoping the cache to the snapshot instance (one per session per state)
+    removes the cross-contamination at the root, so the bitmap signal can be
+    re-enabled safely. The snapshot is a frozen dataclass; the cache is stashed
+    as a non-field attr (does not affect ``__eq__`` / prev!=curr comparisons),
+    the same pattern effective_bitmap uses for ``_owned_unlocked_cache``.
+
+    Returns b"" on any error (fail-open: the caller treats an empty bitmap as
+    "no signal" and falls back to the metric hash, never false-flagging).
+    """
+    if not skill:
+        return b""
+    from util.stats_report.effective_bitmap import compute_effective_owned_bitmap
+    key = (skill, loc, quality_mode, frozenset(req_kw or ()))
+    cache = None
+    try:
+        cache = snapshot.__dict__.get("_stale_bitmap_cache")
+        if cache is None:
+            cache = {}
+            object.__setattr__(snapshot, "_stale_bitmap_cache", cache)
+    except Exception:
+        cache = None
+    if cache is not None and key in cache:
+        return cache[key]
+    try:
+        bm = compute_effective_owned_bitmap(
+            snapshot, skill, loc, "NONE", quality_mode, db=conn,
+            required_keywords=(req_kw or None),
+        )
+    except Exception:
+        bm = b""
+    # Cache SUCCESSES only, so a transient failure can be retried.
+    if bm and cache is not None:
+        cache[key] = bm
+    return bm or b""
 
 
 def _recipe_loc_ctx(session_uuid, db, snapshot):
@@ -260,6 +395,39 @@ def _activity_first_accessible_location(activity):
     return None
 
 
+def _activity_accessible_locations(activity):
+    """All accessible locations for an activity (multi-location coverage).
+
+    Same accessibility rule as `_activity_first_accessible_location`, but returns
+    EVERY matching Location (deduped by name) instead of just the first. Returns
+    [] when none are accessible. When `_UNLOCKED_REGIONS` is None (precompute
+    failed) returns the single fallback `[locations[0]]` to preserve prior
+    single-location behavior exactly.
+    """
+    locs = getattr(activity, "locations", None) or []
+    if not locs:
+        return []
+    unlocked = globals().get('_UNLOCKED_REGIONS')
+    locked = globals().get('_LOCKED_LOCATIONS') or set()
+    if unlocked is None:
+        return [locs[0]]
+    out = []
+    seen = set()
+    for loc in locs:
+        loc_name = loc if isinstance(loc, str) else getattr(loc, 'name', '')
+        if loc_name in locked:
+            continue
+        regions = getattr(loc, 'regions', None) if not isinstance(loc, str) else None
+        if regions is None:
+            if loc_name not in seen:
+                seen.add(loc_name); out.append(loc)
+            continue
+        if any(r in unlocked for r in regions):
+            if loc_name not in seen:
+                seen.add(loc_name); out.append(loc)
+    return out
+
+
 def _service_location_accessible(service) -> bool:
     """Return True if the service's location is in an unlocked, non-locked region.
 
@@ -292,6 +460,360 @@ def _service_location_accessible(service) -> bool:
         # the activity helper's handling of non-standard location data).
         return True
     return any(r in unlocked for r in regions)
+
+
+def _activity_required_gear_owned(activity, character) -> bool:
+    """Necessary-condition gear feasibility gate for the goals/stats report.
+
+    Returns False ONLY when the character provably cannot satisfy the
+    activity's `keyword_counts` gear requirement from OWNED items — e.g. the
+    Casbrant's Grave underwater activities require `advanced diving gear: 3`
+    (Wreck Diving, Sea fishing (Spear)); a character owning zero diving gear
+    can never build a valid gearset, so the optimizer returns "0/0
+    optimizations" and the row is a dead end (bug: goals report recommended
+    them anyway).
+
+    Why the report needs this: build_*_jobs gate on `activity.is_unlocked(
+    character=character)`, but ActivityInfo.is_unlocked only enforces
+    keyword_counts when a GEARSET is passed (see activities.py). With no
+    gearset the diving-gear requirement is skipped, so region-unlocked +
+    skill-met underwater activities surface even with no diving gear owned.
+
+    Conservative by construction — it counts total owned QUANTITY of items
+    carrying each required keyword (an OVER-count of real equip capacity,
+    since slot conflicts are ignored), so it only returns False when the
+    requirement is literally un-equippable; it never hides an activity the
+    player could actually gear for. Owned-but-custom-stat-locked gear still
+    counts as owned (per the "hide when NOT owned" policy), so the existing
+    required-but-locked toast — not this gate — surfaces that case.
+
+    Keywords the activity's input_items can supply (e.g. 'arrows' for
+    Alligator hunting) are credited 1, mirroring
+    optimization_utils.meets_activity_requirements' input pre-satisfaction, so
+    input-driven activities are never wrongly hidden.
+    """
+    reqs = getattr(activity, 'requirements', None) or {}
+    keyword_counts = reqs.get('keyword_counts', {}) if isinstance(reqs, dict) else {}
+    if not keyword_counts:
+        return True
+    try:
+        from util.optimization_utils import item_satisfies_required_keyword
+    except Exception:
+        # Can't evaluate the requirement -> be permissive (don't hide).
+        return True
+
+    # Keywords the activity's input_items can pre-satisfy (credit 1 each),
+    # matching meets_activity_requirements' "no input selected -> pre-satisfy
+    # from activity.input_items definitions" behavior.
+    input_kw = set()
+    for ii in (getattr(activity, 'input_items', None) or []):
+        if getattr(ii, 'type', '') == 'keyword':
+            ref = (getattr(ii, 'reference', '') or '').lower()
+            if ref:
+                input_kw.add(ref)
+
+    owned = getattr(character, 'items', None) or {}
+    if not isinstance(owned, dict):
+        return True
+
+    for keyword, required_count in keyword_counts.items():
+        try:
+            required = int(required_count or 0)
+        except (TypeError, ValueError):
+            required = 0
+        needed = required - (1 if str(keyword).lower() in input_kw else 0)
+        if needed <= 0:
+            continue
+        capacity = 0
+        for item, qty in owned.items():
+            if item is None:
+                continue
+            try:
+                q = int(qty or 0)
+            except (TypeError, ValueError):
+                q = 0
+            if q <= 0:
+                continue
+            try:
+                if item_satisfies_required_keyword(item, keyword, activity):
+                    capacity += q
+                    if capacity >= needed:
+                        break
+            except Exception:
+                # Unevaluable item -> be permissive for this keyword.
+                capacity = needed
+                break
+        if capacity < needed:
+            return False
+    return True
+
+
+def _skill_display_name(skill):
+    """Best-effort display-cased skill name from a skill key/object."""
+    s = skill if isinstance(skill, str) else getattr(skill, 'name', '') or str(skill)
+    return s.capitalize() if s and s.islower() else s
+
+
+def _activity_unlock_dims(activity, character):
+    """Why does ``activity.is_unlocked(character=character)`` fail?
+
+    Mirrors (in order) the non-gearset checks in ActivityInfo.is_unlocked and
+    attributes the failure to an include-unavailable dimension:
+
+      * skill-level requirement unmet -> 'level' (+ missing_level reason)
+      * reputation / achievement-point / completion gate unmet -> 'other'
+        (+ missing_other reason)
+
+    Returns ``(dims, reasons, hard)`` where ``dims`` is a subset of
+    {'level','other'}, ``reasons`` is a dict of metrics_breakdown keys to merge,
+    and ``hard`` is True for a permanent lock (a done single-completion activity)
+    which must stay excluded regardless of any include-unavailable toggle."""
+    # Permanent lock: a completed single-completion activity can never recur.
+    try:
+        if getattr(activity, 'single_completion', False):
+            key = activity.name.lower().replace(' ', '_')
+            cs = getattr(character, 'custom_stats', None)
+            if not cs:
+                try:
+                    from util.walkscape_globals import get_custom_stats
+                    cs = get_custom_stats()
+                except Exception:
+                    cs = None
+            if cs and cs.get(key) is True:
+                return set(), {}, True
+    except Exception:
+        pass
+
+    dims = set()
+    reasons = {}
+    # Skill level.
+    try:
+        for skill, required_level in (getattr(activity, 'skill_requirements', {}) or {}).items():
+            try:
+                have = character.get_skill_level(str(skill).lower())
+            except Exception:
+                have = 0
+            if have < required_level:
+                dims.add('level')
+                reasons['missing_level'] = {
+                    'skill': _skill_display_name(skill),
+                    'level': int(required_level),
+                }
+                break
+    except Exception:
+        pass
+    # Reputation / achievement points (everything is_unlocked gates that is NOT
+    # a skill level is bucketed under 'other').
+    try:
+        reqs = getattr(activity, 'requirements', {}) or {}
+        _rep_lc = {str(k).lower(): v for k, v in (getattr(character, 'reputation', None) or {}).items()}
+        for faction, required_amount in (reqs.get('reputation', {}) or {}).items():
+            if _rep_lc.get(str(faction).lower(), 0) < required_amount:
+                dims.add('other')
+                reasons.setdefault('missing_other', {
+                    'kind': 'reputation',
+                    'detail': f'{faction} reputation {required_amount}',
+                })
+                break
+    except Exception:
+        pass
+    try:
+        reqs = getattr(activity, 'requirements', {}) or {}
+        required_ap = reqs.get('achievement_points', 0) or 0
+        if required_ap > 0 and 'missing_other' not in reasons:
+            try:
+                from util.walkscape_globals import ACHIEVEMENT_POINTS
+                _have_ap = ACHIEVEMENT_POINTS
+            except Exception:
+                _have_ap = None
+            if _have_ap is not None and _have_ap < required_ap:
+                dims.add('other')
+                reasons['missing_other'] = {
+                    'kind': 'achievement',
+                    'detail': f'{required_ap} achievement points',
+                }
+    except Exception:
+        pass
+    return dims, reasons, False
+
+
+def _activity_location_reason(activity):
+    """Build a missing_location reason for an activity with no accessible
+    location. Names the first listed location; omits the optional hint."""
+    locs = getattr(activity, 'locations', None) or []
+    name = ''
+    if locs:
+        first = locs[0]
+        name = first if isinstance(first, str) else getattr(first, 'name', '') or ''
+    return {'name': name}
+
+
+def _keyword_level_min(activity, keyword):
+    """Minimum tool skill-level required for ``keyword`` on this activity, from
+    keyword_level_requirements (0 if none)."""
+    try:
+        reqs = getattr(activity, 'requirements', {}) or {}
+        kw = str(keyword).lower()
+        for r in (reqs.get('keyword_level_requirements', []) or []):
+            if str(r.get('keyword', '')).lower() == kw:
+                return int(r.get('level', 0) or 0)
+    except Exception:
+        pass
+    return 0
+
+
+def _activity_gear_unmet(activity, character):
+    """Describe the unmet gear/tool keyword requirement(s) for an activity whose
+    ``_activity_required_gear_owned`` returned False.
+
+    Returns a reasons dict that may contain:
+      * 'missing_gear' + 'gear_gated'=True  for a gear-keyword requirement
+        (count >= 2, e.g. "advanced diving gear: 3") — these rows move to the
+        bottom "Possible with more gear" section.
+      * 'missing_tool'                       for a tool-slot keyword requirement
+        (count == 1, e.g. a hatchet / net) — rendered inline, slot left empty.
+
+    See the module docstring note: the gear-vs-tool split is heuristic — a
+    required_count >= 2 is treated as a gear-keyword bundle (can't be a single
+    tool slot) and a required_count == 1 as a tool slot. Flagged for review."""
+    reasons = {}
+    reqs = getattr(activity, 'requirements', None) or {}
+    keyword_counts = reqs.get('keyword_counts', {}) if isinstance(reqs, dict) else {}
+    if not keyword_counts:
+        return reasons
+    try:
+        from util.optimization_utils import item_satisfies_required_keyword
+    except Exception:
+        item_satisfies_required_keyword = None
+
+    input_kw = set()
+    for ii in (getattr(activity, 'input_items', None) or []):
+        if getattr(ii, 'type', '') == 'keyword':
+            ref = (getattr(ii, 'reference', '') or '').lower()
+            if ref:
+                input_kw.add(ref)
+
+    owned = getattr(character, 'items', None) or {}
+    if not isinstance(owned, dict):
+        owned = {}
+
+    for keyword, required_count in keyword_counts.items():
+        try:
+            required = int(required_count or 0)
+        except (TypeError, ValueError):
+            required = 0
+        needed = required - (1 if str(keyword).lower() in input_kw else 0)
+        if needed <= 0:
+            continue
+        capacity = 0
+        if item_satisfies_required_keyword is not None:
+            for item, qty in owned.items():
+                if item is None:
+                    continue
+                try:
+                    q = int(qty or 0)
+                except (TypeError, ValueError):
+                    q = 0
+                if q <= 0:
+                    continue
+                try:
+                    if item_satisfies_required_keyword(item, keyword, activity):
+                        capacity += q
+                        if capacity >= needed:
+                            break
+                except Exception:
+                    capacity = needed
+                    break
+        if capacity >= needed:
+            continue
+        kw_display = str(keyword).replace('_', ' ').strip()
+        if required >= 2:
+            reasons['gear_gated'] = True
+            reasons['missing_gear'] = {
+                'keyword': str(keyword),
+                'keyword_display': kw_display,
+                'count': required,
+                'owned': capacity,
+            }
+        else:
+            reasons.setdefault('missing_tool', {
+                'keyword': str(keyword),
+                'keyword_display': kw_display,
+                'min_level': _keyword_level_min(activity, keyword),
+            })
+    return reasons
+
+
+def _sr_gate_activity(activity, character):
+    """Combined include-unavailable gate for an activity in the job enumerators.
+
+    Evaluates the three enumerator guards (is_unlocked, location accessibility,
+    required-gear-owned) and applies union semantics against the per-run
+    ``_INCL_UNAVAIL`` dimensions.
+
+    Returns ``(include, unmet)``:
+      * include False  -> exclude the activity (``continue``)
+      * include True, unmet == {} -> fully available today (render normally)
+      * include True, unmet != {} -> included-because-unavailable; ``unmet`` is
+        the dict of metrics_breakdown keys to attach (missing_level /
+        missing_location / missing_gear(+gear_gated) / missing_tool /
+        missing_other).
+
+    When every include-unavailable dimension is at its default (all off except
+    inputs), any gated activity returns include=False — byte-identical to the
+    pre-feature guards."""
+    dims = set()
+    unmet = {}
+
+    try:
+        unlocked = activity.is_unlocked(character=character)
+    except Exception:
+        unlocked = True
+    if not unlocked:
+        udims, ureasons, hard = _activity_unlock_dims(activity, character)
+        if hard:
+            return False, {}
+        if not udims:
+            # is_unlocked failed for a reason we can't attribute (e.g. an
+            # activity-completion gate). Bucket under 'other' so it is only
+            # surfaced when the user opts into unavailable-by-other.
+            udims = {'other'}
+            ureasons.setdefault('missing_other', {'kind': 'other', 'detail': 'Locked'})
+        dims |= udims
+        unmet.update(ureasons)
+
+    try:
+        loc_gated = _activity_first_accessible_location(activity) is None
+    except Exception:
+        loc_gated = False
+    if loc_gated:
+        dims.add('location')
+        unmet['missing_location'] = _activity_location_reason(activity)
+
+    try:
+        gear_ok = _activity_required_gear_owned(activity, character)
+    except Exception:
+        gear_ok = True
+    if not gear_ok:
+        dims.add('gear')
+        unmet.update(_activity_gear_unmet(activity, character))
+
+    if not dims:
+        return True, {}
+    if all(_incl(d) for d in dims):
+        return True, unmet
+    return False, {}
+
+
+def _sr_job_location(activity):
+    """First accessible location, or a fallback to the activity's first listed
+    location when none is accessible (used when an activity is surfaced via the
+    include-unavailable 'location' dimension)."""
+    loc = _activity_first_accessible_location(activity)
+    if loc is not None:
+        return loc
+    locs = getattr(activity, 'locations', None) or []
+    return locs[0] if locs else None
 
 
 def build_xp_jobs(run_id: str, session_uuid: str, selected_skills: List[str],
@@ -338,6 +860,22 @@ def build_xp_jobs(run_id: str, session_uuid: str, selected_skills: List[str],
     # one job per granted skill. This guarantees multi-skill activities
     # appear in every XP-granting section regardless of which single
     # skill the user toggled.
+    #
+    # 2026-09-28 (jwbail [fix:termite-effort]): a level>=4 Termite's "Terminate"
+    # ability converts logs -> Carpentry XP while Woodcutting, so a Carpentry
+    # row must appear for every log-cutting activity when the character owns one.
+    # Carpentry is NOT in those activities' static secondary_xp, so add it to the
+    # granted set here (ownership-gated, computed once). run_optimizer_for_job
+    # computes the actual Carpentry XP/step. Gate the emission on the activity
+    # actually dropping a convertible logs-keyword material so we never emit a
+    # Carpentry row that would resolve to 0 (or worse, fall back to Woodcutting XP).
+    try:
+        from ui.pet_effort import owned_termite_level, activity_has_logs_drop
+        _termite_carpentry_owned = owned_termite_level(character) is not None
+    except Exception:
+        _termite_carpentry_owned = False
+        activity_has_logs_drop = None
+
     for activity in ACTIVITIES_BY_NAME.values():
         primary = (getattr(activity, 'primary_skill', '') or '').lower()
         sec_xp = getattr(activity, 'secondary_xp', None) or {}
@@ -349,6 +887,11 @@ def build_xp_jobs(run_id: str, session_uuid: str, selected_skills: List[str],
                 sec_str = (sec if isinstance(sec, str) else getattr(sec, 'name', '')).lower()
                 if sec_str:
                     granted.add(sec_str)
+        # Termite Terminate -> informational Carpentry on log-cutting activities.
+        if (_termite_carpentry_owned and primary == 'woodcutting'
+                and activity_has_logs_drop is not None
+                and activity_has_logs_drop(activity)):
+            granted.add('carpentry')
         if not granted:
             continue
         # Activity included iff at least one of its granted XP skills is
@@ -366,18 +909,12 @@ def build_xp_jobs(run_id: str, session_uuid: str, selected_skills: List[str],
         # chest/collectible drops via build_new_items_jobs.)
         if getattr(activity, 'one_time', False):
             continue
-        # Skip locked activities (spoiler protection)
-        try:
-            if not activity.is_unlocked(character=character):
-                continue
-        except Exception:
-            pass  # If check fails, include the activity
-
-        # 2026-05-22 fix: skip activities whose every location is
-        # inaccessible to the character (e.g. Crown of Cinders for
-        # a character without Charter of the Drowned). Was causing
-        # locked-region activities to surface in xp/coins sections.
-        if _activity_first_accessible_location(activity) is None:
+        # Include-unavailable gate: evaluates the locked / inaccessible-location
+        # / required-gear guards together and honors the per-run _INCL_UNAVAIL
+        # dimensions. With all dimensions at default (off) this excludes every
+        # gated activity exactly like the prior three sequential guards.
+        _inc, _unmet = _sr_gate_activity(activity, character)
+        if not _inc:
             continue
 
         # Emit one job per granted skill. skill_name uses the display
@@ -395,6 +932,9 @@ def build_xp_jobs(run_id: str, session_uuid: str, selected_skills: List[str],
                 ss = sec if isinstance(sec, str) else getattr(sec, 'name', '')
                 if ss:
                     skill_display[ss.lower()] = ss
+        # Termite-injected Carpentry section (see granted-set note above).
+        if 'carpentry' in granted:
+            skill_display.setdefault('carpentry', 'Carpentry')
 
         for sk_lower in granted:
             sk_display = skill_display.get(sk_lower, sk_lower.capitalize())
@@ -405,6 +945,7 @@ def build_xp_jobs(run_id: str, session_uuid: str, selected_skills: List[str],
                 category='xp',
                 activity=activity,
                 skill_name=sk_display,
+                extras=({'unmet': dict(_unmet)} if _unmet else None),
             ))
 
     return jobs
@@ -473,15 +1014,10 @@ def build_new_items_jobs(run_id: str, session_uuid: str, character,
             all_activities.append(act)
 
     for activity in all_activities:
-        # Skip locked activities (spoiler protection)
-        try:
-            if not activity.is_unlocked(character=character):
-                continue
-        except Exception:
-            pass  # If check fails, include the activity
-
-        # 2026-05-22 fix: skip activities at inaccessible locations.
-        if _activity_first_accessible_location(activity) is None:
+        # Include-unavailable gate (locked / inaccessible location / required
+        # gear). Default (all dimensions off) keeps the prior three guards.
+        _inc, _unmet = _sr_gate_activity(activity, character)
+        if not _inc:
             continue
 
         # Get all drops for this activity
@@ -582,6 +1118,13 @@ def build_new_items_jobs(run_id: str, session_uuid: str, character,
             # correct, which is what makes the "53 → 11k" bug go away.
             best_drop = None
             best_steps = None
+            # 2026-07-19: collect every unowned drop's per-item steps so the
+            # row can report COMBINED "steps to any new <kind>" odds in the
+            # headline AND an expandable per-item breakdown. denom =
+            # prob·qty·multi (base rates, no gear); steps_per_item =
+            # steps_per_reward / denom.
+            sum_denom = 0.0
+            entry_items = []  # [(steps_nogear, item_name, item_ref)]
             for d in kind_drops:
                 pct = float(getattr(d, 'chance_percent', 0) or 0)
                 if pct <= 0:
@@ -603,7 +1146,10 @@ def build_new_items_jobs(run_id: str, session_uuid: str, character,
                     denom = chance_prob * avg_qty
                 if denom <= 0:
                     continue
+                sum_denom += denom
                 spi = steps_per_reward / denom
+                if d.item_name:
+                    entry_items.append((spi, d.item_name, d.item_ref or ''))
                 if best_steps is None or spi < best_steps:
                     best_steps = spi
                     best_drop = d
@@ -616,6 +1162,47 @@ def build_new_items_jobs(run_id: str, session_uuid: str, character,
             best_drop_name = best_drop.item_name
             best_drop_ref = best_drop.item_ref or ''
 
+            # 2026-07-19 (bug 276fbd0a + follow-up): the player cares about
+            # obtaining ANY still-missing item of this kind, and every reward
+            # roll can yield any of the unowned drops. Showing only the single
+            # fastest item understates the true rate (the more you're missing,
+            # the faster you get "a new one"). Emit COMBINED odds for the row
+            # headline:
+            #   steps to any new <kind> = steps_per_reward / Σ denom
+            # plus a per-item breakdown (steps to each specific item) for the
+            # expandable list. The combined/best and per-item/best ratios are
+            # gear-independent — steps_per_reward is per-activity (cancels) and
+            # find_collectibles scales every collectible uniformly (also
+            # cancels) — so the read side scales these no-gear values by
+            # gear_best/best_steps to stay accurate with the optimizer's
+            # gearset. Applies to ALL kinds (gear / tools / eggs / collectibles)
+            # per user request.
+            row_metric = best_steps
+            extras = {
+                'best_drop': {
+                    'item_name': best_drop_name,
+                    'item_ref': best_drop_ref,
+                    'kind': kind,
+                },
+            }
+            if _unmet:
+                extras['unmet'] = dict(_unmet)
+            if sum_denom > 0 and best_steps:
+                combined_steps = steps_per_reward / sum_denom
+                entry_items.sort(key=lambda t: t[0])  # fastest first
+                items_meta = [
+                    {'item_name': nm, 'item_ref': rf, 'steps': st}
+                    for (st, nm, rf) in entry_items
+                ]
+                row_metric = combined_steps
+                extras['combined'] = {
+                    'kind': kind,
+                    'count': len(items_meta),
+                    'best_steps': best_steps,
+                    'combined_steps': combined_steps,
+                    'items': items_meta,
+                }
+
             jobs.append(ReportJob(
                 job_id=str(uuid.uuid4()),
                 run_id=run_id,
@@ -623,7 +1210,7 @@ def build_new_items_jobs(run_id: str, session_uuid: str, character,
                 category='new_items',
                 activity=activity,
                 skill_name=kind,  # OVERLOADED: kind label (gear/tools/eggs/collectibles)
-                precomputed_metric=best_steps,
+                precomputed_metric=row_metric,
                 # 2026-05-24: keep the item name in the metric_name so the
                 # row-level metric_name carries the ITEM the value refers
                 # to. The frontend now renders the item name as the row
@@ -631,19 +1218,720 @@ def build_new_items_jobs(run_id: str, session_uuid: str, character,
                 # parses metric_name + metrics_json.best_drop to drive
                 # the drop popover wiring.
                 precomputed_metric_name=best_drop_name,
-                # Stash the best-drop item_ref + name in metrics_json so
-                # the frontend can derive the item icon path and wire
-                # the column-3 drop popover from these rows.
-                extras={
-                    'best_drop': {
-                        'item_name': best_drop_name,
-                        'item_ref': best_drop_ref,
-                        'kind': kind,
-                    },
-                },
+                # Stash the best-drop item_ref + name (and, for
+                # collectibles, the combined-odds metadata) in metrics_json
+                # so the frontend can derive the item icon path, wire the
+                # column-3 drop popover, and render the combined row.
+                extras=extras,
             ))
 
     return jobs
+
+
+# Base probability that a regular material drop rolls its "(Fine)" variant.
+# Mirrors util/autogenerated/activities.py `base_fine_chance = 0.01`. Used to
+# scale a fine leaf's steps/item up from its base item's steps/item. The
+# target_items report is gear-independent, so the Fine-Material-Finding
+# multiplier is 1.0 and this flat base chance is the divisor.
+_TI_BASE_FINE_CHANCE = 0.01
+
+
+def _ti_owned_ifc_items(character) -> list:
+    """Owned, equippable items that carry ANY of the 5 target
+    ItemFindingCategory stats (in any quality/skill/location scope).
+
+    These are the candidate finding-gear pieces (e.g. the Adoring fan statue
+    TOOL for AGT, or ectoplasm-finding gear). Whether each ACTUALLY applies to a
+    given activity is resolved per-activity via get_stats_for_skill(skill,
+    location, character) — the stat can be location/skill-gated (e.g. ectoplasm
+    gear only works in Ghostly locations), so a raw stat presence is not enough.
+    (2026-08-13 jwbail)
+    """
+    IFC_KEYS = {
+        'ItemFindingCategory.BIRD_NEST', 'ItemFindingCategory.ECTOPLASM',
+        'ItemFindingCategory.GOLD_NUGGET', 'ItemFindingCategory.ADVENTURERS_GUILD_TOKENS',
+        'ItemFindingCategory.SEA_SHELLS',
+    }
+
+    def _has_ifc(stats):
+        if not isinstance(stats, dict):
+            return False
+        for k, v in stats.items():
+            if isinstance(v, dict):
+                if _has_ifc(v):
+                    return True
+            elif k in IFC_KEYS:
+                return True
+        return False
+
+    out = []
+    try:
+        owned = getattr(character, 'items', {}) or {}
+    except Exception:
+        owned = {}
+    for item, qty in owned.items():
+        try:
+            if not qty or qty <= 0:
+                continue
+            if hasattr(item, 'is_unlocked') and not item.is_unlocked(character, ignore_gear_requirements=True):
+                continue
+        except Exception:
+            pass
+        if _has_ifc(getattr(item, '_stats', None)):
+            out.append(item)
+    return out
+
+
+# Maps the expandable target categories to their ItemFindingCategory stat key
+# and the optimizer target ref used to score them.
+# 2026-08-14 (jwbail): gold_nugget dropped from the IFC finding-gear expansion —
+# it is now a plain 'Nugget' material (native mining drops only), matching
+# Silver nugget which has no IFC expansion.
+_TI_IFC_STAT = {
+    'bird_nest': 'ItemFindingCategory.BIRD_NEST',
+    'ectoplasm': 'ItemFindingCategory.ECTOPLASM',
+    'adventurers_guild_tokens': 'ItemFindingCategory.ADVENTURERS_GUILD_TOKENS',
+    'sea_shells': 'ItemFindingCategory.SEA_SHELLS',
+}
+_TI_IFC_TARGET = {
+    'bird_nest': 'cat:if:bird_nest',
+    'ectoplasm': 'cat:if:ectoplasm',
+    'adventurers_guild_tokens': 'cat:if:adventurers_guild_tokens',
+    'sea_shells': 'cat:sea_shells',
+}
+
+
+def build_target_items_jobs(run_id: str, session_uuid: str, character,
+                            include_fine: bool = False,
+                            target_groups: 'Optional[List[str]]' = None) -> 'List[ReportJob]':
+    """Build jobs for the v2 keyword-based target-items grouping.
+
+    Material + finding items: one job per item leaf (min steps/item across
+    activities). Currency groups (AGT, sea_shells): one job per currency
+    (best units/1k-steps across activities).
+
+    Key: ('target_items', group_slug, leaf_slug, 'NONE', 'NONE')
+    """
+    from util.autogenerated.activities import ACTIVITIES_BY_SKILL
+    from util.activity_metrics import calculate_activity_metrics
+    from util.stats_report.target_items import (
+        classify_drop_entry_all, get_item_keywords_for_drop,
+        classify_item, _get_keywords_for_drop, _has_fine_material,
+        CURRENCY_GROUPS, FINDING_GROUPS, keyword_to_slug,
+    )
+    from util.ag_token_value import get_drop_ag_token_value, get_drop_fine_ag_token_value
+    from util.shell_value import get_drop_shell_value, get_drop_fine_shell_value
+    import math
+
+    jobs = []
+
+    # Dedup activities by name (multi-skill activities appear in multiple buckets)
+    all_activities = []
+    seen_activity_names = set()
+    for skill_activities in ACTIVITIES_BY_SKILL.values():
+        for act in skill_activities:
+            name = getattr(act, 'name', None)
+            if not name or name in seen_activity_names:
+                continue
+            seen_activity_names.add(name)
+            all_activities.append(act)
+
+    # ── One job per (item, activity) pair (v3 gear-aware) ─────────────────
+    ti_pairs = []       # material/finding: per-(item,activity) records
+    ti_currency = []    # currency: per-(currency,activity) records
+    _seen_ti = set()    # dedup (item_slug, activity, is_fine) — an item in BOTH
+                        # the primary and secondary drop table would otherwise
+                        # emit two identical jobs (578 vs 507 count mismatch).
+    _ti_unmet_by_activity = {}  # activity.name -> include-unavailable reasons
+
+    for activity in all_activities:
+        # Include-unavailable gate (locked / inaccessible location / required
+        # gear). Default (all dimensions off) keeps the prior three guards.
+        _inc, _unmet = _sr_gate_activity(activity, character)
+        if not _inc:
+            continue
+        if _unmet:
+            _ti_unmet_by_activity[activity.name] = dict(_unmet)
+
+        # First accessible location (falls back to the first listed location
+        # when the activity is surfaced only via the 'location' dimension).
+        loc = _sr_job_location(activity)
+        if loc is None:
+            continue
+
+        # Get all drops
+        all_drops = list(getattr(activity, 'drop_table', None) or []) + \
+                    list(getattr(activity, 'secondary_drop_table', None) or [])
+        if not all_drops:
+            continue
+
+        # Calculate steps_per_reward_roll with empty stats (gear-independent)
+        try:
+            empty_stats = {'we': 0.0, 'da': 0.0, 'dr': 0.0, 'flat': 0, 'pct': 0.0}
+            metrics = calculate_activity_metrics(
+                base_steps=activity.base_steps,
+                base_xp=activity.base_xp,
+                max_efficiency=activity.max_efficiency,
+                total_stats=empty_stats,
+            )
+            steps_per_reward = metrics.get('steps_per_reward_roll', activity.base_steps)
+        except Exception:
+            steps_per_reward = activity.base_steps
+
+        loc_name = loc if isinstance(loc, str) else getattr(loc, 'name', str(loc))
+
+        # ── Accumulate currency value per activity ────────────────────────
+        agt_per_step = 0.0
+        shells_per_step = 0.0
+
+        for d in all_drops:
+            item_name = getattr(d, 'item_name', '') or ''
+            item_ref = getattr(d, 'item_ref', '') or ''
+            if not item_name or item_name == 'Nothing' or not item_ref:
+                continue
+
+            # Compute items_per_step for this drop
+            pct = float(getattr(d, 'chance_percent', 0) or 0)
+            if pct <= 0:
+                continue
+            chance_prob = pct / 100.0
+            qty = getattr(d, 'quantity', None)
+            qmin = getattr(qty, 'min_qty', 1) if qty is not None else 1
+            qmax = getattr(qty, 'max_qty', 1) if qty is not None else 1
+            try:
+                avg_qty = (float(qmin or 1) + float(qmax or 1)) / 2.0
+            except (TypeError, ValueError):
+                avg_qty = 1.0
+            if avg_qty <= 0:
+                avg_qty = 1.0
+            multi = int(getattr(d, 'multi_roll_count', 0) or 0)
+            if multi > 1:
+                denom = multi * chance_prob * avg_qty
+            else:
+                denom = chance_prob * avg_qty
+            if denom <= 0:
+                continue
+            steps_per_item = steps_per_reward / denom
+            items_per_step = 1.0 / steps_per_item if steps_per_item > 0 else 0.0
+
+            # Currency accumulation
+            agt_val = get_drop_ag_token_value(d)
+            if agt_val > 0:
+                agt_per_step += items_per_step * agt_val
+            shell_val = get_drop_shell_value(d)
+            if shell_val > 0:
+                shells_per_step += items_per_step * shell_val
+
+            # Fine currency contribution (when include_fine is ON)
+            if include_fine and _has_fine_material(d):
+                # Fine items drop at a reduced rate; approximate via the fine
+                # drop rate entries. For currency, we use the fine sell value
+                # helpers which look up the _FINE variant's special_sell.
+                fine_agt = get_drop_fine_ag_token_value(d)
+                if fine_agt > 0:
+                    # Fine drop rate is handled by the fine DropEntry in the
+                    # drop table; for currency aggregation, use the base
+                    # items_per_step * fine_material_finding adjustment.
+                    # Simplified: fine items appear in the drop table as separate
+                    # entries with is_fine=True. We handle them when we encounter
+                    # them. For items whose fine appears as a separate table entry,
+                    # the fine DropEntry will be iterated separately. For the
+                    # currency value aggregation, just check if the current drop
+                    # IS a fine entry.
+                    pass  # Fine AGT handled via separate fine drop entries below
+                fine_shell = get_drop_fine_shell_value(d)
+                if fine_shell > 0:
+                    pass  # Same — handled via fine entries
+
+            # ── Material/finding items classification ─────────────────────
+            # Only emit fine leaves when include_fine is ON
+            classifications = classify_drop_entry_all(d, include_fine=include_fine)
+            if not classifications:
+                continue
+
+            item_keywords = get_item_keywords_for_drop(d)
+
+            for classification in classifications:
+                group_slug, item_slug, display_name, c_item_ref, is_fine = classification
+
+                # Fine variant: rare ~1% roll on the base drop -> ~100x steps
+                # (no-gear fallback; execute_job recomputes gear-aware).
+                eff_steps = steps_per_item
+                if is_fine and steps_per_item not in (None, float('inf')):
+                    eff_steps = steps_per_item / _TI_BASE_FINE_CHANCE
+                if eff_steps <= 0 or math.isinf(eff_steps):
+                    continue
+
+                _gl = FINDING_GROUPS.get(group_slug, group_slug)
+                _res = classify_item(
+                    getattr(d, 'item_name', '') or '',
+                    getattr(d, 'item_ref', '') or '',
+                    _get_keywords_for_drop(d),
+                )
+                if _res:
+                    _gl = _res[1]
+
+                # v3: one record per (item, activity) — EVERY drop-applicable
+                # activity, not just the best. execute_job runs a gear-aware
+                # optimizer per record; the report lists all activities under
+                # each item.
+                _pk = (item_slug, activity.name, is_fine)
+                if _pk in _seen_ti:
+                    continue
+                _seen_ti.add(_pk)
+                ti_pairs.append({
+                    'item_slug': item_slug,
+                    'activity': activity,
+                    'location': loc_name,
+                    'item_name': display_name,
+                    'item_ref': c_item_ref,
+                    'group_slug': group_slug,
+                    'group_label': _gl,
+                    'is_fine': is_fine,
+                    'item_keywords': item_keywords,
+                    'eff_steps': eff_steps,
+                })
+
+        # After processing all drops for this activity, emit per-(currency,
+        # activity) records so the report lists EVERY activity under AGT /
+        # Sea Shells. Value already = drops x sell value (incl. fine multiplier
+        # from util/shell_value.py + util/ag_token_value.py, not hardcoded).
+        agt_per_1k = agt_per_step * 1000.0
+        if agt_per_1k > 0:
+            ti_currency.append({
+                'currency_slug': 'adventurers_guild_tokens',
+                'units_per_1k': agt_per_1k,
+                'activity': activity,
+                'location': loc_name,
+            })
+        shells_per_1k = shells_per_step * 1000.0
+        if shells_per_1k > 0:
+            ti_currency.append({
+                'currency_slug': 'sea_shells',
+                'units_per_1k': shells_per_1k,
+                'activity': activity,
+                'location': loc_name,
+            })
+
+    # ── Emit material/finding jobs ────────────────────────────────────────
+    # chest_name is OVERLOADED with item_slug so the write identity
+    # (category, activity_name, skill_name=group, chest_name=item_slug) is
+    # UNIQUE per (item, activity) — otherwise many items in the same
+    # group+activity collapse onto one scope (the 179/214 collapse, now on
+    # the activity axis).
+    for p in ti_pairs:
+        group_slug = p['group_slug']
+        group_kind = 'finding' if group_slug in FINDING_GROUPS else (
+            'other' if group_slug == 'other' else 'material')
+        extras = {
+            'item_name': p['item_name'],
+            'item_ref': p['item_ref'],
+            'item_slug': p['item_slug'],
+            'group_slug': group_slug,
+            'group_label': p['group_label'],
+            'group_kind': group_kind,
+            'item_keywords': p['item_keywords'],
+            'activity_name': p['activity'].name,
+            'location': p['location'],
+            'is_fine': p['is_fine'],
+            'metric_kind': 'steps_per_item',
+            # gear-aware optimizer target: steps_per_reward_roll::<target>
+            'target_ref': p['item_name'],
+            # legacy compat
+            'target_category': group_slug,
+            'target_category_label': p['group_label'],
+        }
+        jobs.append(ReportJob(
+            job_id=str(uuid.uuid4()),
+            run_id=run_id,
+            session_uuid=session_uuid,
+            category='target_items',
+            activity=p['activity'],
+            skill_name=group_slug,        # OVERLOADED: group_slug
+            chest_name=p['item_slug'],    # OVERLOADED: item leaf (write uniqueness)
+            precomputed_metric=p['eff_steps'],
+            precomputed_metric_name=p['item_name'],
+            extras=extras,
+        ))
+
+    # ── Emit currency jobs: one per (currency, activity) ──────────────────
+    for c in ti_currency:
+        currency_slug = c['currency_slug']
+        label = CURRENCY_GROUPS.get(currency_slug, currency_slug)
+        extras = {
+            'item_slug': currency_slug,
+            'group_slug': currency_slug,
+            'group_label': label,
+            'group_kind': 'currency',
+            'metric_kind': 'per_1k',
+            # Optimizer target so the gearset is optimized for THIS currency
+            # (optimize_activity_gearsets supports these synthetics:
+            # cat:if:adventurers_guild_tokens and cat:sea_shells).
+            'target_ref': ('cat:if:adventurers_guild_tokens'
+                           if currency_slug == 'adventurers_guild_tokens' else 'cat:sea_shells'),
+            'activity_name': c['activity'].name,
+            'location': c['location'],
+            'units_per_1k': c['units_per_1k'],
+            'is_fine': False,
+            # Legacy compat
+            'target_category': currency_slug,
+            'target_category_label': label,
+            'item_name': label,
+            'item_ref': '',
+            'item_keywords': [],
+        }
+        jobs.append(ReportJob(
+            job_id=str(uuid.uuid4()),
+            run_id=run_id,
+            session_uuid=session_uuid,
+            category='target_items',
+            activity=c['activity'],
+            # (activity_name, skill_name=currency_slug) is already unique per
+            # (currency, activity); chest_name left None.
+            skill_name=currency_slug,
+            precomputed_metric=c['units_per_1k'],
+            precomputed_metric_name=label,
+            extras=extras,
+        ))
+
+    # ── Global item-finding (IF) expansion — location-aware ───────────────
+    # Ectoplasm / Gold Nugget / Bird Nest (finding) and AGT / Sea Shells
+    # (currency) can be found on activities via ItemFindingCategory.<CAT> gear/
+    # tools. The stat is often gated (e.g. ectoplasm gear only applies while in
+    # Ghostly locations), so applicability is resolved PER-ACTIVITY at the same
+    # (skill, location) the optimizer scores at — we emit a job only where the
+    # owned gear's IFC.<cat> actually resolves > 0. This ranks every genuinely-
+    # findable activity without emitting impossible-penalty rows. Native-drop /
+    # sellable activities are already covered above, so skip those pairs.
+    # (2026-08-13 jwbail)
+    _ifc_items = _ti_owned_ifc_items(character)
+    if _ifc_items:
+        _native_find_pairs = {(p['group_slug'], p['activity'].name)
+                              for p in ti_pairs if p['group_slug'] in FINDING_GROUPS}
+        _native_cur_pairs = {(c['currency_slug'], c['activity'].name) for c in ti_currency}
+        _gif_count = 0
+        for activity in all_activities:
+            _inc, _unmet = _sr_gate_activity(activity, character)
+            if not _inc:
+                continue
+            if _unmet:
+                _ti_unmet_by_activity[activity.name] = dict(_unmet)
+            loc = _sr_job_location(activity)
+            if loc is None:
+                continue
+            loc_name = loc if isinstance(loc, str) else getattr(loc, 'name', str(loc))
+            # Resolve stats at the SAME location the optimizer uses: the accessible
+            # Location object, else activity.locations[0] (mirrors SELECTED_LOCATION).
+            _locs = getattr(activity, 'locations', None) or []
+            loc_obj = loc if (loc is not None and not isinstance(loc, str)) else (_locs[0] if _locs else None)
+            skill = (getattr(activity, 'primary_skill', '') or '').lower()
+            # Sum each target IFC stat across the owned finding gear at this
+            # activity+location — >0 means the find applies here.
+            applic = {}
+            for it in _ifc_items:
+                try:
+                    st = it.get_stats_for_skill(skill, location=loc_obj, character=character)
+                except Exception:
+                    st = None
+                if not isinstance(st, dict):
+                    continue
+                for cat, key in _TI_IFC_STAT.items():
+                    val = st.get(key)
+                    if isinstance(val, (int, float)) and val > 0:
+                        applic[cat] = applic.get(cat, 0.0) + val
+            if not applic:
+                continue
+            for cat in applic:
+                if cat in CURRENCY_GROUPS:
+                    if (cat, activity.name) in _native_cur_pairs:
+                        continue
+                    label = CURRENCY_GROUPS.get(cat, cat)
+                    jobs.append(ReportJob(
+                        job_id=str(uuid.uuid4()), run_id=run_id, session_uuid=session_uuid,
+                        category='target_items', activity=activity,
+                        skill_name=cat, precomputed_metric=0.0, precomputed_metric_name=label,
+                        extras={
+                            'item_slug': cat, 'group_slug': cat, 'group_label': label,
+                            'group_kind': 'currency', 'metric_kind': 'per_1k',
+                            'target_ref': _TI_IFC_TARGET[cat], 'activity_name': activity.name,
+                            'location': loc_name, 'units_per_1k': 0.0, 'is_fine': False,
+                            'target_category': cat, 'target_category_label': label,
+                            'item_name': label, 'item_ref': '', 'item_keywords': [],
+                            'global_if': True,
+                        }))
+                    _gif_count += 1
+                else:
+                    if (cat, activity.name) in _native_find_pairs:
+                        continue
+                    label = FINDING_GROUPS.get(cat, cat)
+                    jobs.append(ReportJob(
+                        job_id=str(uuid.uuid4()), run_id=run_id, session_uuid=session_uuid,
+                        category='target_items', activity=activity,
+                        skill_name=cat, chest_name=cat,  # OVERLOADED: item leaf = category (write uniqueness)
+                        precomputed_metric=None, precomputed_metric_name=label,
+                        extras={
+                            'item_name': label, 'item_ref': '', 'item_slug': cat,
+                            'group_slug': cat, 'group_label': label, 'group_kind': 'finding',
+                            'item_keywords': [], 'activity_name': activity.name,
+                            'location': loc_name, 'is_fine': False,
+                            'metric_kind': 'steps_per_item', 'target_ref': _TI_IFC_TARGET[cat],
+                            'target_category': cat, 'target_category_label': label,
+                            'global_if': True,
+                        }))
+                    _gif_count += 1
+
+    # ── Filter by target_groups if provided ───────────────────────────────
+    if target_groups:
+        _tg_set = set(target_groups)
+        jobs = [j for j in jobs if (j.skill_name or '') in _tg_set]
+
+    # Attach include-unavailable reasons to each per-activity job whose
+    # activity was surfaced only because an unavailable dimension is enabled.
+    if _ti_unmet_by_activity:
+        for j in jobs:
+            an = getattr(j.activity, 'name', None) if j.activity else None
+            if an and an in _ti_unmet_by_activity:
+                if not isinstance(j.extras, dict):
+                    j.extras = {}
+                j.extras['unmet'] = dict(_ti_unmet_by_activity[an])
+
+    return jobs
+
+
+def _extract_best_drop(row):
+    """Pull the {item_name, item_ref, kind} best_drop dict off a cached
+    new_items result row.
+
+    Read-path rows (get_stats_report_results_latest_per_scope) carry it in
+    a JSON `metrics_json` string; results-v2 rows carry it under `extras`.
+    Returns the dict or None.
+    """
+    if not isinstance(row, dict):
+        return None
+    mj = row.get('metrics_json')
+    if isinstance(mj, str):
+        try:
+            mj = json.loads(mj)
+        except Exception:
+            mj = None
+    if isinstance(mj, dict) and isinstance(mj.get('best_drop'), dict):
+        return mj['best_drop']
+    ex = row.get('extras')
+    if isinstance(ex, dict) and isinstance(ex.get('best_drop'), dict):
+        return ex['best_drop']
+    return None
+
+
+def new_items_drop_is_owned(best_drop, ownership) -> bool:
+    """Return True if a new_items row's targeted drop is already owned.
+
+    Uses the EXACT same matching build_new_items_jobs applies when it
+    decides to skip a drop, so the read-path filter and the job-generation
+    filter agree: a drop the worker would refuse to regenerate is the same
+    drop we hide from the cached "fastest to obtain" list.
+    """
+    if not isinstance(best_drop, dict) or not isinstance(ownership, dict):
+        return False
+    ref = best_drop.get('item_ref') or ''
+    name = best_drop.get('item_name') or ''
+    name_id = _normalize_item_id(name)
+    if not name_id:
+        return False
+    if ref.startswith('Item.'):
+        return name_id in ownership.get('items', set())
+    if ref.startswith('Collectible.'):
+        return name_id in ownership.get('collectibles', set())
+    if ref.startswith('Egg.'):
+        # "Tiger egg" -> species id "tiger"; owned if a pet of that
+        # species exists or the egg itself is on hand.
+        species_id = name_id.replace('_egg', '').strip('_')
+        return (species_id in ownership.get('pet_species', set())
+                or name_id in ownership.get('eggs', set()))
+    # Unknown/blank ref prefix: be conservative and check the two name
+    # buckets so a row with a stripped ref still filters when owned.
+    return (name_id in ownership.get('items', set())
+            or name_id in ownership.get('collectibles', set()))
+
+
+def filter_owned_new_items(results, ownership):
+    """Drop new_items result rows whose targeted item the user now owns.
+
+    Fixes bug 0e1a28e6: after obtaining an item (e.g. Seahorse fossil),
+    re-running the goals optimizer left it at the top of the "fastest to
+    obtain" list until a full reset. Root cause: once an item is owned,
+    build_new_items_jobs stops generating a job for it, so the stale cached
+    row is never overwritten OR deleted — only a reset (which wipes the
+    whole cache) cleared it. Filtering on read makes the list correct
+    regardless of what's cached, and self-heals without a reset.
+
+    `results` is the {category: [rows]} map from
+    get_stats_report_results_latest_per_scope. Mutates and returns it.
+    """
+    if not isinstance(results, dict):
+        return results
+    rows = results.get('new_items')
+    if not rows:
+        return results
+    results['new_items'] = [
+        row for row in rows
+        if not new_items_drop_is_owned(_extract_best_drop(row), ownership)
+    ]
+    return results
+
+
+_SINGLE_COMPLETION_KEYS_CACHE = None
+
+
+def _single_completion_keys():
+    """Return {completion_stat_key: activity_display_name} for every
+    single-completion activity (e.g. {'repair_the_bank': 'Repair the bank'}).
+
+    The completion key is derived exactly like Activity.is_unlocked does
+    (name.lower().replace(' ', '_')) so a custom-stat toggle matches. Cached
+    module-side — the activity catalog is static per process.
+    """
+    global _SINGLE_COMPLETION_KEYS_CACHE
+    if _SINGLE_COMPLETION_KEYS_CACHE is not None:
+        return _SINGLE_COMPLETION_KEYS_CACHE
+    out = {}
+    try:
+        import util.walkscape_constants  # noqa: F401
+        from util.autogenerated.activities import ACTIVITIES_BY_NAME
+        for name, act in ACTIVITIES_BY_NAME.items():
+            if getattr(act, 'single_completion', False):
+                out[str(name).lower().replace(' ', '_')] = name
+    except Exception:
+        out = {}
+    _SINGLE_COMPLETION_KEYS_CACHE = out
+    return out
+
+
+def _row_activity_name(row):
+    """Extract a result row's activity display name (dict or object shape)."""
+    if isinstance(row, dict):
+        return row.get('activity_name')
+    return getattr(row, 'activity_name', None)
+
+
+def filter_completed_single_completion_activities(results, custom_stats):
+    """Drop every result row whose activity is a single-completion activity
+    the user has flagged complete via custom_stats.
+
+    Mirrors filter_owned_new_items (bug 0e1a28e6) for single-completion
+    activities (report fee0a91e). Once the player checks e.g.
+    custom_stats['repair_the_bank']=True, Activity.is_unlocked() returns
+    False, so build_*_jobs stop emitting jobs for that activity — but its
+    stale cached rows (coins / chests / new_items) linger until a full
+    reset. Filtering on read hides them immediately, with no rerun, exactly
+    like an owned new item disappears from "fastest to obtain".
+    detect_stale_scopes already stops flagging these via
+    enumerate_applicable_sources' single-completion gate, so no (!) remains
+    either.
+
+    `results` is the {category: [rows]} map from
+    get_stats_report_results_latest_per_scope. Mutates and returns it.
+    """
+    if not isinstance(results, dict) or not isinstance(custom_stats, dict):
+        return results
+    done_names = {
+        name for key, name in _single_completion_keys().items()
+        if custom_stats.get(key) is True
+    }
+    if not done_names:
+        return results
+    for cat, rows in list(results.items()):
+        if not rows:
+            continue
+        results[cat] = [
+            row for row in rows
+            if _row_activity_name(row) not in done_names
+        ]
+    return results
+
+
+def filter_ungeared_activities(results, character):
+    """Drop cached result rows whose activity's required gear the player
+    doesn't own — the read-path mirror of the build_*_jobs gate
+    `_activity_required_gear_owned`.
+
+    Same lingering-cache problem as filter_owned_new_items (bug 0e1a28e6) and
+    filter_completed_single_completion_activities (report fee0a91e): the build
+    gate stops EMITTING jobs for ungeared activities (e.g. Casbrant's Grave
+    Wreck Diving / Sea fishing (Spear) require `advanced diving gear: 3`), but
+    rows written BEFORE the gate existed — or before the player lost/never had
+    the gear — linger in the cache until a full reset, still showing a dead-end
+    row whose Optimize returns "0/0 optimizations". Filtering on read hides them
+    immediately, with no rerun, and self-heals if the player later acquires the
+    gear (the gate then re-admits the activity and it reappears).
+
+    Conservative by construction: only rows whose activity_name resolves in
+    ACTIVITIES_BY_NAME AND provably can't meet its keyword_counts from owned
+    gear are dropped. Recipe rows (chests_recipes — activity_name is a recipe
+    name) and any unresolvable activity name are kept untouched. Owned-but-
+    custom-stat-locked gear counts as owned (matches the build gate). Mutates
+    and returns `results`.
+    """
+    if not isinstance(results, dict) or character is None:
+        return results
+    try:
+        import util.walkscape_constants  # noqa: F401  (populate the catalog)
+        from util.autogenerated.activities import ACTIVITIES_BY_NAME
+    except Exception:
+        return results
+
+    # Evaluate each distinct activity once — many rows share an activity_name.
+    _verdict = {}
+
+    def _keep(activity_name):
+        if not activity_name:
+            return True
+        if activity_name in _verdict:
+            return _verdict[activity_name]
+        act = ACTIVITIES_BY_NAME.get(activity_name)
+        if act is None:
+            # Recipe shim / unknown name — not gear-gated here; keep it.
+            _verdict[activity_name] = True
+            return True
+        try:
+            v = _activity_required_gear_owned(act, character)
+        except Exception:
+            v = True  # be permissive on any evaluation error
+        _verdict[activity_name] = v
+        return v
+
+    for cat, rows in list(results.items()):
+        if not rows:
+            continue
+        results[cat] = [row for row in rows
+                        if _keep(_row_activity_name(row))
+                        or _row_included_as_unavailable(row)]
+    return results
+
+
+def _row_metrics_json(row):
+    """Return a result row's metrics_json as a dict (parsing a JSON string if
+    needed), or {} when absent/unparseable."""
+    mj = row.get('metrics_json') if isinstance(row, dict) else getattr(row, 'metrics_json', None)
+    if isinstance(mj, str):
+        try:
+            mj = json.loads(mj)
+        except Exception:
+            return {}
+    return mj if isinstance(mj, dict) else {}
+
+
+def _row_included_as_unavailable(row):
+    """True if a result row was deliberately surfaced by the include-unavailable
+    feature (it carries a gear/tool/level/location/other reason). Such rows must
+    survive the read-path ungeared filter — the run that produced them opted in,
+    and the markers are recorded in metrics_json so no run-config lookup is
+    needed on read."""
+    mj = _row_metrics_json(row)
+    if not mj:
+        return False
+    return bool(mj.get('gear_gated') or mj.get('missing_gear')
+                or mj.get('missing_tool') or mj.get('missing_level')
+                or mj.get('missing_location') or mj.get('missing_other'))
 
 
 def _drop_kind(drop):
@@ -693,18 +1981,15 @@ def build_chest_jobs(run_id: str, session_uuid: str, character, category: str = 
     # Collect all chest-dropping activities grouped by chest name —
     # dedup by activity name within each chest bucket.
     chest_activities: Dict[str, Dict[str, Any]] = {}
+    _chest_unmet_by_activity: Dict[str, dict] = {}
 
     for skill_activities in ACTIVITIES_BY_SKILL.values():
         for activity in skill_activities:
-            try:
-                if not activity.is_unlocked(character=character):
-                    continue
-            except Exception:
-                pass
-
-            # 2026-05-22 fix: skip activities at inaccessible locations.
-            if _activity_first_accessible_location(activity) is None:
+            _inc, _unmet = _sr_gate_activity(activity, character)
+            if not _inc:
                 continue
+            if _unmet:
+                _chest_unmet_by_activity[activity.name] = dict(_unmet)
 
             all_drops = list(activity.drop_table) + list(activity.secondary_drop_table)
             for drop in all_drops:
@@ -733,6 +2018,8 @@ def build_chest_jobs(run_id: str, session_uuid: str, character, category: str = 
                 activity=activity,
                 skill_name=activity.primary_skill,
                 chest_name=chest_name,
+                extras=({'unmet': dict(_chest_unmet_by_activity[activity.name])}
+                        if activity.name in _chest_unmet_by_activity else None),
             ))
 
     return jobs
@@ -900,15 +2187,8 @@ def build_coins_jobs(run_id: str, session_uuid: str, selected_skills: List[str],
             primary = (getattr(activity, 'primary_skill', '') or '')
             if primary.lower() != (skill_name or '').lower():
                 continue
-            try:
-                if not activity.is_unlocked(character=character):
-                    continue
-            except Exception:
-                pass
-
-            # 2026-05-22 fix: skip activities at inaccessible locations
-            # (e.g. Crown of Cinders without Charter of the Drowned).
-            if _activity_first_accessible_location(activity) is None:
+            _inc, _unmet = _sr_gate_activity(activity, character)
+            if not _inc:
                 continue
 
             jobs.append(ReportJob(
@@ -918,6 +2198,7 @@ def build_coins_jobs(run_id: str, session_uuid: str, selected_skills: List[str],
                 category='coins',
                 activity=activity,
                 skill_name=skill_name,
+                extras=({'unmet': dict(_unmet)} if _unmet else None),
             ))
 
     return jobs
@@ -927,7 +2208,31 @@ def build_coins_jobs(run_id: str, session_uuid: str, selected_skills: List[str],
 # JOB EXECUTION
 # ============================================================================
 
-def _auto_pick_input_item_for_activity(activity, character):
+def _fine_variant_of(item):
+    """Return the Material *_FINE variant of an input item instance, or None.
+
+    Used by the goals-report "Use fine inputs" setting (R2): when on, a hunting
+    activity's input slot projects the Fine variant of its input material (e.g.
+    arrows) when one exists — mirroring the crafting tree's use_fine_inputs. Only
+    MaterialInstance inputs have fine variants; Items return None (keep base).
+    """
+    try:
+        from util.autogenerated.materials import Material, MaterialInstance
+    except ImportError:
+        return None
+    if not isinstance(item, MaterialInstance):
+        return None
+    try:
+        if not item.has_fine_material():
+            return None
+        enum_name = (item.name.upper().replace(" ", "_").replace("(", "")
+                     .replace(")", "").replace("-", "_").replace("'", ""))
+        return getattr(Material, enum_name + '_FINE', None)
+    except Exception:
+        return None
+
+
+def _auto_pick_input_item_for_activity(activity, character, use_fine_inputs=False):
     """Pick the best-scoring owned input item for the activity's input slot.
 
     Mirrors ui/app.py:_auto_pick_input_items_for_activity but works directly
@@ -1008,7 +2313,7 @@ def _auto_pick_input_item_for_activity(activity, character):
                     best_score = s
                     best = item
             if best is not None:
-                return best
+                return (_fine_variant_of(best) if use_fine_inputs else None) or best
 
         elif input_type == 'material':
             try:
@@ -1018,7 +2323,7 @@ def _auto_pick_input_item_for_activity(activity, character):
             ref_attr = reference.split('.', 1)[-1] if '.' in reference else reference
             mat = getattr(Material, ref_attr, None)
             if mat is not None and isinstance(mat, MaterialInstance):
-                return mat
+                return (_fine_variant_of(mat) if use_fine_inputs else None) or mat
 
     return None
 
@@ -1055,6 +2360,16 @@ def _extract_pet_consumable_meta(final_gearset):
                     'variant': 'normal',
                     'rarity': 'common',
                     'type': 'pet',
+                    # 2026-08-31 (jwbail): mark useAbility so the Equip path
+                    # checks column-2's per-pet "use ability" box (and applies
+                    # the ability stats) — but ONLY when the run had the
+                    # "Always use active applicable pet ability" toggle on AND
+                    # this pet actually has an ability at its (adult) level.
+                    # A juvenile pet has no `abilities`, so it stays unchecked.
+                    'useAbility': bool(
+                        globals().get('_USE_PET_ABILITY', False)
+                        and getattr(pet_obj, 'abilities', None)
+                    ),
                 }
         except Exception:
             sel_pet = None
@@ -1097,7 +2412,7 @@ def _extract_pet_consumable_meta(final_gearset):
 
 def run_optimizer_for_job(job: ReportJob, character,
                           pet_items_pool=None, consumable_items_pool=None,
-                          hidden_items=None) -> Dict[str, Any]:
+                          hidden_items=None, force_location=None) -> Dict[str, Any]:
     """Run the greedy local search optimizer for a single job.
 
     Returns a dict with metric_value, metric_name, gearset_export.
@@ -1131,18 +2446,114 @@ def run_optimizer_for_job(job: ReportJob, character,
     # set's per-piece find_collectibles). The user-visible symptom was
     # 33615 vs 28426 for Cut willow trees → Weeping willow tear (~9% gap)
     # because find_collectibles gear was never picked.
-    import util.walkscape_globals as _wg
-    _ap = getattr(character, 'achievement_points', None)
-    if _ap is not None:
-        _wg.set_achievement_points(_ap)
-    _tsl = getattr(character, '_total_skill_level', None)
-    if _tsl is not None:
-        _wg.set_total_skill_level(_tsl)
-    _cs = getattr(character, 'custom_stats', None)
-    if _cs is not None:
-        _wg.set_custom_stats(_cs)
+    _reapply_character_thread_local_globals(character)
 
     activity = job.activity
+
+    # ── Multi-location coverage (Feature 1) ──────────────────────────────────
+    # An activity doable at several accessible locations can have a DIFFERENT
+    # optimal gearset per location (gear is region-scoped via locationHasKeywords).
+    # Today only the first accessible location was optimized. Here we optimize
+    # EACH accessible location (recursing with force_location), keep the best as
+    # the row, group locations that yield the IDENTICAL gearset ("Nomad Woods or
+    # Disenchanted Forest"), and stash the distinct-set alternatives in
+    # metrics_json['alt_locations'] for the frontend's Alternative Locations
+    # section. Scoped to target-rate categories (chests/new_items) where lower
+    # metric_value = fewer steps = better. force_location set => single-location
+    # base case (no recursion), so this runs exactly once per location.
+    _cat0 = getattr(job, 'category', None)
+    if force_location is None and _cat0 in ('chests', 'new_items', 'xp', 'coins', 'target_items') and activity is not None:
+        _acc = _activity_accessible_locations(activity)
+        if len(_acc) > 1:
+            # Dedup locations by region-tag set: for the SAME activity, two
+            # locations with identical region tags scope gear identically, so
+            # they produce the IDENTICAL optimization — solve ONCE per distinct
+            # region profile and reuse. This cuts the multi-location cost from
+            # #locations to #distinct-region-profiles (e.g. Azurazera+Frusenholm,
+            # both [jarvonia,snowy], collapse to one solve). Exact: same activity
+            # => same base_steps/target; only region-scoped gear varies, fully
+            # captured by the region tags.
+            _by_profile = {}   # region-tag frozenset -> [location names]
+            _rep = {}          # profile -> representative location object
+            for _loc in _acc:
+                _regs = (frozenset([_loc]) if isinstance(_loc, str)
+                         else frozenset(getattr(_loc, 'regions', None) or []))
+                _lname = _loc if isinstance(_loc, str) else getattr(_loc, 'name', '')
+                if _regs not in _by_profile:
+                    _by_profile[_regs] = []
+                    _rep[_regs] = _loc
+                _by_profile[_regs].append(_lname)
+            _per = []   # ([location names sharing this profile], result)
+            for _prof, _lnames in _by_profile.items():
+                try:
+                    _r = run_optimizer_for_job(job, character, pet_items_pool,
+                                               consumable_items_pool, hidden_items,
+                                               force_location=_rep[_prof])
+                except Exception as _mle:
+                    print(f"[MULTILOC] {getattr(activity,'name','?')} loc-optimize failed: {_mle}", flush=True)
+                    continue
+                _per.append((_lnames, _r))
+            _valid = [(lns, r) for (lns, r) in _per
+                      if r and isinstance(r.get('metric_value'), (int, float))
+                      and r.get('metric_value') > 0 and r.get('metric_value') != float('inf')]
+            if _valid:
+                # Direction-aware: chests/new_items are steps-based (LOWER
+                # metric_value = fewer steps = better -> ascending, best first);
+                # xp (xp/step) and coins (coins/1k) are HIGHER-is-better ->
+                # descending so the best location is the primary row. (2026-07-30)
+                _higher_better = _cat0 in ('xp', 'coins')
+                _valid.sort(key=lambda t: t[1]['metric_value'], reverse=_higher_better)
+                # Group locations by (metric, gearset export) so each group is a
+                # set of TRULY equivalent locations — same result AND same gear.
+                # Keying on export alone was wrong: region-scoped gear (e.g.
+                # Linden leaf shorts, GDTE-only) makes the SAME export score a
+                # DIFFERENT metric in another region, so those locations were
+                # incorrectly folded into the primary "X or Y" name with one
+                # (wrong) step count. The lowest-metric group is the primary row;
+                # every other group becomes a grouped alternative-locations entry
+                # (locations sharing a metric+export merged into one "A or B").
+                def _grp_key(r):
+                    mv = r.get('metric_value')
+                    mv = round(float(mv), 6) if isinstance(mv, (int, float)) else mv
+                    return (mv, r.get('gearset_export'))
+                _groups = {}
+                _order = []
+                for lns, r in _valid:
+                    k = _grp_key(r)
+                    if k not in _groups:
+                        _groups[k] = {'locations': list(lns), 'result': r}
+                        _order.append(k)
+                    else:
+                        _groups[k]['locations'].extend(lns)
+                _best = _groups[_order[0]]['result']
+                _best_locs = _groups[_order[0]]['locations']
+                _alts = []
+                for k in _order[1:]:
+                    g = _groups[k]
+                    _aentry = {'location': ' or '.join(g['locations']),
+                               'locations': g['locations'],
+                               'metric_value': g['result'].get('metric_value'),
+                               'gearset_export': g['result'].get('gearset_export')}
+                    # Surface the alt's own chosen consumable/pet (not carried in
+                    # the encoded export) so the alt gear preview shows them
+                    # in-slot — the displayed metric already includes them. Each
+                    # per-location result already computed these into its
+                    # metrics_json (see _extract_pet_consumable_meta above).
+                    _amj = g['result'].get('metrics_json')
+                    if isinstance(_amj, dict):
+                        if _amj.get('optimized_consumable'):
+                            _aentry['optimized_consumable'] = _amj['optimized_consumable']
+                        if _amj.get('optimized_pet'):
+                            _aentry['optimized_pet'] = _amj['optimized_pet']
+                    _alts.append(_aentry)
+                _mj = _best.get('metrics_json')
+                if isinstance(_mj, dict):
+                    _mj['primary_location'] = _best_locs[0]
+                    _mj['same_set_locations'] = _best_locs[1:]
+                    _mj['alt_locations'] = _alts
+                return _best
+            # no valid multi-location result -> fall through to single-location path
+
 
     # Filter the ambient pet/consumable pool down to ones whose stats
     # actually scope to this job's primary skill (or a skill group
@@ -1158,12 +2569,30 @@ def run_optimizer_for_job(job: ReportJob, character,
     primary_skill = (getattr(activity, 'primary_skill', '') or '').lower()
     pet_pool = list(pet_items_pool or [])
     consumable_pool = list(consumable_items_pool or [])
-    # Drop hidden consumables (pets are already filtered at pool build).
-    if hidden_items:
+    # Drop hidden consumables (pets are already filtered at pool build) unless
+    # the user enabled "Use hidden consumables".
+    if hidden_items and not globals().get('_USE_HIDDEN_CONSUMABLES', False):
         consumable_pool = [c for c in consumable_pool if c not in hidden_items]
+    # target_items (bug 2026-08-12 "include pets on, none included"): a pet that
+    # boosts the TARGET item's find rate is relevant even when its stat isn't
+    # scoped to the activity's primary skill and isn't in the default
+    # _GLOBAL_FIND_STATS allowlist — notably ItemFindingCategory.* for currency /
+    # cat:if:* targets (AGT, Sea Shells, Gold Nugget). Feed those target-relevant
+    # finding stats to the pre-filter so those pets survive to the optimizer,
+    # which then scores them and keeps only the ones that actually help.
+    _extra_find = None
+    if getattr(job, 'category', None) == 'target_items':
+        try:
+            from optimize_activity_gearsets import finding_stats_for_if_target
+            _extra_find = finding_stats_for_if_target(
+                (job.extras or {}).get('target_ref') or '') or None
+        except Exception as _e:
+            print(f"[stats_report_worker] TI-PET extra-find resolve failed: {_e}", flush=True)
+            _extra_find = None
+    _pet_in = len(pet_pool)
     if primary_skill:
         pet_pool = _filter_pet_consumable_candidates_by_skill(
-            pet_pool, primary_skill, item_kind='pet')
+            pet_pool, primary_skill, item_kind='pet', extra_find_stats=_extra_find)
         consumable_pool = _filter_pet_consumable_candidates_by_skill(
             consumable_pool, primary_skill, item_kind='consumable')
 
@@ -1186,7 +2615,7 @@ def run_optimizer_for_job(job: ReportJob, character,
         optimize_activity_gearsets.TARGET_ITEM = None
         optimize_activity_gearsets.TARGET_DROP_RATE = 0
         optimize_activity_gearsets.VERBOSE = False
-        optimize_activity_gearsets.IGNORED_ITEMS = set(hidden_items) if hidden_items else set()
+        optimize_activity_gearsets.IGNORED_ITEMS = _sr_effective_ignored(hidden_items)
         optimize_activity_gearsets.INCLUDE_CONSUMABLES = bool(consumable_pool)
         optimize_activity_gearsets.CONSUMABLE_ITEMS = list(consumable_pool)
         optimize_activity_gearsets.INCLUDE_PETS = bool(pet_pool)
@@ -1200,7 +2629,7 @@ def run_optimizer_for_job(job: ReportJob, character,
         # works for single-location activities but ignores accessibility
         # filtering and skips multi-location ranking. Setting the
         # accessible location explicitly aligns with the column-3 path.
-        _selected_loc = _activity_first_accessible_location(activity)
+        _selected_loc = force_location if force_location is not None else _activity_first_accessible_location(activity)
         # _activity_first_accessible_location may return a string when
         # activity.locations holds string IDs; the optimizer expects a
         # Location object or None. Pass through if it's a Location, else
@@ -1244,7 +2673,8 @@ def run_optimizer_for_job(job: ReportJob, character,
         # can render a warning badge on the row ("you can't actually do
         # this without owning a hunting net"). Returns the keyword name
         # + min level so the user knows what to acquire.
-        _picked_input = _auto_pick_input_item_for_activity(activity, character)
+        _picked_input = _auto_pick_input_item_for_activity(
+            activity, character, use_fine_inputs=globals().get('_USE_FINE_INPUTS', False))
         optimize_activity_gearsets.INPUT_ITEM = _picked_input
         _missing_input = None
         if _picked_input is None and getattr(activity, 'input_items', None):
@@ -1367,6 +2797,23 @@ def run_optimizer_for_job(job: ReportJob, character,
             else:
                 optimize_activity_gearsets.SORTING_PRIORITY = [Sorting.STEPS_PER_REWARD_ROLL]
             optimize_activity_gearsets.SORTING_WEIGHTS = {Sorting.STEPS_PER_REWARD_ROLL: 100}
+        elif job.category == 'target_items':
+            # 2026-08-12 (jwbail) v3 gear-aware: optimize the gearset that
+            # minimizes steps to THIS target item at THIS activity. extras
+            # ['target_ref'] is the item's display name; the comparator reads
+            # steps_per_reward_roll::<target>, which is find/FMF/double-reward
+            # aware via activity.get_expected_drop_rate — same mechanism as the
+            # new_items / chests targeted branches above.
+            _ti_target = (job.extras or {}).get('target_ref') or job.precomputed_metric_name
+            if _ti_target:
+                optimize_activity_gearsets.SORTING_PRIORITY = [
+                    SortingEntry(sort=Sorting.STEPS_PER_REWARD_ROLL,
+                                 target=_ti_target, weight=100),
+                ]
+                optimize_activity_gearsets.TARGET_ITEM = _ti_target
+            else:
+                optimize_activity_gearsets.SORTING_PRIORITY = [Sorting.STEPS_PER_REWARD_ROLL]
+            optimize_activity_gearsets.SORTING_WEIGHTS = {Sorting.STEPS_PER_REWARD_ROLL: 100}
         else:
             optimize_activity_gearsets.SORTING_PRIORITY = [Sorting.STEPS_PER_REWARD_ROLL]
             optimize_activity_gearsets.SORTING_WEIGHTS = {Sorting.STEPS_PER_REWARD_ROLL: 100}
@@ -1389,31 +2836,179 @@ def run_optimizer_for_job(job: ReportJob, character,
         # ~7.7x faster on gathering activities). Falls back to full greedy+refine
         # only if exact is infeasible or errors. Never breaks the report.
         _exact_used = False
-        if globals().get('_EXACT_XP_MODE', False) and getattr(job, 'category', None) in ('xp', 'coins'):
+        _exact_cat = getattr(job, 'category', None)
+        _target_rate_cats = ('chests', 'chests_recipes', 'new_items', 'target_items')
+        _tr_target = None
+        if globals().get('_EXACT_XP_MODE', False) and _exact_cat in (('xp', 'coins') + _target_rate_cats):
             _ex_gear = None
             try:
                 _oag = optimize_activity_gearsets
-                if getattr(job, 'category', None) == 'coins':
+                if _exact_cat == 'coins':
                     from util.exact_coins_optimizer import exact_coins_optimize as _exact_fn
-                else:
+                elif _exact_cat == 'xp':
                     from util.exact_activity_xp_optimizer import exact_xp_optimize as _exact_fn
-                _ex_gear = _exact_fn(
-                    activity, character,
-                    skill=getattr(activity, 'primary_skill', None),
-                    location=getattr(_oag, 'SELECTED_LOCATION', None),
-                    pets=getattr(_oag, 'PET_ITEMS', None),
-                    consumables=getattr(_oag, 'CONSUMABLE_ITEMS', None),
-                    input_item=getattr(_oag, 'INPUT_ITEM', None))
+                else:
+                    # chests / chests_recipes / new_items all maximize the same
+                    # objective — the target item(s)'s drop-rate per step — via
+                    # the shared target-rate exact optimizer (a coins subclass
+                    # with unit item weights). Target = the chest name, or the
+                    # builder-picked best-drop item (the SAME target the greedy
+                    # path scores against), so exact and greedy are comparable.
+                    from util.exact_target_rate_optimizer import exact_target_rate_optimize as _exact_fn
+                    if _exact_cat in ('chests', 'chests_recipes'):
+                        _tr_target = getattr(job, 'chest_name', None)
+                    elif _exact_cat == 'target_items':
+                        # Material scopes maximize steps_per_reward_roll::<item>
+                        # (the exact target-rate objective). Currency scopes
+                        # (metric_kind 'per_1k') are a VALUE aggregate (AGT / Sea
+                        # Shells) -> the exact currency-value optimizer. FINDING
+                        # groups (ectoplasm / bird_nest / gold_nugget) are found
+                        # via ItemFindingCategory GEAR, not a native drop-table
+                        # rate exact_target_rate can score (cat:if:X targets
+                        # return a degenerate ~0 rate -> garbage), so they stay on
+                        # greedy. 2026-08-14: prod-vs-testing diff showed exact
+                        # regressed finding badly; gate it out here.
+                        _ti_ex = getattr(job, 'extras', None) or {}
+                        _ti_mk = _ti_ex.get('metric_kind')
+                        _ti_gk = _ti_ex.get('group_kind')
+                        if _ti_gk == 'finding':
+                            # ectoplasm/bird_nest are found via ItemFindingCategory
+                            # GEAR. The cat:if:<CAT> rate = if_stat/(100*base_spr)
+                            # (linear in IFC.<CAT>) -> the exact finding-rate
+                            # optimizer (coins model, C0=0, A_coins=0.01*IFC.<CAT>)
+                            # solves it exactly and fixes the 1e9 garbage
+                            # exact_target_rate produced on cat:if targets. Only
+                            # route cat:if:<CAT> non-fine scopes (target/SORTING/
+                            # display all consistent on cat:if); fine-finding stays
+                            # greedy pending the multiplicative-FMF finding variant.
+                            _tref = _ti_ex.get('target_ref') or ''
+                            if _tref.startswith('cat:if:') and not _ti_ex.get('is_fine'):
+                                _tr_target = _tref
+                                from util.exact_target_rate_optimizer import (
+                                    exact_finding_rate_optimize as _exact_fn)
+                        elif _ti_mk == 'steps_per_item':
+                            _tr_target = _ti_ex.get('target_ref') or None
+                            # FINE variants factorize as base_rate*(1+FMF) — the
+                            # base_find x FMF cross-term the linear A_coins model
+                            # drops (~11% error). Route them to the multiplicative
+                            # ExactFineRateOptimizer (proven 0.00% model error).
+                            if _tr_target and _ti_ex.get('is_fine'):
+                                from util.exact_target_rate_optimizer import (
+                                    exact_fine_rate_optimize as _exact_fn)
+                        elif _ti_mk == 'per_1k':
+                            _tr_target = _ti_ex.get('target_ref') or None
+                            if _tr_target:
+                                from util.exact_target_rate_optimizer import (
+                                    exact_currency_optimize as _exact_fn)
+                    else:
+                        _tr_target = ((getattr(job, 'extras', None) or {}).get('best_drop') or {}).get('item_name')
+                if _exact_cat in _target_rate_cats:
+                    if _tr_target:
+                        # Chests: the optimal gearset is chest-type-independent
+                        # (chest_finding/WE/DA/dr scale every chest equally, so
+                        # argmax is identical for all chests at an activity+
+                        # location). Solve ONCE per (run, activity, location) and
+                        # reuse across the activity's chests; the per-chest metric
+                        # still recomputes downstream from the reused gearset.
+                        _ck = None
+                        _solve_cache = None
+                        if _exact_cat == 'chests' and activity is not None:
+                            _ck = (job.run_id, getattr(activity, 'name', None),
+                                   getattr(_oag, 'SELECTED_LOCATION', None),
+                                   bool(globals().get('_FAST_MODE', False)))
+                            _solve_cache = _CHEST_SOLVE_CACHE
+                        elif _exact_cat == 'target_items' and activity is not None:
+                            # Cache the exact solve per (run, activity, location,
+                            # fast, TARGET ITEM). It MUST be keyed on the specific
+                            # target item (_tr_target), NOT just the find-signature.
+                            # Unlike chests -- whose argmax is chest-type-independent
+                            # because chest_finding/WE/DA/dr scale every chest
+                            # equally -- a target-item RATE optimum depends on that
+                            # item's own base rate (C0) and per-axis find marginals.
+                            # Items sharing a find-signature (e.g. every RANDOM_GEM
+                            # fine gem: Rough topaz / Rough jade / Rough star pearl /
+                            # Rough wrentmarine ...) can have DIFFERENT optimal
+                            # gearsets, because the FMF-vs-gem-find trade-off shifts
+                            # with C0 (verified: topaz+wrentmarine -> Royal troubadour
+                            # capesuit, jade+star pearl -> Conservationist shirt).
+                            # Reusing one gearset across the signature let whichever
+                            # sibling solved first win the cache key -> the fine/base
+                            # rough_topaz @ Antique market assessor regression. The
+                            # find-signature stays in the key (harmless, still
+                            # distinguishes find profiles); _tr_target is the fix.
+                            _ck = (job.run_id, getattr(activity, 'name', None),
+                                   getattr(_oag, 'SELECTED_LOCATION', None),
+                                   bool(globals().get('_FAST_MODE', False)),
+                                   _tr_target,
+                                   _ti_find_signature(job))
+                            _solve_cache = _TI_SOLVE_CACHE
+                        _cached = (_solve_cache.get(_ck)
+                                   if (_ck is not None and _solve_cache is not None) else None)
+                        if _cached is not None:
+                            _ex_gear, _cached_be = _cached
+                            try:
+                                import util.exact_target_rate_optimizer as _exmod0
+                                _exmod0.last_run_budget_exhausted = _cached_be
+                            except Exception:
+                                pass
+                        else:
+                            _ex_gear = _exact_fn(
+                                activity, character, _tr_target,
+                                skill=getattr(activity, 'primary_skill', None),
+                                location=getattr(_oag, 'SELECTED_LOCATION', None),
+                                pets=getattr(_oag, 'PET_ITEMS', None),
+                                consumables=getattr(_oag, 'CONSUMABLE_ITEMS', None),
+                                input_item=getattr(_oag, 'INPUT_ITEM', None))
+                            if _ck is not None and _solve_cache is not None and _ex_gear:
+                                try:
+                                    import util.exact_target_rate_optimizer as _exmod0
+                                    _be = getattr(_exmod0, 'last_run_budget_exhausted', False)
+                                except Exception:
+                                    _be = False
+                                _solve_cache[_ck] = (_ex_gear, _be)
+                    # else: no resolvable target -> leave _ex_gear None -> greedy fallback
+                else:
+                    _ex_gear = _exact_fn(
+                        activity, character,
+                        skill=getattr(activity, 'primary_skill', None),
+                        location=getattr(_oag, 'SELECTED_LOCATION', None),
+                        pets=getattr(_oag, 'PET_ITEMS', None),
+                        consumables=getattr(_oag, 'CONSUMABLE_ITEMS', None),
+                        input_item=getattr(_oag, 'INPUT_ITEM', None))
             except Exception as _exc:
                 import traceback
                 print(f"[EXACT_XP] ERROR {getattr(activity, 'name', '?')}: {_exc}")
                 traceback.print_exc()
             if _ex_gear:
-                if getattr(job, 'category', None) == 'coins':
+                if _exact_cat == 'coins':
                     import util.exact_coins_optimizer as _exmod
-                else:
+                elif _exact_cat == 'xp':
                     import util.exact_activity_xp_optimizer as _exmod
-                if getattr(_exmod, '_USE_DINKELBACH', False) or not getattr(_exmod, 'last_run_budget_exhausted', False):
+                else:
+                    import util.exact_target_rate_optimizer as _exmod
+                # 2026-08-14 (jwbail): ALWAYS run the greedy-comparison valve for
+                # target_items, even when the exact solve is "proven optimal" on
+                # ITS objective. The exact objective (get_expected_drop_rate rate
+                # / currency value) can diverge from the report's DISPLAY metric
+                # for fine variants and currency aggregates, so a proven-optimal
+                # exact gearset was landing WORSE than greedy on the shown metric
+                # (the prod-vs-testing regression). Forcing the valve + scoring
+                # _xps on the true display metric keeps exact ONLY when it beats
+                # greedy on what the user sees. Other categories keep the fast path.
+                # 2026-08-14 (jwbail): force the greedy-comparison valve ONLY for
+                # target_items CURRENCY (AGT/Sea Shells) — its value model is still
+                # a linear approximation (the AGT regression) pending the per-drop
+                # fine extension. MATERIAL scopes (fine now via the exact
+                # multiplicative-FMF optimizer, non-fine via exact_target_rate) are
+                # exact and trust the proven-optimal fast path; they only fall to
+                # the standard budget-cut valve if the B&B exhausts its node budget
+                # (same safety net every exact category uses). Finding stays greedy
+                # (gated above). No forced greedy for material.
+                _ti_force_valve = (_exact_cat == 'target_items'
+                                   and (getattr(job, 'extras', None) or {}).get('metric_kind') == 'per_1k')
+                if (not _ti_force_valve) and (
+                        getattr(_exmod, '_USE_DINKELBACH', False)
+                        or not getattr(_exmod, 'last_run_budget_exhausted', False)):
                     # Proven global optimum -> use it directly.
                     # (Dinkelbach mode: trust the engine result even if a
                     # subproblem hit the node budget, so we can measure the raw
@@ -1438,6 +3033,31 @@ def run_optimizer_for_job(job: ReportJob, character,
                     def _xps(_g):
                         try:
                             _m, _ts = optimize_activity_gearsets.calculate_gearset_metrics(_g, activity, character)
+                            # target_items CURRENCY: score on the value/step the
+                            # report actually shows (units/1k via compute_*_targets),
+                            # NOT the item-rate SPR — otherwise the valve compares
+                            # on the wrong axis and can keep a lower-value gearset
+                            # (the AGT regression the prod diff surfaced).
+                            if (getattr(job, 'category', None) == 'target_items'
+                                    and (getattr(job, 'extras', None) or {}).get('metric_kind') == 'per_1k'
+                                    and _tr_target):
+                                _cloc = getattr(optimize_activity_gearsets, 'SELECTED_LOCATION', None)
+                                _dr = activity.get_expected_drop_rate(
+                                    _ts or {}, location=_cloc, target_item=None, character=character,
+                                    include_collectibles_from_character=False)
+                                if _tr_target == 'cat:sea_shells':
+                                    from util.shell_value import compute_shell_targets_for_activity as _vf, SHELL_TARGET as _tk
+                                else:
+                                    from util.ag_token_value import compute_agt_targets_for_activity as _vf, AGT_TARGET as _tk
+                                _spv = _vf(activity, _dr, stats=_ts or {}).get(_tk)
+                                return (1.0 / _spv) if (_spv and _spv > 0 and _spv != float('inf')) else float('-inf')
+                            if _exact_cat in _target_rate_cats and _tr_target:
+                                # rolls-per-step of the target (higher better);
+                                # mirrors the worker's own steps_per_reward_roll
+                                # metric for this target so exact-incumbent and
+                                # hill-climb are compared on the true objective.
+                                _spr = _m.get(f'steps_per_reward_roll::{_tr_target}')
+                                return (1.0 / _spr) if (_spr and _spr > 0 and _spr != float('inf')) else float('-inf')
                             if getattr(job, 'category', None) == 'coins':
                                 from util.coin_value import compute_coin_targets_for_activity, COIN_TARGET
                                 _dr = activity.get_expected_drop_rate(
@@ -1456,7 +3076,6 @@ def run_optimizer_for_job(job: ReportJob, character,
                         final_gearset = _ex_gear; _exact_used = True; _winner = 'exact_incumbent'
                     else:
                         final_gearset = _refine; _winner = 'hill_climb'
-                    _log_valve_comparison(job, activity, _r_exact, _r_refine, _winner)
             else:
                 initial_gearset = optimize_activity_gearsets.get_greedy_initial_solution(activity, character)
                 if globals().get('_FAST_MODE', False):
@@ -1472,6 +3091,46 @@ def run_optimizer_for_job(job: ReportJob, character,
             else:
                 final_gearset = optimize_activity_gearsets.local_search_refine(
                     initial_gearset, activity, character, optimize_activity_gearsets.MAX_ITERATIONS)
+        # Fill any EMPTY slot with a metric-neutral utility item (never-worse)
+        # via the shared dumb-upgrade pass, so activity categories (xp/coins/
+        # chests/new_items) fill empties like the greedy calculator and the
+        # recipe path. Activities aren't crafting -> include_nmc=False. The pass
+        # rejects any candidate that lowers a stat, so the primary metric can't
+        # regress; it skips pet/consumable slots. (Thread 2026-07-29.)
+        try:
+            from util.dumb_upgrade_pass import apply_dumb_stat_upgrade as _apply_du
+            _du_reqs = getattr(activity, 'requirements', None) or {}
+            _du_req_kw = (set((_du_reqs.get('keyword_counts', {}) or {}).keys())
+                          if isinstance(_du_reqs, dict) else set())
+            _du_req_names = ({n.lower() for n in (_du_reqs.get('item_requirements', []) or [])
+                             if isinstance(n, str)} if isinstance(_du_reqs, dict) else set())
+            final_gearset = _apply_du(
+                final_gearset, character,
+                skill=(getattr(activity, 'primary_skill', '') or 'agility').lower(),
+                location=getattr(optimize_activity_gearsets, 'SELECTED_LOCATION', None),
+                include_nmc=False,
+                required_keywords=_du_req_kw,
+                required_item_names=_du_req_names,
+                # Use the FULL owned pet pool (not optimize_activity_gearsets.
+                # PET_ITEMS, which is skill-filtered): the pet skill filter drops
+                # pets whose only relevant stat is global inventory_space (e.g.
+                # Reindeer on a fishing activity), so the dumb-fill never saw the
+                # better inventory pet and left the optimizer's Camel in place.
+                # The never-worse dominance check keeps this safe. Matches the
+                # recipe path, which already passes the full pool. (2026-07-30)
+                pet_candidates=(list(pet_items_pool) if pet_items_pool else None),
+                # Also UPGRADE an occupied gear/ring slot to a strictly-dominant
+                # inventory/FMF item (e.g. Collection ring over an equal-FC Gold
+                # jade ring). The goals report runs in FAST mode, which skips
+                # local_search_refine (and its own dumb-upgrade that already
+                # opts in), so this worker pass is the ONLY dumb-upgrade that
+                # runs for activity rows -- it must opt in too or the occupied
+                # ring is never upgraded (bug feaa0b46). Safe: the never-worse
+                # check runs first, so the swap is always a strict Pareto win.
+                allow_occupied_tier3_swap=True,
+                verbose=False)
+        except Exception as _du_exc:
+            print(f"[activity-dumb-fill] skipped: {_du_exc!r}", flush=True)
         final_metrics, total_stats = optimize_activity_gearsets.calculate_gearset_metrics(
             final_gearset, activity, character, final=True
         )
@@ -1504,7 +3163,7 @@ def run_optimizer_for_job(job: ReportJob, character,
         # Empty maps make the frontend fall through to the on-demand endpoint
         # (stats-report-page.js _storedRowAlternatives returns null when the
         # stored maps are empty).
-        _slot_alts, _slot_locked = ({}, {})
+        _slot_alts, _slot_locked, _slot_hidden = ({}, {}, {})
     # ── END optimizer critical section ────────────────────────────────
     export_string = encode_gearset(final_gearset)
 
@@ -1539,6 +3198,31 @@ def run_optimizer_for_job(job: ReportJob, character,
     for skill, xp_per_action in secondary_xp_per_action.items():
         if expected_steps > 0:
             xp_per_step_by_skill[skill] = xp_per_action / expected_steps
+    # Termite "Terminate" -> Carpentry XP (informational). On a Woodcutting
+    # activity, if the character OWNS a level>=4 Termite, the ability converts a
+    # 15% share of found logs into Carpentry XP (= material effort * 0.5). Surface
+    # it as a Carpentry secondary stream so the goals report shows it on every
+    # log-cutting activity. Ownership-keyed (not equipped-pet-keyed) to match the
+    # product intent and the owned_pets staleness fingerprint. The XP is a fixed
+    # effort*modifier and is intentionally NOT bonus-XP scaled; the drop yields it
+    # is derived from already reflect the optimized gearset's find/double bonuses.
+    _termite_carpentry = None
+    try:
+        from ui.pet_effort import compute_report_termite_carpentry
+        _termite_carpentry = compute_report_termite_carpentry(
+            activity, total_stats,
+            getattr(optimize_activity_gearsets, 'SELECTED_LOCATION', None),
+            character)
+    except Exception:
+        _termite_carpentry = None
+    if _termite_carpentry and _termite_carpentry.get('per_step'):
+        _carp = _termite_carpentry['skill'].capitalize()  # 'Carpentry'
+        xp_per_step_by_skill[_carp] = (
+            xp_per_step_by_skill.get(_carp, 0.0) + _termite_carpentry['per_step'])
+        _cpa = _termite_carpentry.get('per_action')
+        if _cpa:
+            secondary_xp_per_action[_carp] = (
+                secondary_xp_per_action.get(_carp, 0.0) + _cpa)
     total_xp_per_step = sum(xp_per_step_by_skill.values())
 
     metrics_breakdown = {
@@ -1558,6 +3242,9 @@ def run_optimizer_for_job(job: ReportJob, character,
         # Sum of every skill's XP/step on this activity. Frontend shows
         # this as 'Total: 1.354 XP/step' next to the section-skill value.
         'total_xp_per_step': total_xp_per_step,
+        # Informational Termite Terminate -> Carpentry stream (or None). Present
+        # so the frontend can label the Carpentry row as a pet-derived stream.
+        'termite_carpentry': _termite_carpentry,
         'bonus_xp_percent': bonus_xp_pct,
         'bonus_xp_add': bonus_xp_add,
     }
@@ -1575,6 +3262,11 @@ def run_optimizer_for_job(job: ReportJob, character,
         # Prefer the per-skill XP/step for the section's skill.
         if section_skill and section_skill in xp_per_step_by_skill:
             metric_value = xp_per_step_by_skill[section_skill]
+        elif section_skill and section_skill.lower() == 'carpentry':
+            # Termite-injected Carpentry section but no Carpentry XP was computed
+            # for this gearset (e.g. the ability didn't apply / no logs yield) ->
+            # 0, never the activity's PRIMARY (Woodcutting) XP.
+            metric_value = 0.0
         else:
             metric_value = primary_xp_per_step
         metric_name = 'XP/step'
@@ -1590,6 +3282,29 @@ def run_optimizer_for_job(job: ReportJob, character,
         else:
             metric_value = 0.0
         metric_name = 'Coins/1k steps'
+    elif job.category == 'target_items':
+        # 2026-08-12 (jwbail): gear-aware metric from final_metrics (matches the
+        # column-3 drops table once the optimized gearset is equipped). The
+        # optimizer scored with TARGET_ITEM=extras['target_ref'] (the item name,
+        # or cat:sea_shells / cat:if:adventurers_guild_tokens for currency), so
+        # final_metrics carries steps_per_reward_roll::<target_ref>.
+        _tr = (job.extras or {}).get('target_ref') or job.precomputed_metric_name or ''
+        _spr = final_metrics.get(f'steps_per_reward_roll::{_tr}')
+        _is_currency = bool(job.extras and (job.extras.get('metric_kind') == 'per_1k'
+                                            or job.extras.get('group_kind') == 'currency'))
+        if _is_currency:
+            # value-weighted units per 1000 steps (higher = better). cat:sea_shells
+            # / cat:if:adventurers_guild_tokens already fold in the fine ×10 sell
+            # multiplier via util/shell_value.py / util/ag_token_value.py.
+            if _spr and _spr > 0 and _spr != float('inf'):
+                metric_value = 1000.0 / _spr
+            else:
+                metric_value = job.precomputed_metric or 0.0
+            metric_name = '/1k steps'
+        else:
+            metric_value = (_spr if (_spr is not None and _spr > 0 and _spr != float('inf'))
+                            else job.precomputed_metric)
+            metric_name = 'Steps/item'
     elif job.category in ('chests', 'chests_recipes'):
         # 2026-05-21: read the chest-specific composite key. The
         # bare 'steps_per_reward_roll' is the activity's first
@@ -1670,7 +3385,36 @@ def run_optimizer_for_job(job: ReportJob, character,
         best_drop_name = best_drop_meta.get('item_name') or ''
         composite_key = f'steps_per_reward_roll::{best_drop_name}'
         metric_value = final_metrics.get(composite_key)
-        if metric_value is None or not (metric_value > 0) or metric_value == float('inf'):
+        gear_best = metric_value if (metric_value is not None and metric_value > 0
+                                     and metric_value != float('inf')) else None
+        combined_meta = (job.extras or {}).get('combined') or {}
+        # 2026-07-19 (bug 276fbd0a + follow-up): the composite key is the
+        # gear-aware value for the single fastest drop. Convert to COMBINED
+        # "any new <kind>" odds, and build the gear-aware per-item breakdown
+        # for the expandable list. Both use gear_scale = gear_best/best_steps
+        # (no-gear); steps_per_reward and the uniform find_collectibles
+        # multiplier cancel, so the scale is a single per-activity factor.
+        if combined_meta and combined_meta.get('best_steps'):
+            base_best = combined_meta['best_steps']  # no-gear steps to fastest
+            gear_scale = (gear_best / base_best) if (gear_best and base_best) else 1.0
+            combined_nogear = combined_meta.get('combined_steps') or job.precomputed_metric or 0.0
+            metric_value = combined_nogear * gear_scale
+            scaled_items = [
+                {'item_name': it.get('item_name'),
+                 'item_ref': it.get('item_ref'),
+                 'steps': (it.get('steps') or 0.0) * gear_scale}
+                for it in combined_meta.get('items', [])
+            ]
+            metrics_breakdown['new_items_combined'] = {
+                'kind': combined_meta.get('kind'),
+                'count': combined_meta.get('count', len(scaled_items)),
+                'items': scaled_items,
+            }
+        elif gear_best is not None:
+            metric_value = gear_best
+        else:
+            # No usable gear-aware value and no combined meta — fall back to
+            # the builder's no-gear precomputed_metric.
             metric_value = job.precomputed_metric
         metric_name = best_drop_name or (job.precomputed_metric_name or 'Steps/item')
     else:
@@ -1718,6 +3462,17 @@ def run_optimizer_for_job(job: ReportJob, character,
         # for dolphin egg without indicating the hunting net dependency.
         metrics_breakdown['missing_input'] = _missing_input
 
+    # Include-unavailable reasons: merge the per-dimension unmet markers the
+    # job builder attached (missing_level / missing_location / missing_gear
+    # (+gear_gated) / missing_tool / missing_other) into metrics_breakdown so
+    # the frontend can render the warning badges and partition gear_gated rows
+    # into the bottom "Possible with more gear" section. gear_gated lands as a
+    # top-level key by design.
+    _unmet = (job.extras or {}).get('unmet') if isinstance(getattr(job, 'extras', None), dict) else None
+    if isinstance(_unmet, dict):
+        for _k, _v in _unmet.items():
+            metrics_breakdown[_k] = _v
+
     # 2026-06-05 (jwbail): stash the worker-computed slot alternatives so
     # the frontend can render them directly (correct-axis, no on-demand
     # re-scoring). Keys mirror the column-2 _alternatives convention.
@@ -1725,6 +3480,8 @@ def run_optimizer_for_job(job: ReportJob, character,
         metrics_breakdown['_slot_alternatives'] = _slot_alts
     if _slot_locked:
         metrics_breakdown['_slot_locked_alternatives'] = _slot_locked
+    if _slot_hidden:
+        metrics_breakdown['_slot_hidden_alternatives'] = _slot_hidden
 
     return {
         'metric_value': metric_value,
@@ -1787,6 +3544,444 @@ def _resolve_services_for_recipe(recipe, character):
     return matches
 
 
+class _RecipeExactAdapter:
+    """Presents a crafting recipe as an 'activity' so the exact target-rate
+    optimizer can maximize chest-drops-per-craft-step. The exact greedy metric
+    is steps_per_chest = expected_steps_per_item / (0.004 * (1 + chest_finding))
+    (base_chest_rate=0.004 flat; DR already baked into expected_steps_per_item,
+    so it appears exactly once). Reuses calculate_crafting_metrics so the exact
+    numbers match the greedy displayed value by construction (validated). Service
+    buffs are injected via the optimizer's base_stats; gear is scoped at the
+    service's location (passed as `location`)."""
+    _BASE_CHEST_RATE = 0.004
+
+    def __init__(self, recipe, chest_name, skill, location):
+        self.recipe = recipe
+        self.chest_name = chest_name
+        self.name = getattr(recipe, 'name', 'recipe')
+        self.primary_skill = skill
+        self.base_xp = float(getattr(recipe, 'base_xp', 0.0) or 0.0)
+        self.base_steps = int(getattr(recipe, 'base_steps', 1) or 1)
+        self.max_efficiency = float(getattr(recipe, 'max_efficiency', 0.0) or 0.0)
+        self.skill_requirements = {}
+        self.requirements = getattr(recipe, 'requirements', {}) or {}
+        self.input_items = getattr(recipe, 'input_items', []) or []
+        self.locations = [location] if location is not None else []
+        # Crafting step floor is 10 — the SAME as activities (game rule: no
+        # action costs fewer than 10 steps). Tells the exact engine to use
+        # max(ceil(...), 10), matching calculate_crafting_metrics so the linear
+        # proxy the engine optimizes stays consistent with the real crafting
+        # metric (bug c61d7623: was 1, which over-credited step-reduction gear).
+        self.step_floor = 10
+
+    def get_expected_drop_rate(self, stats, location=None, target_item=None,
+                               verbose=False, character=None, consumable=None,
+                               input_item=None, include_collectibles_from_character=True):
+        from util.activity_metrics import calculate_crafting_metrics
+        try:
+            m = calculate_crafting_metrics(
+                base_steps=self.base_steps, base_xp=self.base_xp,
+                max_efficiency=self.max_efficiency, total_stats=dict(stats or {}))
+            espi = m.get('expected_steps_per_item') or self.base_steps
+        except Exception:
+            espi = self.base_steps
+        cf = (stats or {}).get('chest_finding', 0.0)
+        denom = self._BASE_CHEST_RATE * (1.0 + cf)
+        spc = (espi / denom) if denom > 0 else float('inf')
+        return {self.chest_name: spc}
+
+
+def _exact_recipe_chest_solve(recipe, service, character, chest_name, location):
+    """Exact gearset for a (recipe, service/location) chest solve. Returns a
+    {slot: Item} gearset or None to fall back to greedy."""
+    from util.exact_target_rate_optimizer import exact_target_rate_optimize as _EX
+    import optimize_craft_gearsets as _ocg
+    skill = _ocg._stat_scope_skill(recipe)
+    base_stats = {}
+    if service is not None:
+        try:
+            base_stats = dict(service.get_stats_for_skill(
+                skill=skill, location=location, character=character))
+        except Exception:
+            base_stats = {}
+    adapter = _RecipeExactAdapter(recipe, chest_name, skill, location)
+    # Feed the engine the CRAFTING innate work-efficiency (skill-level bonus +
+    # collectibles), which differs from the engine's default ACTIVITY level-WE
+    # rule. Matches calculate_craft_metrics' aggregate_gearset_stats(items=[])
+    # work_efficiency; service WE stays in base_stats (added as gear-side stats),
+    # so this covers only the non-gear, non-service innate. Without this the
+    # engine over-credits innate WE and picks DA-heavy gearsets the real metric
+    # rates worse (Carpentry L62: engine 0.25 vs real 0.125). (Thread 2026-07-27.)
+    try:
+        from util.gearset_utils import aggregate_gearset_stats as _ags
+        _innate = _ags(items=[], skill=skill, location=location, character=character,
+                       include_level_bonus=True, include_collectibles=True,
+                       activity_level=getattr(recipe, 'level', None))
+        adapter.we_level_override = float((_innate or {}).get('work_efficiency', 0.0) or 0.0)
+    except Exception:
+        adapter.we_level_override = None
+    # Feed the SERVICE's keyword requirements (e.g. underwater loom needs
+    # {'diving gear': 3}) into the exact engine as hard constraints. The recipe's
+    # own `requirements` do NOT include the service's, so without this the engine
+    # can drop the required gear (e.g. the diving set) for higher-stat gear and
+    # return an INVALID gearset that can't be crafted at that service (bug:
+    # Tailor a kelp diving mask @ underwater loom returned proper-gear, 0 diving).
+    try:
+        _svc_kc = (getattr(service, 'requirements', None) or {}).get('keyword_counts', {}) or {}
+        if _svc_kc:
+            _merged = dict(adapter.requirements or {})
+            _kc = dict(_merged.get('keyword_counts', {}) or {})
+            for _k, _v in _svc_kc.items():
+                _kc[str(_k)] = max(int(_kc.get(str(_k), 0) or 0), int(_v or 0))
+            _merged['keyword_counts'] = _kc
+            adapter.requirements = _merged
+    except Exception:
+        pass
+    # Pets / consumables: run_recipe_optimizer_for_job stashed the (skill-
+    # filtered) pools on optimize_craft_gearsets before the solve loop. Pass
+    # them into the exact optimizer so recipe chest gearsets can include a pet /
+    # consumable -- they were silently ignored before (not applied AND not shown
+    # on the row). None keeps the gear-only behavior.
+    _pets = list(getattr(_ocg, 'PET_ITEMS', None) or []) if getattr(_ocg, 'INCLUDE_PETS', False) else None
+    _cons = list(getattr(_ocg, 'CONSUMABLE_ITEMS', None) or []) if getattr(_ocg, 'INCLUDE_CONSUMABLES', False) else None
+    # Reuse the tool/gear/ring frontiers across recipes sharing this (character,
+    # skill, location, reqs, pools) — the frontiers are pool-only, so building
+    # them once per skill+location and reusing them for every recipe of that
+    # skill is the ~4-5x win for tool-heavy skills (Trinketry/Cooking/Smithing).
+    # Run-scoped (cleared per run) so character identity never collides.
+    return _EX(adapter, character, chest_name, skill=skill, location=location,
+               base_stats=base_stats or None, pets=_pets, consumables=_cons,
+               frontier_cache=_RECIPE_FRONTIER_CACHE)
+
+
+def _recipe_solve(recipe, service, character, chest_name):
+    """Exact-first recipe-chest solve, falling back to greedy optimize_for_service.
+    Returns (gearset, metrics, iters) in the SAME shape as optimize_for_service,
+    so all downstream service/location grouping + metrics_json are unchanged.
+    Gated on the exact-optimizer FAC (_EXACT_XP_MODE); the greedy path is the
+    exact fallback and the non-FAC default."""
+    import optimize_craft_gearsets as _ocg
+    _loc = service.location if service else getattr(_ocg, 'SELECTED_LOCATION', None)
+
+    def _spc(_metrics):
+        """Real displayed steps/chest for this recipe/chest target (lower is
+        better). Reads the composite target key the UI displays, falling back to
+        the bare key. Missing/zero -> +inf so it never wins a comparison."""
+        if not _metrics:
+            return float('inf')
+        v = _metrics.get('steps_per_chest_recipe::cat:chests')
+        if v is None or not (v > 0):
+            v = _metrics.get('steps_per_chest_recipe')
+        return v if (v and v > 0) else float('inf')
+
+    if globals().get('_EXACT_XP_MODE', False) and chest_name:
+        try:
+            _gear = _exact_recipe_chest_solve(recipe, service, character, chest_name, _loc)
+            if _gear:
+                # The exact engine (with W-cap fix and step_floor) returns a
+                # near-optimal gearset. Run a COMPLETE real-metric local search
+                # over ALL slots to convergence, using calculate_craft_metrics as
+                # the objective. This guarantees the returned gearset is a local
+                # optimum of the real metric — it can only improve, never regress.
+                _gear = _refine_recipe_gearset(_gear, recipe, service, character)
+                _m, _ = _ocg.calculate_craft_metrics(
+                    _gear, recipe, service, character, 'Normal', 1)
+                return _gear, _m, 0
+        except Exception as _e:
+            print(f"[recipe-exact] {getattr(recipe, 'name', '?')} exact failed, "
+                  f"greedy fallback: {type(_e).__name__}: {_e}", flush=True)
+    return _ocg.optimize_for_service(recipe, service, character)
+
+
+
+def _refine_recipe_gearset(gearset, recipe, service, character):
+    """Complete real-metric local search over ALL gear+tool slots, seeded from
+    the exact engine output. Uses calculate_craft_metrics as the objective with
+    FULL validation (keyword uniqueness, uuid uniqueness, service/diving-gear
+    requirements). Converges to a local optimum of the real metric — can only
+    improve, never regress. Replaces the old _refine_recipe_tools tool-only
+    hill-climb. (Thread 2026-07-27.)"""
+    import optimize_craft_gearsets as _ocg
+    from util.optimization_utils import filter_items_by_quality, validate_tool_keywords
+    from util.walkscape_constants import EXCLUDED_TOOL_KEYWORDS
+
+    # Identify all mutable slots
+    tool_slots = sorted([s for s in gearset if isinstance(s, str) and s.startswith('tool')])
+    gear_slots = [s for s in ['head', 'cape', 'back', 'chest', 'hands', 'legs',
+                              'feet', 'neck', 'ring1', 'ring2', 'pet', 'consumable']
+                  if s in gearset]
+    all_slots = gear_slots + tool_slots
+
+    # Build candidate pools per slot type
+    cand_by_slot = {}
+    for it, qty in character.items.items():
+        if not qty or not hasattr(it, 'get_stats_for_skill') or not hasattr(it, 'slot'):
+            continue
+        slot = getattr(it, 'slot', None)
+        if slot is None:
+            continue
+        if hasattr(it, 'is_unlocked'):
+            try:
+                if not it.is_unlocked(character, ignore_gear_requirements=True):
+                    continue
+            except Exception:
+                pass
+        if slot == 'ring':
+            cand_by_slot.setdefault('ring1', []).append(it)
+            cand_by_slot.setdefault('ring2', []).append(it)
+        elif slot == 'tools':
+            for ts in tool_slots:
+                cand_by_slot.setdefault(ts, []).append(it)
+        else:
+            cand_by_slot.setdefault(slot, []).append(it)
+
+    # Quality-filter: keep best quality per base item
+    for sl in list(cand_by_slot.keys()):
+        try:
+            cand_by_slot[sl] = filter_items_by_quality(cand_by_slot[sl], keep_highest_only=True)
+        except Exception:
+            pass
+
+    def _spc(gd):
+        m, _ = _ocg.calculate_craft_metrics(gd, recipe, service, character, 'Normal', 1)
+        v = m.get('steps_per_chest_recipe::cat:chests')
+        if v is None or not (v > 0):
+            v = m.get('steps_per_chest_recipe')
+        return v if (v and v > 0) else float('inf')
+
+    def _tool_id(it):
+        if it is None:
+            return None
+        base = getattr(it, 'uuid', None) or getattr(it, 'name', None) or id(it)
+        return (base, getattr(it, 'name', None))
+
+    def _item_id(it):
+        if it is None:
+            return None
+        base = getattr(it, 'uuid', None) or getattr(it, 'name', None) or id(it)
+        return (base, getattr(it, 'name', None))
+
+    # Service/diving-gear validation: some services require specific gear
+    # Service keyword requirements (e.g. underwater loom -> {'diving gear': 3}).
+    # The refinement MUST keep these satisfied, or the best-improvement search
+    # can swap the required gear (e.g. the diving set) out for higher-stat gear
+    # and return an INVALID gearset. Stored as {keyword_lower: min_count}.
+    _svc_kw_reqs = {}
+    if service is not None:
+        _reqs = getattr(service, 'requirements', None) or {}
+        for _kw, _cnt in (_reqs.get('keyword_counts', {}) or {}).items():
+            try:
+                _c = int(_cnt or 0)
+                if _c > 0:
+                    _svc_kw_reqs[str(_kw).lower()] = _c
+            except Exception:
+                pass
+
+    def _is_valid(gd):
+        # Tool keyword uniqueness
+        tools = [gd.get(s) for s in tool_slots]
+        if not validate_tool_keywords(tools, EXCLUDED_TOOL_KEYWORDS):
+            return False
+        # UUID uniqueness for non-ring slots (tools can't duplicate)
+        seen_tools = set()
+        for s in tool_slots:
+            it = gd.get(s)
+            if it is not None:
+                tid = _tool_id(it)
+                if tid in seen_tools:
+                    return False
+                seen_tools.add(tid)
+        # Ring uuid check: same ring can't exceed owned qty
+        r1 = gd.get('ring1')
+        r2 = gd.get('ring2')
+        if r1 is not None and r2 is not None:
+            if _item_id(r1) == _item_id(r2):
+                # Check owned qty >= 2
+                qty = 0
+                for it, q in character.items.items():
+                    if _item_id(it) == _item_id(r1):
+                        qty = q
+                        break
+                if qty < 2:
+                    return False
+        # Enforce service keyword requirements (e.g. 3x diving gear at an
+        # underwater loom). Count equipped items providing each required
+        # keyword; reject if under. Consistent with the exact engine's reqs
+        # constraint, so a valid engine seed passes and the search stays valid.
+        if _svc_kw_reqs:
+            for _rk, _rc in _svc_kw_reqs.items():
+                _have = 0
+                for _it in gd.values():
+                    if _it is not None and hasattr(_it, 'keywords'):
+                        if any(_rk == str(_x).lower() for _x in (_it.keywords or [])):
+                            _have += 1
+                if _have < _rc:
+                    return False
+        return True
+
+    cur = dict(gearset)
+    cur_spc = _spc(cur)
+
+    # BEST-IMPROVEMENT hill-climb: each pass, evaluate every candidate swap
+    # across ALL slots with the real metric and apply only the SINGLE globally
+    # best one, then repeat. This escapes the order-dependent trap of a
+    # first-improvement-per-slot climb: from the engine seed (e.g. Upcycle trash
+    # circlet+pocketwatch) a per-slot climb greedily swaps the head first, which
+    # then makes the pocketwatch->screwdriver swap look worse and stalls at a
+    # suboptimal gearset; best-improvement takes the larger pocketwatch->
+    # screwdriver swap first and lands in the correct basin (1908->1737 vs the
+    # per-slot climb's 1809). Only one swap per pass, so allow more passes.
+    # (Thread 2026-07-27.)
+    for _pass in range(60):
+        best_spc = cur_spc
+        best_slot = None
+        best_item = None  # an Item, or 'EMPTY' sentinel
+        for slot in all_slots:
+            for cand in cand_by_slot.get(slot, []):
+                if cur.get(slot) is cand:
+                    continue
+                test = dict(cur)
+                test[slot] = cand
+                if not _is_valid(test):
+                    continue
+                sp = _spc(test)
+                if sp < best_spc - 1e-9:
+                    best_spc = sp
+                    best_slot = slot
+                    best_item = cand
+            # Also try emptying the slot
+            if cur.get(slot) is not None:
+                test = dict(cur)
+                test[slot] = None
+                if _is_valid(test):
+                    sp = _spc(test)
+                    if sp < best_spc - 1e-9:
+                        best_spc = sp
+                        best_slot = slot
+                        best_item = 'EMPTY'
+        if best_slot is None:
+            break  # converged: no single swap improves the real metric
+        cur[best_slot] = None if best_item == 'EMPTY' else best_item
+        cur_spc = best_spc
+
+    # Fill any slot the refinement left EMPTY with a metric-neutral utility
+    # item (inventory space, keyword/find bonuses, etc.) via the shared
+    # dumb-upgrade pass. It rejects any candidate that lowers a stat
+    # (sign-aware), so it is never-worse on the real metric by construction,
+    # and it skips the pet/consumable slots. The exact+refine path otherwise
+    # leaves empties the greedy calculator would have filled. (Thread 2026-07-29.)
+    try:
+        from util.dumb_upgrade_pass import apply_dumb_stat_upgrade
+        import optimize_craft_gearsets as _ocg_du
+        _du_loc = (getattr(service, 'location', None) if service is not None
+                   else getattr(_ocg_du, 'SELECTED_LOCATION', None))
+        _du_req_kw = set()
+        _du_req_names = set()
+        if service is not None and hasattr(service, 'requirements'):
+            _svc_req = getattr(service, 'requirements', None) or {}
+            _du_req_kw = set((_svc_req.get('keyword_counts', {}) or {}).keys())
+            _du_req_names = {n.lower() for n in (_svc_req.get('item_requirements', []) or [])
+                             if isinstance(n, str)}
+        cur = apply_dumb_stat_upgrade(
+            cur, character,
+            skill=_ocg_du._stat_scope_skill(recipe),
+            location=_du_loc,
+            include_nmc=True,
+            required_keywords=_du_req_kw,
+            required_item_names=_du_req_names,
+            pet_candidates=(list(getattr(_ocg_du, 'PET_ITEMS', None) or [])
+                            if getattr(_ocg_du, 'INCLUDE_PETS', False) else None),
+            allow_occupied_tier3_swap=True,
+            verbose=False)
+    except Exception as _du_exc:
+        print(f"[recipe-dumb-fill] skipped: {_du_exc!r}", flush=True)
+    return cur
+
+
+# Region display names + icons for SERVICE-LESS recipes (craftable in any
+# accessible region). Mirrors ui/app.py REGION_CONFIG; replicated here because
+# the browser (Pyodide) worker cannot import ui.app. If regions change, update
+# both (small, static config).
+_RECIPE_REGION_CONFIG = {
+    'gdte': {'name': 'Grand Duchy of Trellin-Erdwise', 'icon': '/assets/icons/regions/gdte.svg'},
+    'jarvonia': {'name': 'Jarvonia', 'icon': '/assets/icons/regions/jarvonia.svg'},
+    'syrenthia': {'name': 'Syrenthia', 'icon': '/assets/icons/regions/syrenthia.svg'},
+    'wallisia': {'name': 'Wallisia', 'icon': '/assets/icons/regions/wallisia.svg'},
+    'wrentmark': {'name': 'Wrentmark', 'icon': '/assets/icons/regions/wrentmark.svg'},
+}
+
+
+def _recipe_region_of(loc):
+    """First accessible (unlocked) region tag of a location, for service-less
+    recipe region display. Falls back to the first listed region."""
+    if loc is None:
+        return None
+    regs = getattr(loc, 'regions', None) or []
+    ur = globals().get('_UNLOCKED_REGIONS')
+    for r in regs:
+        if not ur or str(r).lower() in {str(x).lower() for x in ur}:
+            return str(r).lower()
+    return str(regs[0]).lower() if regs else None
+
+
+def _recipe_region_display(region_tag):
+    cfg = _RECIPE_REGION_CONFIG.get((region_tag or '').lower())
+    return cfg['name'] if cfg else (region_tag or '').replace('_', ' ').title()
+
+
+def _recipe_region_icon(region_tag):
+    cfg = _RECIPE_REGION_CONFIG.get((region_tag or '').lower())
+    return cfg['icon'] if cfg else None
+
+
+def _recipe_service_stats_payload(svc):
+    """Full nested service stats + gated stats for the row's service (i) popover.
+
+    Matches the /api/services payload shape the column-3 service popover
+    consumes ({stats:{skill:{loc:{stat:val}}}, gated_stats:{reputation,
+    skill_level}}), so the stats-report (i) renders identically via the shared
+    service-stats-popover.js module. Previously the row only carried an intrinsic
+    *diff* (service_extras / alt 'extras'), which is why the (i) showed partial,
+    mis-formatted stats. Returns None when the service has no stats to show.
+    """
+    if svc is None:
+        return None
+    try:
+        _st = getattr(svc, '_stats', None)
+        if _st is None:
+            _st = getattr(svc, 'stats', None) or {}
+        _gt = getattr(svc, 'gated_stats', None) or {}
+        if not _st and not _gt:
+            return None
+        return {'stats': _st, 'gated_stats': _gt}
+    except Exception:
+        return None
+
+
+def _alt_service_icon(svc):
+    """Service icon path for a recipe service alt (e.g. Tidal Workshop), so the
+    alt row renders the service icon like the primary row rather than a location
+    icon derived from the location name. Returns '' on any failure."""
+    if svc is None:
+        return ''
+    try:
+        from ui.crafting_tree import _get_service_icon_path
+        return _get_service_icon_path(svc) or ''
+    except Exception:
+        return ''
+
+
+def _recipe_service_loc_id(svc):
+    """Location id (lowercased tag) of a service, for popover condition
+    suppression (matches the location keys inside the service stat blocks)."""
+    if svc is None:
+        return ''
+    _l = getattr(svc, 'location', None)
+    if isinstance(_l, str):
+        return _l.lower()
+    return (getattr(_l, 'id', '') or '').lower()
+
+
 def run_recipe_optimizer_for_job(job: ReportJob, character,
                                   pet_items_pool=None, consumable_items_pool=None,
                                   hidden_items=None):
@@ -1813,16 +4008,7 @@ def run_recipe_optimizer_for_job(job: ReportJob, character,
     # 2026-05-25 (jwbail): re-apply character's thread-local globals — see
     # detailed note in run_optimizer_for_job. Same ThreadPoolExecutor +
     # threading.local() interaction affects recipe jobs too.
-    import util.walkscape_globals as _wg
-    _ap = getattr(character, 'achievement_points', None)
-    if _ap is not None:
-        _wg.set_achievement_points(_ap)
-    _tsl = getattr(character, '_total_skill_level', None)
-    if _tsl is not None:
-        _wg.set_total_skill_level(_tsl)
-    _cs = getattr(character, 'custom_stats', None)
-    if _cs is not None:
-        _wg.set_custom_stats(_cs)
+    _reapply_character_thread_local_globals(character)
 
     recipe_name = job.recipe_name or (getattr(job.activity, 'name', None) if job.activity else None)
     if not recipe_name:
@@ -1850,11 +4036,19 @@ def run_recipe_optimizer_for_job(job: ReportJob, character,
     # branching below either uses this directly (single candidate) or
     # iterates over ALL candidates to find the lowest-score one.
     service = service_candidates[0] if service_candidates else None
+    # Retain every candidate service's optimized result so we can, after
+    # picking the best, group the services that yield the IDENTICAL optimal
+    # gearset (the "Alternative Service Locations" naming) and flag any whose
+    # only difference is an objective-irrelevant stat (e.g. +XP) with an (i).
+    # Populated only in the multi-candidate branch below.
+    _cand_records = []
+    _loc_records = None  # service-less: per-region [(loc, gearset, score)] for grouping
 
     pet_pool = list(pet_items_pool or [])
     consumable_pool = list(consumable_items_pool or [])
-    # Drop hidden consumables (pets are already filtered at pool build).
-    if hidden_items:
+    # Drop hidden consumables (pets are already filtered at pool build) unless
+    # the user enabled "Use hidden consumables".
+    if hidden_items and not globals().get('_USE_HIDDEN_CONSUMABLES', False):
         consumable_pool = [c for c in consumable_pool if c not in hidden_items]
     # Same lock the activity optimizer uses — both modules expose their
     # config as module globals, so the SAME thread-safety invariant
@@ -1873,7 +4067,7 @@ def run_recipe_optimizer_for_job(job: ReportJob, character,
         optimize_craft_gearsets.TARGET_QUALITY = 'Normal'
         optimize_craft_gearsets.TARGET_QUALITY_QUANTITY = 1
         optimize_craft_gearsets.VERBOSE = False
-        optimize_craft_gearsets.IGNORED_ITEMS = set(hidden_items) if hidden_items else set()
+        optimize_craft_gearsets.IGNORED_ITEMS = _sr_effective_ignored(hidden_items)
         optimize_craft_gearsets.INCLUDE_CONSUMABLES = bool(consumable_pool)
         optimize_craft_gearsets.CONSUMABLE_ITEMS = consumable_pool
         optimize_craft_gearsets.INCLUDE_PETS = bool(pet_pool)
@@ -1913,14 +4107,47 @@ def run_recipe_optimizer_for_job(job: ReportJob, character,
                 best_gearset = None
                 best_metrics = None
                 best_service = None
+                # Dedup service candidates by SOLVE IDENTITY before solving.
+                # Many candidates are the SAME service at different locations
+                # (e.g. Kitchen at ~13 locations) that scope gear identically
+                # (same region set) AND fold identical service base stats, so
+                # they produce a bit-identical exact solve. Solving each was the
+                # dominant recipe cost (profiled: Fry a carp = 13 solves but only
+                # 3 distinct frontiers -> 18s). Group by (region-scope,
+                # base_stats) and solve ONE representative per group; members
+                # reuse its (gearset, score). The downstream (metric, gearset)
+                # alt-location grouping then merges members into one "A or B or C"
+                # entry exactly as before. Exact: identical (region-scope,
+                # base_stats) => identical frontier => identical gearset + score.
+                # Mirrors the activity multi-location _by_profile dedup.
+                _skill_k = optimize_craft_gearsets._stat_scope_skill(recipe)
+                _svc_groups = {}
+                _svc_group_order = []
                 for cand_svc in service_candidates:
+                    _cloc = getattr(cand_svc, 'location', None)
+                    if isinstance(_cloc, str):
+                        _regk = frozenset([_cloc.lower()])
+                    else:
+                        _regk = frozenset(str(r).lower() for r in (getattr(_cloc, 'regions', None) or []))
                     try:
-                        cg, cm, _ = optimize_craft_gearsets.optimize_for_service(
-                            recipe, cand_svc, character,
-                        )
+                        _bs = cand_svc.get_stats_for_skill(skill=_skill_k, location=_cloc, character=character)
+                        _bsk = tuple(sorted((str(k), round(float(v), 6)) for k, v in (_bs or {}).items()))
+                        _key = (_regk, _bsk)
+                    except Exception:
+                        # Can't prove identity -> unique key so it's solved on its own.
+                        _key = (_regk, None, id(cand_svc))
+                    if _key not in _svc_groups:
+                        _svc_groups[_key] = []
+                        _svc_group_order.append(_key)
+                    _svc_groups[_key].append(cand_svc)
+                for _key in _svc_group_order:
+                    _members = _svc_groups[_key]
+                    _rep = _members[0]
+                    try:
+                        cg, cm, _ = _recipe_solve(recipe, _rep, character, job.chest_name)
                     except Exception as _cand_e:
                         print(f'[stats_report_worker] recipe candidate failed {recipe_name} '
-                              f'svc={getattr(cand_svc, "name", cand_svc)!r}: '
+                              f'svc={getattr(_rep, "name", _rep)!r}: '
                               f'{type(_cand_e).__name__}: {_cand_e}', flush=True)
                         continue
                     cand_score = cm.get('steps_per_chest_recipe::cat:chests')
@@ -1928,11 +4155,15 @@ def run_recipe_optimizer_for_job(job: ReportJob, character,
                         cand_score = cm.get('steps_per_chest_recipe', float('inf'))
                     if cand_score is None or cand_score == 0:
                         cand_score = float('inf')
-                    if best_score is None or cand_score < best_score:
-                        best_score = cand_score
-                        best_gearset = cg
-                        best_metrics = cm
-                        best_service = cand_svc
+                    # Every member shares this identical solve — record all so the
+                    # alt-location grouping surfaces each location.
+                    for _msvc in _members:
+                        _cand_records.append((_msvc, cg, cand_score))
+                        if best_score is None or cand_score < best_score:
+                            best_score = cand_score
+                            best_gearset = cg
+                            best_metrics = cm
+                            best_service = _msvc
                 if best_gearset is None:
                     raise RuntimeError(
                         f'no service candidate produced a result for {recipe_name}'
@@ -1942,9 +4173,7 @@ def run_recipe_optimizer_for_job(job: ReportJob, character,
                 service = best_service  # so service_icon/location pick this one
                 chosen_loc_obj = None  # service supplies its own location
             elif service is not None:
-                gearset, metrics, _iter = optimize_craft_gearsets.optimize_for_service(
-                    recipe, service, character,
-                )
+                gearset, metrics, _iter = _recipe_solve(recipe, service, character, job.chest_name)
                 chosen_loc_obj = None  # service supplies its own location
             else:
                 # 2026-06-02 (jwbail): serviceless recipes don't have a
@@ -1970,8 +4199,16 @@ def run_recipe_optimizer_for_job(job: ReportJob, character,
                     loc = getattr(Location, attr_name)
                     if not isinstance(loc, LocationInfo):
                         continue
-                    if getattr(loc, 'is_underwater', False):
-                        continue
+                    # NOTE: do NOT blanket-skip underwater locations. Every
+                    # Syrenthia crafting spot (Vastalume, Kelp Forest, Darktide
+                    # Trench, Underwater Cave, …) is underwater, so skipping them
+                    # meant Syrenthia could NEVER surface as a service-less recipe
+                    # region — even though SERVICE recipes happily recommend
+                    # underwater services (Tidal Workshop @ Vastalume). Region
+                    # access is already gated by `unlocked_regions` below (the
+                    # same check `_service_location_accessible` uses for the
+                    # service path), so underwater regions the character hasn't
+                    # unlocked are still excluded there. (Fix: thread 2026-07-27.)
                     if locked_locations and loc.name in locked_locations:
                         continue
                     loc_regions = getattr(loc, 'regions', []) or []
@@ -1998,12 +4235,11 @@ def run_recipe_optimizer_for_job(job: ReportJob, character,
                 best_gearset = None
                 best_metrics = None
                 best_score = None
+                _loc_records = []   # [(loc, gearset, score)] for per-region grouping
                 for cand in candidate_locations:
                     optimize_craft_gearsets.SELECTED_LOCATION = cand
                     try:
-                        cg, cm, _ci = optimize_craft_gearsets.optimize_for_service(
-                            recipe, None, character,
-                        )
+                        cg, cm, _ci = _recipe_solve(recipe, None, character, job.chest_name)
                     except Exception as _loc_e:
                         print(f'[stats_report_worker] recipe candidate failed {recipe_name} '
                               f'loc={getattr(cand, "name", cand)!r}: '
@@ -2014,6 +4250,7 @@ def run_recipe_optimizer_for_job(job: ReportJob, character,
                         cand_score = cm.get('steps_per_chest_recipe', float('inf'))
                     if cand_score is None or cand_score == 0:
                         cand_score = float('inf')
+                    _loc_records.append((cand, cg, cand_score))
                     if best_score is None or cand_score < best_score:
                         best_score = cand_score
                         best_loc = cand
@@ -2026,9 +4263,7 @@ def run_recipe_optimizer_for_job(job: ReportJob, character,
                     if first_real is not None:
                         optimize_craft_gearsets.SELECTED_LOCATION = first_real
                         try:
-                            rerun = optimize_craft_gearsets.optimize_for_service(
-                                recipe, None, character,
-                            )
+                            rerun = _recipe_solve(recipe, None, character, job.chest_name)
                             best_loc = first_real
                             best_gearset, best_metrics, _ = rerun
                         except Exception:
@@ -2090,7 +4325,7 @@ def run_recipe_optimizer_for_job(job: ReportJob, character,
         # precompute (flat ~1.4s/row on the server; skipped on the local batch
         # anyway). Empty maps make the frontend fall through to the on-demand
         # endpoint when a slot picker is opened.
-        _slot_alts, _slot_locked = ({}, {})
+        _slot_alts, _slot_locked, _slot_hidden = ({}, {}, {})
 
     # ── outside the lock — pure local-data work ────────────────────────
     # Service info for frontend rendering. Recipe rows don't have an
@@ -2150,6 +4385,290 @@ def run_recipe_optimizer_for_job(job: ReportJob, character,
     if service is None and chosen_loc_obj is not None:
         service_location = getattr(chosen_loc_obj, 'name', '') or ''
 
+    # ── Alternative Service Locations grouping (increment 2) ─────────────────
+    # Group candidate services whose optimized gearset is IDENTICAL to the
+    # chosen best (same encoded set = same solve) and list their locations
+    # together; surface objective-irrelevant-stat services (e.g. a +XP bench for
+    # a chest run) via (i), sorted first. Uses ONLY already-computed candidate
+    # results — exact, no extra optimizer runs. Stored as NEW fields; existing
+    # service_name/service_location rendering is unchanged (the alt-locations UI
+    # increment consumes these).
+    _service_grouped_name = service_name
+    _service_alt_locations = []
+    _service_extras = []
+    _service_alternatives = []
+    _service_type_groups = []   # per-service-type lines for the same-set group
+    _region_lines = []          # per-region lines (display + icon) for service-less recipes
+    if _cand_records and service is not None and export_string:
+        try:
+            from util.service_dedup import (
+                service_intrinsic_stats, irrelevant_intrinsic, grouped_name)
+            _skill_key = (getattr(recipe, 'skill', '') or '').lower()
+
+            def _loc_name(s):
+                _l = getattr(s, 'location', None)
+                return _l if isinstance(_l, str) else (getattr(_l, 'name', '') or '')
+
+            _primary_score = None
+            for _svc, _cg, _sc in _cand_records:
+                if _svc is service:
+                    _primary_score = _sc
+                    break
+
+            def _score_close(a, b):
+                if a is None or b is None:
+                    return False
+                return abs(a - b) <= max(0.5, abs(b) * 1e-4)
+
+            _same = [service]  # chosen best is always in its own group
+            for _svc, _cg, _sc in _cand_records:
+                if _svc is service:
+                    continue
+                try:
+                    # Fold a service into the primary group ONLY when it yields
+                    # the SAME gearset AND the SAME metric. Services with the
+                    # same gear but different intrinsic stats (e.g. a Cursed
+                    # loom's -20% WE) score DIFFERENTLY, so they must not be
+                    # merged into the primary "A or B" name showing the primary's
+                    # (better) step count -- they surface as their own
+                    # alternative with their own number below.
+                    if (encode_gearset(_cg) == export_string
+                            and _score_close(_sc, _primary_score)):
+                        _same.append(_svc)
+                except Exception:
+                    continue
+            _same_ids = {id(s) for s in _same}
+            # irrelevant-stat services first (they carry the (i) tooltip)
+            _same.sort(key=lambda s: (
+                0 if irrelevant_intrinsic(service_intrinsic_stats(s, _skill_key)) else 1,
+                _loc_name(s)))
+            for s in _same:
+                _ln = _loc_name(s)
+                if _ln and _ln not in _service_alt_locations:
+                    _service_alt_locations.append(_ln)
+                _irr = irrelevant_intrinsic(service_intrinsic_stats(s, _skill_key))
+                if _irr:
+                    _service_extras.append(
+                        {'name': getattr(s, 'name', ''), 'location': _ln, 'stats': _irr})
+            if _service_alt_locations:
+                _service_grouped_name = grouped_name(
+                    getattr(service, 'name', service_name) or service_name,
+                    _service_alt_locations)
+
+            # Split the same-set group by SERVICE TYPE. The group can mix
+            # service types that happen to yield the identical solve (e.g.
+            # Alight Kitchen @ Azurazera + Basic Kitchen @ several locs), so
+            # labeling every location with the primary service's name+icon was
+            # wrong ("Alight Kitchen (Azurazera, Blackspell Harbour, ...)" where
+            # only Azurazera is the Alight Kitchen). Emit one entry per distinct
+            # service type — icon + name + its OWN locations — so the row can
+            # render them on separate lines. (Thread 2026-07-29.)
+            _type_map = {}
+            for s in _same:
+                _tn = getattr(s, 'name', '') or service_name
+                _tl = _loc_name(s)
+                _tg = _type_map.setdefault(_tn, {'name': _tn, 'rep': s, 'locs': []})
+                if _tl and _tl not in _tg['locs']:
+                    _tg['locs'].append(_tl)
+            _primary_type = getattr(service, 'name', service_name) or service_name
+            for _tn, _tg in _type_map.items():
+                _service_type_groups.append({
+                    'name': _tn,
+                    'icon': _alt_service_icon(_tg['rep']),
+                    'locations': _tg['locs'],
+                    'grouped_name': grouped_name(_tn, _tg['locs']),
+                    'location_id': _recipe_service_loc_id(_tg['rep']),
+                    'service_stats': _recipe_service_stats_payload(_tg['rep']),
+                })
+            # Primary service type first, then alphabetical.
+            _service_type_groups.sort(
+                key=lambda g: (0 if g['name'] == _primary_type else 1, g['name']))
+
+            # Different-set alternatives: candidate services whose optimized
+            # gearset DIFFERS from the chosen best. Group by encoded gearset
+            # (each distinct set = one alternative), grouped-name each, carry the
+            # (i) extras, and sort best-first (fewer steps). Inline for the
+            # alt-section UI. Uses only already-computed candidate results.
+            _by_set = {}
+            for _svc, _cg, _sc in _cand_records:
+                if id(_svc) in _same_ids:
+                    continue  # already folded into the primary group
+                try:
+                    _ex = encode_gearset(_cg)
+                except Exception:
+                    continue
+                # Key on (metric, gearset): a same-gear/different-metric service
+                # (different intrinsic stats) is its OWN alternative with its OWN
+                # step count, never merged with a service that scores differently.
+                _key = (round(_sc, 3) if isinstance(_sc, (int, float)) else None, _ex)
+                _grp = _by_set.setdefault(_key, {'svcs': [], 'score': None, 'ex': _ex, 'cg': _cg})
+                _grp['svcs'].append(_svc)
+                if _sc is not None and (_grp['score'] is None or _sc < _grp['score']):
+                    _grp['score'] = _sc
+            for _key, _grp in _by_set.items():
+                _svcs = _grp['svcs']
+                _ex = _grp['ex']
+                # Extract the alt's own chosen pet/consumable (not carried in the
+                # encoded export) so the alt gear preview shows them in-slot — the
+                # displayed metric already includes them (user report: "the number
+                # is with the consumable, we just don't know what it is").
+                _apet, _acons = _extract_pet_consumable_meta(_grp.get('cg'))
+                # Split this same-gearset alt group by SERVICE TYPE. Different
+                # service TYPES can share the identical gearset+metric (e.g.
+                # Alight Kitchen @ Azurazera + Basic Kitchen @ many locations,
+                # or Sawmill of Barbantok @ Barbantok + Basic Sawmill @
+                # Kallaheim), but labeling them all with the first service's
+                # name is wrong — only Azurazera is Alight Kitchen; Kallaheim is
+                # a Basic Sawmill, not "Sawmill of Barbantok". Emit ONE alt entry
+                # per distinct service type (icon + name + its OWN locations) so
+                # each renders on its own line. (Thread 2026-07-30.)
+                _alt_by_type = {}
+                for s in _svcs:
+                    _tn = getattr(s, 'name', '') or service_name
+                    _t = _alt_by_type.setdefault(_tn, {'name': _tn, 'rep': s, 'locs': []})
+                    _ln = _loc_name(s)
+                    if _ln and _ln not in _t['locs']:
+                        _t['locs'].append(_ln)
+                # Primary/objective-irrelevant service type first, then alpha.
+                _alt_types = sorted(
+                    _alt_by_type.values(),
+                    key=lambda t: (
+                        0 if irrelevant_intrinsic(service_intrinsic_stats(t['rep'], _skill_key)) else 1,
+                        t['name']))
+                for _t in _alt_types:
+                    _rep = _t['rep']
+                    _tlocs = _t['locs']
+                    _airr = irrelevant_intrinsic(service_intrinsic_stats(_rep, _skill_key))
+                    _alt_extras = ([{'name': _t['name'],
+                                     'location': (_tlocs[0] if _tlocs else ''),
+                                     'stats': _airr}] if _airr else [])
+                    _alt_entry = {
+                        'grouped_name': grouped_name(_t['name'], _tlocs),
+                        'locations': _tlocs,
+                        'metric_value': _grp['score'],
+                        'gearset_export': _ex,
+                        'extras': _alt_extras,
+                        # Full nested stats of this service type's representative,
+                        # so the alt (i) matches column 3.
+                        'service_stats': _recipe_service_stats_payload(_rep),
+                        'location_id': _recipe_service_loc_id(_rep),
+                        # The SERVICE icon for this alt (e.g. Basic Sawmill), so
+                        # each service-type line shows its own icon.
+                        'service_icon': _alt_service_icon(_rep),
+                        # Raw service name + a concrete location so the alt Equip
+                        # button can select the right service/location in column 3.
+                        'service_name': _t['name'],
+                        'service_location': (_tlocs[0] if _tlocs else ''),
+                    }
+                    if _apet:
+                        _alt_entry['optimized_pet'] = _apet
+                    if _acons:
+                        _alt_entry['optimized_consumable'] = _acons
+                    _service_alternatives.append(_alt_entry)
+            _service_alternatives.sort(
+                key=lambda a: (a['metric_value'] if a['metric_value'] is not None else float('inf')))
+        except Exception:
+            pass
+
+    # ── Service-less recipes: group by ACCESSIBLE REGION (craftable anywhere) ──
+    # Region-scoped gear can change the optimal set per region, so each candidate
+    # region was solved above; group by (metric, gearset) -> primary region +
+    # alternative regions, and surface the REGION (name + icon), not a location.
+    # Mirrors the service grouping but keyed on regions.
+    _is_region = False
+    _region_icon = None
+    _region_location_id = ''
+    if service is None and _loc_records and export_string:
+        try:
+            _reg_groups = {}
+            for _lc, _cg, _sc in _loc_records:
+                _rt = _recipe_region_of(_lc)
+                if not _rt:
+                    continue
+                try:
+                    _rex = encode_gearset(_cg)
+                except Exception:
+                    continue
+                _rkey = (round(_sc, 3) if isinstance(_sc, (int, float)) else None, _rex)
+                _rg = _reg_groups.setdefault(_rkey, {'regions': [], 'score': _sc, 'ex': _rex, 'tag': _rt, 'region_tags': {}, 'loc_by_region': {}})
+                _rd = _recipe_region_display(_rt)
+                if _rd not in _rg['regions']:
+                    _rg['regions'].append(_rd)
+                _rg['region_tags'][_rd] = _rt
+                # First concrete location id seen in this region — so alt region
+                # equip can select a real location IN the region (the col-3
+                # dropdown needs a location id, not the region name). (2026-07-31)
+                _lc_id = (getattr(_lc, 'id', '') or '')
+                if not _lc_id:
+                    _lc_nm = (getattr(_lc, 'name', '') or (_lc if isinstance(_lc, str) else '') or '')
+                    _lc_id = _lc_nm.replace(' ', '_').replace("'", '')
+                if _lc_id:
+                    _rg['loc_by_region'].setdefault(_rd, _lc_id.lower())
+                if _sc is not None and (_rg['score'] is None or _sc < _rg['score']):
+                    _rg['score'] = _sc
+            _ordered = sorted(
+                _reg_groups.values(),
+                key=lambda g: (g['score'] if g['score'] is not None else float('inf')))
+            if _ordered:
+                _is_region = True
+                _prim = _ordered[0]
+                _prim_tag = _recipe_region_of(best_loc) if best_loc is not None else None
+                # The optimizer's chosen best_loc lives in the primary region;
+                # surface its id so Equip picks a concrete location in that region
+                # (user: "equip for a non-service recipe should select the first
+                # location in that region", not leave the location blank).
+                if best_loc is not None:
+                    _bl_id = (getattr(best_loc, 'id', '') or '')
+                    if not _bl_id:
+                        # best_loc may be a location NAME (string) or an object
+                        # without an .id -- slugify the name so Equip still gets a
+                        # concrete location id in the chosen region (was empty for
+                        # every service-less recipe -> region equip did nothing).
+                        # (2026-07-30)
+                        _bl_name = (getattr(best_loc, 'name', '')
+                                    or (best_loc if isinstance(best_loc, str) else '') or '')
+                        _bl_id = _bl_name.replace(' ', '_').replace("'", '')
+                    _region_location_id = _bl_id.lower()
+                if _prim_tag:
+                    service_location = _recipe_region_display(_prim_tag)
+                    _region_icon = _recipe_region_icon(_prim_tag)
+                elif _prim['regions']:
+                    service_location = _prim['regions'][0]
+                _service_grouped_name = ' or '.join(_prim['regions']) if _prim['regions'] else service_location
+                _service_alt_locations = list(_prim['regions'][1:])
+                # Per-region lines so the row can render each region on its own
+                # line with its OWN icon (user: 3 regions -> 3 lines + 3 icons).
+                _region_lines = [
+                    {'display': _d, 'icon': _recipe_region_icon((_prim.get('region_tags') or {}).get(_d))}
+                    for _d in _prim['regions']
+                ]
+                _service_extras = []
+                _service_alternatives = []
+                for _rg in _ordered[1:]:
+                    _rtags = _rg.get('region_tags') or {}
+                    # Split each tied-region group into ONE alt entry PER region
+                    # so the Alternative Service Locations render each region on
+                    # its own line with its OWN icon (was "Jarvonia or Grand Duchy
+                    # of Trellin-Erdwise or Wallisia" jammed onto one line).
+                    # Mirrors the primary region_lines split. (2026-07-30)
+                    for _rd in _rg['regions']:
+                        _service_alternatives.append({
+                            'grouped_name': _rd,
+                            'locations': [_rd],
+                            'metric_value': _rg['score'],
+                            'gearset_export': _rg['ex'],
+                            'extras': [],
+                            # Per-region icon so each region alt shows its own badge.
+                            'region_icon': _recipe_region_icon(_rtags.get(_rd) or _rg.get('tag')),
+                            # A concrete location id IN this region so Equip
+                            # selects a real location in the col-3 dropdown (not
+                            # the region name, which isn't a location). (2026-07-31)
+                            'region_location_id': (_rg.get('loc_by_region') or {}).get(_rd, ''),
+                        })
+        except Exception as _rge:
+            print(f"[recipe-region] service-less region grouping failed {recipe_name}: "
+                  f"{type(_rge).__name__}: {_rge}", flush=True)
+
     metrics_json = {
         'recipe_name': recipe_name,
         # Service info — frontend reads these to render the recipe row's
@@ -2158,6 +4677,30 @@ def run_recipe_optimizer_for_job(job: ReportJob, character,
         'service_name': service_name,
         'service_location': service_location,
         'service_icon': service_icon,
+        # Full nested service stats for the row's service (i) popover, rendered
+        # identically to column 3 via utils/service-stats-popover.js. service_skill
+        # + service_location_id drive the same redundant-condition suppression.
+        'service_stats': _recipe_service_stats_payload(service),
+        'service_skill': (getattr(recipe, 'skill', '') or ''),
+        'service_location_id': _recipe_service_loc_id(service),
+        # Alternative Service Locations (increment 2): same-set services grouped
+        # for display + (i)-tooltip data for objective-irrelevant-stat services.
+        'service_grouped_name': _service_grouped_name,
+        'service_alt_locations': _service_alt_locations,
+        'service_extras': _service_extras,
+        'service_alternatives': _service_alternatives,
+        # Per-service-type lines for the same-set group (icon + name + its own
+        # locations), and per-region lines for service-less recipes (display +
+        # own icon). Frontend renders these multi-line when >1. (2026-07-29.)
+        'service_type_groups': _service_type_groups,
+        'region_lines': _region_lines,
+        # Service-less recipes: is_region True => frontend renders the REGION
+        # icon (not a service/location icon); grouped name is a region set.
+        'is_region': _is_region,
+        'region_icon': _region_icon,
+        # Concrete location id inside the primary region (service-less recipes),
+        # so Equip selects a real location rather than leaving it blank.
+        'region_location_id': _region_location_id,
         # Recipe output (Item.BIRCH_PLANK / Material.PINE_LOGS / etc.).
         # Frontend uses resolveItemIcon() on this ref to pick the icon.
         'recipe_output_ref': output_item_ref,
@@ -2177,6 +4720,18 @@ def run_recipe_optimizer_for_job(job: ReportJob, character,
         metrics_json['_slot_alternatives'] = _slot_alts
     if _slot_locked:
         metrics_json['_slot_locked_alternatives'] = _slot_locked
+    if _slot_hidden:
+        metrics_json['_slot_hidden_alternatives'] = _slot_hidden
+
+    # Merge include-unavailable reasons (missing_level / missing_location /
+    # missing_tool / missing_other / gear_gated+missing_gear) attached to the
+    # recipe job by the enumerators, mirroring run_optimizer_for_job's merge so
+    # target_items / chests_recipes rows carry the same warnings + bottom-section
+    # gear flag as activity rows.
+    _unmet = (job.extras or {}).get('unmet') if isinstance(getattr(job, 'extras', None), dict) else None
+    if isinstance(_unmet, dict):
+        for _k, _v in _unmet.items():
+            metrics_json[_k] = _v
 
     return {
         'metric_value': metric_value,
@@ -2271,10 +4826,78 @@ def execute_job(job: ReportJob, character, db_path: str,
             if job.extras and isinstance(result.get('metrics_json'), dict):
                 if 'best_drop' in job.extras and job.extras['best_drop']:
                     result['metrics_json']['best_drop'] = job.extras['best_drop']
+                # If the optimizer path didn't already build the gear-aware
+                # per-item breakdown (new_items_combined), synthesize a
+                # no-gear one from the builder's combined meta so the
+                # expandable list still renders.
+                if (job.extras.get('combined')
+                        and 'new_items_combined' not in result['metrics_json']):
+                    _c = job.extras['combined']
+                    result['metrics_json']['new_items_combined'] = {
+                        'kind': _c.get('kind'),
+                        'count': _c.get('count', len(_c.get('items', []))),
+                        'items': _c.get('items', []),
+                    }
             elif job.extras and not result.get('metrics_json'):
                 # Optimizer fallback path returned None — still surface
-                # best_drop so the row renders with item info.
+                # best_drop (and the no-gear combined breakdown) so the
+                # row + expandable list render.
                 result['metrics_json'] = {'best_drop': job.extras.get('best_drop')}
+                if job.extras.get('combined'):
+                    _c = job.extras['combined']
+                    result['metrics_json']['new_items_combined'] = {
+                        'kind': _c.get('kind'),
+                        'count': _c.get('count', len(_c.get('items', []))),
+                        'items': _c.get('items', []),
+                    }
+        # target_items: currency (AGT/Sea Shells) is a value-weighted units/1k
+        # metric that is gear-independent here -> precomputed passthrough.
+        # Material/finding items run the optimizer targeting THIS item so gear
+        # (FMF / double-rewards / work-efficiency) is chosen to minimize its
+        # steps/item, producing a real gearset_export (Equip/Save/Gear buttons)
+        # and a gear-aware metric -- mirrors new_items. (2026-08-12 jwbail)
+        elif job.category == 'target_items':
+            _ti_extras = dict(job.extras) if job.extras else {}
+            _ti_is_currency = (_ti_extras.get('metric_kind') == 'per_1k'
+                               or _ti_extras.get('group_kind') == 'currency')
+            if job.activity is None:
+                result = {
+                    'metric_value': job.precomputed_metric,
+                    'metric_name': job.precomputed_metric_name or 'Steps/item',
+                    'gearset_export': None,
+                    'metrics_json': _ti_extras,
+                }
+            else:
+                try:
+                    _opt = run_optimizer_for_job(
+                        job, character,
+                        pet_items_pool=pet_items_pool,
+                        consumable_items_pool=consumable_items_pool,
+                        hidden_items=hidden_items,
+                    )
+                    _omj = _opt.get('metrics_json')
+                    _omj = {**_ti_extras, **_omj} if isinstance(_omj, dict) else _ti_extras
+                    # Gear-aware metric from the optimizer (currency = units/1k
+                    # higher-better, material = steps/item lower-better — both
+                    # computed in run_optimizer_for_job's target_items branch).
+                    _om = _opt.get('metric_value')
+                    _ofinal = (_om if (_om is not None and _om > 0 and _om != float('inf'))
+                               else job.precomputed_metric)
+                    result = {
+                        'metric_value': _ofinal,
+                        'metric_name': _opt.get('metric_name') or job.precomputed_metric_name or 'Steps/item',
+                        'gearset_export': _opt.get('gearset_export'),
+                        'metrics_json': _omj,
+                    }
+                except Exception as _tie:
+                    print(f'[stats_report_worker] target_items optimizer fallback: {_tie}',
+                          flush=True)
+                    result = {
+                        'metric_value': job.precomputed_metric,
+                        'metric_name': job.precomputed_metric_name or 'Steps/item',
+                        'gearset_export': None,
+                        'metrics_json': _ti_extras,
+                    }
         # For precomputed jobs without a category-specific gearset path,
         # no optimizer is run — use the precomputed metric directly.
         elif job.precomputed_metric is not None:
@@ -2288,6 +4911,25 @@ def execute_job(job: ReportJob, character, db_path: str,
                                            pet_items_pool=pet_items_pool,
                                            consumable_items_pool=consumable_items_pool,
                                            hidden_items=hidden_items)
+
+        # Include-unavailable "inputs" gate. A row whose activity declares an
+        # input requirement the user can't satisfy (missing_input) is shown
+        # with a warning ONLY when the inputs dimension is enabled — which is
+        # the default, so this reproduces today's behavior exactly. When the
+        # user turns the inputs sub-toggle off, drop the row (count it as done
+        # so progress still completes, but write no result).
+        _mj_check = result.get('metrics_json') if isinstance(result, dict) else None
+        if (isinstance(_mj_check, dict) and _mj_check.get('missing_input')
+                and not _incl('inputs')):
+            print(f'[stats_report_worker] [{_job_id_short}] DROP input-gated '
+                  f'{job.category}/{_src} (inputs dimension off)', flush=True)
+            if scope_sink is None:
+                try:
+                    DatabaseManager(db_path).update_stats_report_progress(
+                        job.run_id, success=True)
+                except Exception:
+                    pass
+            return True
 
         # Client-side (Pyodide) path: hand the scope to the caller (browser)
         # instead of writing to the DB here. The server-side per-scope ingest
@@ -2306,6 +4948,13 @@ def execute_job(job: ReportJob, character, db_path: str,
                 'metric_name': result['metric_name'],
                 'gearset_export': result['gearset_export'],
                 'metrics_json': result.get('metrics_json'),
+                # 2026-08-12 (jwbail): carry the target_items leaf identity so
+                # the local-scope path (_find_local_job) can match the exact
+                # item — (category, skill_name, chest_name, activity_name) is
+                # shared by many items in the same group+activity and collapses
+                # ~35 items onto one scope key otherwise (bug 1db9384e, 179/214).
+                'item_slug': (job.extras or {}).get('item_slug') if job.extras else None,
+                'group_slug': (job.extras or {}).get('group_slug') if job.extras else None,
                 'job_status': 'complete',
             })
             return True
@@ -2636,6 +5285,58 @@ def load_character(session_uuid: str, db_path: str):
     for _s, _xp in (_uo.get('skills_xp') or {}).items():
         skills_xp[_s] = _xp
 
+    # 2026-09-28 (jwbail [fix:termite-effort]): apply column-1 PET overrides
+    # (level + has) so the Character the optimizer builds matches the pet roster
+    # that from_char_config (stale detection / enumerate_applicable_sources)
+    # sees. The column-1 pet level slider writes ui_config.user_overrides.items
+    # [species].level (and .has for an un-owned pet). from_char_config applies
+    # these into its owned_pets, but load_character previously passed the RAW
+    # char_config['pets'] straight through — so setting a Termite to level 4 via
+    # the slider made enumerate emit ('xp','carpentry',...) scopes (the "Newly
+    # unlocked activities" popup) while owned_termite_level(character) still saw
+    # the imported (lower) level and build_xp_jobs emitted ZERO Carpentry jobs.
+    # Net: the report showed N newly-unlocked Carpentry activities that could
+    # never be optimized (0/0 on every run, (!) never cleared). Mirror
+    # from_char_config's pet-override logic here so the optimizer's pet level
+    # (and thus its level-gated stats + the Terminate ability gate) is correct.
+    _pets_list = [dict(p) for p in (char_config.get('pets') or []) if isinstance(p, dict)]
+    try:
+        from util.autogenerated.pets import PETS_BY_NAME as _PBN
+        from util.stats_report.normalize import normalize_item_id as _norm_pet
+        _known_species = {_norm_pet(str(s)) for s in _PBN.keys()}
+        _ov_items = _uo.get('items') if isinstance(_uo.get('items'), dict) else {}
+        _pet_ov_level = {}
+        _pet_has_add = {}
+        for _oid, _st in _ov_items.items():
+            if not isinstance(_st, dict):
+                continue
+            _sp = _norm_pet(str(_oid))
+            if _sp not in _known_species:
+                continue
+            try:
+                _lvl = int(_st.get('level') or 0)
+            except (TypeError, ValueError):
+                _lvl = 0
+            if _lvl > 0:
+                _pet_ov_level[_sp] = _lvl
+                if _st.get('has'):
+                    _pet_has_add[_sp] = _lvl
+        _seen_pet = set()
+        for _p in _pets_list:
+            _sp = _norm_pet(str(_p.get('species') or _p.get('name') or ''))
+            _seen_pet.add(_sp)
+            if _sp in _pet_ov_level:
+                _p['level'] = _pet_ov_level[_sp]
+                # A slider-set level implies the pet is at that stage; clear an
+                # 'egg' stage so _parse_pets resolves the adult ability/stats.
+                if not _p.get('stage') or str(_p.get('stage')).lower() == 'egg':
+                    _p['stage'] = 'adult'
+        for _sp, _lvl in _pet_has_add.items():
+            if _sp not in _seen_pet:
+                _pets_list.append({'species': _sp, 'level': _lvl, 'stage': 'adult'})
+    except Exception as _pe:
+        print(f'[stats_report_worker] load_character pet-override apply failed: {_pe}', flush=True)
+
     minimal_export = {
         'name': char_config.get('name', 'Unknown'),
         'game_version': char_config.get('game_version', 'Unknown'),
@@ -2648,7 +5349,7 @@ def load_character(session_uuid: str, db_path: str):
         'bank': {},
         'gear': {},
         'collectibles': char_config.get('collectibles', []),
-        'pets': char_config.get('pets', []),
+        'pets': _pets_list,
         # Custom-stats toggle state lives in ui_config.custom_stats (same source
         # the main character export uses); fall back to char_config for older
         # sessions. This is what makes deselecting a custom stat actually lower
@@ -2859,25 +5560,47 @@ def get_ownership_lookup(session_uuid: str, db_path: str) -> Dict[str, set]:
     ui_items = ui_config.get('items') or {}
     user_override_items = (ui_config.get('user_overrides') or {}).get('items') or {}
     merged_overrides = {**ui_items, **user_override_items}
+
+    def _mark_owned(item_id):
+        """Add a manually-owned/hidden override id to every new_items
+        ownership bucket. The override (ui_config.user_overrides.items.<id>)
+        doesn't tell us the drop KIND, so we add the normalized id to items,
+        collectibles AND eggs — a slug only matches drops of its real kind,
+        so cross-adding is harmless. Item ids are drop-name-compatible
+        slugs (catalog uses _name_to_id, same convention as
+        _normalize_item_id), so 'seahorse_fossil' matches the
+        Collectible.SEAHORSE_FOSSIL drop's normalized name."""
+        norm = _normalize_item_id(item_id)
+        if not norm:
+            return
+        forms = {norm}
+        # Rings carry a rarity suffix in the slug; drops come without it.
+        for suffix in ('_common', '_uncommon', '_rare', '_epic',
+                       '_legendary', '_ethereal'):
+            if norm.endswith(suffix):
+                forms.add(norm[:-len(suffix)])
+                break
+        items.update(forms)
+        collectibles.update(forms)
+        eggs.update(forms)
+
     for item_id, state in merged_overrides.items():
         if not isinstance(state, dict):
             continue
-        if state.get('hide'):
-            norm = _normalize_item_id(item_id)
-            if norm:
-                items.add(norm)
-                # Also strip ring rarity suffix so a drop normalized
-                # without quality (e.g. 'gold_ruby_ring') matches a
-                # hidden 'gold_ruby_ring_legendary'.
-                for suffix in ('_common', '_uncommon', '_rare', '_epic',
-                               '_legendary', '_ethereal'):
-                    if norm.endswith(suffix):
-                        items.add(norm[:-len(suffix)])
-                        break
-        # hide_fine intentionally NOT respected for new_items — the kind
-        # buckets here are non-quality-aware (a drop is "Birch skis", not
-        # "Birch skis (Fine)"), so a fine-only hide shouldn't suppress
-        # the base item.
+        # 2026-07-17 (bug 0e1a28e6 follow-up): honor the column-1 "owned"
+        # checkbox (user_overrides.items.<id>.has, set by item-row.js) in
+        # addition to the "Hide" checkbox. Marking an item owned must drop
+        # it from the new_items "fastest to obtain" list on the next
+        # results load — without needing a full re-optimize — and is
+        # reversible (un-check → it reappears, no re-optimize). Both the
+        # read-path filter and build_new_items_jobs read this lookup, so
+        # honoring `has` here fixes both the display and job generation.
+        if state.get('hide') or state.get('has'):
+            _mark_owned(item_id)
+        # hide_fine / has_fine intentionally NOT respected for new_items —
+        # the kind buckets here are non-quality-aware (a drop is "Birch
+        # skis", not "Birch skis (Fine)"), so a fine-only flag shouldn't
+        # suppress the base item.
 
     return {
         'items': items,
@@ -2918,7 +5641,7 @@ def _build_hidden_items(session_uuid: str, db_path: str):
     return build_hidden_items_set(ui_config)
 
 
-def _build_pet_items(session_uuid: str, db_path: str):
+def _build_pet_items(session_uuid: str, db_path: str, use_pet_ability: bool = False):
     """Mirror optimize_worker._build_pet_items_from_character_config but
     self-contained: pets live in character_config['pets'] (species + level)
     and optionally character_config['user_overrides']['items'] (manual flags
@@ -3009,10 +5732,34 @@ def _build_pet_items(session_uuid: str, db_path: str):
             seen.add((species, level))
             pet_items.append(pet_info)
 
+    # Part 4 (2026-08-31 jwbail): when the goals report's "Always use active
+    # applicable pet ability" toggle is on, merge each candidate pet's ACTIVE
+    # ability stats into its per-skill/location stats (assume charges are
+    # loaded) — byte-for-byte the same deep-merge the column-2 include_pets
+    # path applies (optimize_worker._augment_pet_items_for_all_items /
+    # _merge_pet_ability_stats). Only a pet whose CURRENT level has an
+    # `abilities` list carries one — abilities unlock at the ADULT level — so
+    # this naturally applies adult-level applicable abilities only and leaves
+    # juvenile pets at their level-only stats. The optimizer's own
+    # skill/location matching then decides which merged stats actually apply to
+    # each activity/recipe (e.g. Pixie's find_collectibles for collectibles).
+    if use_pet_ability and pet_items:
+        try:
+            from ui.optimize_worker import _merge_pet_ability_stats
+            pet_items = [
+                _merge_pet_ability_stats(p) if getattr(p, 'abilities', None) else p
+                for p in pet_items
+            ]
+        except Exception as _merge_err:
+            print(f'[stats_report_worker] pet-ability merge skipped: {_merge_err!r}',
+                  flush=True)
+
     return pet_items
 
 
-def _collect_owned_consumables(character):
+def _collect_owned_consumables(character, *, include_fine=True,
+                               min_owned_enabled=False, min_owned=5,
+                               min_owned_op='lt'):
     """Owned consumables come from character.items where the item has a
     `duration` attribute (mirrors the column-2 path's filter). Returns a
     list of Consumable objects ready for optimize_activity_gearsets.CONSUMABLE_ITEMS."""
@@ -3031,6 +5778,33 @@ def _collect_owned_consumables(character):
             continue
         if hasattr(item, 'duration'):
             consumables.append(item)
+    # Apply global Consumable Options (Include Fine Consumables + "Ignore
+    # consumables I own X or less of"). Fine and normal are distinct owned
+    # items, so they are counted separately. Inlined (no cross-module import)
+    # so the Pyodide local-worker path stays self-contained.
+    if not include_fine or min_owned_enabled:
+        try:
+            threshold = int(min_owned)
+        except (TypeError, ValueError):
+            threshold = 0
+        _op = str(min_owned_op or 'lt').lower()
+        if _op not in ('lt', 'lte'):
+            _op = 'lt'
+        filtered = []
+        for c in consumables:
+            name = getattr(c, 'name', '') or ''
+            is_fine = name.endswith('(Fine)') or name.endswith(' (Fine)')
+            if not include_fine and is_fine:
+                continue
+            if min_owned_enabled:
+                try:
+                    q = int(items.get(c, 0))
+                except Exception:
+                    q = 0
+                if (q <= threshold) if _op == 'lte' else (q < threshold):
+                    continue
+            filtered.append(c)
+        consumables = filtered
     return consumables
 
 
@@ -3074,6 +5848,13 @@ def _filter_pet_consumable_for_activity(activity, pet_pool, consumable_pool):
 # bundle EXCLUDES ui/database.py -- the LOCAL (browser) path gates via this.
 _EXACT_XP_SESSIONS = {'00000000-0000-0000-0000-000000000000'}
 
+# Bundle-safe allowlist for the NEW (meet-in-the-middle) optimizer. This set is
+# embedded in the Pyodide bundle, so it is the ONLY thing that enables the new
+# optimizer on local/browser runs (which cannot read the server DB). Add tester
+# session UUIDs here to let them try the new optimizer in prod. Keep in sync
+# with DatabaseManager._NEW_OPTIMIZER_ALWAYS_ENABLED (the server-side mirror).
+_NEW_OPTIMIZER_SESSIONS = {'00000000-0000-0000-0000-000000000000'}
+
 
 def exact_xp_enabled_for(session_uuid, db_path=None):
     """True if the exact XP optimizer should run for this session.
@@ -3081,25 +5862,152 @@ def exact_xp_enabled_for(session_uuid, db_path=None):
     Works on BOTH the server path (run_worker) and the local/Pyodide path
     (optimize-local-worker.js) -- allowlist first (bundle-safe), then the
     DatabaseManager feature flag when available (server / admin-enabled).
+
+    GA 2026-07-29: the exact optimizer is now the DEFAULT for ALL sessions --
+    the FAC gate is removed by returning True unconditionally. The allowlist +
+    feature-flag checks below are kept (unreachable) for reference / quick revert.
     """
-    if session_uuid in _EXACT_XP_SESSIONS:
+    return True
+    if session_uuid in _EXACT_XP_SESSIONS or session_uuid in _NEW_OPTIMIZER_SESSIONS:
         return True
     try:
         from ui.database import DatabaseManager
-        return bool(DatabaseManager(db_path).has_feature(session_uuid, 'exact_xp_optimizer'))
+        _db = DatabaseManager(db_path)
+        return bool(_db.has_feature(session_uuid, 'exact_xp_optimizer')
+                    or _db.has_feature(session_uuid, 'new_optimizer'))
     except Exception:
         return False
+
+
+def compute_region_access(session_uuid, db_path=None):
+    """Return (unlocked_regions, locked_locations) for a session.
+
+    unlocked_regions is a set of region keys, or None when it couldn't be
+    computed (meaning "apply no region filter"). locked_locations is a set.
+
+    This is the SINGLE source of truth for region access — run_worker uses it,
+    AND app.py passes its result into the local/Pyodide run params so the
+    browser does NOT recompute it DB-free. The browser recomputation diverged
+    from the server (e.g. it missed 'jarvonia' for some characters and dropped
+    "Litter looting in Kallaheim" — 2 XP scopes — from local runs). Computing
+    it once, server-side, keeps local and server identical.
+    """
+    try:
+        from ui.database import DatabaseManager as _DB
+        _session = _DB(db_path).get_session(session_uuid) or {}
+        _cc = _session.get('character_config') or {}
+        if isinstance(_cc, str):
+            _cc = json.loads(_cc)
+        from optimize_travel_gearsets import detect_unlocked_regions, detect_locked_locations
+        _ri = detect_unlocked_regions(_cc)
+        _ur = {r for r, v in (_ri.get('unlocked') or _ri).items() if v} if isinstance(_ri, dict) else set()
+        # ghostly/spectral are the charter realm BEYOND Wraithwater — only
+        # unlocked with the Charter of the Drowned, not on Wallisia entry.
+        _has_charter = any(
+            (c if isinstance(c, str) else (c.get('name') or c.get('id') or c.get('export_name') or ''))
+            .lower().replace(' ', '_').replace("'", '') == 'charter_of_the_drowned'
+            for c in (_cc.get('collectibles') or [])
+        )
+        if _has_charter:
+            _ur.update({'ghostly', 'spectral'})
+        _ll = detect_locked_locations(_cc) or set()
+        return _ur, _ll
+    except Exception as e:
+        print(f'[stats_report_worker] compute_region_access failed: {e}')
+        return None, set()
+
+
+def run_fastest_craft_category(session_uuid: str, db_path: str,
+                               selected_categories: Optional[List[str]],
+                               run_id: Optional[str] = None,
+                               base_completed: int = 0,
+                               base_total: int = 0) -> int:
+    """Run the Fastest Craft compute for the goals-report `fastest_craft`
+    category over the selected prefixed chip ids, persisting into
+    fastest_craft_results. Never raises — a failure
+    here must not fail the rest of the run. Returns the item count (0 on error).
+
+    Progress: when `run_id` is given, the run's `total_jobs` is extended by the
+    number of Fastest Craft items to solve and `completed_jobs` is advanced as
+    each item finishes, so the goals-report progress bar reflects the (slow,
+    12-solves-per-item) compute instead of sitting at 0/0. `base_completed` /
+    `base_total` carry the regular-job counts so the combined denominator is
+    correct when fastest_craft runs alongside other categories.
+    """
+    try:
+        from ui.database import DatabaseManager
+        from ui.fastest_craft import run_fastest_craft, enumerate_craftable_items, VARIANTS, QUALITIES
+        db = DatabaseManager(db_path)
+        session = db.get_session(session_uuid) or {}
+        session_data = session.get('character_config') or {}
+        ui_config = session.get('ui_config') or {}
+        if isinstance(ui_config, str):
+            try:
+                ui_config = json.loads(ui_config)
+            except Exception:
+                ui_config = {}
+        selected = set(selected_categories) if selected_categories else None
+
+        def _set_counts(completed, total):
+            if not run_id:
+                return
+            try:
+                conn = db._get_connection()
+                conn.execute(
+                    "UPDATE stats_report_runs SET total_jobs = ?, completed_jobs = ? "
+                    "WHERE id = ?", (int(total), int(completed), run_id))
+                conn.commit()
+            except Exception as _e:  # noqa: BLE001 — progress is best-effort
+                print(f'[stats_report_worker] fc progress update failed: {_e}', flush=True)
+
+        # Pre-set the denominator so the bar leaves 0/0 immediately, even before
+        # the first (slow) item finishes.
+        try:
+            fc_total = len(enumerate_craftable_items(selected)) * len(VARIANTS) * len(QUALITIES)
+        except Exception:
+            fc_total = 0
+        _set_counts(base_completed, base_total + fc_total)
+
+        def _progress(done, total):
+            # run_fastest_craft calls progress(done, total) per ITEM. Advance the
+            # run's completed_jobs so the UI shows real motion (coarse: one tick
+            # per item, each item = 12 B&B solves).
+            _set_counts(base_completed + done, base_total + (total or fc_total))
+            if done == total or done % 5 == 0:
+                print(f'[stats_report_worker] fastest_craft [{done}/{total}]', flush=True)
+
+        res = run_fastest_craft(session_uuid, selected, session_data, ui_config,
+                                db=db, owned_counts=None, progress=_progress,
+                                log=lambda *a, **k: print(*a, flush=True))
+        count = int(res.get('count', 0) or 0)
+        print(f'[stats_report_worker] fastest_craft complete: {count} items')
+        return count
+    except Exception as e:  # noqa: BLE001 — isolated from the rest of the run
+        print(f'[stats_report_worker] fastest_craft failed (non-fatal): {e!r}', file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        return 0
 
 
 def run_worker(session_uuid: str, run_id: str, db_path: str,
                categories: List[str], skills: List[str],
                notify: bool, mode: str,
                include_pets: bool = False, include_consumables: bool = False,
+               use_pet_ability: bool = False,
+               use_fine_inputs: bool = False,
                stale_only: bool = False,
                kinds: Optional[List[str]] = None,
                chests_filter: Optional[List[str]] = None,
                skills_by_category: Optional[dict] = None,
-               chests_by_category: Optional[dict] = None):
+               chests_by_category: Optional[dict] = None,
+               target_categories: Optional[List[str]] = None,
+               include_fine: bool = False,
+               include_fine_consumables: bool = True,
+               consumable_min_owned_enabled: bool = False,
+               consumable_min_owned: int = 5,
+               consumable_min_owned_operator: str = 'lt',
+               consumable_use_hidden: bool = False,
+               include_unavailable: Optional[dict] = None,
+               fastest_craft_categories: Optional[List[str]] = None):
     """Main worker logic — builds jobs, runs them concurrently, completes run.
 
     stale_only: when True, filter the built jobs to only those flagged stale
@@ -3117,8 +6025,16 @@ def run_worker(session_uuid: str, run_id: str, db_path: str,
     all chests (preserves pre-2026-06-02 behavior). Plumbed from the
     --chests CLI arg / /api/stats-report/run body.chests / WTO panel
     selection.
+
+    fastest_craft_categories: prefixed Fastest Craft chip ids ('gear:rings',
+    'cons:cooking', 'mat:bar', ...) for the fastest_craft category ([] = every
+    craftable output). Runs after the regular jobs, before the
+    run is marked complete. None (merge / resume spawns, which don't carry the
+    selection) skips it rather than solving every crafted item.
     """
+    _RECIPE_FRONTIER_CACHE.clear()  # run-scoped: never reuse frontiers across runs
     from ui.database import DatabaseManager
+    run_fc = 'fastest_craft' in categories and fastest_craft_categories is not None
 
     print(f'[stats_report_worker] Starting run {run_id} for session {session_uuid}')
     print(f'[stats_report_worker] Categories: {categories}, Skills: {skills}, Mode: {mode}')
@@ -3127,7 +6043,7 @@ def run_worker(session_uuid: str, run_id: str, db_path: str,
     # bitmap). One run per worker process today, but clear defensively in case
     # run_worker is ever invoked twice in a process or from tests.
     _reset_stale_memo()
-    print(f'[stats_report_worker] include_pets={include_pets} include_consumables={include_consumables}')
+    print(f'[stats_report_worker] include_pets={include_pets} include_consumables={include_consumables} use_pet_ability={use_pet_ability}')
 
     # Load character
     character = load_character(session_uuid, db_path)
@@ -3135,7 +6051,6 @@ def run_worker(session_uuid: str, run_id: str, db_path: str,
 
     # [EXACT XP optimizer] feature gate -- ON only for opted-in sessions. The
     # gated hook in run_optimizer_for_job then runs the exact B&B for xp jobs.
-    globals()['_VALVE_LOG_DB_PATH'] = db_path
     globals()['_EXACT_XP_MODE'] = exact_xp_enabled_for(session_uuid, db_path)
     if globals().get('_EXACT_XP_MODE'):
         print('[stats_report_worker] EXACT_XP_MODE enabled for this session')
@@ -3144,8 +6059,29 @@ def run_worker(session_uuid: str, run_id: str, db_path: str,
     # job's optimizer call can reuse the same pool. Each helper is
     # tolerant of empty/missing data — returns [] when the user has no
     # pets / no consumables in their character config.
-    pet_items_pool = _build_pet_items(session_uuid, db_path) if include_pets else []
-    consumable_items_pool = _collect_owned_consumables(character) if include_consumables else []
+    # 2026-08-31 (jwbail): stash the run-level "use pet ability" flag on a
+    # module global so _extract_pet_consumable_meta can mark the chosen pet's
+    # slot with useAbility=true (so Equip checks column-2's per-pet "use
+    # ability" box). Mirrors the other run-scoped worker globals
+    # (_NEW_ITEMS_OWNERSHIP, _UNLOCKED_REGIONS, ...). The local Pyodide path
+    # sets srw._USE_PET_ABILITY directly (optimize-local-worker.js).
+    globals()['_USE_PET_ABILITY'] = bool(use_pet_ability)
+    globals()['_USE_FINE_INPUTS'] = bool(use_fine_inputs)
+    globals()['_USE_HIDDEN_CONSUMABLES'] = bool(consumable_use_hidden)
+    # Include-unavailable dimensions for this run (EFFECTIVE flags derived in
+    # ui/app.py). None / missing keys fall back to the legacy default (inputs
+    # included-with-warning, everything else excluded). The local Pyodide path
+    # sets srw._INCL_UNAVAIL directly (optimize-local-worker.js).
+    globals()['_INCL_UNAVAIL'] = _normalize_incl_unavail(include_unavailable)
+    print(f'[stats_report_worker] include_unavailable={globals()["_INCL_UNAVAIL"]}')
+    pet_items_pool = _build_pet_items(session_uuid, db_path, use_pet_ability) if include_pets else []
+    consumable_items_pool = _collect_owned_consumables(
+        character,
+        include_fine=include_fine_consumables,
+        min_owned_enabled=consumable_min_owned_enabled,
+        min_owned=consumable_min_owned,
+        min_owned_op=consumable_min_owned_operator,
+    ) if include_consumables else []
     # 2026-06-17 (jwbail): build the hide list once and feed it to every job's
     # optimizer (IGNORED_ITEMS + consumable filter) so the goals report never
     # recommends gear / items / collectibles / eggs / consumables the user hid.
@@ -3175,32 +6111,11 @@ def run_worker(session_uuid: str, run_id: str, db_path: str,
     # global so build_*_jobs can read it without widening their
     # signatures.
     try:
-        from ui.database import DatabaseManager as _DB
-        _db = _DB(db_path)
-        _session = _db.get_session(session_uuid) or {}
-        _char_config = _session.get('character_config') or {}
-        if isinstance(_char_config, str):
-            _char_config = json.loads(_char_config)
-        from optimize_travel_gearsets import detect_unlocked_regions, detect_locked_locations
-        _region_info = detect_unlocked_regions(_char_config)
-        _unlocked_regions = set(_region_info.get('unlocked', _region_info).keys()) if isinstance(_region_info, dict) else set()
-        if isinstance(_region_info, dict):
-            _unlocked_regions = {r for r, v in (_region_info.get('unlocked') or _region_info).items() if v}
-        # ghostly/spectral are the charter realm BEYOND Wraithwater. Wallisia
-        # entry is now GDTE-based, so only unlock these sub-regions with the
-        # Charter of the Drowned — not on Wallisia entry alone (else a
-        # GDTE-only player would wrongly reach the spectral realm).
-        _has_charter = any(
-            (c if isinstance(c, str) else (c.get('name') or c.get('id') or c.get('export_name') or ''))
-            .lower().replace(' ', '_').replace("'", '') == 'charter_of_the_drowned'
-            for c in (_char_config.get('collectibles') or [])
-        )
-        if _has_charter:
-            _unlocked_regions.update({'ghostly', 'spectral'})
-        _locked_locations = detect_locked_locations(_char_config) or set()
+        _unlocked_regions, _locked_locations = compute_region_access(session_uuid, db_path)
         globals()['_UNLOCKED_REGIONS'] = _unlocked_regions
         globals()['_LOCKED_LOCATIONS'] = _locked_locations
-        print(f'[stats_report_worker] unlocked_regions={sorted(_unlocked_regions)}, '
+        print(f'[stats_report_worker] unlocked_regions='
+              f'{sorted(_unlocked_regions) if _unlocked_regions is not None else None}, '
               f'locked_locations={sorted(_locked_locations)}')
     except Exception as e:
         print(f'[stats_report_worker] Failed to compute location accessibility: {e}')
@@ -3309,14 +6224,32 @@ def run_worker(session_uuid: str, run_id: str, db_path: str,
         all_jobs.extend(coins_jobs)
         print(f'[stats_report_worker] Built {len(coins_jobs)} coins jobs')
 
+    if 'target_items' in categories:
+        ti_jobs = build_target_items_jobs(run_id, session_uuid, character,
+                                         include_fine=include_fine,
+                                         target_groups=target_categories)
+        # target_groups filter is now applied inside build_target_items_jobs
+        all_jobs.extend(ti_jobs)
+        print(f'[stats_report_worker] Built {len(ti_jobs)} target_items jobs')
+
     # Stats-report stale-detection: filter to stale/newly-unlocked scopes only
     # when --stale-only true. This is the new default behavior — Optimize button
     # always sends stale_only=true, and the filter computes stale list dynamically
     # via detect_stale_scopes (not from cache, which may be empty on first run).
     if stale_only:
         before = len(all_jobs)
-        all_jobs = _filter_jobs_to_stale_only(all_jobs, session_uuid, db_path)
-        print(f'[stats_report_worker] stale_only filter: {before} -> {len(all_jobs)} jobs')
+        # target_items has its OWN stale filter (_filter_target_items_jobs_to_stale)
+        # that uses the built jobs as the source of truth for the applicable set,
+        # instead of detect_stale_scopes/enumerate_applicable_sources (which don't
+        # emit target_items and would drop everything -> the old 0/0 failure mode
+        # that forced the always-run bypass). It keeps only new / version-bumped /
+        # gear-or-input-changed (item, activity) scopes and prunes orphaned rows.
+        _ti_jobs = [j for j in all_jobs if getattr(j, 'category', None) == 'target_items']
+        _other = [j for j in all_jobs if getattr(j, 'category', None) != 'target_items']
+        _ti_kept = _filter_target_items_jobs_to_stale(_ti_jobs, session_uuid, db_path)
+        all_jobs = _ti_kept + _filter_jobs_to_stale_only(_other, session_uuid, db_path)
+        print(f'[stats_report_worker] stale_only filter: {before} -> {len(all_jobs)} jobs '
+              f'(target_items {len(_ti_jobs)} -> {len(_ti_kept)} stale)')
         # Update total_jobs in the DB so progress UI shows accurate denominator
         try:
             db_local = DatabaseManager(db_path)
@@ -3334,14 +6267,19 @@ def run_worker(session_uuid: str, run_id: str, db_path: str,
         if stale_only:
             msg = 'No stale or newly-unlocked scopes — nothing to optimize'
         print(f'[stats_report_worker] {msg}')
+        if run_fc:
+            run_fastest_craft_category(session_uuid, db_path, fastest_craft_categories,
+                                       run_id=run_id, base_completed=0, base_total=0)
         db = DatabaseManager(db_path)
-        # Update total_jobs to actual count so UI shows 0/0 correctly
-        try:
-            conn = db._get_connection()
-            conn.execute("UPDATE stats_report_runs SET total_jobs = 0 WHERE id = ?", (run_id,))
-            conn.commit()
-        except Exception:
-            pass
+        # Update total_jobs to actual count so UI shows 0/0 correctly — but only
+        # when fastest_craft did NOT run (it owns the denominator when present).
+        if not run_fc:
+            try:
+                conn = db._get_connection()
+                conn.execute("UPDATE stats_report_runs SET total_jobs = 0 WHERE id = ?", (run_id,))
+                conn.commit()
+            except Exception:
+                pass
         fingerprint = db.compute_inventory_fingerprint(session_uuid)
         db.complete_stats_report_run(run_id, fingerprint)
         return
@@ -3392,6 +6330,11 @@ def run_worker(session_uuid: str, run_id: str, db_path: str,
             except Exception as e:
                 completed += 1
                 print(f'[stats_report_worker] [{completed}/{len(all_jobs)}] Job exception: {e}')
+
+    if run_fc:
+        run_fastest_craft_category(session_uuid, db_path, fastest_craft_categories,
+                                   run_id=run_id, base_completed=len(all_jobs),
+                                   base_total=len(all_jobs))
 
     # Complete the run
     db = DatabaseManager(db_path)
@@ -3451,6 +6394,38 @@ def main():
                         help='Include owned pets in optimization (true/false)')
     parser.add_argument('--include-consumables', default='false',
                         help='Include owned consumables in optimization (true/false)')
+    parser.add_argument('--use-pet-ability', default='false',
+                        help='When true, merge each candidate pet\'s ACTIVE applicable '
+                             'ability stats (adult-level only) into scoring — mirrors the '
+                             'goals report "Always use active applicable pet ability" '
+                             'toggle and column-2\'s per-pet "use ability" box. '
+                             '2026-08-31 (jwbail).')
+    parser.add_argument('--include-fine-consumables', default='true',
+                        help='Consumable Options: include Fine consumable variants '
+                             '(true/false, default true).')
+    parser.add_argument('--use-fine-inputs', default='false',
+                        help='Use fine inputs (R2): project the Fine variant of a hunting '
+                             'activity input item (e.g. arrows) when one exists '
+                             '(true/false, default false).')
+    parser.add_argument('--consumable-min-owned-enabled', default='false',
+                        help='Consumable Options: enable the "ignore consumables I own X '
+                             'or less of" threshold (true/false, default false).')
+    parser.add_argument('--consumable-min-owned', default='5',
+                        help='Consumable Options: threshold X for the min-owned filter '
+                             '(integer 1..100, default 5).')
+    parser.add_argument('--consumable-min-owned-operator', default='lt',
+                        help='Consumable Options: comparator for the min-owned threshold — '
+                             '"lt" (< / fewer than, default) or "lte" (<= / fewer than or equal to).')
+    parser.add_argument('--consumable-use-hidden', default='false',
+                        help='Consumable Options: consider consumables the user hid '
+                             '(column-1 hide) too (true/false, default false).')
+    parser.add_argument('--include-unavailable', default='null',
+                        help='JSON object of EFFECTIVE include-unavailable dimensions '
+                             '{level,location,gear,inputs,other} (booleans). Surfaces '
+                             'activities the report would normally hide because they are '
+                             'gated only by the enabled dimension(s). Default "null" '
+                             'reproduces legacy behavior (inputs included-with-warning, '
+                             'everything else excluded).')
     parser.add_argument('--stale-only', default='false',
                         help='When true, filter jobs to scopes flagged stale or newly-unlocked '
                              '(stats-report stale-detection feature). Default false runs everything '
@@ -3479,6 +6454,19 @@ def main():
                         help='JSON object {categoryKey: [chest names]} for per-category chest '
                              'selection (chests / chests_recipes tuned independently). Absent key '
                              'falls back to --chests. 2026-06-16 (jwbail).')
+    parser.add_argument('--target-categories', default='null',
+                        help='JSON array of target-category slugs (gems, normal_items, '
+                             'fine_items, etc.) for the target_items WTO sub-filter. Worker '
+                             'filters build_target_items_jobs to only these categories. '
+                             '"null"/empty = all categories. 2026-08-11 (jwbail).')
+    parser.add_argument('--include-fine', default='false',
+                        help='When true, target_items includes fine item variants as separate '
+                             'leaves and adds fine sell value to currency groups. '
+                             '2026-08-12 (jwbail, v2 keyword grouping).')
+    parser.add_argument('--fastest-craft-categories', default='null',
+                        help='JSON array of prefixed Fastest Craft chip ids (e.g. '
+                             '["tools:pickaxes", "mat:bar"]) for the fastest_craft category. '
+                             '"[]" = every craftable output.')
     parser.add_argument('--resume', default='false',
                         help='When true, this is a respawned worker after container restart. '
                              'Flips the run row status from interrupted/running back to running '
@@ -3492,12 +6480,48 @@ def main():
 
     args = parser.parse_args()
 
+    # ── Background CPU throttle (2026-08-17) ─────────────────────────────
+    # These optimization workers are CPU-heavy and, at default priority,
+    # competed head-to-head with uvicorn for CPU — starving request handling
+    # and causing slow page loads / intermittent 502s under load (bug reports
+    # 2026-08-15..17). Renice ourselves so the kernel always preempts us for
+    # interactive traffic. This is work-conserving: a lone run still gets a
+    # full core (niceness only matters under contention), while many concurrent
+    # runs share CPU and slow down gracefully instead of flattening the box.
+    # Tunable via STATS_REPORT_WORKER_NICE (0..19, default 15); 0 disables.
+    # Best-effort — never abort the run over a failed renice.
+    try:
+        _nice_target = max(0, min(19, int(os.environ.get('STATS_REPORT_WORKER_NICE', '15'))))
+        if _nice_target:
+            os.nice(_nice_target)
+            print(f'[stats_report_worker] reniced to +{_nice_target} '
+                  f'(background CPU throttle)', flush=True)
+    except Exception as _nice_err:
+        print(f'[stats_report_worker] renice skipped ({_nice_err!r})', flush=True)
+
     try:
         categories = json.loads(args.categories)
         skills = json.loads(args.skills)
         notify = args.notify.lower() in ('true', '1', 'yes')
         include_pets = args.include_pets.lower() in ('true', '1', 'yes')
         include_consumables = args.include_consumables.lower() in ('true', '1', 'yes')
+        use_pet_ability = args.use_pet_ability.lower() in ('true', '1', 'yes')
+        include_fine_consumables = args.include_fine_consumables.lower() in ('true', '1', 'yes')
+        use_fine_inputs = args.use_fine_inputs.lower() in ('true', '1', 'yes')
+        consumable_min_owned_enabled = args.consumable_min_owned_enabled.lower() in ('true', '1', 'yes')
+        try:
+            consumable_min_owned = max(1, min(100, int(args.consumable_min_owned)))
+        except (TypeError, ValueError):
+            consumable_min_owned = 5
+        consumable_min_owned_operator = (getattr(args, 'consumable_min_owned_operator', 'lt') or 'lt').lower()
+        if consumable_min_owned_operator not in ('lt', 'lte'):
+            consumable_min_owned_operator = 'lt'
+        consumable_use_hidden = args.consumable_use_hidden.lower() in ('true', '1', 'yes')
+        try:
+            include_unavailable = json.loads(args.include_unavailable)
+            include_unavailable = include_unavailable if isinstance(include_unavailable, dict) else None
+        except Exception:
+            include_unavailable = None
         stale_only = args.stale_only.lower() in ('true', '1', 'yes')
         is_resume = args.resume.lower() in ('true', '1', 'yes')
         is_fast = args.fast.lower() in ('true', '1', 'yes')
@@ -3530,6 +6554,19 @@ def main():
                 chests_by_category = {}
         except Exception:
             chests_by_category = {}
+        try:
+            target_categories = json.loads(args.target_categories)
+            if not isinstance(target_categories, list) or not target_categories:
+                target_categories = None
+        except Exception:
+            target_categories = None
+        include_fine = args.include_fine.lower() in ('true', '1', 'yes')
+        try:
+            fastest_craft_categories = json.loads(args.fastest_craft_categories)
+            if not isinstance(fastest_craft_categories, list):
+                fastest_craft_categories = None
+        except Exception:
+            fastest_craft_categories = None
     except json.JSONDecodeError as e:
         print(f'[stats_report_worker] Failed to parse JSON args: {e}', file=sys.stderr)
         sys.exit(1)
@@ -3616,11 +6653,22 @@ def main():
             mode=args.mode,
             include_pets=include_pets,
             include_consumables=include_consumables,
+            use_pet_ability=use_pet_ability,
             stale_only=stale_only,
             kinds=kinds,
             chests_filter=chests_filter,
             skills_by_category=skills_by_category,
             chests_by_category=chests_by_category,
+            target_categories=target_categories,
+            include_fine=include_fine,
+            include_fine_consumables=include_fine_consumables,
+            use_fine_inputs=use_fine_inputs,
+            consumable_min_owned_enabled=consumable_min_owned_enabled,
+            consumable_min_owned=consumable_min_owned,
+            consumable_min_owned_operator=consumable_min_owned_operator,
+            consumable_use_hidden=consumable_use_hidden,
+            include_unavailable=include_unavailable,
+            fastest_craft_categories=fastest_craft_categories,
         )
     except Exception as e:
         print(f'[stats_report_worker] Fatal error: {e}', file=sys.stderr)
@@ -3770,6 +6818,53 @@ def _write_stats_report_result_row(db, job, character, result):
                 optimization_version=OPTIMIZATION_VERSIONS.get(cat, 1),
                 extras_json=extras,
             )
+        return
+
+    # target_items: one row per (item, activity). Key = ('target_items',
+    # group_slug, item_slug, activity_slug, 'NONE'). Stores a REAL per-scope
+    # dominance_bitmap + metric_inputs_hash (via the shared _target_items_stale_
+    # signals helper) so the stale filter can detect gear/state changes -- these
+    # rows used to store b''/'' and the category bypassed stale detection
+    # entirely (2026-08-13, target_items v3).
+    if cat == 'target_items':
+        import json as _json
+        _tik = _target_items_scope_key(job)
+        sub_ti, src_ti, loc_ti = _tik[1], _tik[2], _tik[3]
+        _ti_bm, _ti_mh, _ti_scope = _target_items_stale_signals(job, snapshot, conn)
+        mj = result.get('metrics_json')
+        # Carry the metrics_json for display AND the EXACT bitmap scope params
+        # (skill/loc/req_kw) the bitmap was computed under, so the read-side
+        # badge (compute_target_items_stale_groups) recomputes the bitmap with
+        # byte-identical inputs instead of re-deriving loc from metrics_json.
+        if isinstance(mj, dict):
+            _extras_obj = dict(mj)
+        elif mj:
+            try:
+                _extras_obj = _json.loads(mj) if isinstance(mj, str) else {}
+            except Exception:
+                _extras_obj = {}
+        else:
+            _extras_obj = {}
+        if not isinstance(_extras_obj, dict):
+            _extras_obj = {}
+        _extras_obj["_stale_scope"] = _ti_scope
+        extras_str = _json.dumps(_extras_obj)
+        db.create_stats_report_result(
+            session_uuid=job.session_uuid,
+            category='target_items',
+            subcategory=sub_ti,
+            source_name=src_ti,
+            location=loc_ti,
+            service='NONE',
+            rank=0,
+            metric_value=result.get('metric_value') or 0.0,
+            metric_name=result.get('metric_name') or '',
+            export_string=result.get('gearset_export') or '',
+            dominance_bitmap=_ti_bm,
+            metric_inputs_hash=_ti_mh,
+            optimization_version=OPTIMIZATION_VERSIONS.get('target_items', 1),
+            extras_json=extras_str,
+        )
         return
 
     # Other categories: single row, no extras
@@ -3991,6 +7086,601 @@ def _required_keywords_for_job(job):
     return {str(k).lower() for k in kc.keys()} if kc else set()
 
 
+def _build_item_ifc_map():
+    """Reverse map: item_ref -> frozenset('ItemFindingCategory.<CAT>').
+
+    Built at runtime by iterating util.autogenerated.item_finding — a game-data
+    regen that adds/renames IF categories or changes their member items is
+    picked up automatically, no code edit. Memoized on _TI_ITEM_IFC_MAP.
+    """
+    global _TI_ITEM_IFC_MAP
+    if _TI_ITEM_IFC_MAP is not None:
+        return _TI_ITEM_IFC_MAP
+    m = {}
+    try:
+        from util.autogenerated.item_finding import ItemFindingCategory
+        # Sentinel type of a CategoryInstance (mirrors finding_stats_for_if_target).
+        _sentinel = type(getattr(ItemFindingCategory, 'GOLD_PIECES', None))
+        for attr in dir(ItemFindingCategory):
+            if attr.startswith('_'):
+                continue
+            cat = getattr(ItemFindingCategory, attr, None)
+            if _sentinel is type(None) or not isinstance(cat, _sentinel):
+                continue
+            stat = f'ItemFindingCategory.{attr}'
+            for d in (getattr(cat, 'drops', None) or []):
+                ref = getattr(d, 'item_ref', None)
+                if ref:
+                    m.setdefault(ref, set()).add(stat)
+    except Exception as e:
+        print(f"[stats_report_worker] item-IFC reverse map build failed "
+              f"(target_items exact solves fall back to per-item, no sharing): {e}",
+              flush=True)
+    _TI_ITEM_IFC_MAP = {k: frozenset(v) for k, v in m.items()}
+    return _TI_ITEM_IFC_MAP
+
+
+def _ti_find_signature(job):
+    """Find-signature for target_items exact-solve REUSE (see the exact block in
+    run_optimizer_for_job). Two (item, activity) scopes may share ONE exact
+    solve iff this signature matches — i.e. the identical set of find-relevant
+    gear applies to both, so their argmax gearset is the same (only the base
+    drop weight differs, which does not move the argmax).
+
+    Fully data-driven (no hardcoded item/skill/gem lists). Composed of:
+      * group_slug   -- activity-scoped material-type finding lever (gem/ore/
+                        hide/...), from classify_item / build_target_groups.
+      * is_fine      -- fine variants weight fine_material_finding.
+      * per-item IF categories -- global ItemFindingCategory.* the item belongs
+                        to, from the runtime item_ref->IFC reverse map (so e.g.
+                        Gold nugget {GOLD_NUGGET} and Silver nugget {} do NOT
+                        share, and all RANDOM_GEM gems DO share).
+      * finding_stats_for_if_target(target_ref) -- cat:/currency/IFC targets.
+
+    Correctness bias: on ANY error, return a UNIQUE token so the scope never
+    shares a solve. A too-fine signature only costs reuse; a too-coarse one
+    would hand an item the wrong gearset.
+    """
+    ex = None
+    try:
+        ex = getattr(job, 'extras', None) or {}
+        group_slug = ex.get('group_slug') or (getattr(job, 'skill_name', None) or '')
+        is_fine = bool(ex.get('is_fine'))
+        item_ref = ex.get('item_ref') or ''
+        target_ref = ex.get('target_ref') or ''
+        ifcs = set(_build_item_ifc_map().get(item_ref, frozenset()))
+        try:
+            from optimize_activity_gearsets import finding_stats_for_if_target
+            ifcs |= set(finding_stats_for_if_target(target_ref) or ())
+        except Exception:
+            pass
+        return (group_slug, is_fine, frozenset(ifcs))
+    except Exception:
+        # Unique -> never shares a solve.
+        _leaf = None
+        try:
+            _leaf = (ex or {}).get('item_slug')
+        except Exception:
+            _leaf = None
+        return ('__unique__', _leaf or getattr(job, 'chest_name', None)
+                or getattr(job, 'job_id', None) or id(job))
+
+
+def _target_items_scope_key(job):
+    """Scope key for a target_items job.
+
+    MUST stay identical to what _write_stats_report_result_row writes and what
+    enumerate_applicable_sources emits: ('target_items', <group_slug>,
+    <leaf_slug>, 'NONE', 'NONE'). group_slug is carried on job.skill_name;
+    leaf_slug is job.extras['item_slug'] (materials + currency), falling back to
+    the normalized display name.
+
+    2026-08-12 (bug 84f7b7ba): _filter_jobs_to_stale_only previously derived the
+    key with the generic activity-based path (_derive_subcategory + activity
+    name + activity location), producing ('target_items', '', '<activity>',
+    '<loc>', 'NONE') which never matched the write/enumerate key. Every
+    target_items job was dropped as "not stale" → the report ran 0/0 on both
+    server and local runs.
+    """
+    sub = (getattr(job, 'skill_name', None) or '').lower()
+    src = ''
+    if getattr(job, 'extras', None):
+        src = job.extras.get('item_slug', '') or ''
+    if not src:
+        src = _normalize_item_id(getattr(job, 'precomputed_metric_name', None) or '')
+    # v3 per-(item,activity): activity slug in the location field so two
+    # activities for the same item do NOT collide on the scope key.
+    act = ''
+    if getattr(job, 'extras', None):
+        act = job.extras.get('activity_name', '') or ''
+    if not act and getattr(job, 'activity', None) is not None:
+        act = getattr(job.activity, 'name', '') or ''
+    act_slug = _normalize_item_id(act) if act else 'NONE'
+    return ('target_items', sub, src, act_slug, 'NONE')
+
+
+def _target_items_stale_signals(job, snapshot, conn):
+    """Compute (dominance_bitmap, metric_inputs_hash) for a target_items job.
+
+    SINGLE source of truth shared by the WRITE path
+    (_write_stats_report_result_row) and the stale FILTER
+    (_filter_target_items_jobs_to_stale) so the stored signals and the
+    recomputed signals can never diverge (the class of key/signal-divergence
+    bug that stranded the enumerated categories forever).
+
+    The bitmap is the activity's (primary_skill, first-accessible-location)
+    effective-owned maximal set -- IDENTICAL derivation to the xp/coins/chests
+    write path -- so owning or crafting a better piece of finding/skill gear
+    for that activity flips a bit and re-flags the scope. The hash captures the
+    activity's WE-cap skill level + relevant custom-stats / pets (resolved via
+    the activity name). Both fall back to empty on error so the caller's
+    comparison is safe (fail-open re-run happens in the filter, not here).
+    """
+    from util.stats_report.metric_inputs import compute_metric_inputs_hash
+
+    skill = _derive_primary_skill(job)
+    # 2026-08-13 (jwbail): derive the bitmap location from the job's
+    # extras['location'] -- the EXACT location the optimizer scored this scope
+    # at -- rather than _derive_location(job). For multi-location activities
+    # _derive_location (globals-based first-accessible) can disagree with the
+    # optimized location, so the WRITE (via _derive_location) and the BADGE
+    # (compute_target_items_stale_groups, which uses the stored extras.location)
+    # stored/recomputed bitmaps at DIFFERENT locations -> the signals never
+    # matched -> those (item, activity) scopes always re-flagged and re-ran and
+    # falsely badged. Sourcing loc from extras.location here makes the WRITE,
+    # the resume FILTER, and the BADGE all compute the bitmap at the same
+    # location, so completed scopes compare equal and are correctly skipped.
+    loc = ""
+    _ex_loc = (job.extras or {}).get("location") if getattr(job, "extras", None) else None
+    if _ex_loc:
+        loc = str(_ex_loc).lower().replace(" ", "_").replace("'", "")
+    if not loc:
+        loc = _derive_location(job)
+    req_kw = _required_keywords_for_job(job)
+    bitmap = b""
+    if skill:
+        # Snapshot-scoped memo (see _scoped_owned_bitmap). MUST NOT use the old
+        # module-global scope-keyed cache, which leaked bitmaps across
+        # concurrent runs/sessions and stored wrong bitmaps -> the false-positive
+        # loop that got the bitmap comparison disabled on 2026-09-01.
+        bitmap = _scoped_owned_bitmap(snapshot, skill, loc, "activity", req_kw, conn)
+
+    tik = _target_items_scope_key(job)
+    act_name = ""
+    if getattr(job, "extras", None):
+        act_name = job.extras.get("activity_name", "") or ""
+    if not act_name and getattr(job, "activity", None) is not None:
+        act_name = getattr(job.activity, "name", "") or ""
+    try:
+        # source_name = activity name (not the item slug) so the hash resolves
+        # the activity's real primary skill / WE cap. Both write + filter call
+        # this same helper, so the stored and recomputed hashes match.
+        mh = compute_metric_inputs_hash(
+            snapshot, "target_items", tik[1], act_name or tik[2], tik[3], "NONE", db=conn
+        )
+    except Exception:
+        mh = ""
+    # Scope params the bitmap was computed under. Stored in the row's extras so
+    # the read-side badge recomputes the bitmap with byte-identical inputs
+    # instead of re-deriving loc from metrics_json (that mismatch was a
+    # bitmap-divergence source distinct from the memo pollution).
+    _scope = {"skill": skill or "", "loc": loc or "", "req_kw": sorted(req_kw)}
+    return (bitmap or b""), (mh or ""), _scope
+
+
+def _target_items_filter_core(ti_jobs, stored, current_version, signal_fn):
+    """Pure stale-decision core for target_items (no DB / snapshot).
+
+    Keeps a job (re-run) when its scope is:
+      * new       -- no stored row for the scope key (new activity/item, newly
+                     unlocked, newly SELECTED group, or first ever run)
+      * version   -- stored optimization_version < current_version
+      * changed   -- recomputed (bitmap, hash) differs from the stored pair
+                     (owned/crafted better gear, custom-stat/pet/level change)
+    Drops fresh scopes (stored, same version, same signals). Fail-open: any
+    signal_fn error keeps the job so a transient compute failure never wrongly
+    skips a scope.
+
+    Args:
+        ti_jobs: built target_items ReportJobs (the AUTHORITATIVE applicable set).
+        stored: {scope_key5: (dominance_bitmap, metric_inputs_hash, version)}.
+        current_version: int, OPTIMIZATION_VERSIONS['target_items'].
+        signal_fn: job -> (bitmap_bytes, hash_str).
+
+    Returns (kept_jobs, built_keys, reasons_dict).
+    """
+    kept = []
+    built_keys = set()
+    reasons = {"new": 0, "version": 0, "changed": 0, "error": 0, "fresh": 0}
+    for job in ti_jobs:
+        key = _target_items_scope_key(job)
+        built_keys.add(key)
+        rec = stored.get(key)
+        if rec is None:
+            kept.append(job)
+            reasons["new"] += 1
+            continue
+        bm_s, mh_s, ver_s = rec
+        if (ver_s or 0) < current_version:
+            kept.append(job)
+            reasons["version"] += 1
+            continue
+        try:
+            bm_c, mh_c = signal_fn(job)
+        except Exception:
+            kept.append(job)
+            reasons["error"] += 1
+            continue
+        # 2026-09-01 (bug 8990f0e4) DISABLED the bitmap comparison because the
+        # module-global scope-keyed bitmap memo leaked bitmaps across concurrent
+        # runs/sessions, so stored bitmaps were wrong and never matched the
+        # recompute (415/596 rows mismatched even with hash + owned-count equal)
+        # -> a 100% false-positive re-optimize loop (AGT/ore/sea_shells never
+        # cleared). But hash-only can NEVER see an owned-gear change, so gaining
+        # a better piece (e.g. Heavy pick handle for Ore) stopped re-flagging.
+        # 2026-09-21 (jwbail [fix:stale-detection]) RE-ENABLES it: the memo is
+        # now snapshot-scoped (_scoped_owned_bitmap), so the write and the
+        # recompute compute the identical bitmap for an unchanged snapshot and
+        # the loop cannot recur. Guard: compare the bitmap ONLY when BOTH the
+        # stored and recomputed bitmaps are non-empty, so a legacy empty-bitmap
+        # row or a transient compute error falls back to hash-only and never
+        # false-flags. bm_s/bm_c are the raw effective-owned dominance bitmaps.
+        mh_changed = (mh_c or "") != (mh_s or "")
+        bm_changed = bool(bm_s) and bool(bm_c) and (bytes(bm_c) != bytes(bm_s))
+        if mh_changed or bm_changed:
+            kept.append(job)
+            reasons["changed"] += 1
+        else:
+            reasons["fresh"] += 1
+    return kept, built_keys, reasons
+
+
+def _filter_target_items_jobs_to_stale(ti_jobs, session_uuid, db_path):
+    """Stale-filter target_items jobs, then prune orphaned stored rows.
+
+    Unlike the other categories (which route through detect_stale_scopes +
+    enumerate_applicable_sources), target_items derives its currently-applicable
+    scope set directly from build_target_items_jobs -- the SAME code that
+    produces the jobs -- so there is NO enumerate/build key divergence (the
+    class of bug that caused the 0/0 and perpetual-(!) failures for the
+    enumerated categories, see _target_items_scope_key). We compare each built
+    job's scope against the stored stats_report_results rows and keep only the
+    new / version-bumped / changed ones (see _target_items_filter_core).
+
+    Fail-open at every DB boundary: if we can't load stored rows or build the
+    snapshot, run ALL jobs (never wrongly skip). Returns the filtered list.
+    """
+    from ui.database import DatabaseManager
+    from util.stats_report.state_snapshot import from_char_config
+    from util.stats_report.optimization_versions import OPTIMIZATION_VERSIONS
+
+    if not ti_jobs:
+        return ti_jobs
+
+    current_version = OPTIMIZATION_VERSIONS.get("target_items", 1)
+    db = DatabaseManager(db_path)
+    conn = db._get_connection()
+
+    # Load stored target_items rows for this session.
+    stored = {}
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT subcategory, source_name, location, service, "
+            "dominance_bitmap, metric_inputs_hash, optimization_version "
+            "FROM stats_report_results "
+            "WHERE session_uuid = ? AND category = 'target_items'",
+            (session_uuid,),
+        )
+        for sub, src, loc, svc, bm, mh, ver in cursor.fetchall():
+            stored[("target_items", sub, src, loc, svc)] = (bm, mh, ver)
+    except Exception as e:
+        print(f"[stats_report_worker] target_items stale: stored-row query failed: "
+              f"{e} -- running all target_items jobs", flush=True)
+        return ti_jobs
+
+    # Build the snapshot once (same constructor the write path uses).
+    try:
+        sess = db.get_session(session_uuid) or {}
+        snapshot = from_char_config(
+            sess.get("character_config") or {},
+            sess.get("ui_config") or {},
+        )
+    except Exception as e:
+        print(f"[stats_report_worker] target_items stale: snapshot build failed: "
+              f"{e} -- running all target_items jobs", flush=True)
+        return ti_jobs
+
+    def _signal_fn(job):
+        bm, mh, _scope = _target_items_stale_signals(job, snapshot, conn)
+        return bm, mh
+
+    kept, built_keys, reasons = _target_items_filter_core(
+        ti_jobs, stored, current_version, _signal_fn
+    )
+
+    # Prune orphaned stored rows whose scope is no longer built THIS run, but
+    # only within the groups actually built (a group the user didn't select
+    # this run keeps its rows -- mirrors prune_orphaned_new_items_results'
+    # kind-restriction). Removes rows for obtained items / removed or renamed
+    # activities / de-selected fine variants.
+    pruned = 0
+    if built_keys:
+        try:
+            built_groups = {k[1] for k in built_keys}
+            # (group_slug, item_slug, activity_slug) triples for the results
+            # table; (group_slug, item_slug, activity_name) for the gearsets
+            # (display) table. Build both from the jobs so the prune covers
+            # what the UI actually reads.
+            valid_result = {(k[1], k[2], k[3]) for k in built_keys}
+            valid_gearset = set()
+            for j in ti_jobs:
+                grp = (getattr(j, "skill_name", None) or "")
+                itm = getattr(j, "chest_name", None) or ""
+                act = j.activity.name if getattr(j, "activity", None) else None
+                valid_gearset.add((grp, itm, act))
+            pruned = db.prune_orphaned_target_items_results(
+                session_uuid, built_groups, valid_result, valid_gearset
+            )
+        except Exception as e:
+            print(f"[stats_report_worker] target_items orphan prune failed: {e}", flush=True)
+
+    print(f"[stats_report_worker] target_items stale filter: {len(ti_jobs)} -> {len(kept)} "
+          f"jobs {reasons}; pruned {pruned} orphan row(s)", flush=True)
+    return kept
+
+
+def compute_target_items_stale_groups(snapshot, conn, session_uuid):
+    """Read-side staleness for the target_items (!) badge (no job build).
+
+    Returns (stale_group_slugs:set, stale_scope_tuples:list) where each tuple is
+    (group_slug, item_slug, activity_slug). For every STORED target_items row it
+    recomputes the (dominance_bitmap, metric_inputs_hash) from the activity in
+    the row's extras_json and compares against the stored signals + version --
+    the SAME signal logic _filter_target_items_jobs_to_stale uses on Optimize,
+    so a badged group's rows WILL recompute and the badge clears (no perpetual-!).
+
+    FAIL-SAFE: if a row can't be confidently recomputed (activity missing from
+    the catalog, no skill, bitmap error) it is SKIPPED (not flagged), so a
+    transient/unknown case never produces a stuck badge. Newly-unlocked scopes
+    (no stored row) are intentionally NOT surfaced here -- they have no row to
+    read and are picked up as jobs on the next Optimize by the worker's
+    built-jobs filter; the badge is about EXISTING rows going stale.
+    """
+    import json as _json
+    from util.stats_report.effective_bitmap import compute_effective_owned_bitmap
+    from util.stats_report.metric_inputs import compute_metric_inputs_hash
+    from util.stats_report.optimization_versions import OPTIMIZATION_VERSIONS
+
+    stale_groups = set()
+    stale_scopes = []
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT subcategory, source_name, location, dominance_bitmap, "
+            "metric_inputs_hash, optimization_version, extras_json "
+            "FROM stats_report_results WHERE session_uuid = ? AND category = 'target_items'",
+            (session_uuid,),
+        )
+        rows = cur.fetchall()
+    except Exception:
+        return stale_groups, stale_scopes
+    if not rows:
+        return stale_groups, stale_scopes
+
+    current_version = OPTIMIZATION_VERSIONS.get("target_items", 1)
+    try:
+        import util.walkscape_constants  # noqa: F401
+        from util.autogenerated.activities import ACTIVITIES_BY_NAME
+    except Exception:
+        ACTIVITIES_BY_NAME = {}
+
+    # 2026-08-31 (jwbail): per-call memoization of the two expensive signals.
+    # This runs read-side on the web process over EVERY stored target_items row
+    # (~1000+ for a large character) and previously recomputed the effective-
+    # owned bitmap + metric hash from scratch per row -- the ~4s that dominated
+    # the goals-report open. Both signals depend ONLY on the activity
+    # (skill/location/required-keywords for the bitmap; group/activity for the
+    # hash), NOT the per-item scope, so every target item sharing an activity
+    # yields identical signals. Memoize within THIS call, where the snapshot is
+    # fixed (so the cache is correct AND process-safe -- unlike the module-level
+    # worker bitmap cache, which must stay snapshot-scoped to a single run).
+    _bm_memo = {}
+    _mh_memo = {}
+
+    for (group, item_slug, act_slug, bm_s, mh_s, ver_s, extras_json) in rows:
+        try:
+            if (ver_s or 0) < current_version:
+                stale_groups.add(group)
+                stale_scopes.append((group, item_slug, act_slug))
+                continue
+            ex = {}
+            if extras_json:
+                try:
+                    ex = _json.loads(extras_json) if isinstance(extras_json, str) else (extras_json or {})
+                except Exception:
+                    ex = {}
+            act_name = ex.get("activity_name") or ""
+            act = ACTIVITIES_BY_NAME.get(act_name)
+            if act is None:
+                continue  # can't recompute -> don't false-flag
+            sk = getattr(act, "skill", None) or getattr(act, "primary_skill", None)
+            skill = (sk if isinstance(sk, str) else getattr(sk, "name", "")).lower()
+            if not skill:
+                continue
+            # Prefer the EXACT bitmap scope params the WRITE path used, stored in
+            # extras._stale_scope, so the recompute is byte-identical to the
+            # stored bitmap (re-deriving loc from metrics_json here was a
+            # divergence source). Rows written before this fix have no
+            # _stale_scope -> fall back to hash-only (no bitmap flag) so legacy
+            # rows can never false-badge; they gain the bitmap signal after the
+            # next Optimize rewrites them with stored scope params.
+            _sscope = ex.get("_stale_scope") if isinstance(ex, dict) else None
+            _use_bitmap = isinstance(_sscope, dict) and bool(_sscope.get("skill")) and bool(bm_s)
+            if _use_bitmap:
+                skill = str(_sscope.get("skill") or skill).lower()
+                loc_slug = str(_sscope.get("loc") or "").lower()
+                req_kw = {str(k).lower() for k in (_sscope.get("req_kw") or [])}
+            else:
+                loc_name = ex.get("location") or ""
+                loc_slug = (loc_name.lower().replace(" ", "_").replace("'", "")
+                            if loc_name else act_slug)
+                reqs = getattr(act, "requirements", None) or {}
+                kc = reqs.get("keyword_counts", {}) if isinstance(reqs, dict) else {}
+                req_kw = {str(k).lower() for k in kc.keys()} if kc else set()
+
+            _mh_key = (group, act_name, act_slug)
+            if _mh_key in _mh_memo:
+                mh_c = _mh_memo[_mh_key]
+            else:
+                try:
+                    mh_c = compute_metric_inputs_hash(
+                        snapshot, "target_items", group, act_name, act_slug, "NONE", db=conn)
+                    _mh_memo[_mh_key] = mh_c  # memoize successes only
+                except Exception:
+                    mh_c = mh_s  # neutral (per-row stored) -> don't flag, don't memoize
+            mh_changed = (mh_c or "") != (mh_s or "")
+
+            # Owned-gear signal: recompute the bitmap with the stored scope
+            # params and flag when it differs from the stored one. Only runs when
+            # _use_bitmap (stored scope present AND a non-empty stored bitmap).
+            # Fail-safe: a compute error leaves bm_changed False (never a stuck !).
+            bm_changed = False
+            if _use_bitmap:
+                _bm_key = (skill, loc_slug, frozenset(req_kw))
+                if _bm_key in _bm_memo:
+                    bm_c = _bm_memo[_bm_key]
+                else:
+                    try:
+                        bm_c = compute_effective_owned_bitmap(
+                            snapshot, skill, loc_slug, "NONE", "activity", db=conn,
+                            required_keywords=req_kw or None,
+                        )
+                    except Exception:
+                        bm_c = None  # fail-safe: never false-flag on a compute error
+                    if bm_c is not None:
+                        _bm_memo[_bm_key] = bm_c
+                if bm_c and bytes(bm_c) != bytes(bm_s):
+                    bm_changed = True
+
+            if mh_changed or bm_changed:
+                stale_groups.add(group)
+                stale_scopes.append((group, item_slug, act_slug))
+        except Exception:
+            continue
+    return stale_groups, stale_scopes
+
+
+def ensure_target_items_applicability_rows(session_uuid, db_path, include_fine=False):
+    """Materialize a placeholder stats_report_results row for every currently-
+    applicable BASE target_items (item, activity) scope that has no stored row,
+    so NEWLY-UNLOCKED scopes 'have a row to read' and the (!) badge can flag
+    them (compute_target_items_stale_groups reads rows; a scope with no row is
+    invisible to it). This mirrors how the other categories detect
+    newly-unlocked (enumerate_applicable_sources - stored), but target_items has
+    no enumerate_applicable_sources entry (field-overloaded key), so we
+    enumerate via build_target_items_jobs -- the SAME source of truth the run
+    uses -- and persist the gap as placeholders.
+
+    Placeholders use optimization_version=0 (< current) + empty bitmap/hash, so
+    compute_target_items_stale_groups flags them stale until a real Optimize run
+    overwrites them (via _write_stats_report_result_row, same PK) with the true
+    signals. They live ONLY in stats_report_results (the stale-detection table),
+    NOT stats_report_gearsets (the display table read by
+    get_stats_report_results_latest_per_scope / /api/stats-report/results), so
+    they never render as junk rows.
+
+    include_fine defaults False on purpose: BASE scopes are built by EVERY run
+    regardless of the fine toggle, so a base placeholder is guaranteed to be
+    replaced (or pruned) by the next run of its group -- no perpetual-(!). Fine
+    scopes are only built when the toggle is on, so materializing them here
+    could strand a badge; they're covered by real rows once a fine run happens.
+
+    Idempotent (only inserts MISSING scopes; never overwrites a real row) and
+    fail-safe (any error is swallowed and returns the count so far). Returns the
+    number of placeholder rows written.
+    """
+    import json as _json
+    from ui.database import DatabaseManager
+
+    written = 0
+    try:
+        character = load_character(session_uuid, db_path)
+    except Exception as e:
+        print(f"[stats_report_worker] applicability: load_character failed: {e}", flush=True)
+        return 0
+    if character is None:
+        return 0
+
+    # Set the region-access globals so build_target_items_jobs picks the SAME
+    # first-accessible location the run/write path uses (else the scope key's
+    # activity slug + the eventual bitmap location could diverge).
+    try:
+        _ur, _ll = compute_region_access(session_uuid, db_path)
+        globals()['_UNLOCKED_REGIONS'] = _ur
+        globals()['_LOCKED_LOCATIONS'] = _ll
+    except Exception:
+        globals().setdefault('_UNLOCKED_REGIONS', None)
+        globals().setdefault('_LOCKED_LOCATIONS', set())
+
+    try:
+        jobs = build_target_items_jobs('applicability', session_uuid, character,
+                                       include_fine=include_fine)
+    except Exception as e:
+        print(f"[stats_report_worker] applicability: build_target_items_jobs failed: {e}", flush=True)
+        return 0
+
+    db = DatabaseManager(db_path)
+    conn = db._get_connection()
+    stored = set()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT subcategory, source_name, location, service FROM stats_report_results "
+            "WHERE session_uuid = ? AND category = 'target_items'",
+            (session_uuid,),
+        )
+        for sub, src, loc, svc in cur.fetchall():
+            stored.add((sub, src, loc, svc))
+    except Exception as e:
+        print(f"[stats_report_worker] applicability: stored-row query failed: {e}", flush=True)
+        return 0
+
+    for job in jobs:
+        try:
+            key = _target_items_scope_key(job)  # ('target_items', group, item, act, 'NONE')
+            skey = (key[1], key[2], key[3], key[4])
+            if skey in stored:
+                continue  # already has a (real or placeholder) row
+            extras = dict(job.extras) if getattr(job, 'extras', None) else {}
+            extras['pending'] = True
+            db.create_stats_report_result(
+                session_uuid=session_uuid,
+                category='target_items',
+                subcategory=key[1],
+                source_name=key[2],
+                location=key[3],
+                service='NONE',
+                rank=0,
+                metric_value=0.0,
+                metric_name='',
+                export_string='',
+                dominance_bitmap=b'',
+                metric_inputs_hash='',
+                optimization_version=0,   # < current -> flagged stale by the badge
+                extras_json=_json.dumps(extras),
+            )
+            stored.add(skey)
+            written += 1
+        except Exception:
+            continue
+
+    if written:
+        print(f"[stats_report_worker] applicability: wrote {written} placeholder "
+              f"target_items row(s) for newly-applicable scopes", flush=True)
+    return written
+
+
 def _filter_jobs_to_stale_only(all_jobs, session_uuid, db_path):
     """Filter built jobs to scopes flagged stale or newly-unlocked.
 
@@ -4041,7 +7731,8 @@ def _filter_jobs_to_stale_only(all_jobs, session_uuid, db_path):
     try:
         scopes = detect_stale_scopes(prev, curr, conn,
                                       session_uuid=session_uuid,
-                                      char_config=sess.get('character_config') or {})
+                                      char_config=sess.get('character_config') or {},
+                                      include_unavailable=globals().get('_INCL_UNAVAIL'))
     except Exception as e:
         print(f"[stats_report worker] detect_stale_scopes failed: {e} — falling back to no-op")
         scopes = []
@@ -4074,12 +7765,15 @@ def _filter_jobs_to_stale_only(all_jobs, session_uuid, db_path):
     dropped_samples = {}
     for job in all_jobs:
         cat = job.category
-        sub = _derive_subcategory(job)
-        src = job.activity.name if job.activity else (getattr(job, 'recipe_name', None) or '')
-        _rctx = _recipe_loc_ctx(session_uuid, db, curr) if cat == "chests_recipes" else None
-        loc = _derive_location(job, recipe_ctx=_rctx)
-        svc = _derive_service(job)
-        key = (cat, sub, src, loc, svc)
+        if cat == 'target_items':
+            key = _target_items_scope_key(job)
+        else:
+            sub = _derive_subcategory(job)
+            src = job.activity.name if job.activity else (getattr(job, 'recipe_name', None) or '')
+            _rctx = _recipe_loc_ctx(session_uuid, db, curr) if cat == "chests_recipes" else None
+            loc = _derive_location(job, recipe_ctx=_rctx)
+            svc = _derive_service(job)
+            key = (cat, sub, src, loc, svc)
         if key in stale_keys or (cat, src) in zero_scopes:
             out.append(job)
         else:

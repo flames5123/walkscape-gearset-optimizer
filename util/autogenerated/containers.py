@@ -82,8 +82,8 @@ class ContainerInfo:
 class Container:
     """Enum-style access to all containers."""
 
-    ADVENTURING_GUILD_CHEST = ContainerInfo(
-        name='Adventuring guild chest',
+    ADVENTURERS_GUILD_CHEST = ContainerInfo(
+        name="Adventurers' Guild chest",
         container_type='unique_openable',
         main_table=[
             DropEntry(item_name='Coal', item_ref="Material.COAL", quantity=Quantity(min_qty=10, max_qty=30), chance_percent=16.5750),
@@ -859,7 +859,7 @@ class Container:
             DropEntry(item_name='Rough sandpaper', item_ref="Item.ROUGH_SANDPAPER", quantity=Quantity(min_qty=1, max_qty=1), chance_percent=10.0000),
         ],
         uncommon_table=[
-            DropEntry(item_name='Gem-tipped tweezers', item_ref="Item.GEM_TIPPED_TWEEZERS", quantity=Quantity(min_qty=1, max_qty=1), chance_percent=1.6667),
+            DropEntry(item_name='Gem tipped tweezers', item_ref="Item.GEM_TIPPED_TWEEZERS", quantity=Quantity(min_qty=1, max_qty=1), chance_percent=1.6667),
             DropEntry(item_name='Pretty pliers', item_ref="Item.PRETTY_PLIERS", quantity=Quantity(min_qty=1, max_qty=1), chance_percent=1.6667),
             DropEntry(item_name='Zip pouch', item_ref="Item.ZIP_POUCH", quantity=Quantity(min_qty=1, max_qty=1), chance_percent=1.6667),
         ],
@@ -922,7 +922,7 @@ class Container:
 
 # Lookup dictionaries
 CONTAINERS_BY_NAME = {
-    'Adventuring guild chest': Container.ADVENTURING_GUILD_CHEST,
+    "Adventurers' Guild chest": Container.ADVENTURERS_GUILD_CHEST,
     'Agility chest': Container.AGILITY_CHEST,
     'Bird nest': Container.BIRD_NEST,
     'Carpentry chest': Container.CARPENTRY_CHEST,

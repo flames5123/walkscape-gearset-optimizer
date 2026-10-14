@@ -114,7 +114,7 @@ class OwnedItemsSection extends CollapsibleSection {
                 <div class="owned-items-container">
                     <div class="error-message" style="padding: 20px; text-align: center; color: #ff6b6b;">
                         <p>Unable to load item catalog</p>
-                        <p style="font-size: 12px; color: #b0b0b0;">The catalog data is not available. Please refresh the page.</p>
+                        <p style="font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1))); color: #b0b0b0;">The catalog data is not available. Please refresh the page.</p>
                     </div>
                 </div>
             `;
@@ -135,6 +135,7 @@ class OwnedItemsSection extends CollapsibleSection {
                     ${this.renderCrafted()}
                     ${this.renderChests()}
                     ${this.renderPets()}
+                    ${this.renderEggs()}
                     ${this.renderMaterials()}
                     ${this.renderCustomItems()}
                 </div>
@@ -599,6 +600,48 @@ class OwnedItemsSection extends CollapsibleSection {
     }
 
     /**
+     * Render Pet Eggs category.
+     *
+     * Pet eggs (catalog.categories.eggs, item type 'egg', id '<species>_egg')
+     * are surfaced in the goals report's "Fastest New Item Activities" → Eggs
+     * kind, where each row has a "Hide" button that writes
+     * user_overrides.items.<species>_egg.hide=true. Before this category
+     * existed, eggs had NO column-1 home: the only egg-adjacent rows were the
+     * Pets category, keyed by the bare species id ('tiger'), NOT '<species>_egg'.
+     * So a hidden egg never showed as hidden in column 1 and could never be
+     * unhidden — the hide flag was stuck forever (user report b5afbe50:
+     * "I hid both tiger eggs and now they don't reset"). Rendering eggs here
+     * with the standard eye icon — keyed by egg.id ('tiger_egg'), the SAME id
+     * the goals-report Hide button and the worker's get_ownership_lookup use —
+     * makes the hidden state visible and reversible, exactly like gear and
+     * collectibles already are.
+     * @returns {string} HTML string
+     */
+    renderEggs() {
+        const catalog = this.props.catalog || { categories: {} };
+        const eggs = catalog.categories.eggs || [];
+
+        if (eggs.length === 0) {
+            return '';
+        }
+
+        const obtained = this.countObtained(eggs);
+
+        return `
+            <div class="item-category collapsible-category" data-category="eggs">
+                <div class="category-header clickable">
+                    <span class="category-title">Pet Eggs</span>
+                    <span class="category-count">${obtained}/${eggs.length}</span>
+                    <span class="expand-arrow">▼</span>
+                </div>
+                <div class="category-items" style="display: none;">
+                    ${eggs.map(egg => `<div class="item-row-container" data-item-id="${egg.id}"></div>`).join('')}
+                </div>
+            </div>
+        `;
+    }
+
+    /**
      * Render Custom Items category (generic items).
      * Gated behind window._featureFlags?.generic.
      */
@@ -666,13 +709,13 @@ class OwnedItemsSection extends CollapsibleSection {
             </div>
             <div class="category-subcategories" style="display:none">
                 <div class="gi-category-controls">
-                    <button class="btn-create-generic-item optimize-btn" style="font-size:13px;padding:5px 14px">🔧 Add/Edit Generic Items</button>
+                    <button class="btn-create-generic-item optimize-btn" style="font-size: max(var(--min-text, 5px), calc(13px * var(--text-scale, 1)));padding:5px 14px">🔧 Add/Edit Generic Items</button>
                     <label class="gi-checkbox-label gi-community-toggle" style="margin-top:6px">
                         <input type="checkbox" class="gi-show-community-col1" ${communityChecked} />
                         Show community definitions
                     </label>
                 </div>
-                ${items.length === 0 ? '<div class="gi-no-items-msg" style="padding:4px 0;color:var(--text-secondary);font-size:12px">No custom items yet.</div>' : subcategoriesHtml}
+                ${items.length === 0 ? '<div class="gi-no-items-msg" style="padding:4px 0;color:var(--text-secondary);font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)))">No custom items yet.</div>' : subcategoriesHtml}
             </div>
         </div>`;
     }
@@ -881,6 +924,9 @@ class OwnedItemsSection extends CollapsibleSection {
 
         // Pets (empty for now)
         items.push(...(catalog.categories.pets || []));
+
+        // Pet Eggs (type 'egg')
+        items.push(...(catalog.categories.eggs || []));
 
         return items;
     }
@@ -1203,7 +1249,7 @@ class OwnedItemsSection extends CollapsibleSection {
         }
 
         if (items.length === 0) {
-            $subcategories.append('<div class="gi-no-items-msg" style="padding:4px 0;color:var(--text-secondary);font-size:12px">No custom items yet.</div>');
+            $subcategories.append('<div class="gi-no-items-msg" style="padding:4px 0;color:var(--text-secondary);font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)))">No custom items yet.</div>');
         } else {
             for (const slot of slotOrder) {
                 if (!bySlot[slot] || bySlot[slot].length === 0) continue;
@@ -1414,6 +1460,12 @@ class OwnedItemsSection extends CollapsibleSection {
 
         // Pets
         for (const item of (categories.pets || [])) {
+            if (item.id === itemId) return item;
+        }
+
+        // Pet Eggs (type 'egg', id '<species>_egg') — needed so the column-1
+        // Pet Eggs category rows hydrate into ItemRow components.
+        for (const item of (categories.eggs || [])) {
             if (item.id === itemId) return item;
         }
 

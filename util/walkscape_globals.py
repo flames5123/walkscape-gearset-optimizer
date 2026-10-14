@@ -56,6 +56,23 @@ def get_total_collectibles() -> int:
     return getattr(_thread_locals, 'total_collectibles', DEFAULT_TOTAL_COLLECTIBLES)
 
 
+DEFAULT_TOTAL_WEALTH = 0
+
+
+def set_total_wealth(value: int):
+    """Set the player's total wealth (value of all items = coins + Σ item value)
+    for the current thread/user. Used by total_wealth gated stats (e.g. the
+    Golden Frog, whose per-stat bonuses unlock at 100k/250k/500k/1M wealth).
+    Defaults to 0 when unknown, mirroring the frontend (no wealth -> gate off).
+    """
+    _thread_locals.total_wealth = value
+
+
+def get_total_wealth() -> int:
+    """Get the current total wealth (value of all items) for this thread/user."""
+    return getattr(_thread_locals, 'total_wealth', DEFAULT_TOTAL_WEALTH)
+
+
 def set_custom_stats(custom_stats: dict):
     """
     Set custom stats for current thread/user.

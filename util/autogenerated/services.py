@@ -276,6 +276,16 @@ class Service:
         gated_stats={},
     )
 
+    BASIC_KITCHEN_STONE_SLINGERS_CAMP = ServiceInstance(
+        name='Basic Kitchen',
+        category=Skill.COOKING,
+        tier='Basic Kitchen',
+        location=Location.STONE_SLINGERS_CAMP,
+        requirements={'keyword_counts': {}, 'skill': {}, 'reputation': {}, 'access': []},
+        stats={},
+        gated_stats={},
+    )
+
     BASIC_LOOM_AZURAZERA = ServiceInstance(
         name='Basic Loom',
         category=Skill.TAILORING,
@@ -301,6 +311,16 @@ class Service:
         category=Skill.TAILORING,
         tier='Basic Loom',
         location=Location.SALSFIRTH,
+        requirements={'keyword_counts': {}, 'skill': {}, 'reputation': {}, 'access': []},
+        stats={},
+        gated_stats={},
+    )
+
+    BASIC_LOOM_SUMMERS_REACH = ServiceInstance(
+        name='Basic Loom',
+        category=Skill.TAILORING,
+        tier='Basic Loom',
+        location=Location.SUMMERS_REACH,
         requirements={'keyword_counts': {}, 'skill': {}, 'reputation': {}, 'access': []},
         stats={},
         gated_stats={},

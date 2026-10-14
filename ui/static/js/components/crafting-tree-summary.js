@@ -1,3 +1,4 @@
+import { rewardSourceGroupsHtml, openAchievementFromSource } from '../utils/reward-sources.js';
 /**
  * SummaryDashboard — Final card at the bottom of the crafting tree
  * showing aggregated totals: steps, time, XP, shopping list, cost, steps breakdown.
@@ -9,9 +10,11 @@
 
 import Component from './base.js';
 import { wireDropAnchor } from '../drop-item-popover.js';
+import { tradingButtonsHTML } from '../trading-buttons.js';
 import api from '../api.js';
 
 import { formatFixed } from '../utils/number-format.js';
+import { unhideAlt } from '../utils/unhide-item.js';
 
 class SummaryDashboard extends Component {
     constructor(element, props = {}) {
@@ -974,6 +977,22 @@ class SummaryDashboard extends Component {
             const lockedBadge = entry.is_locked
                 ? ' <span class="tree-upgrade-locked-badge" title="Locked behind requirements">🔒</span>'
                 : '';
+            const hiddenBadge = entry.is_hidden
+                ? ' <span class="tree-upgrade-hidden-badge" title="Hidden from the optimizer">🙈</span>'
+                : '';
+
+            // Ring copies badge: "×1" (one copy, best single ring slot) vs
+            // "×2" (two copies, both ring slots). Only present on ring items
+            // that can benefit both ring slots; absent otherwise. Lets the
+            // user see the honest single-copy saving alongside the two-copy
+            // saving instead of one conflated total. (user report 2026-09-21)
+            const copiesBadge = entry.copies
+                ? ` <span class="tree-upgrade-copies-badge" title="${
+                    entry.copies === 2
+                        ? 'Two copies — fills both ring slots'
+                        : 'One copy — best single ring slot'
+                  }">×${entry.copies}</span>`
+                : '';
 
             // Per-node breakdown table — sorted backend-side by biggest
             // savings within the entry.
@@ -1029,19 +1048,29 @@ class SummaryDashboard extends Component {
             const dataQualityAttr = entry.quality
                 ? ` data-drop-quality="${this._escape(entry.quality)}"`
                 : '';
+            const unhideBtn = entry.is_hidden
+                ? `<button class="btn-source-dropdown tree-upgrade-unhide-btn" data-item-name="${escapedName}" data-item-uuid="${this._escape(entry.uuid || '')}" title="Unhide this item so the optimizer can use it" type="button">Unhide</button>`
+                : '';
+            const tradeHtml = tradingButtonsHTML(
+                { name: baseName, type: 'item', quality: entry.quality, tradable: entry.tradable },
+                { owned: false });
             const actionsHtml = `
                 <div class="tree-upgrade-actions-row">
                     <button class="btn-source-dropdown tree-upgrade-sources-btn" data-item-name="${escapedBase}" title="Show sources for this item">Sources <span class="source-arrow">▼</span></button>
                     <button class="btn-source-dropdown tree-upgrade-stats-btn tree-summary-drop-anchor" data-drop-name="${escapedBase}"${dataQualityAttr} title="Show stats for this item" type="button">Stats</button>
+                    ${unhideBtn}
                 </div>
-                <div class="tree-upgrade-sources-container" style="display:none"></div>`;
+                <div class="tree-upgrade-sources-container" style="display:none"></div>
+                ${tradeHtml}`;
             return `
                 <div class="tree-upgrade-entry" data-entry-idx="${idx}">
                     <div class="tree-upgrade-row" role="button" tabindex="0">
                         <span class="expand-arrow">▼</span>
                         ${iconHtml}
                         <span class="tree-upgrade-name">${escapedName}</span>
+                        ${copiesBadge}
                         ${lockedBadge}
+                        ${hiddenBadge}
                         <span class="tree-upgrade-total ${savingsClass}">${stepsText}</span>
                     </div>
                     <div class="tree-upgrade-details" style="display:none">
@@ -1059,7 +1088,7 @@ class SummaryDashboard extends Component {
         const countBadge = `<span class="tree-summary-count">${treeUpgrades.length}</span>`;
         return this._section(
             'tree_upgrades',
-            `${stepsIcon} Non-owned/Locked Upgrades ${countBadge}`,
+            `${stepsIcon} Non-owned/Locked/Hidden Upgrades ${countBadge}`,
             `<div class="tree-upgrades-list">${rows}</div>`,
         );
     }
@@ -1117,13 +1146,28 @@ class SummaryDashboard extends Component {
             // Don't toggle if the click was on an action link inside
             // the details (defensive — nothing should bubble through
             // because details start hidden).
-            if ($(e.target).closest('.tree-upgrade-sources-btn, .tree-upgrade-sources-container, .tree-upgrade-stats-btn').length) return;
+            if ($(e.target).closest('.tree-upgrade-sources-btn, .tree-upgrade-sources-container, .tree-upgrade-stats-btn, .tree-upgrade-unhide-btn').length) return;
             e.preventDefault();
             const $row = $(this);
             const $details = $row.siblings('.tree-upgrade-details');
             const $arrow = $row.find('.expand-arrow');
             $details.slideToggle(150);
             $arrow.toggleClass('expanded');
+        });
+
+        // Unhide — flip the item's hide flag off. The tree summary is
+        // recomputed backend-side on the next optimize; optimistically drop
+        // the row so it leaves the list immediately.
+        this.$element.on('click.tu', '.tree-upgrade-unhide-btn', function (e) {
+            e.stopPropagation();
+            e.preventDefault();
+            const $btn = $(this);
+            unhideAlt({
+                name: $btn.data('item-name'),
+                uuid: $btn.data('item-uuid'),
+                quality: '',
+            }, { pruneStore: false });
+            $btn.closest('.tree-upgrade-entry').slideUp(150, function () { $(this).remove(); });
         });
 
         // Sources expandable inside an entry's details. Uses the same
@@ -1166,6 +1210,12 @@ class SummaryDashboard extends Component {
             const closeTree = () => {
                 $('.crafting-tree-close-btn').first().trigger('click');
             };
+            if (sourceType === 'achievement_reward' && sourceId) {
+                // Open the Achievements page (scroll + highlight). Routing via
+                // the #achievements hash mutually closes this tree overlay.
+                openAchievementFromSource(sourceId);
+                return;
+            }
             if (typeof window !== 'undefined' && window.store) {
                 if (sourceType === 'activity_drop' && sourceId) {
                     window.store.update('column3.selectedActivity', sourceId);
@@ -1250,6 +1300,7 @@ class SummaryDashboard extends Component {
                 html += `<div class="source-item source-item-no-click source-item-chest"><div class="source-item-main"><span class="source-name">${esc(src.name || '?')}</span><span class="source-badge source-badge-chest">Chest</span></div><div class="source-item-details"><span>Chance per chest: ${esc(dropRate)}</span>${qty ? `<span>${esc(qty)}</span>` : ''}</div></div>`;
             }
         }
+        html += rewardSourceGroupsHtml(sources);
         html += '</div>';
         return html;
     }

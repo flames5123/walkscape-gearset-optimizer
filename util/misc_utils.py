@@ -140,13 +140,35 @@ def build_all_item_lookups():
     return lookups
 
 
-def resolve_item_reference(name, lookups=None):
+# Shop-table caption item_type -> ordered whitelist of lookup namespaces the
+# item may resolve against. A shop item whose declared type appears here is
+# matched ONLY against the listed namespaces (in priority order); every other
+# namespace is ignored. This stops an item that merely shares a name with an
+# unrelated functional item from being conflated -- e.g. the "Carrot" cosmetic
+# nose sold in "Not a Shop" was resolving to Material.CARROT (the crafting
+# ingredient). Types absent from this map resolve against every namespace
+# (legacy behaviour). Bug 22d73855.
+ITEM_TYPE_ALLOWED_REF_TYPES = {
+    # Cosmetics are appearance items. Some cosmetics are ALSO equippable gear
+    # (Warm beanie, Pirate hat, Treasure hunter hat/jacket) and legitimately map
+    # to an Item.* ref, so equipment is allowed -- but a cosmetic must NEVER
+    # resolve to a functional ingredient (Material / Consumable / Collectible /
+    # Container / ...) just because the names happen to match.
+    'Cosmetic': ('Item',),
+}
+
+
+def resolve_item_reference(name, lookups=None, item_type=None):
     """
     Resolve an item name to its module reference.
     
     Args:
         name: Item name to resolve
         lookups: Pre-built lookup dicts from build_all_item_lookups(), or None to build fresh
+        item_type: Optional shop-table caption type (e.g. 'Cosmetic', 'Material').
+            When provided and present in ITEM_TYPE_ALLOWED_REF_TYPES, resolution is
+            restricted to that type's whitelisted namespaces so a cosmetic is never
+            conflated with a same-named ingredient.
     
     Returns:
         String like "Material.FISHBONE" or None if not found
@@ -165,8 +187,16 @@ def resolve_item_reference(name, lookups=None):
         name.replace("'", ""),  # Remove curly apostrophes
     ]
     
-    # Try each type in order (Material, Item, Consumable, etc.)
-    for type_name, type_lookup in lookups.items():
+    # Constrain the searched namespaces (and their priority order) when the
+    # shop declared a type that must not cross into unrelated namespaces.
+    allowed = ITEM_TYPE_ALLOWED_REF_TYPES.get(item_type)
+    if allowed is not None:
+        type_order = [(t, lookups[t]) for t in allowed if t in lookups]
+    else:
+        # Try each type in order (Material, Item, Consumable, etc.)
+        type_order = list(lookups.items())
+    
+    for type_name, type_lookup in type_order:
         for name_variant in variations:
             if name_variant.lower() in type_lookup:
                 enum_name = type_lookup[name_variant.lower()]

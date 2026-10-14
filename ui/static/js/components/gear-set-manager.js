@@ -19,6 +19,11 @@ import store from '../state.js';
 import api from '../api.js';
 import KeyboardNavigator from '../utils/keyboard-navigation.js';
 import CleanupModal from './cleanup-modal.js';
+import { resolveGearsetTarget, targetMatchesSelection, buildMatchSelection } from './gearset-suggest-match.js';
+
+// Build marker so debug logs empirically prove which build the browser loaded.
+const GEARSET_SUGGEST_JS_BUILD = 'gs-suggest-2026-08-14g';
+console.log('[gs-suggest] module loaded, build=' + GEARSET_SUGGEST_JS_BUILD);
 
 class GearSetManager extends Component {
     /**
@@ -41,6 +46,51 @@ class GearSetManager extends Component {
 
         // Keyboard navigation
         this.keyboardNav = null;
+
+        // Suggestion state
+        this._suggestTarget = null;
+        this._suggestVisible = false;
+        this._suggestExpanded = false; // true when dismiss options are showing
+        this._suggestEnabled = this._loadSuggestSetting();
+        // Cached {activities, recipesBySkill, locations} for name->target resolution.
+        // Populated async from the live selector-dropdown caches (preferred) or by
+        // fetching the (304-cached) /api endpoints. NOT held on store.state.
+        this._suggestData = null;
+        this._suggestDataLoading = false;
+        // Kick off the data load now so it's ready by the time a set is picked.
+        this._ensureSuggestData();
+
+        // "Show matching gear sets first" (opt-in, default OFF). When on, the
+        // saved-set dropdown floats sets whose name resolves to the current
+        // activity/recipe/travel to the top and highlights them. Reuses the same
+        // _suggestData + resolver as the reverse suggestion feature above.
+        this._sortMatchingFirst = this._loadSortMatchingFirstSetting();
+        // Memoize name->target resolution (resolver scans all activities/recipes/
+        // locations per name; a user can have hundreds of saved sets). Cleared
+        // whenever _suggestData (re)loads. Keyed by raw gear-set name.
+        this._matchTargetCache = new Map();
+
+        // Listen for global setting changes
+        window.addEventListener('suggestMatchingActivityChanged', (e) => {
+            this._suggestEnabled = e.detail.value;
+            if (!this._suggestEnabled) {
+                this._hideSuggestion();
+            } else {
+                this._evaluateSuggestion();
+            }
+        });
+
+        // Re-render the saved list when the "matching first" setting is toggled
+        // or when the current activity/recipe/travel selection changes (so the
+        // ordering/highlight tracks the live selection while the dropdown is open).
+        window.addEventListener('sortMatchingGearsetsFirstChanged', (e) => {
+            this._sortMatchingFirst = !!(e.detail && e.detail.value);
+            if (this.dropdownOpen) this.renderPreservingScroll();
+        });
+        this.subscribe('column3.selectedActivity', () => this._onSelectionContextChange());
+        this.subscribe('column3.selectedRecipe', () => this._onSelectionContextChange());
+        this.subscribe('column3.travelStart', () => this._onSelectionContextChange());
+        this.subscribe('column3.travelEnd', () => this._onSelectionContextChange());
 
         // Subscribe to gear set state changes
         this.subscribe('gearsets.selectedId', () => this.onSelectionChange());
@@ -153,6 +203,9 @@ class GearSetManager extends Component {
         } else {
             this.render();
         }
+
+        // Evaluate suggestion after selection changes
+        this._evaluateSuggestion();
     }
 
     /**
@@ -432,14 +485,33 @@ class GearSetManager extends Component {
     renderDropdownContent() {
         const filteredGearSets = this.getFilteredGearSets();
 
-        // Render gear set list items
-        const gearSetItems = filteredGearSets.map(gs => {
+        // Render gear set list items. When "matching first" is active, the list
+        // is already sorted matches-first; we tag matching rows for highlight and
+        // drop a single divider at the matches -> non-matches boundary.
+        const anyMatches = filteredGearSets.some(gs => gs.matches);
+        let dividerInserted = false;
+        const gearSetItems = filteredGearSets.map((gs, idx) => {
             const isPendingDelete = this.pendingDelete === gs.id;
             const deleteButtonClass = isPendingDelete ? 'delete-confirm' : 'delete-button';
             const deleteButtonText = isPendingDelete ? 'Delete?' : '×';
 
+            // Insert one divider once we cross from the matching group into the
+            // rest (only when there is a genuine boundary, i.e. some of each).
+            let divider = '';
+            if (anyMatches && !gs.matches && !dividerInserted) {
+                dividerInserted = true;
+                divider = `<div class="gear-set-divider" aria-hidden="true"><span>Other gear sets</span></div>`;
+            }
+
+            const matchClass = gs.matches ? ' gear-set-matching' : '';
+            const matchBadge = gs.matches
+                ? `<span class="gear-set-match-badge" title="Matches your current ${gs.matchType || 'selection'}">★</span>`
+                : '';
+
             return `
-                <div class="gear-set-item" data-id="${gs.id}">
+                ${divider}
+                <div class="gear-set-item${matchClass}" data-id="${gs.id}">
+                    ${matchBadge}
                     <span class="gear-set-name">${gs.name}</span>
                     <button class="${deleteButtonClass}" data-id="${gs.id}">${deleteButtonText}</button>
                 </div>
@@ -550,17 +622,59 @@ class GearSetManager extends Component {
      */
     getFilteredGearSets() {
         const saved = store.state.gearsets.saved || {};
-        const gearSets = Object.entries(saved).map(([id, data]) => ({
+        let gearSets = Object.entries(saved).map(([id, data]) => ({
             id,
             name: data.name
         }));
 
-        if (!this.searchText) {
+        if (this.searchText) {
+            const searchLower = this.searchText.toLowerCase();
+            gearSets = gearSets.filter(gs => gs.name.toLowerCase().includes(searchLower));
+        }
+
+        // Opt-in: float sets matching the current activity/recipe/travel to the
+        // top and tag them for highlighting. Annotates gs.matches in place.
+        return this._applyMatchingFirst(gearSets);
+    }
+
+    /**
+     * When "show matching gear sets first" is enabled AND resolver data is loaded
+     * AND there's a current selection, tag each gear set with a `matches` boolean
+     * (does its name resolve to the current activity/recipe/travel?) and stable-
+     * sort matching sets to the front. Otherwise returns the list unchanged (with
+     * matches=false) so rendering is uniform.
+     *
+     * Stable within each group: preserves the original saved order among matches
+     * and among non-matches (Array.prototype.sort is stable in modern engines).
+     * @param {Array<{id:string,name:string}>} gearSets
+     * @returns {Array<{id:string,name:string,matches:boolean,matchType?:string}>}
+     */
+    _applyMatchingFirst(gearSets) {
+        // Default: nothing matches (uniform, cheap path).
+        for (const gs of gearSets) { gs.matches = false; gs.matchType = null; }
+
+        if (!this._sortMatchingFirst || !this._suggestData) {
+            // If the feature is on but data isn't ready, trigger a load; the
+            // dropdown re-renders when it resolves (_ensureSuggestData).
+            if (this._sortMatchingFirst && !this._suggestData) this._ensureSuggestData();
             return gearSets;
         }
 
-        const searchLower = this.searchText.toLowerCase();
-        return gearSets.filter(gs => gs.name.toLowerCase().includes(searchLower));
+        const selection = buildMatchSelection(store.state.column3 || {});
+        const hasSelection = !!(selection.selectedActivity || selection.selectedRecipe ||
+            (selection.travelStart && selection.travelEnd));
+        if (!hasSelection) return gearSets;
+
+        for (const gs of gearSets) {
+            const target = this._resolveTargetCached(gs.name);
+            if (targetMatchesSelection(target, selection)) {
+                gs.matches = true;
+                gs.matchType = target.type; // 'activity' | 'recipe' | 'travel'
+            }
+        }
+
+        // Stable partition: matches first, original relative order preserved.
+        return gearSets.sort((a, b) => (a.matches === b.matches ? 0 : (a.matches ? -1 : 1)));
     }
 
     /**
@@ -616,11 +730,19 @@ class GearSetManager extends Component {
                     </div>
                 </div>
                 ${dropdownHtml}
+                <div class="gearset-suggest-row" style="display:none;"></div>
             </div>
         `;
 
         this.$element.html(html);
         console.log('GearSetManager rendered, dropdown in DOM:', this.$element.find('.gear-set-dropdown').length);
+        // The render above recreates the (empty) .gearset-suggest-row, which would
+        // wipe a button shown by an earlier evaluate (e.g. the load()->render race).
+        // Re-evaluate against the current selection so the button re-appears if it
+        // still applies. _evaluateSuggestion never calls render(), so no recursion.
+        if (this._suggestEnabled !== undefined) {
+            this._evaluateSuggestion();
+        }
     }
 
     /**
@@ -736,6 +858,372 @@ class GearSetManager extends Component {
                 $dropdown.slideUp(200);
             }
         });
+
+        // --- Suggestion row event handlers ---
+        this.$element.on('click', '.gearset-suggest-apply', () => {
+            this._applySuggestion();
+        });
+
+        this.$element.on('click', '.gearset-suggest-x', (e) => {
+            e.stopPropagation();
+            this._toggleDismissOptions();
+        });
+
+        this.$element.on('click', '.gearset-suggest-dismiss-set', () => {
+            this._dismissForSet();
+        });
+
+        this.$element.on('click', '.gearset-suggest-dismiss-global', () => {
+            this._dismissGlobal();
+        });
+    }
+
+    // --- Suggestion helpers ---
+
+    /**
+     * Load the activities/recipes/locations needed for name->target matching.
+     * Prefers the live selector-dropdown caches (already fetched on page load);
+     * falls back to the (server 304-cached) /api endpoints. Re-runs the
+     * suggestion evaluation once the data lands.
+     */
+    async _ensureSuggestData() {
+        if (this._suggestData || this._suggestDataLoading) return;
+        this._suggestDataLoading = true;
+        try {
+            let activities = window.activitySelector?.activitiesData?.activities;
+            if (!Array.isArray(activities)) {
+                const r = await $.get('/api/activities');
+                activities = r?.activities || [];
+            }
+            let recipesBySkill = window.recipeSelector?.recipesData?.by_skill;
+            if (!recipesBySkill || typeof recipesBySkill !== 'object') {
+                const r = await $.get('/api/recipes');
+                recipesBySkill = r?.by_skill || {};
+            }
+            let locations = [];
+            try {
+                const rl = await $.get('/api/locations');
+                locations = rl?.regions || [];
+            } catch (e) {
+                locations = [];
+            }
+            this._suggestData = { activities: activities || [], recipesBySkill: recipesBySkill || {}, locations };
+        } catch (e) {
+            console.warn('[gearset-suggest] failed to load matching data:', e);
+            // Leave _suggestData null; a later evaluation will retry.
+        } finally {
+            this._suggestDataLoading = false;
+        }
+        if (this._suggestData) this._evaluateSuggestion();
+        // Name->target resolution can only succeed once data is present. Drop any
+        // negative cache entries computed before load and refresh the open list
+        // so "matching first" ordering/highlight applies as soon as data arrives.
+        if (this._suggestData) {
+            this._matchTargetCache?.clear();
+            if (this.dropdownOpen && this._sortMatchingFirst) this.renderPreservingScroll();
+        }
+    }
+
+    _loadSuggestSetting() {
+        const saved = localStorage.getItem('suggestMatchingActivity');
+        return saved === null ? true : saved === 'true';
+    }
+
+    /**
+     * Load the opt-in "show matching gear sets first" setting. Default OFF.
+     */
+    _loadSortMatchingFirstSetting() {
+        return localStorage.getItem('sortMatchingGearsetsFirst') === 'true';
+    }
+
+    /**
+     * The current activity/recipe/travel selection changed. If the dropdown is
+     * open and "matching first" is on, re-order/re-highlight to track it.
+     */
+    _onSelectionContextChange() {
+        if (this.dropdownOpen && this._sortMatchingFirst) {
+            this.renderPreservingScroll();
+        }
+    }
+
+    /**
+     * Resolve a gear-set name to its target (activity/recipe/travel), memoized.
+     * Returns null when data isn't loaded yet or the name doesn't resolve to a
+     * single unambiguous target. Uses the quiet resolver path to avoid flooding
+     * the console when many sets are resolved on each render.
+     * @param {string} name
+     * @returns {Object|null}
+     */
+    _resolveTargetCached(name) {
+        if (!this._suggestData || !name) return null;
+        if (this._matchTargetCache.has(name)) return this._matchTargetCache.get(name);
+        const { activities, recipesBySkill, locations } = this._suggestData;
+        const target = resolveGearsetTarget(name, { activities, recipesBySkill, locations }, { quiet: true });
+        this._matchTargetCache.set(name, target);
+        return target;
+    }
+
+    _evaluateSuggestion() {
+        const _selId = this._getActiveId();
+        const _name = _selId ? (store.state.gearsets.saved?.[_selId]?.name) : null;
+        console.log('[gs-suggest] evaluate:', {
+            enabled: this._suggestEnabled,
+            selectedId: _selId,
+            name: _name,
+            dataReady: !!this._suggestData,
+            dismissed: _selId ? !!store.state.gearsets.saved?.[_selId]?.suggestDismissed : null
+        });
+        if (!this._suggestEnabled) {
+            console.log('[gs-suggest] skip: setting disabled');
+            this._hideSuggestion();
+            return;
+        }
+
+        const selectedId = this._getActiveId();
+        if (!selectedId) {
+            console.log('[gs-suggest] skip: no selected saved set');
+            this._hideSuggestion();
+            return;
+        }
+
+        const savedGearset = store.state.gearsets.saved?.[selectedId];
+        if (!savedGearset) {
+            console.log('[gs-suggest] skip: selectedId not in saved map');
+            this._hideSuggestion();
+            return;
+        }
+
+        // Check per-set dismissed
+        if (savedGearset.suggestDismissed) {
+            console.log('[gs-suggest] skip: dismissed for this set');
+            this._hideSuggestion();
+            return;
+        }
+
+        const name = savedGearset.name;
+        if (!name) {
+            this._hideSuggestion();
+            return;
+        }
+
+        // Get client-side data (activities/recipes/locations are NOT on store.state;
+        // they live on the selector-dropdown instances or the /api endpoints).
+        if (!this._suggestData) {
+            // Data not ready yet — load it, then this method re-runs on resolve.
+            console.log('[gs-suggest] data not ready; loading activities/recipes/locations then re-evaluating');
+            this._ensureSuggestData();
+            this._hideSuggestion();
+            return;
+        }
+        const { activities, recipesBySkill, locations } = this._suggestData;
+        console.log('[gs-suggest] data sizes:', {
+            activities: Array.isArray(activities) ? activities.length : 0,
+            recipeSkills: recipesBySkill ? Object.keys(recipesBySkill).length : 0,
+            regions: Array.isArray(locations) ? locations.length : 0
+        });
+
+        const target = resolveGearsetTarget(name, { activities, recipesBySkill, locations });
+        console.log('[gs-suggest] resolved target for name "' + name + '":', target);
+        if (!target) {
+            console.log('[gs-suggest] skip: no single unambiguous target matched the name');
+            this._hideSuggestion();
+            return;
+        }
+
+        // Check if target differs from current selection
+        const col3 = store.state.column3 || {};
+        let matches = false;
+        if (target.type === 'activity' && target.activityId === col3.selectedActivity) {
+            matches = true;
+        } else if (target.type === 'recipe' && target.recipeId === col3.selectedRecipe) {
+            matches = true;
+        } else if (target.type === 'travel' &&
+                   target.travelStart === col3.travelStart &&
+                   target.travelEnd === col3.travelEnd) {
+            matches = true;
+        }
+        console.log('[gs-suggest] match check:', {
+            targetType: target.type,
+            currentActivity: col3.selectedActivity,
+            currentRecipe: col3.selectedRecipe,
+            alreadyMatches: matches
+        });
+
+        if (matches) {
+            console.log('[gs-suggest] skip: target already equals current selection');
+            this._hideSuggestion();
+            return;
+        }
+
+        console.log('[gs-suggest] SHOWING button ->', target.label);
+        this._suggestTarget = target;
+        this._showSuggestion(target);
+    }
+
+    _showSuggestion(target) {
+        const $row = this.$element.find('.gearset-suggest-row');
+        if (!$row.length) return;
+
+        const typeLabel = target.type === 'travel' ? 'route' : (target.type === 'recipe' ? 'recipe' : 'activity');
+        const buttonText = `Change ${typeLabel} to ${target.label}`;
+
+        $row.html(`
+            <div class="gearset-suggest-bar">
+                <button class="gearset-suggest-apply" title="${buttonText}">${buttonText}</button>
+                <div class="gearset-suggest-options" aria-hidden="true">
+                    <button class="gearset-suggest-dismiss-set">Dismiss only for this gear set</button>
+                    <button class="gearset-suggest-dismiss-global">Never show again</button>
+                </div>
+                <button class="gearset-suggest-x" title="Dismiss options" aria-label="Dismiss options">×</button>
+            </div>
+        `);
+
+        this._suggestVisible = true;
+        this._suggestExpanded = false;
+        $row.slideDown(200);
+    }
+
+    _hideSuggestion() {
+        this._suggestTarget = null;
+        this._suggestVisible = false;
+        this._suggestExpanded = false;
+        if (this._wrapReadyTimer) {
+            clearTimeout(this._wrapReadyTimer);
+            this._wrapReadyTimer = null;
+        }
+        const $row = this.$element.find('.gearset-suggest-row');
+        if ($row.length && $row.is(':visible')) {
+            $row.slideUp(200);
+        }
+    }
+
+    _applySuggestion() {
+        const target = this._suggestTarget;
+        if (!target) { console.log('[gs-suggest] apply: no target'); return; }
+        console.log('[gs-suggest] apply:', JSON.stringify(target),
+            'hasActivitySel=', !!window.activitySelector, 'hasRecipeSel=', !!window.recipeSelector);
+
+        if (target.type === 'activity') {
+            if (window.activitySelector) {
+                window.activitySelector.selectActivity(target.activityId);
+            } else {
+                // Fallback if the selector global isn't available yet.
+                store.state.column3.selectedActivity = target.activityId;
+                store.state.column3.selectedRecipe = null;
+                store._notifySubscribers('column3.selectedActivity');
+                store._notifySubscribers('column3.selectedRecipe');
+            }
+        } else if (target.type === 'recipe') {
+            if (window.recipeSelector) {
+                window.recipeSelector.selectRecipe(target.recipeId);
+            } else {
+                store.state.column3.selectedRecipe = target.recipeId;
+                store.state.column3.selectedActivity = null;
+                store._notifySubscribers('column3.selectedRecipe');
+                store._notifySubscribers('column3.selectedActivity');
+            }
+        } else if (target.type === 'travel') {
+            // Travel is the Column-3 "traveling" pseudo-activity: selecting it
+            // renders TravelInfoSection (start/end location dropdowns). We set
+            // both locations in state, select the pseudo-activity so the section
+            // mounts and reads them, then notify so an already-mounted section
+            // updates its dropdowns. (Do NOT navigate to the separate travel tab.)
+            store.state.column3.travelStart = target.travelStart;
+            store.state.column3.travelEnd = target.travelEnd;
+            if (window.activitySelector) {
+                window.activitySelector.selectActivity('traveling');
+            } else {
+                store.state.column3.selectedActivity = 'traveling';
+                store.state.column3.selectedRecipe = null;
+                store._notifySubscribers('column3.selectedActivity');
+                store._notifySubscribers('column3.selectedRecipe');
+            }
+            store._notifySubscribers('column3.travelStart');
+            store._notifySubscribers('column3.travelEnd');
+        }
+
+        this._hideSuggestion();
+    }
+
+    _toggleDismissOptions() {
+        this._suggestExpanded = !this._suggestExpanded;
+        const $bar = this.$element.find('.gearset-suggest-bar');
+        const $opts = this.$element.find('.gearset-suggest-options');
+        const $x = this.$element.find('.gearset-suggest-x');
+        if (this._wrapReadyTimer) {
+            clearTimeout(this._wrapReadyTimer);
+            this._wrapReadyTimer = null;
+        }
+        if (!$opts.length) return;
+
+        if (this._suggestExpanded) {
+            $x.text('>').attr({ title: 'Back', 'aria-label': 'Back' });
+            // Measure the FINAL height at the expanded (full 50/50) width with ALL
+            // transitions off (gs-measuring), so the apply button collapses to 0
+            // instantly and the options get their true width — otherwise apply is
+            // still mid-width, options wrap huge, and endH comes out too tall
+            // (causing an over-expand then pop-down at the end).
+            $bar.addClass('gs-measuring expanded');
+            $opts.css('height', 'auto');
+            void $opts[0].offsetHeight;              // reflow -> final layout
+            const endH = $opts.outerHeight();
+            // Reset to the collapsed "from" state (still measuring => instant).
+            $bar.removeClass('expanded');
+            $opts.css('height', '0px');
+            void $opts[0].offsetHeight;              // reflow -> collapsed
+            // Re-enable transitions, then animate width (flex-grow) + height together.
+            $bar.removeClass('gs-measuring');
+            $bar.addClass('expanded');
+            void $opts[0].offsetHeight;              // commit the 0px start
+            $opts.css('height', endH + 'px');
+            this._wrapReadyTimer = setTimeout(() => {
+                $opts.css('height', '');             // back to CSS height:auto (steady)
+                this._wrapReadyTimer = null;
+            }, 270);
+        } else {
+            $x.text('×').attr({ title: 'Dismiss options', 'aria-label': 'Dismiss options' });
+            // Collapse: pin current height, then animate width + height to 0.
+            const curH = $opts.outerHeight();
+            $opts.css({ transition: 'none', height: curH + 'px' });
+            void $opts[0].offsetHeight;
+            $opts.css('transition', '');
+            $bar.removeClass('expanded');
+            $opts.css('height', '0px');
+            this._wrapReadyTimer = setTimeout(() => {
+                $opts.css({ height: '', transition: '' });
+                this._wrapReadyTimer = null;
+            }, 270);
+        }
+    }
+
+    _dismissForSet() {
+        const selectedId = this._getActiveId();
+        if (!selectedId) return;
+
+        // Update local state
+        if (store.state.gearsets.saved[selectedId]) {
+            store.state.gearsets.saved[selectedId].suggestDismissed = true;
+        }
+
+        // Persist to backend
+        const uuid = store.state.session?.uuid;
+        if (uuid) {
+            api.dismissGearSetSuggest(uuid, selectedId);
+        }
+
+        this._hideSuggestion();
+    }
+
+    _dismissGlobal() {
+        // Turn off the global setting
+        localStorage.setItem('suggestMatchingActivity', 'false');
+        this._suggestEnabled = false;
+        window.dispatchEvent(new CustomEvent('suggestMatchingActivityChanged', { detail: { value: false } }));
+
+        // Show toast
+        api.showSuccess("You can re-enable this in Settings > UI > Misc UI Settings > 'Suggest matching activity when I pick a saved gear set'");
+
+        this._hideSuggestion();
     }
 }
 

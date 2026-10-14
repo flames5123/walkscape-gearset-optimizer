@@ -104,6 +104,21 @@ def _attr_scope(attr):
     return skill, location
 
 
+def _attr_wealth_threshold(attr):
+    """Return the totalWealth requirement amount for an attribute, or None.
+
+    Golden Frog's stats each carry a totalWealth(100000) requirement — such
+    stats are modelled as a `total_wealth` gate rather than unconditional
+    _stats (see stats_mixin.py). Returns an int threshold when present.
+    """
+    for req in (attr.get('requirements') or []):
+        if req.get('type') == 'totalWealth':
+            amt = (req.get('requirement') or {}).get('amount')
+            if amt is not None:
+                return int(amt)
+    return None
+
+
 def _map_stat(s):
     """Map an API stat dict to (mapped_name, value). Returns (None, 0) if unknown.
 
@@ -139,6 +154,8 @@ def parse_level_stats_nested(level_data):
     """
     stats = {}
     for attr in level_data.get('attributes', []):
+        if _attr_wealth_threshold(attr) is not None:
+            continue  # wealth-gated → emitted as a total_wealth gate, not base stats
         skill, location = _attr_scope(attr)
         for s in (attr.get('stats') or []):
             mapped, v = _map_stat(s)
@@ -147,6 +164,28 @@ def parse_level_stats_nested(level_data):
             d = stats.setdefault(skill, {}).setdefault(location, {})
             d[mapped] = round(d.get(mapped, 0) + v, 4)
     return stats
+
+
+def parse_level_wealth_gated_nested(level_data):
+    """Parse a level's totalWealth-gated attributes into
+    {'total_wealth': {str(threshold): {skill: {location: {stat: value}}}}}.
+
+    Returns {} when the level has no wealth-gated attributes.
+    """
+    buckets = {}
+    for attr in level_data.get('attributes', []):
+        threshold = _attr_wealth_threshold(attr)
+        if threshold is None:
+            continue
+        skill, location = _attr_scope(attr)
+        tkey = str(threshold)
+        for s in (attr.get('stats') or []):
+            mapped, v = _map_stat(s)
+            if mapped is None:
+                continue
+            d = buckets.setdefault(tkey, {}).setdefault(skill, {}).setdefault(location, {})
+            d[mapped] = round(d.get(mapped, 0) + v, 4)
+    return {'total_wealth': buckets} if buckets else {}
 
 
 # Percentage stats — used only to render the human-readable ability effect blurb.
@@ -278,20 +317,41 @@ def build_cooldown_string(cooldown):
     """
     if not isinstance(cooldown, dict):
         return str(cooldown) if cooldown else None
-    inputs = [i for i in (cooldown.get('inputs') or []) if i.get('type') == 'item']
-    if not inputs:
-        return None
+    all_inputs = cooldown.get('inputs') or []
+    item_inputs = [i for i in all_inputs if i.get('type') == 'item']
+    coin_inputs = [i for i in all_inputs if i.get('type') == 'coins']
     # 'One full charge requires N' — N is the API's inputsNeeded (how many inputs
     # a full charge costs), NOT the sum of the per-item input values.
     needed = cooldown.get('inputsNeeded')
-    if needed is None:
-        needed = sum(int(i.get('value', 0) or 0) for i in inputs)
-    parts = [f"This ability is charged by using items. One full charge requires {int(needed)}."]
-    for i in inputs:
-        item_name = str(i.get('item', '')).replace('_', ' ')
-        item_name = item_name[:1].upper() + item_name[1:]
-        parts.append(f"{int(i.get('value', 0) or 0)} gained from {item_name}")
-    return ' '.join(parts)
+
+    if item_inputs:
+        n = needed
+        if n is None:
+            n = sum(int(i.get('value', 0) or 0) for i in item_inputs)
+        parts = [f"This ability is charged by using items. One full charge requires {int(n)}."]
+        for i in item_inputs:
+            item_name = str(i.get('item', '')).replace('_', ' ')
+            item_name = item_name[:1].upper() + item_name[1:]
+            parts.append(f"{int(i.get('value', 0) or 0)} gained from {item_name}")
+        return ' '.join(parts)
+
+    if coin_inputs:
+        # Coin-charged abilities (e.g. the Golden Frog's Lucky Day). Emit the
+        # SAME structure as item-charged abilities (Tiger) so the UI renders
+        # them identically — a "One full charge requires N" header plus one
+        # "V gained from <amount> coins" row per coin input. Auto-detected here
+        # so future coin-charged pets format correctly with no manual edits.
+        n = needed
+        if n is None:
+            n = sum(int(i.get('value', 0) or 0) for i in coin_inputs)
+        parts = [f"This ability is charged by spending coins. One full charge requires {int(n)}."]
+        for i in coin_inputs:
+            amount = int(i.get('amount', 0) or 0)
+            value = int(i.get('value', 0) or 0)
+            parts.append(f"{value} gained from {amount} coins")
+        return ' '.join(parts)
+
+    return None
 
 
 ABILITY_CACHE_DIR = Path('util/cache/tools_api_cache/abilities')
@@ -346,6 +406,76 @@ def _xp_requirement_desc(pet_data):
     return ''
 
 
+# ── Rare pet names (from the pets API) ────────────────────────────────────
+# The pets API publishes a rare variant per pet via `rareId` (the export slug,
+# e.g. "pet_rock_rock_pet") and `rareName` (the display name, e.g. "Pet Rock
+# Rock Pet"). These ARE our rare_export_name / rare_name, so we use them
+# directly — no derivation, no wiki. (This replaced an earlier wiki scrape
+# workaround; the API is now the single source of truth. See bug 799e0a55.)
+# A pet with no rare variant has a null/empty rareId.
+
+
+def rare_fields(pet_data):
+    """(rare_export_name, rare_name) from a pet's API `rareId`/`rareName`, or
+    (None, None) if the pet has no rare variant. rareId is already the export
+    slug; rareName is used verbatim (falls back to a title-cased rareId)."""
+    rid = (pet_data or {}).get('rareId')
+    rname = (pet_data or {}).get('rareName')
+    if not rid:
+        return None, None
+    return rid, (rname or rid.replace('_', ' ').title())
+
+
+def rare_map_from_api(all_pets):
+    """{pet_name: (rare_export_name, rare_name)} for every API pet that has a
+    rare variant. Drives backfill of EXISTING pets already in pets.py."""
+    out = {}
+    for pet in all_pets or []:
+        rid, rname = rare_fields(pet)
+        if rid:
+            out[pet['name']] = (rid, rname)
+    return out
+
+
+def backfill_rare_names(content, rare_map):
+    """Insert rare_name/rare_export_name into any EXISTING PetLevels block that
+    lacks them, and add the PETS_BY_RARE_EXPORT_NAME entry, from API data.
+
+    `rare_map` is {pet_name: (rare_export_name, rare_name)}. Pure text
+    transform. Returns (content, [changed_pet_names]). A pet already carrying
+    rare fields, or absent from the file, is left untouched. This retroactively
+    syncs pets added before their rare variant appeared in the API."""
+    changed = []
+    for pet_name, rare in (rare_map or {}).items():
+        slug, rname = rare if isinstance(rare, (tuple, list)) else (rare, None)
+        if not slug:
+            continue
+        rname = rname or slug.replace('_', ' ').title()
+        enum = name_to_enum(pet_name)
+        # Header slice: `    ENUM = PetLevels(` up to the `levels={` line.
+        m = re.search(r'(    %s = PetLevels\(\n)(.*?)(\n        levels=\{)' % re.escape(enum),
+                      content, re.DOTALL)
+        if not m:
+            continue  # not in file yet — emitted fresh with rare fields instead
+        header = m.group(2)
+        if 'rare_name=' in header:
+            continue  # already has rare metadata
+        new_header = re.sub(
+            r'(\n        species=)',
+            "\n        rare_name=%s,\n        rare_export_name=%s,\\1"
+            % (escape_str(rname), escape_str(slug)),
+            header, count=1)
+        if new_header == header:
+            continue  # no species line to anchor on
+        content = content[:m.start(2)] + new_header + content[m.end(2):]
+        if ("'%s':" % slug) not in content and 'PETS_BY_RARE_EXPORT_NAME = {\n' in content:
+            content = content.replace(
+                'PETS_BY_RARE_EXPORT_NAME = {\n',
+                'PETS_BY_RARE_EXPORT_NAME = {\n    %s: Pet.%s,\n' % (escape_str(slug), enum), 1)
+        changed.append(pet_name)
+    return content, changed
+
+
 def build_pet_code(pet_data, ability_defs=None):
     """Build the PetLevels block + per-level _stats assignments for a pet.
 
@@ -366,6 +496,12 @@ def build_pet_code(pet_data, ability_defs=None):
     lines = [f"    {enum} = PetLevels("]
     lines.append(f"        name='{name}',")
     lines.append(f"        egg_name='{egg_name}',")
+    # Rare-variant metadata from the API (rareId/rareName). Emitted between
+    # egg_name and species to match existing pets.py style.
+    _rare_id, _rare_name = rare_fields(pet_data)
+    if _rare_id:
+        lines.append(f"        rare_name={escape_str(_rare_name)},")
+        lines.append(f"        rare_export_name={escape_str(_rare_id)},")
     lines.append(f"        species='{species}',")
     lines.append(f"        levels={{")
     for level_data in levels:
@@ -445,18 +581,25 @@ def build_pet_code(pet_data, ability_defs=None):
         for unlock, ast in passive_folds:
             if level >= unlock:
                 _merge_stats(st, ast)
-        if not st:
-            continue
-        lines.append(f"    {enum}._levels[{level}]._stats = {{")
-        for sk, locs in st.items():
-            lines.append(f"        '{sk}': {{")
-            for loc, sm in locs.items():
-                lines.append(f"            '{loc}': {{")
-                for k, v in sm.items():
-                    lines.append(f"                '{k}': {v},")
-                lines.append("            },")
-            lines.append("        },")
-        lines.append("    }")
+        if st:
+            lines.append(f"    {enum}._levels[{level}]._stats = {{")
+            for sk, locs in st.items():
+                lines.append(f"        '{sk}': {{")
+                for loc, sm in locs.items():
+                    lines.append(f"            '{loc}': {{")
+                    for k, v in sm.items():
+                        lines.append(f"                '{k}': {v},")
+                    lines.append("            },")
+                lines.append("        },")
+            lines.append("    }")
+
+        # Wealth-gated stats (e.g. Golden Frog) emitted as a total_wealth gate
+        # so each stat renders a "N Total Wealth" requirement note and is
+        # applied always (coin balance unknown at scoring time). Emitted
+        # independently of base _stats — a pet may be wholly wealth-gated.
+        gated = parse_level_wealth_gated_nested(level_data)
+        if gated:
+            lines.append(f"    {enum}._levels[{level}].gated_stats = {gated!r}")
     return '\n'.join(lines)
 
 
@@ -488,6 +631,8 @@ def main():
         print("No new pets to add.")
     # Generate code
     ability_defs = fetch_ability_defs()
+    # Rare-variant names come straight from the API (rareId/rareName).
+    rare_map = rare_map_from_api(all_pets)
     new_code = []
     for pet in new_pets:
         new_code.append('\n' + build_pet_code(pet, ability_defs) + '\n')
@@ -595,6 +740,14 @@ def main():
                 print(f"  ⚠ No existing _stats line for {nm} L{lvl}; skipped (needs insert)")
     if updated:
         print(f"Updated stats for existing pets: {', '.join(updated)}")
+
+    # Backfill rare-variant metadata onto EXISTING pets that predate their
+    # rare variant in the API (e.g. Pet Rock / Sawmantis / Termite, and now
+    # Golden Frog / Pixie). New pets already got their rare fields from
+    # build_pet_code above; this covers the ones already in the file.
+    content, rare_changed = backfill_rare_names(content, rare_map)
+    if rare_changed:
+        print(f"Backfilled rare names for existing pets: {', '.join(rare_changed)}")
 
     PETS_FILE.write_text(content)
     print(f"\nAdded {len(new_pets)} new pets")

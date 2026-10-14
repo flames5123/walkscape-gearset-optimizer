@@ -10,10 +10,11 @@ from util.stats_mixin import StatsMixin
 
 class MaterialInstance(StatsMixin):
     """Base class for material instances. Optionally has stats (e.g., arrows with WE)."""
-    def __init__(self, name: str, keywords: List[str], value: int, special_sell: Optional[Tuple[int, str]] = None, stats: Optional[Dict] = None, requirements: Optional[List] = None):
+    def __init__(self, name: str, keywords: List[str], value: int, special_sell: Optional[Tuple[int, str]] = None, stats: Optional[Dict] = None, requirements: Optional[List] = None, effort: Optional[int] = None):
         self.name = name
         self.keywords = keywords
         self.value = value
+        self.effort = effort
         self._stats = stats or {}
         self.gated_stats = {}
         self.requirements = requirements or []
@@ -47,83 +48,85 @@ class Material:
     ADAMANT_BAR = MaterialInstance(
         name='Adamant bar',
         keywords=['Bar'],
-        value=11,
+        value=7,
         special_sell=None
     )
 
     ADAMANT_BAR_FINE = MaterialInstance(
         name='Adamant bar (Fine)',
         keywords=['Bar'],
-        value=43,
+        value=38,
         special_sell=None
     )
 
     ADAMANT_ORE = MaterialInstance(
         name='Adamant ore',
         keywords=['Ore'],
-        value=8,
+        value=6,
+        effort=29,
         special_sell=None
     )
 
     ADAMANT_ORE_FINE = MaterialInstance(
         name='Adamant ore (Fine)',
         keywords=['Ore'],
-        value=39,
+        value=37,
+        effort=29,
         special_sell=None
     )
 
     ADVENTURERS_ENAMEL_PIN = MaterialInstance(
         name="Adventurers' enamel pin",
-        keywords=['Misc.', 'Light'],
-        value=2,
+        keywords=['Misc.', 'Light', 'Curiosity'],
+        value=0,
         special_sell=(2, 'Currency.ADVENTURERS_GUILD_TOKEN')
     )
 
     ADVENTURERS_ENAMEL_PIN_FINE = MaterialInstance(
         name="Adventurers' enamel pin (Fine)",
-        keywords=['Misc.', 'Light'],
-        value=10,
+        keywords=['Misc.', 'Light', 'Curiosity'],
+        value=6,
         special_sell=(10, 'Currency.ADVENTURERS_GUILD_TOKEN')
     )
 
     AERODYNAMIC_THREAD = MaterialInstance(
         name='Aerodynamic thread',
-        keywords=[],
+        keywords=['Hunting Product'],
         value=6,
         special_sell=None
     )
 
     AERODYNAMIC_THREAD_FINE = MaterialInstance(
         name='Aerodynamic thread (Fine)',
-        keywords=[],
+        keywords=['Hunting Product'],
         value=27,
         special_sell=None
     )
 
     ANIMAL_FUR = MaterialInstance(
         name='Animal fur',
-        keywords=[],
+        keywords=['Hunting Product'],
         value=5,
         special_sell=None
     )
 
     ANIMAL_FUR_FINE = MaterialInstance(
         name='Animal fur (Fine)',
-        keywords=[],
+        keywords=['Hunting Product'],
         value=26,
         special_sell=None
     )
 
     ANIMAL_MEAT = MaterialInstance(
         name='Animal meat',
-        keywords=['Ingredient'],
+        keywords=['Ingredient', 'Hunting Product'],
         value=1,
         special_sell=None
     )
 
     ANIMAL_MEAT_FINE = MaterialInstance(
         name='Animal meat (Fine)',
-        keywords=['Ingredient'],
+        keywords=['Ingredient', 'Hunting Product'],
         value=11,
         special_sell=None
     )
@@ -132,6 +135,7 @@ class Material:
         name='Bamboo logs',
         keywords=['Log'],
         value=4,
+        effort=95,
         special_sell=None
     )
 
@@ -139,33 +143,34 @@ class Material:
         name='Bamboo logs (Fine)',
         keywords=['Log'],
         value=24,
+        effort=95,
         special_sell=None
     )
 
     BAMBOO_PLANK = MaterialInstance(
         name='Bamboo plank',
         keywords=['Plank'],
-        value=4,
+        value=6,
         special_sell=None
     )
 
     BAMBOO_PLANK_FINE = MaterialInstance(
         name='Bamboo plank (Fine)',
         keywords=['Plank'],
-        value=35,
+        value=37,
         special_sell=None
     )
 
     BASIC_HIDE = MaterialInstance(
         name='Basic hide',
-        keywords=['Hide'],
+        keywords=['Hide', 'Hunting Product'],
         value=1,
         special_sell=None
     )
 
     BASIC_HIDE_FINE = MaterialInstance(
         name='Basic hide (Fine)',
-        keywords=['Hide'],
+        keywords=['Hide', 'Hunting Product'],
         value=11,
         special_sell=None
     )
@@ -201,14 +206,14 @@ class Material:
     BEAVER_TRINKET = MaterialInstance(
         name='Beaver trinket',
         keywords=['Carpentry', 'Trinket'],
-        value=200,
+        value=133,
         special_sell=None
     )
 
     BEAVER_TRINKET_FINE = MaterialInstance(
         name='Beaver trinket (Fine)',
         keywords=['Carpentry', 'Trinket'],
-        value=558,
+        value=490,
         special_sell=None
     )
 
@@ -229,14 +234,14 @@ class Material:
     BERRIES = MaterialInstance(
         name='Berries',
         keywords=['Plant', 'Ingredient'],
-        value=2,
+        value=1,
         special_sell=None
     )
 
     BERRIES_FINE = MaterialInstance(
         name='Berries (Fine)',
         keywords=['Plant', 'Ingredient'],
-        value=15,
+        value=11,
         special_sell=None
     )
 
@@ -244,6 +249,7 @@ class Material:
         name='Birch logs',
         keywords=['Log'],
         value=0,
+        effort=28,
         special_sell=None
     )
 
@@ -251,6 +257,7 @@ class Material:
         name='Birch logs (Fine)',
         keywords=['Log'],
         value=6,
+        effort=28,
         special_sell=None
     )
 
@@ -270,14 +277,14 @@ class Material:
 
     BONES = MaterialInstance(
         name='Bones',
-        keywords=['Misc.'],
+        keywords=['Misc.', 'Hunting Product'],
         value=1,
         special_sell=None
     )
 
     BONES_FINE = MaterialInstance(
         name='Bones (Fine)',
-        keywords=['Misc.'],
+        keywords=['Misc.', 'Hunting Product'],
         value=11,
         special_sell=None
     )
@@ -375,56 +382,58 @@ class Material:
     CIRCULAR_ROOT_TRINKET = MaterialInstance(
         name='Circular root trinket',
         keywords=['Woodcutting', 'Trinket'],
-        value=140,
+        value=108,
         special_sell=None
     )
 
     CIRCULAR_ROOT_TRINKET_FINE = MaterialInstance(
         name='Circular root trinket (Fine)',
         keywords=['Woodcutting', 'Trinket'],
-        value=497,
+        value=464,
         special_sell=None
     )
 
     CLAM_SHELL = MaterialInstance(
         name='Clam shell',
         keywords=['Misc.'],
-        value=8,
+        value=6,
         special_sell=None
     )
 
     CLAM_SHELL_FINE = MaterialInstance(
         name='Clam shell (Fine)',
         keywords=['Misc.'],
-        value=30,
+        value=27,
         special_sell=None
     )
 
     COAL = MaterialInstance(
         name='Coal',
         keywords=['Ore'],
-        value=2,
+        value=1,
+        effort=8,
         special_sell=None
     )
 
     COAL_FINE = MaterialInstance(
         name='Coal (Fine)',
         keywords=['Ore'],
-        value=15,
+        value=11,
+        effort=8,
         special_sell=None
     )
 
     COMPASS_TRINKET = MaterialInstance(
         name='Compass trinket',
         keywords=['Foraging', 'Agility', 'Trinket'],
-        value=108,
+        value=60,
         special_sell=None
     )
 
     COMPASS_TRINKET_FINE = MaterialInstance(
         name='Compass trinket (Fine)',
         keywords=['Foraging', 'Agility', 'Trinket'],
-        value=325,
+        value=276,
         special_sell=None
     )
 
@@ -476,6 +485,7 @@ class Material:
         name='Copper ore',
         keywords=['Ore'],
         value=0,
+        effort=1,
         special_sell=None
     )
 
@@ -483,6 +493,7 @@ class Material:
         name='Copper ore (Fine)',
         keywords=['Ore'],
         value=6,
+        effort=1,
         special_sell=None
     )
 
@@ -490,6 +501,7 @@ class Material:
         name='Coral',
         keywords=['Log'],
         value=4,
+        effort=112,
         special_sell=None
     )
 
@@ -497,6 +509,7 @@ class Material:
         name='Coral (Fine)',
         keywords=['Log'],
         value=24,
+        effort=112,
         special_sell=None
     )
 
@@ -517,14 +530,16 @@ class Material:
     CRYSTAL_COAL = MaterialInstance(
         name='Crystal coal',
         keywords=['Ore'],
-        value=9,
+        value=4,
+        effort=27,
         special_sell=None
     )
 
     CRYSTAL_COAL_FINE = MaterialInstance(
         name='Crystal coal (Fine)',
         keywords=['Ore'],
-        value=50,
+        value=44,
+        effort=27,
         special_sell=None
     )
 
@@ -558,14 +573,14 @@ class Material:
 
     DARK_FEATHER = MaterialInstance(
         name='Dark feather',
-        keywords=['Light'],
+        keywords=['Light', 'Hunting Product'],
         value=4,
         special_sell=None
     )
 
     DARK_FEATHER_FINE = MaterialInstance(
         name='Dark feather (Fine)',
-        keywords=['Light'],
+        keywords=['Light', 'Hunting Product'],
         value=24,
         special_sell=None
     )
@@ -580,7 +595,7 @@ class Material:
     ECTOPLASM_FINE = MaterialInstance(
         name='Ectoplasm (Fine)',
         keywords=['Misc.', 'Ultra Light', 'Processed'],
-        value=6,
+        value=5,
         special_sell=None
     )
 
@@ -594,7 +609,7 @@ class Material:
     ECTOPLASM_FISH_FINE = MaterialInstance(
         name='Ectoplasm fish (Fine)',
         keywords=['Fish'],
-        value=6,
+        value=5,
         special_sell=None
     )
 
@@ -602,13 +617,15 @@ class Material:
         name='Ectoplasm logs',
         keywords=['Log'],
         value=0,
+        effort=116,
         special_sell=None
     )
 
     ECTOPLASM_LOGS_FINE = MaterialInstance(
         name='Ectoplasm logs (Fine)',
         keywords=['Log'],
-        value=6,
+        value=5,
+        effort=116,
         special_sell=None
     )
 
@@ -616,27 +633,29 @@ class Material:
         name='Ectoplasm rock',
         keywords=['Ore'],
         value=0,
+        effort=25,
         special_sell=None
     )
 
     ECTOPLASM_ROCK_FINE = MaterialInstance(
         name='Ectoplasm rock (Fine)',
         keywords=['Ore'],
-        value=6,
+        value=5,
+        effort=25,
         special_sell=None
     )
 
     ECTOPLASM_SCRAPS = MaterialInstance(
         name='Ectoplasm scraps',
-        keywords=['Hide', 'Medium'],
+        keywords=['Hide', 'Medium', 'Hunting Product'],
         value=0,
         special_sell=None
     )
 
     ECTOPLASM_SCRAPS_FINE = MaterialInstance(
         name='Ectoplasm scraps (Fine)',
-        keywords=['Hide', 'Medium'],
-        value=6,
+        keywords=['Hide', 'Medium', 'Hunting Product'],
+        value=5,
         special_sell=None
     )
 
@@ -670,14 +689,14 @@ class Material:
 
     ELDERHIDE_HIDE = MaterialInstance(
         name='Elderhide hide',
-        keywords=['Hide'],
+        keywords=['Hide', 'Hunting Product'],
         value=3,
         special_sell=None
     )
 
     ELDERHIDE_HIDE_FINE = MaterialInstance(
         name='Elderhide hide (Fine)',
-        keywords=['Hide'],
+        keywords=['Hide', 'Hunting Product'],
         value=23,
         special_sell=None
     )
@@ -698,14 +717,14 @@ class Material:
 
     ELDERHIDE_SCRAPS = MaterialInstance(
         name='Elderhide scraps',
-        keywords=['Hide', 'Light'],
+        keywords=['Hide', 'Light', 'Hunting Product'],
         value=1,
         special_sell=None
     )
 
     ELDERHIDE_SCRAPS_FINE = MaterialInstance(
         name='Elderhide scraps (Fine)',
-        keywords=['Hide', 'Light'],
+        keywords=['Hide', 'Light', 'Hunting Product'],
         value=11,
         special_sell=None
     )
@@ -713,14 +732,14 @@ class Material:
     ETHERNITE = MaterialInstance(
         name='Ethernite',
         keywords=['Gem', 'Cut Gem'],
-        value=108,
+        value=200,
         special_sell=None
     )
 
     ETHERNITE_FINE = MaterialInstance(
         name='Ethernite (Fine)',
         keywords=['Gem', 'Cut Gem'],
-        value=257,
+        value=352,
         special_sell=None
     )
 
@@ -745,41 +764,43 @@ class Material:
     FARGANITE_BAR = MaterialInstance(
         name='Farganite bar',
         keywords=['Bar'],
-        value=8,
+        value=6,
         special_sell=None
     )
 
     FARGANITE_BAR_FINE = MaterialInstance(
         name='Farganite bar (Fine)',
         keywords=['Bar'],
-        value=39,
+        value=37,
         special_sell=None
     )
 
     FARGANITE_ORE = MaterialInstance(
         name='Farganite ore',
         keywords=['Ore'],
-        value=5,
+        value=4,
+        effort=17,
         special_sell=None
     )
 
     FARGANITE_ORE_FINE = MaterialInstance(
         name='Farganite ore (Fine)',
         keywords=['Ore'],
-        value=36,
+        value=24,
+        effort=17,
         special_sell=None
     )
 
     FEATHER = MaterialInstance(
         name='Feather',
-        keywords=['Light'],
+        keywords=['Light', 'Hunting Product'],
         value=0,
         special_sell=None
     )
 
     FEATHER_FINE = MaterialInstance(
         name='Feather (Fine)',
-        keywords=['Light'],
+        keywords=['Light', 'Hunting Product'],
         value=6,
         special_sell=None
     )
@@ -829,42 +850,44 @@ class Material:
     GOLD_BAR = MaterialInstance(
         name='Gold bar',
         keywords=['Bar'],
-        value=10,
+        value=6,
         special_sell=None
     )
 
     GOLD_BAR_FINE = MaterialInstance(
         name='Gold bar (Fine)',
         keywords=['Bar'],
-        value=51,
+        value=47,
         special_sell=None
     )
 
     GOLD_NUGGET = MaterialInstance(
         name='Gold nugget',
         keywords=['Nugget', 'Light'],
-        value=8,
+        value=3,
         special_sell=None
     )
 
     GOLD_NUGGET_FINE = MaterialInstance(
         name='Gold nugget (Fine)',
         keywords=['Nugget', 'Light'],
-        value=39,
+        value=34,
         special_sell=None
     )
 
     GOLD_ORE = MaterialInstance(
         name='Gold ore',
         keywords=['Ore'],
-        value=10,
+        value=5,
+        effort=14,
         special_sell=None
     )
 
     GOLD_ORE_FINE = MaterialInstance(
         name='Gold ore (Fine)',
         keywords=['Ore'],
-        value=51,
+        value=46,
+        effort=14,
         special_sell=None
     )
 
@@ -884,43 +907,43 @@ class Material:
 
     HALFMAW_SCALES = MaterialInstance(
         name='Halfmaw scales',
-        keywords=['Misc.', 'Light'],
-        value=1,
+        keywords=['Misc.', 'Light', 'Curiosity'],
+        value=0,
         special_sell=(1, 'Currency.ADVENTURERS_GUILD_TOKEN')
     )
 
     HALFMAW_SCALES_FINE = MaterialInstance(
         name='Halfmaw scales (Fine)',
-        keywords=['Misc.', 'Light'],
-        value=5,
+        keywords=['Misc.', 'Light', 'Curiosity'],
+        value=6,
         special_sell=(5, 'Currency.ADVENTURERS_GUILD_TOKEN')
     )
 
     HALFMAW_TEETH = MaterialInstance(
         name='Halfmaw teeth',
-        keywords=['Misc.', 'Light'],
-        value=3,
+        keywords=['Misc.', 'Light', 'Curiosity'],
+        value=0,
         special_sell=(3, 'Currency.ADVENTURERS_GUILD_TOKEN')
     )
 
     HALFMAW_TEETH_FINE = MaterialInstance(
         name='Halfmaw teeth (Fine)',
-        keywords=['Misc.', 'Light'],
-        value=15,
+        keywords=['Misc.', 'Light', 'Curiosity'],
+        value=6,
         special_sell=(15, 'Currency.ADVENTURERS_GUILD_TOKEN')
     )
 
     HARDENED_KELP = MaterialInstance(
         name='Hardened kelp',
         keywords=['Processed'],
-        value=7,
+        value=5,
         special_sell=None
     )
 
     HARDENED_KELP_FINE = MaterialInstance(
         name='Hardened kelp (Fine)',
         keywords=['Processed'],
-        value=38,
+        value=36,
         special_sell=None
     )
 
@@ -954,14 +977,14 @@ class Material:
 
     HIDE_SCRAPS = MaterialInstance(
         name='Hide scraps',
-        keywords=['Hide', 'Light'],
+        keywords=['Hide', 'Light', 'Hunting Product'],
         value=0,
         special_sell=None
     )
 
     HIDE_SCRAPS_FINE = MaterialInstance(
         name='Hide scraps (Fine)',
-        keywords=['Hide', 'Light'],
+        keywords=['Hide', 'Light', 'Hunting Product'],
         value=6,
         special_sell=None
     )
@@ -997,28 +1020,28 @@ class Material:
     HYDRILIUM = MaterialInstance(
         name='Hydrilium',
         keywords=['Processed'],
-        value=10,
+        value=7,
         special_sell=None
     )
 
     HYDRILIUM_FINE = MaterialInstance(
         name='Hydrilium (Fine)',
         keywords=['Processed'],
-        value=51,
+        value=48,
         special_sell=None
     )
 
     HYDRILIUM_BAR = MaterialInstance(
         name='Hydrilium bar',
         keywords=['Bar'],
-        value=10,
+        value=7,
         special_sell=None
     )
 
     HYDRILIUM_BAR_FINE = MaterialInstance(
         name='Hydrilium bar (Fine)',
         keywords=['Bar'],
-        value=51,
+        value=48,
         special_sell=None
     )
 
@@ -1058,6 +1081,7 @@ class Material:
         name='Iron ore',
         keywords=['Ore'],
         value=1,
+        effort=5,
         special_sell=None
     )
 
@@ -1065,6 +1089,7 @@ class Material:
         name='Iron ore (Fine)',
         keywords=['Ore'],
         value=11,
+        effort=5,
         special_sell=None
     )
 
@@ -1186,14 +1211,14 @@ class Material:
 
     LIZARD_TAIL = MaterialInstance(
         name='Lizard tail',
-        keywords=[],
+        keywords=['Hunting Product'],
         value=2,
         special_sell=None
     )
 
     LIZARD_TAIL_FINE = MaterialInstance(
         name='Lizard tail (Fine)',
-        keywords=[],
+        keywords=['Hunting Product'],
         value=15,
         special_sell=None
     )
@@ -1226,6 +1251,22 @@ class Material:
         special_sell=None
     )
 
+    MAHOGANY_LOGS = MaterialInstance(
+        name='Mahogany logs',
+        keywords=['Log'],
+        value=8,
+        effort=146,
+        special_sell=None
+    )
+
+    MAHOGANY_LOGS_FINE = MaterialInstance(
+        name='Mahogany logs (Fine)',
+        keywords=['Log'],
+        value=30,
+        effort=146,
+        special_sell=None
+    )
+
     MAHOGANY_PLANK = MaterialInstance(
         name='Mahogany plank',
         keywords=['Plank'],
@@ -1243,14 +1284,16 @@ class Material:
     MANGROVE_LOGS = MaterialInstance(
         name='Mangrove logs',
         keywords=['Log'],
-        value=5,
+        value=4,
+        effort=114,
         special_sell=None
     )
 
     MANGROVE_LOGS_FINE = MaterialInstance(
         name='Mangrove logs (Fine)',
         keywords=['Log'],
-        value=26,
+        value=24,
+        effort=114,
         special_sell=None
     )
 
@@ -1272,6 +1315,7 @@ class Material:
         name='Maple logs',
         keywords=['Log'],
         value=2,
+        effort=77,
         special_sell=None
     )
 
@@ -1279,6 +1323,7 @@ class Material:
         name='Maple logs (Fine)',
         keywords=['Log'],
         value=15,
+        effort=77,
         special_sell=None
     )
 
@@ -1394,17 +1439,31 @@ class Material:
         special_sell=None
     )
 
+    MYSTERIOUS_CHITIN = MaterialInstance(
+        name='Mysterious chitin',
+        keywords=['Misc.', 'Light', 'Curiosity'],
+        value=10,
+        special_sell=(10, 'Currency.ADVENTURERS_GUILD_TOKEN')
+    )
+
+    MYSTERIOUS_CHITIN_FINE = MaterialInstance(
+        name='Mysterious chitin (Fine)',
+        keywords=['Misc.', 'Light', 'Curiosity'],
+        value=50,
+        special_sell=(50, 'Currency.ADVENTURERS_GUILD_TOKEN')
+    )
+
     NAME_TAG = MaterialInstance(
         name='Name tag',
-        keywords=['Misc.', 'Light'],
-        value=10,
+        keywords=['Misc.', 'Light', 'Curiosity'],
+        value=0,
         special_sell=(10, 'Currency.ADVENTURERS_GUILD_TOKEN')
     )
 
     NAME_TAG_FINE = MaterialInstance(
         name='Name tag (Fine)',
-        keywords=['Misc.', 'Light'],
-        value=50,
+        keywords=['Misc.', 'Light', 'Curiosity'],
+        value=6,
         special_sell=(50, 'Currency.ADVENTURERS_GUILD_TOKEN')
     )
 
@@ -1426,6 +1485,7 @@ class Material:
         name='Oak logs',
         keywords=['Log'],
         value=2,
+        effort=64,
         special_sell=None
     )
 
@@ -1433,6 +1493,7 @@ class Material:
         name='Oak logs (Fine)',
         keywords=['Log'],
         value=15,
+        effort=64,
         special_sell=None
     )
 
@@ -1453,28 +1514,28 @@ class Material:
     OPAL = MaterialInstance(
         name='Opal',
         keywords=['Gem', 'Cut Gem'],
-        value=40,
+        value=27,
         special_sell=None
     )
 
     OPAL_FINE = MaterialInstance(
         name='Opal (Fine)',
         keywords=['Gem', 'Cut Gem'],
-        value=186,
+        value=173,
         special_sell=None
     )
 
     PEARLS = MaterialInstance(
         name='Pearls',
         keywords=['Gem', 'Rough Gem'],
-        value=22,
+        value=15,
         special_sell=None
     )
 
     PEARLS_FINE = MaterialInstance(
         name='Pearls (Fine)',
         keywords=['Gem', 'Rough Gem'],
-        value=65,
+        value=57,
         special_sell=None
     )
 
@@ -1496,6 +1557,7 @@ class Material:
         name='Pine logs',
         keywords=['Log'],
         value=1,
+        effort=39,
         special_sell=None
     )
 
@@ -1503,6 +1565,7 @@ class Material:
         name='Pine logs (Fine)',
         keywords=['Log'],
         value=11,
+        effort=39,
         special_sell=None
     )
 
@@ -1551,14 +1614,14 @@ class Material:
     RAW_ANGLERFISH = MaterialInstance(
         name='Raw anglerfish',
         keywords=['Fish'],
-        value=25,
+        value=17,
         special_sell=None
     )
 
     RAW_ANGLERFISH_FINE = MaterialInstance(
         name='Raw anglerfish (Fine)',
         keywords=['Fish'],
-        value=119,
+        value=111,
         special_sell=None
     )
 
@@ -1761,14 +1824,14 @@ class Material:
     RAW_SWORDFISH = MaterialInstance(
         name='Raw swordfish',
         keywords=['Fish'],
-        value=7,
+        value=6,
         special_sell=None
     )
 
     RAW_SWORDFISH_FINE = MaterialInstance(
         name='Raw swordfish (Fine)',
         keywords=['Fish'],
-        value=38,
+        value=37,
         special_sell=None
     )
 
@@ -1817,14 +1880,14 @@ class Material:
     ROUGH_ETHERNITE = MaterialInstance(
         name='Rough ethernite',
         keywords=['Gem', 'Rough Gem'],
-        value=67,
+        value=125,
         special_sell=None
     )
 
     ROUGH_ETHERNITE_FINE = MaterialInstance(
         name='Rough ethernite (Fine)',
         keywords=['Gem', 'Rough Gem'],
-        value=164,
+        value=225,
         special_sell=None
     )
 
@@ -1845,56 +1908,56 @@ class Material:
     ROUGH_OPAL = MaterialInstance(
         name='Rough opal',
         keywords=['Gem', 'Rough Gem'],
-        value=25,
+        value=15,
         special_sell=None
     )
 
     ROUGH_OPAL_FINE = MaterialInstance(
         name='Rough opal (Fine)',
         keywords=['Gem', 'Rough Gem'],
-        value=119,
+        value=57,
         special_sell=None
     )
 
     ROUGH_RUBY = MaterialInstance(
         name='Rough ruby',
         keywords=['Gem', 'Rough Gem'],
-        value=52,
+        value=57,
         special_sell=None
     )
 
     ROUGH_RUBY_FINE = MaterialInstance(
         name='Rough ruby (Fine)',
         keywords=['Gem', 'Rough Gem'],
-        value=148,
+        value=153,
         special_sell=None
     )
 
     ROUGH_STAR_PEARL = MaterialInstance(
         name='Rough star pearl',
         keywords=['Gem', 'Rough Gem'],
-        value=32,
+        value=18,
         special_sell=None
     )
 
     ROUGH_STAR_PEARL_FINE = MaterialInstance(
         name='Rough star pearl (Fine)',
         keywords=['Gem', 'Rough Gem'],
-        value=127,
+        value=60,
         special_sell=None
     )
 
     ROUGH_SUN_STONE = MaterialInstance(
         name='Rough sun stone',
         keywords=['Gem', 'Rough Gem'],
-        value=57,
+        value=75,
         special_sell=None
     )
 
     ROUGH_SUN_STONE_FINE = MaterialInstance(
         name='Rough sun stone (Fine)',
         keywords=['Gem', 'Rough Gem'],
-        value=153,
+        value=172,
         special_sell=None
     )
 
@@ -1915,28 +1978,28 @@ class Material:
     ROUGH_WRENTMARINE = MaterialInstance(
         name='Rough wrentmarine',
         keywords=['Gem', 'Rough Gem'],
-        value=37,
+        value=35,
         special_sell=None
     )
 
     ROUGH_WRENTMARINE_FINE = MaterialInstance(
         name='Rough wrentmarine (Fine)',
         keywords=['Gem', 'Rough Gem'],
-        value=132,
+        value=129,
         special_sell=None
     )
 
     RUBY = MaterialInstance(
         name='Ruby',
         keywords=['Gem', 'Cut Gem'],
-        value=84,
+        value=92,
         special_sell=None
     )
 
     RUBY_FINE = MaterialInstance(
         name='Ruby (Fine)',
         keywords=['Gem', 'Cut Gem'],
-        value=232,
+        value=240,
         special_sell=None
     )
 
@@ -1985,15 +2048,15 @@ class Material:
     SEA_SHELL = MaterialInstance(
         name='Sea shell',
         keywords=['Misc.', 'Light'],
-        value=5,
+        value=2,
         special_sell=None
     )
 
     SEA_SHELL_FINE = MaterialInstance(
         name='Sea shell (Fine)',
         keywords=['Misc.', 'Light'],
-        value=26,
-        special_sell=None
+        value=15,
+        special_sell=(10, 'Material.SEA_SHELL')
     )
 
     SEA_SPINACH = MaterialInstance(
@@ -2027,56 +2090,58 @@ class Material:
     SHRIMP_TRINKET = MaterialInstance(
         name='Shrimp trinket',
         keywords=['Foraging', 'Trinket'],
-        value=150,
+        value=131,
         special_sell=None
     )
 
     SHRIMP_TRINKET_FINE = MaterialInstance(
         name='Shrimp trinket (Fine)',
         keywords=['Foraging', 'Trinket'],
-        value=507,
+        value=488,
         special_sell=None
     )
 
     SILVER_BAR = MaterialInstance(
         name='Silver bar',
         keywords=['Bar'],
-        value=7,
+        value=5,
         special_sell=None
     )
 
     SILVER_BAR_FINE = MaterialInstance(
         name='Silver bar (Fine)',
         keywords=['Bar'],
-        value=38,
+        value=36,
         special_sell=None
     )
 
     SILVER_NUGGET = MaterialInstance(
         name='Silver nugget',
         keywords=['Nugget', 'Light'],
-        value=4,
+        value=2,
         special_sell=None
     )
 
     SILVER_NUGGET_FINE = MaterialInstance(
         name='Silver nugget (Fine)',
         keywords=['Nugget', 'Light'],
-        value=25,
+        value=15,
         special_sell=None
     )
 
     SILVER_ORE = MaterialInstance(
         name='Silver ore',
         keywords=['Ore'],
-        value=7,
+        value=4,
+        effort=9,
         special_sell=None
     )
 
     SILVER_ORE_FINE = MaterialInstance(
         name='Silver ore (Fine)',
         keywords=['Ore'],
-        value=38,
+        value=35,
+        effort=9,
         special_sell=None
     )
 
@@ -2126,6 +2191,7 @@ class Material:
         name='Spruce logs',
         keywords=['Log'],
         value=1,
+        effort=53,
         special_sell=None
     )
 
@@ -2133,6 +2199,7 @@ class Material:
         name='Spruce logs (Fine)',
         keywords=['Log'],
         value=11,
+        effort=53,
         special_sell=None
     )
 
@@ -2153,14 +2220,14 @@ class Material:
     STAR_PEARL = MaterialInstance(
         name='Star pearl',
         keywords=['Gem', 'Cut Gem'],
-        value=52,
+        value=34,
         special_sell=None
     )
 
     STAR_PEARL_FINE = MaterialInstance(
         name='Star pearl (Fine)',
         keywords=['Gem', 'Cut Gem'],
-        value=199,
+        value=180,
         special_sell=None
     )
 
@@ -2210,6 +2277,20 @@ class Material:
         special_sell=None
     )
 
+    STRANGE_FUR = MaterialInstance(
+        name='Strange fur',
+        keywords=['Misc.', 'Light', 'Curiosity'],
+        value=1,
+        special_sell=(1, 'Currency.ADVENTURERS_GUILD_TOKEN')
+    )
+
+    STRANGE_FUR_FINE = MaterialInstance(
+        name='Strange fur (Fine)',
+        keywords=['Misc.', 'Light', 'Curiosity'],
+        value=5,
+        special_sell=(5, 'Currency.ADVENTURERS_GUILD_TOKEN')
+    )
+
     STRONG_BOWSTRING = MaterialInstance(
         name='Strong bowstring',
         keywords=['Processed'],
@@ -2241,14 +2322,14 @@ class Material:
     SUN_STONE = MaterialInstance(
         name='Sun stone',
         keywords=['Gem', 'Cut Gem'],
-        value=92,
+        value=132,
         special_sell=None
     )
 
     SUN_STONE_FINE = MaterialInstance(
         name='Sun stone (Fine)',
         keywords=['Gem', 'Cut Gem'],
-        value=240,
+        value=282,
         special_sell=None
     )
 
@@ -2316,6 +2397,7 @@ class Material:
         name='Tarsilium ore',
         keywords=['Ore'],
         value=3,
+        effort=12,
         special_sell=None
     )
 
@@ -2323,6 +2405,7 @@ class Material:
         name='Tarsilium ore (Fine)',
         keywords=['Ore'],
         value=24,
+        effort=12,
         special_sell=None
     )
 
@@ -2330,6 +2413,7 @@ class Material:
         name='Teak logs',
         keywords=['Log'],
         value=3,
+        effort=90,
         special_sell=None
     )
 
@@ -2337,6 +2421,7 @@ class Material:
         name='Teak logs (Fine)',
         keywords=['Log'],
         value=24,
+        effort=90,
         special_sell=None
     )
 
@@ -2372,6 +2457,7 @@ class Material:
         name='Tin ore',
         keywords=['Ore'],
         value=0,
+        effort=3,
         special_sell=None
     )
 
@@ -2379,6 +2465,7 @@ class Material:
         name='Tin ore (Fine)',
         keywords=['Ore'],
         value=6,
+        effort=3,
         special_sell=None
     )
 
@@ -2472,57 +2559,59 @@ class Material:
 
     UNICORN_HORN = MaterialInstance(
         name='Unicorn horn',
-        keywords=[],
+        keywords=['Hunting Product'],
         value=12,
         special_sell=None
     )
 
     UNICORN_HORN_FINE = MaterialInstance(
         name='Unicorn horn (Fine)',
-        keywords=[],
+        keywords=['Hunting Product'],
         value=70,
         special_sell=None
     )
 
     UNIDENTIFIED_REMAINS = MaterialInstance(
         name='Unidentified remains',
-        keywords=['Misc.', 'Heavy'],
-        value=20,
+        keywords=['Misc.', 'Heavy', 'Curiosity'],
+        value=0,
         special_sell=(20, 'Currency.ADVENTURERS_GUILD_TOKEN')
     )
 
     UNIDENTIFIED_REMAINS_FINE = MaterialInstance(
         name='Unidentified remains (Fine)',
-        keywords=['Misc.', 'Heavy'],
-        value=100,
+        keywords=['Misc.', 'Heavy', 'Curiosity'],
+        value=6,
         special_sell=(100, 'Currency.ADVENTURERS_GUILD_TOKEN')
     )
 
     VIOLITE_BAR = MaterialInstance(
         name='Violite bar',
         keywords=['Bar'],
-        value=14,
+        value=8,
         special_sell=None
     )
 
     VIOLITE_BAR_FINE = MaterialInstance(
         name='Violite bar (Fine)',
         keywords=['Bar'],
-        value=46,
+        value=49,
         special_sell=None
     )
 
     VIOLITE_ORE = MaterialInstance(
         name='Violite ore',
         keywords=['Ore'],
-        value=10,
+        value=7,
+        effort=36,
         special_sell=None
     )
 
     VIOLITE_ORE_FINE = MaterialInstance(
         name='Violite ore (Fine)',
         keywords=['Ore'],
-        value=51,
+        value=48,
+        effort=36,
         special_sell=None
     )
 
@@ -2543,56 +2632,60 @@ class Material:
     VOLCANIC_ROCK = MaterialInstance(
         name='Volcanic rock',
         keywords=['Ore'],
-        value=4,
+        value=3,
+        effort=15,
         special_sell=None
     )
 
     VOLCANIC_ROCK_FINE = MaterialInstance(
         name='Volcanic rock (Fine)',
         keywords=['Ore'],
-        value=24,
+        value=23,
+        effort=15,
         special_sell=None
     )
 
     WHEAT = MaterialInstance(
         name='Wheat',
         keywords=['Plant', 'Ingredient'],
-        value=2,
+        value=1,
         special_sell=None
     )
 
     WHEAT_FINE = MaterialInstance(
         name='Wheat (Fine)',
         keywords=['Plant', 'Ingredient'],
-        value=15,
+        value=11,
         special_sell=None
     )
 
     WIDOWS_KISS = MaterialInstance(
         name="Widow's kiss",
         keywords=['Plant'],
-        value=5,
+        value=4,
         special_sell=None
     )
 
     WIDOWS_KISS_FINE = MaterialInstance(
         name="Widow's kiss (Fine)",
         keywords=['Plant'],
-        value=26,
+        value=24,
         special_sell=None
     )
 
     WILLOW_LOGS = MaterialInstance(
         name='Willow logs',
         keywords=['Log'],
-        value=4,
+        value=3,
+        effort=81,
         special_sell=None
     )
 
     WILLOW_LOGS_FINE = MaterialInstance(
         name='Willow logs (Fine)',
         keywords=['Log'],
-        value=24,
+        value=17,
+        effort=81,
         special_sell=None
     )
 
@@ -2641,14 +2734,14 @@ class Material:
     WRENTMARINE = MaterialInstance(
         name='Wrentmarine',
         keywords=['Gem', 'Cut Gem'],
-        value=60,
+        value=58,
         special_sell=None
     )
 
     WRENTMARINE_FINE = MaterialInstance(
         name='Wrentmarine (Fine)',
         keywords=['Gem', 'Cut Gem'],
-        value=207,
+        value=205,
         special_sell=None
     )
 
@@ -2656,6 +2749,7 @@ class Material:
         name='Yew logs',
         keywords=['Log'],
         value=6,
+        effort=126,
         special_sell=None
     )
 
@@ -2663,6 +2757,7 @@ class Material:
         name='Yew logs (Fine)',
         keywords=['Log'],
         value=27,
+        effort=126,
         special_sell=None
     )
 

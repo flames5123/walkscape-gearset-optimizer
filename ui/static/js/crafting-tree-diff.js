@@ -88,7 +88,9 @@ async function _runServerOptimize(nodes, globalSettings, sessionUuid) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      nodes, global_settings: globalSettings, session_uuid: sessionUuid,
+      nodes,
+      global_settings: { ...globalSettings, all_custom_stats_enabled: !!(window.isAllCustomStatsEnabled && window.isAllCustomStatsEnabled()), unlock_all: !!(window.isUnlockAllEnabled && window.isUnlockAllEnabled()) },
+      session_uuid: sessionUuid,
       node_ids: null, depth_optimize: false, run_local: false,
     }),
   }).then((r) => r.json());
@@ -113,7 +115,9 @@ async function _runLocalOptimize(nodes, globalSettings, sessionUuid) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      nodes, global_settings: globalSettings, session_uuid: sessionUuid,
+      nodes,
+      global_settings: { ...globalSettings, all_custom_stats_enabled: !!(window.isAllCustomStatsEnabled && window.isAllCustomStatsEnabled()), unlock_all: !!(window.isUnlockAllEnabled && window.isUnlockAllEnabled()) },
+      session_uuid: sessionUuid,
       node_ids: null, depth_optimize: false, run_local: true,
     }),
   }).then((r) => r.json());

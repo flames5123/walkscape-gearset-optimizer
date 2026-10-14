@@ -67,6 +67,11 @@ SERVICE = Service.BASIC_KITCHEN_BLACKSPELL_HARBOUR  # Or None to auto-select
 SELECTED_LOCATION = None  # Override location when SERVICE is None (e.g., no-service recipes)
 SKILL_LEVEL = None  # None = auto-detect from character
 
+# When True, service enumeration (get_available_services) skips underwater-location
+# services. Set by the worker when an instant-actions ability requires "Not in an
+# Underwater location" (Living Flame's Flambé). Reset per optimization request.
+EXCLUDE_UNDERWATER_SERVICES = False
+
 # Target configuration
 TARGET_QUALITY = 'Perfect'  # 'Normal', 'Good', 'Great', 'Excellent', 'Perfect', 'Eternal'
 TARGET_QUALITY_QUANTITY = 1  # How many of this quality to craft
@@ -184,14 +189,14 @@ _env = _os.environ.get('DEBUG_SPECIFIC_ITEMS', '').strip()
 if _env:
     DEBUG_ITEM_NAMES = [s.strip().lower() for s in _env.split(',') if s.strip()]
 else:
-    # Hardcoded list for the Vastalume chest bug investigation.
-    # Empty list disables all targeted debug logging.
-    DEBUG_ITEM_NAMES = [
-        'merfolk dance bracers',
-        'merfolk dance skirt',
-        'journeyman handwear',
-        'journeyman breeches',
-    ]
+    # Empty by default -- targeted item-debug logging is OFF in production.
+    # It emits hundreds of [DBG-SWAP] prints per recipe from inside the
+    # refinement hot loop; in the pyodide/local worker each print is a
+    # worker->main-thread postMessage console relay, which is very expensive.
+    # Set the DEBUG_SPECIFIC_ITEMS env var (comma-separated names) to re-enable
+    # for a targeted investigation. (Was hardcoded to merfolk/journeyman gear
+    # for the Vastalume chest bug investigation and left on -- 2026-07-28.)
+    DEBUG_ITEM_NAMES = []
 
 def _item_matches_debug(item):
     """True if item's name contains any debug-tagged substring."""
@@ -235,6 +240,10 @@ def get_available_services(recipe, character):
     available = []
     for service in SERVICES_BY_NAME.values():
         if service.is_valid_for_recipe(recipe) and service.is_unlocked(character):
+            # Flambé (Living Flame) can't be used in an Underwater location, so
+            # drop underwater services from the candidate set when active.
+            if EXCLUDE_UNDERWATER_SERVICES and getattr(getattr(service, 'location', None), 'is_underwater', False):
+                continue
             available.append(service)
     
     return available
@@ -886,19 +895,51 @@ def calculate_craft_metrics(
     else:
         metrics['steps_per_chest_recipe'] = 999999.0
 
-    # Budget metric: steps to produce target items from limited materials
+    # Budget metric: steps to produce `budget_target` OUTPUT ITEMS from a
+    # limited pool of `budget_materials` raw materials.
+    #
+    # Bug 06b521a0 (2026-07-21): `budget_target` is a count of OUTPUT ITEMS
+    # (the UI labels the field "output items desired"), but the feasibility
+    # math below used to compute the *materials per craft-action* and then
+    # compare `budget_materials / that` directly against `budget_target` —
+    # i.e. it implicitly assumed one craft-action yields exactly one output
+    # item. That is wrong for any recipe whose output `quantity` > 1: "Cut
+    # into ectoplasm" consumes 2 logs and yields 2 ectoplasm per action, so
+    # the true materials-per-OUTPUT-ITEM is HALF what the old code computed.
+    # The result was that the achievable output was understated by the
+    # output-quantity factor (2×), so realistic gearsets — including ones the
+    # user can clearly see produce >= target on screen — were flagged
+    # infeasible (`steps_for_budget = inf`). With every candidate tied at inf
+    # the primary objective became meaningless and the optimizer fell through
+    # to a secondary axis, returning a high-output/high-STEP gearset instead
+    # of the step-efficient one the user expected.
+    #
+    # Correct materials per output item:
+    #   = base_materials_per_action * (1 - NMC) / [ output_qty * (1 + DR) ]
+    #   = (base_materials_per_recipe / output_qty) * materials_per_craft
+    # `materials_per_craft` already carries the (1-NMC)/(1+DR) factor. We also
+    # fold in the Item-Finding target-bonus factor (extra free target items
+    # per roll) so this stays consistent with `expected_steps_per_item`,
+    # which was already scaled by the same factor above.
     if budget_materials > 0 and budget_target > 0:
-        # How many crafts can we do with our material budget?
-        # Each recipe uses N base materials per craft, reduced by DR/NMC
         base_materials_per_recipe = sum(qty for group in recipe.materials for qty, _ in group)
-        actual_materials_per_craft = base_materials_per_recipe * metrics['materials_per_craft']
-        max_crafts_from_budget = budget_materials / actual_materials_per_craft if actual_materials_per_craft > 0 else 0
-        
-        if max_crafts_from_budget >= budget_target:
+        output_qty = max(1.0, float(getattr(recipe, 'quantity', 1) or 1))
+        if_bonus_factor = metrics.get('_if_target_bonus_factor', 1.0)
+        materials_per_output_item = (
+            (base_materials_per_recipe / output_qty)
+            * metrics['materials_per_craft']
+            * if_bonus_factor
+        )
+        max_items_from_budget = (
+            budget_materials / materials_per_output_item
+            if materials_per_output_item > 0 else 0
+        )
+
+        if max_items_from_budget >= budget_target:
             # We have enough materials — steps = target * steps_per_item
             metrics['steps_for_budget'] = budget_target * metrics['expected_steps_per_item']
         else:
-            # Not enough materials — impossible, use a very high value
+            # Not enough materials to produce the target — infeasible.
             metrics['steps_for_budget'] = float('inf')
     else:
         metrics['steps_for_budget'] = float('inf')
@@ -1486,12 +1527,25 @@ def optimize_for_service(recipe, service, character, consumable=None):
             if not is_gearset_valid(gearset_dict, character, activity=None, service=None, check_requirements=False):
                 return False
         
-        # Budget constraint: reject gearsets that can't produce target from budget
+        # Budget constraint: reject gearsets that can't produce the target
+        # OUTPUT-ITEM count from the material budget. Mirrors the corrected
+        # `steps_for_budget` math (bug 06b521a0): materials are counted PER
+        # OUTPUT ITEM, so we divide the per-action material cost by the
+        # recipe's output `quantity` and fold in the IF target-bonus factor.
+        # Without the /output_qty divisor, recipes with quantity > 1 (e.g.
+        # "Cut into ectoplasm", 2 per craft) understate achievable output by
+        # the quantity factor and wrongly reject step-efficient gearsets.
         if budget_active and check_service_reqs:
             try:
                 metrics = score_function(gearset_dict)
-                actual_mats_per_craft = base_materials_per_recipe * metrics['materials_per_craft']
-                total_mats_needed = actual_mats_per_craft * BUDGET_TARGET
+                output_qty = max(1.0, float(getattr(recipe, 'quantity', 1) or 1))
+                if_bonus_factor = metrics.get('_if_target_bonus_factor', 1.0)
+                materials_per_output_item = (
+                    (base_materials_per_recipe / output_qty)
+                    * metrics['materials_per_craft']
+                    * if_bonus_factor
+                )
+                total_mats_needed = materials_per_output_item * BUDGET_TARGET
                 if total_mats_needed > BUDGET_MATERIALS:
                     return False
             except:
@@ -1632,7 +1686,7 @@ def optimize_for_service(recipe, service, character, consumable=None):
                     if metrics.get('perfect_percentage', 0) > best_metrics.get('perfect_percentage', 0):
                         best_item = item
                         best_metrics = metrics
-            except:
+            except Exception:
                 continue
         gearset['pet'] = best_item
     elif 'pet' in locked:
@@ -2158,6 +2212,7 @@ def optimize_for_service(recipe, service, character, consumable=None):
             required_keywords=_req_keywords,
             required_item_names=_req_item_names,
             locked_slots=set(locked.keys()) if isinstance(locked, dict) else None,
+            allow_occupied_tier3_swap=True,
         )
     except Exception as _dumb_exc:
         import traceback

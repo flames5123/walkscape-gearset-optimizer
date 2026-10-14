@@ -3392,6 +3392,74 @@
         "terrainModifiers": [
           "Have the Charter of the drowned collectible"
         ]
+      },
+      {
+        "id": "route-blackwater_fields-blackwater_lake-719832b5-461d-4ceb-81da-2e9bea81aa2d",
+        "name": "Blackwater Fields to Blackwater Lake",
+        "faction": "wallisia",
+        "coords": [
+          1570,
+          1511
+        ],
+        "distance": 522,
+        "pathpoints": [
+          [
+            1450,
+            1409
+          ],
+          [
+            1465,
+            1425
+          ],
+          [
+            1465,
+            1455
+          ],
+          [
+            1519,
+            1513
+          ],
+          [
+            1570,
+            1511
+          ],
+          [
+            1578,
+            1522
+          ],
+          [
+            1590,
+            1489
+          ],
+          [
+            1590,
+            1470
+          ]
+        ],
+        "terrainModifiers": []
+      },
+      {
+        "id": "route-crown_of_cinders-cactus_canyon-dd206d9e-fdbd-402e-be1f-b7b53e9d2b00",
+        "name": "Crown of Cinders to Cactus Canyon",
+        "faction": "wrentmark",
+        "coords": [
+          1900,
+          711
+        ],
+        "distance": 550,
+        "pathpoints": [
+          [
+            1927,
+            749
+          ],
+          [
+            1900,
+            711
+          ]
+        ],
+        "terrainModifiers": [
+          "Requires Navigate Desert"
+        ]
       }
     ]
   }

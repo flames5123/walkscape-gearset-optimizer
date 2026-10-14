@@ -1,7 +1,7 @@
 import { showInfoPopover, wireInfoIcons } from './info-popover.js';
 import { showGearsetPicker } from './travel-gearset-picker.js';
-import { showImportGearsetModal } from './travel-import-gearset-modal.js';
 import { LOCATION_CANONICAL_REGION } from './travel-config-panel.js';
+import { getPetIconPath } from './utils/pet-utils.js';
 
 import { formatFixed } from './utils/number-format.js';
 
@@ -349,7 +349,7 @@ export default class RegionCard {
                             <span class="travel-gearset-name">${name}</span>
                         </div>
                         <div class="travel-gearset-slot-body">
-                            ${hasGearset ? this._renderAssignedGearset(gearset, routeListHtml) : this._renderEmptyGearset(isOptimizing)}
+                            ${hasGearset ? this._renderAssignedGearset(gearset, routeListHtml, slotKey) : this._renderEmptyGearset(isOptimizing, slotKey)}
                         </div>
                     </div>
                 `;
@@ -456,7 +456,7 @@ export default class RegionCard {
                     </div>
                     ${expandedRoutesHtml}
                     <div class="travel-gearset-slot-body">
-                        ${hasGearset ? this._renderAssignedGearset(gearset, routeListHtml) : this._renderEmptyGearset(isOptimizing)}
+                        ${hasGearset ? this._renderAssignedGearset(gearset, routeListHtml, groupKey) : this._renderEmptyGearset(isOptimizing, groupKey)}
                     </div>
                 </div>
             `;
@@ -512,7 +512,7 @@ export default class RegionCard {
                     ${reqsHtml}
                     ${routeListHtml}
                     <div class="travel-gearset-slot-body">
-                        ${hasGearset ? this._renderAssignedGearset(gearset, '') : this._renderEmptyGearset(isOptimizing)}
+                        ${hasGearset ? this._renderAssignedGearset(gearset, '', slotKey) : this._renderEmptyGearset(isOptimizing, slotKey)}
                     </div>
                 </div>
             `;
@@ -561,7 +561,7 @@ export default class RegionCard {
                         <div class="travel-req-routes-list">${routeListItems}</div>
                     </details>
                     <div class="travel-gearset-slot-body">
-                        ${hasGearset ? this._renderAssignedGearset(gearset) : this._renderEmptyGearset(isOptimizing)}
+                        ${hasGearset ? this._renderAssignedGearset(gearset, '', slotKey) : this._renderEmptyGearset(isOptimizing, slotKey)}
                     </div>
                 </div>
             `;
@@ -592,14 +592,15 @@ export default class RegionCard {
         return `${names.slice(0, 2).join(', ')} (+${names.length - 2} more)`;
     }
 
-    _renderEmptyGearset(isOptimizing = false) {
+    _renderEmptyGearset(isOptimizing = false, slotKey = null) {
         const mode = this.regionConfig.mode || 'single';
         const showSelectImport = mode !== 'multi' && mode !== 'long_short';
         const btnClass = isOptimizing ? 'button button-primary travel-gearset-optimize-btn optimizing' : 'button button-primary travel-gearset-optimize-btn';
         const btnText = isOptimizing ? '<span class="travel-opt-spinner">⏳</span> Optimizing…' : 'Optimize';
         const btnDisabled = isOptimizing ? 'disabled' : '';
         return `
-            <div class="travel-gearset-empty">${isOptimizing ? 'Optimizing…' : 'No gearset assigned'}</div>
+            <div class="travel-gearset-empty">${isOptimizing ? '<span class="travel-opt-spinner">⏳</span> Optimizing…' : 'No gearset assigned — click a slot to pick, or optimize'}</div>
+            ${this._renderGearPreviewBlock(slotKey)}
             <div class="travel-gearset-actions">
                 <button class="${btnClass}" ${btnDisabled}>${btnText}</button>
                 ${showSelectImport ? '<button class="button travel-gearset-select-btn">Select Existing</button>' : ''}
@@ -608,7 +609,7 @@ export default class RegionCard {
         `;
     }
 
-    _renderAssignedGearset(gearset, routeListHtml = '') {
+    _renderAssignedGearset(gearset, routeListHtml = '', slotKey = null) {
         const mode = this.regionConfig.mode || 'single';
         const showSelectImport = mode !== 'multi' && mode !== 'long_short';
         const stats = gearset.stats || {};
@@ -644,9 +645,8 @@ export default class RegionCard {
             </div>
             <div class="travel-gearset-stats travel-gearset-stats--row2">
                 <span class="travel-gearset-stat ${reqsClass}">${reqsIcon} Reqs</span>
-                <button class="travel-gear-preview-toggle" title="Show equipped gear"><span class="expand-arrow">▼</span> Gear</button>
             </div>
-            <div class="travel-gear-preview"></div>
+            ${slotKey ? this._renderGearPreviewBlock(slotKey) : ''}
             ${warningsHtml}
             ${routeListHtml}
             <div class="travel-gearset-actions">
@@ -761,7 +761,7 @@ export default class RegionCard {
             <div class="travel-exception-routes-inline">
                 <div class="travel-exception-routes-header">
                     <span class="travel-exception-routes-title">Cross Region Routes</span>
-                    <span class="travel-info-icon" data-info="Cross-region routes where the same gearset won't give the same steps in both directions due to different regional stats. Each direction is optimized independently." role="button" tabindex="0" aria-label="Cross region routes info">ⓘ</span>
+                    <span class="travel-info-icon" data-info="Cross-region routes need different gear or give different steps depending on direction, because each region has its own regional stats. Gear-requirement crossings (e.g. diving gear for Port Skildar → Casbrant's Grave) are listed here and optimized from the destination region. Non-gear crossings that only differ by region (e.g. Fort of Permafrost → Noiseless Pass) appear as one-way (→) routes in each starting region's list, and each direction is optimized independently there." role="button" tabindex="0" aria-label="Cross region routes info">ⓘ</span>
                 </div>
         `;
 
@@ -1172,6 +1172,18 @@ export default class RegionCard {
         // Info icons — hover + click popover behavior
         wireInfoIcons(this.el);
 
+        // Clickable travel slot grid (items 6/7): each tile opens the item
+        // selection popup for that gear slot within its travel gearset.
+        for (const tile of this.el.querySelectorAll('.travel-slot-grid .tree-gear-mini-slot')) {
+            tile.addEventListener('click', (e) => {
+                e.stopPropagation();
+                if (tile.dataset.disabled === '1') return;
+                const gearSlot = tile.dataset.slot;
+                const gsSlot = tile.dataset.gsSlot;
+                if (gearSlot && gsSlot) this._openSlotPopup(gsSlot, gearSlot);
+            });
+        }
+
         // Gearset name click → focus mode on map (dim other routes, highlight this slot's routes)
         const nameSpans = this.el.querySelectorAll('.travel-gearset-slot .travel-gearset-name');
         for (const nameEl of nameSpans) {
@@ -1236,17 +1248,8 @@ export default class RegionCard {
 
             const updateSwatchColor = (color) => {
                 if (!swatch) return;
-                // Update the SVG paint fills (paint inside can + spill)
-                const svg = swatch.querySelector('svg');
-                if (svg) {
-                    const fills = svg.querySelectorAll('[fill]');
-                    for (const el of fills) {
-                        const f = el.getAttribute('fill');
-                        if (f && f !== 'none' && !f.startsWith('rgba')) {
-                            el.setAttribute('fill', color);
-                        }
-                    }
-                }
+                // Circle background = selected color (item 5)
+                swatch.style.background = color;
             };
 
             picker.addEventListener('input', (e) => {
@@ -1291,6 +1294,10 @@ export default class RegionCard {
                         this.regionConfig.gearsets[slotKey].saved_gearset_id = gs.id;
                         this.regionConfig.gearsets[slotKey].name = this.regionConfig.gearsets[slotKey].name || gs.name;
                         this.regionConfig.gearsets[slotKey].stats = null;
+                        // Auto-lock every populated slot from the picked gear set
+                        // so the optimizer respects the explicit choice (matches
+                        // the crafting tree's Select Existing). (item 9)
+                        this.regionConfig.gearsets[slotKey].locked_slots = this._buildAutoLocks(exportStr, gs.slots);
                         this.onConfigChange('gearsets', this.regionConfig.gearsets);
                         this._render();
                         // Scroll the slot into view after DOM update
@@ -1315,40 +1322,48 @@ export default class RegionCard {
                 }, 350);
             });
         }
-        // Import button — open import modal (Req 4.6)
+        // Import button — inline clipboard import (matches crafting tree; no
+        // full-screen modal). Reads the export string straight from the
+        // clipboard, falling back to a prompt if the clipboard API is
+        // unavailable, then auto-locks every imported slot. (item 9)
         const importBtns = this.el.querySelectorAll('.travel-gearset-import-btn');
         for (const btn of importBtns) {
-            btn.addEventListener('click', (e) => {
+            btn.addEventListener('click', async (e) => {
                 e.stopPropagation();
                 const slot = btn.closest('.travel-gearset-slot');
                 const slotKey = slot?.dataset.slot;
                 if (!slotKey) return;
 
-                const gsConfig = this.regionConfig.gearsets?.[slotKey] || {};
-                const slotName = gsConfig.name || `${this.region.name} ${slotKey}`;
+                const _commitImport = (text) => {
+                    const trimmed = (text || '').trim();
+                    if (!trimmed) return;
+                    if (!this.regionConfig.gearsets) this.regionConfig.gearsets = {};
+                    if (!this.regionConfig.gearsets[slotKey]) this.regionConfig.gearsets[slotKey] = {};
+                    const gsCfg = this.regionConfig.gearsets[slotKey];
+                    gsCfg.export_string = trimmed;
+                    gsCfg.saved_gearset_id = null;
+                    gsCfg.stats = null;
+                    // Importing is an explicit "use exactly this" act — lock
+                    // every populated slot so the next Optimize honors it.
+                    gsCfg.locked_slots = this._buildAutoLocks(trimmed, null);
+                    this.onConfigChange('gearsets', this.regionConfig.gearsets);
+                    this._render();
+                    // Trigger terrain validation immediately (Req 9.1)
+                    this.validateGearsetSlot(slotKey);
+                    if (window.api) window.api.showSuccess('Gear set imported.');
+                };
 
-                showImportGearsetModal({
-                    slotName,
-                    onConfirm: (result) => {
-                        if (!this.regionConfig.gearsets) this.regionConfig.gearsets = {};
-                        if (!this.regionConfig.gearsets[slotKey]) this.regionConfig.gearsets[slotKey] = {};
-                        this.regionConfig.gearsets[slotKey].export_string = result.export_string;
-                        if (result.saved_gearset_id) {
-                            this.regionConfig.gearsets[slotKey].saved_gearset_id = result.saved_gearset_id;
-                        }
-                        if (result.name && !this.regionConfig.gearsets[slotKey].name) {
-                            this.regionConfig.gearsets[slotKey].name = result.name;
-                        }
-                        if (!this.regionConfig.gearsets[slotKey].stats) {
-                            this.regionConfig.gearsets[slotKey].stats = null;
-                        }
-                        this.onConfigChange('gearsets', this.regionConfig.gearsets);
-                        this._render();
-                        // Trigger terrain validation immediately (Req 9.1)
-                        this.validateGearsetSlot(slotKey);
-                        if (window.api) window.api.showSuccess('Gear set imported.');
-                    },
-                });
+                try {
+                    const text = await navigator.clipboard.readText();
+                    if (text && text.trim()) {
+                        _commitImport(text);
+                    } else if (window.api) {
+                        window.api.showInfo('Clipboard is empty — copy a gear set export string first.');
+                    }
+                } catch {
+                    const exportStr = prompt('Paste a gear set export string:');
+                    if (exportStr && exportStr.trim()) _commitImport(exportStr);
+                }
             });
         }
 
@@ -1397,36 +1412,45 @@ export default class RegionCard {
 
         // Gear preview toggle — show/hide tiny gear icons
         for (const btn of this.el.querySelectorAll('.travel-gear-preview-toggle')) {
-            btn.addEventListener('click', async (e) => {
+            btn.addEventListener('click', (e) => {
                 e.stopPropagation();
-                const slot = btn.closest('.travel-gearset-slot');
-                const slotKey = slot?.dataset.slot;
+                // Main-gearset toggles carry data-slot; exception-path toggles
+                // are handled by their own listener below and no-op here.
+                const slotKey = btn.dataset.slot;
                 if (!slotKey) return;
-                const preview = slot.querySelector('.travel-gear-preview');
-                if (!preview) return;
-
-                const isOpen = btn.classList.contains('open');
-                if (isOpen) {
-                    btn.classList.remove('open');
-                    preview.classList.remove('open');
-                    return;
+                const controls = btn.closest('.travel-gear-preview-controls');
+                const preview = controls?.nextElementSibling;
+                if (!preview || !preview.classList.contains('travel-gear-preview')) return;
+                const willOpen = !btn.classList.contains('open');
+                btn.classList.toggle('open', willOpen);
+                preview.classList.toggle('open', willOpen);
+                // Persist so re-renders (e.g. after Optimize) keep the state
+                if (this.regionConfig.gearsets?.[slotKey]) {
+                    this.regionConfig.gearsets[slotKey]._preview_open = willOpen;
                 }
+            });
+        }
 
-                if (!preview.dataset.loaded) {
-                    const gs = this.regionConfig.gearsets?.[slotKey];
-                    const exportStr = gs?.export_string;
-                    if (!exportStr) return;
-                    try {
-                        const html = await this._buildGearPreviewHtml(exportStr);
-                        preview.innerHTML = html;
-                        preview.dataset.loaded = '1';
-                    } catch (err) {
-                        preview.innerHTML = '<span style="font-size:11px;color:var(--text-secondary)">Could not load gear</span>';
-                    }
-                }
-
-                btn.classList.add('open');
-                preview.classList.add('open');
+        // Gear Reset button — unequip all gear + clear every lock for this slot
+        // (crafting-tree style, sits next to the Gear toggle).
+        for (const btn of this.el.querySelectorAll('.travel-gear-reset-btn')) {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const slotKey = btn.dataset.slot;
+                if (!slotKey) return;
+                const gs = this.regionConfig.gearsets?.[slotKey];
+                if (!gs) return;
+                gs.locked_slots = {};
+                gs.export_string = null;
+                gs.saved_gearset_id = null;
+                gs.stats = null;
+                gs._alternatives = {};
+                gs._locked_alternatives = {};
+                gs._validation_warnings = [];
+                gs._preview_open = true; // keep the (now-empty) grid visible after reset
+                this.onConfigChange('gearsets', this.regionConfig.gearsets);
+                this._render();
+                if (window.api) window.api.showSuccess('Gear reset — all slots cleared.');
             });
         }
 
@@ -1561,6 +1585,8 @@ export default class RegionCard {
                             this.exceptionsConfig[routeId].gearset.saved_gearset_id = gs.id;
                             this.exceptionsConfig[routeId].gearset.name = this.exceptionsConfig[routeId].gearset.name || gs.name;
                             this.exceptionsConfig[routeId].gearset.stats = null;
+                            // Auto-lock every populated slot (crafting tree parity). (item 9)
+                            this.exceptionsConfig[routeId].gearset.locked_slots = this._buildAutoLocks(exportStr, gs.slots);
                             this.onExceptionConfigChange(routeId, 'gearset', this.exceptionsConfig[routeId].gearset);
                             this._render();
                             // Compute stats via validate endpoint
@@ -1575,27 +1601,34 @@ export default class RegionCard {
 
             const impBtn = entry.querySelector('.travel-exception-import-btn');
             if (impBtn) {
-                impBtn.addEventListener('click', () => {
-                    const exConfig = this.exceptionsConfig[routeId] || {};
-                    const slotName = exConfig.gearset?.name || routeId;
-
-                    showImportGearsetModal({
-                        slotName,
-                        onConfirm: (result) => {
-                            if (!this.exceptionsConfig[routeId]) this.exceptionsConfig[routeId] = { gearset: {} };
-                            if (!this.exceptionsConfig[routeId].gearset) this.exceptionsConfig[routeId].gearset = {};
-                            this.exceptionsConfig[routeId].gearset.export_string = result.export_string;
-                            if (result.saved_gearset_id) {
-                                this.exceptionsConfig[routeId].gearset.saved_gearset_id = result.saved_gearset_id;
-                            }
-                            if (result.name) {
-                                this.exceptionsConfig[routeId].gearset.name = this.exceptionsConfig[routeId].gearset.name || result.name;
-                            }
-                            this.onExceptionConfigChange(routeId, 'gearset', this.exceptionsConfig[routeId].gearset);
-                            this._render();
-                            if (window.api) window.api.showSuccess('Cross-region gear set imported.');
-                        },
-                    });
+                impBtn.addEventListener('click', async () => {
+                    // Inline clipboard import (matches crafting tree; no modal). (item 9)
+                    const _commitImport = (text) => {
+                        const trimmed = (text || '').trim();
+                        if (!trimmed) return;
+                        if (!this.exceptionsConfig[routeId]) this.exceptionsConfig[routeId] = { gearset: {} };
+                        if (!this.exceptionsConfig[routeId].gearset) this.exceptionsConfig[routeId].gearset = {};
+                        const exGs = this.exceptionsConfig[routeId].gearset;
+                        exGs.export_string = trimmed;
+                        exGs.saved_gearset_id = null;
+                        exGs.stats = null;
+                        exGs.locked_slots = this._buildAutoLocks(trimmed, null);
+                        this.onExceptionConfigChange(routeId, 'gearset', this.exceptionsConfig[routeId].gearset);
+                        this._render();
+                        this._validateExceptionSlot(routeId, trimmed);
+                        if (window.api) window.api.showSuccess('Cross-region gear set imported.');
+                    };
+                    try {
+                        const text = await navigator.clipboard.readText();
+                        if (text && text.trim()) {
+                            _commitImport(text);
+                        } else if (window.api) {
+                            window.api.showInfo('Clipboard is empty — copy a gear set export string first.');
+                        }
+                    } catch {
+                        const exportStr = prompt('Paste a gear set export string:');
+                        if (exportStr && exportStr.trim()) _commitImport(exportStr);
+                    }
                 });
             }
 
@@ -1667,7 +1700,7 @@ export default class RegionCard {
                             previewEl.innerHTML = html;
                             previewEl.dataset.loaded = '1';
                         } catch {
-                            previewEl.innerHTML = '<span style="font-size:11px;color:var(--text-secondary)">Could not load gear</span>';
+                            previewEl.innerHTML = '<span style="font-size: max(var(--min-text, 5px), calc(11px * var(--text-scale, 1)));color:var(--text-secondary)">Could not load gear</span>';
                         }
                     }
 
@@ -1684,16 +1717,9 @@ export default class RegionCard {
                     if (!this.exceptionsConfig[routeId]) this.exceptionsConfig[routeId] = { gearset: {} };
                     if (!this.exceptionsConfig[routeId].gearset) this.exceptionsConfig[routeId].gearset = {};
                     this.exceptionsConfig[routeId].gearset.color = color;
-                    // Update swatch SVG fill live
+                    // Update swatch circle background live (item 5)
                     const swatch = entry.querySelector('.travel-gearset-color-swatch');
-                    if (swatch) {
-                        swatch.querySelectorAll('[fill]').forEach(el => {
-                            const fill = el.getAttribute('fill');
-                            if (fill && fill !== 'none' && !fill.startsWith('rgba') && !fill.startsWith('#fff') && fill !== 'white') {
-                                el.setAttribute('fill', color);
-                            }
-                        });
-                    }
+                    if (swatch) swatch.style.background = color;
                     this.onRouteColorChange([routeId], color);
                 });
                 colorPicker.addEventListener('change', () => {
@@ -1888,13 +1914,19 @@ export default class RegionCard {
             this.regionConfig.gearsets[slotKey].route_names = names;
         }
 
-        this.onOptimize(taskKey, {
+        const payload = {
             task_key: taskKey,
             region_id: regionId,
             gearset_slot: slotKey,
             mode: mode,
             route_ids: routeIds,
-        });
+        };
+        // Honor per-gearset slot locks set via the slot popup (item 7).
+        const gsCfg = this.regionConfig.gearsets?.[slotKey];
+        if (gsCfg && gsCfg.locked_slots && Object.keys(gsCfg.locked_slots).length) {
+            payload.locked_slots = { ...gsCfg.locked_slots };
+        }
+        this.onOptimize(taskKey, payload);
     }
 
     // -------------------------------------------------------------------------
@@ -2993,31 +3025,291 @@ export default class RegionCard {
      * @param {string} slotKey - The gearset slot key for identifying which swatch was clicked
      * @returns {string} HTML
      */
+    /**
+     * Sync-decode a gearset export string into a slot->item map using the
+     * cached catalog (window.api._catalogCache). Mirrors travel-route-gearset's
+     * decoder. Returns {} if pako/catalog aren't ready yet.
+     */
+    _decodeSlotsSync(exportStr) {
+        if (!exportStr || typeof window.pako === 'undefined') return {};
+        const catalog = window.api?._catalogCache;
+        if (!catalog) return {};
+        try {
+            let padded = exportStr;
+            const pad = exportStr.length % 4;
+            if (pad) padded += '='.repeat(4 - pad);
+            const decoded = atob(padded);
+            const bytes = new Uint8Array(decoded.length);
+            for (let i = 0; i < decoded.length; i++) bytes[i] = decoded.charCodeAt(i);
+            const data = JSON.parse(window.pako.inflate(bytes, { to: 'string' }));
+            const items = catalog.items || [];
+            const Q2R = {
+                normal: 'common', common: 'common', good: 'uncommon', uncommon: 'uncommon',
+                great: 'rare', rare: 'rare', excellent: 'epic', epic: 'epic',
+                perfect: 'legendary', legendary: 'legendary', eternal: 'ethereal', ethereal: 'ethereal',
+            };
+            const slots = {};
+            for (const entry of (data.items || [])) {
+                if (!entry.item || entry.item === 'null') continue;
+                let ij;
+                try { ij = JSON.parse(entry.item); } catch { continue; }
+                const uuid = ij.id;
+                const quality = ij.quality || 'common';
+                const type = entry.type;
+                const index = entry.index || 0;
+                let slotName;
+                if (type === 'ring') slotName = `ring${index + 1}`;
+                else if (type === 'tool') slotName = `tool${index}`;
+                else if (type === 'consumable') slotName = 'consumable';
+                else if (type === 'pet') slotName = 'pet';
+                else if (type === 'activityInput') continue;
+                else slotName = type;
+                if (uuid && String(uuid).startsWith('generic::')) {
+                    const gi = (data.generic_slots || {})[slotName];
+                    if (gi) slots[slotName] = { itemId: uuid, name: gi.name || slotName, icon_path: gi.icon_path || null, icon: gi.icon || null, icon_color: gi.icon_color || null, rarity: gi.rarity || 'common', is_generic: true };
+                    continue;
+                }
+                const full = items.find(it => it.uuid === uuid || it.id === uuid);
+                if (!full) continue;
+                let rarity = full.rarity;
+                if (full.type === 'crafted_item') rarity = Q2R[String(quality).toLowerCase()] || 'common';
+                slots[slotName] = { itemId: full.id, uuid: full.uuid, name: full.name, icon_path: full.icon_path, rarity, quality, is_fine: !!full.is_fine, type: full.type };
+            }
+            return slots;
+        } catch (_) {
+            return {};
+        }
+    }
+
+    /**
+     * Build the slot->item map for a gearset with its per-gearset locked_slots
+     * overlaid (locked picks win; null sentinel = force-empty). (item 6/7)
+     */
+    _slotMapForGearset(gearset) {
+        const slots = this._decodeSlotsSync(gearset.export_string);
+        const locked = gearset.locked_slots || {};
+        const citems = (window.api?._catalogCache?.items) || [];
+        const Q2R = { Normal: 'common', Good: 'uncommon', Great: 'rare', Excellent: 'epic', Perfect: 'legendary', Eternal: 'ethereal' };
+        for (const [s, info] of Object.entries(locked)) {
+            if (info === null) { delete slots[s]; continue; }
+            if (!info || typeof info !== 'object' || !info.itemId) continue;
+            const itemId = info.itemId;
+            if (String(itemId).startsWith('generic::')) { if (info.name) slots[s] = { itemId, name: info.name, icon_path: info.icon_path, rarity: info.rarity || 'common', is_generic: true }; continue; }
+            const full = citems.find(it => it.id === itemId || it.uuid === itemId);
+            let rarity = (full && full.rarity) || info.rarity || 'common';
+            if (full && full.type === 'crafted_item') rarity = Q2R[info.quality] || 'common';
+            slots[s] = {
+                itemId: (full && full.id) || itemId, name: (full && full.name) || info.name || s,
+                icon_path: (full && full.icon_path) || info.icon_path || '', rarity, quality: info.quality,
+                is_fine: !!info.is_fine, type: (full && full.type) || info.type,
+                level: info.level, variant: info.variant, max_level: info.max_level,
+            };
+        }
+        // Overlay optimizer-picked pet/consumable. The gear export string is
+        // gear+tools only, so these arrive as a separate display overlay
+        // (_opt_pet/_opt_consumable). A locked or decoded pick still wins; this
+        // only fills an otherwise-empty pet/consumable slot so it renders in the
+        // preview. (optimize pets/consumables fix)
+        const optExtra = { pet: gearset._opt_pet, consumable: gearset._opt_consumable };
+        for (const [s, info] of Object.entries(optExtra)) {
+            if (!info) continue;
+            if (locked[s] === null) continue;      // force-empty sentinel wins
+            if (slots[s]) continue;                 // locked/decoded pick wins
+            let iconPath = info.icon_path || '';
+            if (!iconPath && s === 'pet') {
+                const species = info.species || info.name || '';
+                if (species) iconPath = getPetIconPath(species, info.level || 0, info.variant || 'normal', info.max_level || 0);
+            }
+            if (!iconPath && s === 'consumable') {
+                const itemId = info.itemId || info.id;
+                const full = citems.find(it => it.id === itemId || it.uuid === itemId || it.name === info.name);
+                iconPath = (full && full.icon_path) || '/assets/icons/slots/consumable.svg';
+            }
+            slots[s] = {
+                itemId: info.itemId || info.id || s,
+                name: info.name || s,
+                icon_path: iconPath,
+                rarity: info.rarity || (info.is_fine ? 'fine' : 'common'),
+                quality: info.level != null ? info.level : info.quality,
+                is_fine: !!info.is_fine,
+                type: s,
+                level: info.level,
+                variant: info.variant,
+            };
+        }
+        return slots;
+    }
+
+    /**
+     * Build a locked_slots map from an imported/selected gearset — every
+     * populated slot is auto-locked, mirroring the crafting tree's import /
+     * select-existing intent ("use exactly this gear, respect it"). Prefer the
+     * export string (carries pet/consumable + quality); fall back to a raw
+     * slots object for saved gearsets that have no export string. Empty slots
+     * stay unlocked so the optimizer can still fill them. (item 9)
+     */
+    _buildAutoLocks(exportStr, fallbackSlots) {
+        let decoded = exportStr ? this._decodeSlotsSync(exportStr) : null;
+        if ((!decoded || !Object.keys(decoded).length) && fallbackSlots) {
+            decoded = {};
+            for (const [s, item] of Object.entries(fallbackSlots)) {
+                if (s.startsWith('_')) continue;      // strip _alternatives etc.
+                if (!item || !item.itemId) continue;
+                decoded[s] = item;
+            }
+        }
+        const locks = {};
+        if (decoded) {
+            for (const [s, item] of Object.entries(decoded)) {
+                if (!item || !item.itemId) continue;
+                locks[s] = item;
+            }
+        }
+        return locks;
+    }
+
+    /**
+     * Render the gear-preview block for a travel gearset slot, matching the
+     * crafting tree: a "Gear ▼" show/hide toggle + a "Reset" button on one row,
+     * then a collapsible preview (hidden by default) holding the clickable slot
+     * grid. Open state persists per-gearset via `_preview_open`.
+     */
+    _renderGearPreviewBlock(slotKey) {
+        if (!slotKey) return '';
+        const gearset = this.regionConfig.gearsets?.[slotKey] || {};
+        const open = !!gearset._preview_open;
+        const sk = this._escapeAttrLite(slotKey);
+        return `
+            <div class="travel-gearset-stats travel-gearset-stats--row2 travel-gear-preview-controls">
+                <button class="travel-gear-preview-toggle${open ? ' open' : ''}" data-slot="${sk}" title="Show equipped gear">Gear <span class="expand-arrow">▼</span></button>
+                <button class="button tree-btn-reset travel-gear-reset-btn" data-slot="${sk}" title="Unequip all gear and clear all locks for this slot">Reset</button>
+            </div>
+            <div class="travel-gear-preview${open ? ' open' : ''}" data-slot="${sk}">
+                ${this._renderTravelSlotGrid(slotKey)}
+            </div>`;
+    }
+
+    /**
+     * Render a clickable gear-slot grid for a travel gearset slot (empty +
+     * filled). Empty tiles show slot-family icons; tools are level-gated; each
+     * tile carries data-slot (gear slot) + data-gs-slot (travel gearset key) so
+     * clicks can open the item selection popup. (items 6 + 7)
+     */
+    _renderTravelSlotGrid(slotKey) {
+        const gearset = this.regionConfig.gearsets?.[slotKey] || {};
+        // If the gearset has items but the catalog isn't cached yet, decoding
+        // yields empty tiles — warm it once and re-render so filled slots show.
+        if (gearset.export_string && !window.api?._catalogCache && window.api?.getCatalog && !this._slotGridCatalogWarming) {
+            this._slotGridCatalogWarming = true;
+            window.api.getCatalog()
+                .then(() => { this._slotGridCatalogWarming = false; this._render(); })
+                .catch(() => { this._slotGridCatalogWarming = false; });
+        }
+        const slots = this._slotMapForGearset(gearset);
+        const locked = gearset.locked_slots || {};
+
+        let clvl = 1;
+        try {
+            const cs = (window.store && window.store.state && window.store.state.character) || {};
+            if (typeof window.calculateCharacterLevel === 'function') clvl = window.calculateCharacterLevel(cs) || 1;
+        } catch (_) { /* default 1 */ }
+        const toolGate = { 3: 20, 4: 50, 5: 80 };
+        const fam = (s) => (s === 'ring1' || s === 'ring2') ? 'ring' : (s.startsWith('tool') ? 'tool' : s);
+        const Q2Rc = { common: 'rarity-common', uncommon: 'rarity-uncommon', rare: 'rarity-rare', epic: 'rarity-epic', legendary: 'rarity-legendary', ethereal: 'rarity-ethereal', fine: 'rarity-fine' };
+        const label = (s) => s.startsWith('tool') ? `Tool ${parseInt(s.slice(4), 10) + 1}` : ((s === 'ring1' || s === 'ring2') ? `Ring ${s.slice(4)}` : s.charAt(0).toUpperCase() + s.slice(1));
+
+        const renderTile = (s) => {
+            const item = slots[s];
+            const isLocked = !!locked[s] && locked[s] !== null;
+            const lockOv = isLocked ? `<span class="tree-gear-mini-lock" role="button" tabindex="0" aria-label="Locked" title="Locked — the optimizer keeps this pick (open the slot to unlock)">
+                <svg viewBox="0 0 24 24" width="11" height="11" fill="none" aria-hidden="true"><path d="M8 11V7a4 4 0 1 1 8 0v4" stroke="#e8820c" stroke-width="2.5" stroke-linecap="round"/><rect x="5" y="11" width="14" height="10" rx="2" fill="#e8820c"/><circle cx="12" cy="16" r="1.5" fill="#3d2503"/></svg>
+            </span>` : '';
+            if (s.startsWith('tool')) {
+                const idx = parseInt(s.slice(4), 10);
+                const need = toolGate[idx];
+                if (need && clvl < need) {
+                    return `<div class="travel-gear-mini-slot tree-gear-mini-slot tree-gear-mini-slot--level-locked" data-disabled="1" title="${label(s)} requires character level ${need} (you are ${clvl})"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" aria-hidden="true"><path d="M8 11V7a4 4 0 1 1 8 0v4" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/><rect x="5" y="11" width="14" height="10" rx="2" fill="currentColor"/></svg></div>`;
+                }
+            }
+            const dataAttrs = `data-slot="${s}" data-gs-slot="${this._escapeAttrLite(slotKey)}"`;
+            if (!item) {
+                return `<div class="travel-gear-mini-slot tree-gear-mini-slot tree-gear-mini-slot--empty" ${dataAttrs} title="Empty ${label(s)} slot — click to pick"><img src="/assets/icons/slots/${fam(s)}.svg" class="tree-gear-mini-empty-icon" alt="" onerror="this.style.display='none'">${lockOv}</div>`;
+            }
+            let rc = item.rarity ? (Q2Rc[item.rarity] || '') : '';
+            if (item.is_fine && rc !== 'rarity-fine') rc = 'rarity-fine';
+            return `<div class="travel-gear-mini-slot tree-gear-mini-slot ${rc}" ${dataAttrs} title="${this._escapeHtml(item.name || label(s))}">${item.icon_path ? `<img src="${item.icon_path}" class="travel-gear-mini-icon" alt="" loading="lazy" onerror="this.style.display='none'">` : ''}${lockOv}</div>`;
+        };
+
+        // Crafting-tree layout: all gear tiles flow on ONE wrapping line; only
+        // the tools line is forced onto a new row (tools + pet + consumable). (item: gear preview)
+        const gearSlots = ['cape', 'head', 'back', 'hands', 'chest', 'neck', 'primary', 'legs', 'secondary', 'ring1', 'feet', 'ring2'];
+        const gearHtml = gearSlots.map(renderTile).join('');
+        const toolHtml = ['tool0', 'tool1', 'tool2', 'tool3', 'tool4', 'tool5'].map(renderTile).join('');
+        const extraHtml = ['pet', 'consumable'].map(renderTile).join('');
+        return `<div class="travel-slot-grid">` +
+            `<div class="travel-gear-preview-row">${gearHtml}</div>` +
+            `<div class="travel-gear-preview-row tools-row">${toolHtml}${extraHtml}</div>` +
+            `</div>`;
+    }
+
+    _escapeAttrLite(str) {
+        return String(str || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    /**
+     * Open the item selection popup for a gear slot within a travel gearset,
+     * mirroring the crafting tree's treeNodeContext wiring. (item 7 + 8)
+     */
+    _openSlotPopup(gsSlot, gearSlot) {
+        if (!window.itemSelectionPopup || typeof window.itemSelectionPopup.show !== 'function') {
+            if (window.api) window.api.showInfo('Item picker is not available yet.');
+            return;
+        }
+        if (!this.regionConfig.gearsets) this.regionConfig.gearsets = {};
+        if (!this.regionConfig.gearsets[gsSlot]) this.regionConfig.gearsets[gsSlot] = {};
+        const gearset = this.regionConfig.gearsets[gsSlot];
+        if (!gearset.locked_slots) gearset.locked_slots = {};
+
+        const equippedSlots = this._slotMapForGearset(gearset);
+        window.itemSelectionPopup.show(gearSlot, {
+            treeNodeContext: {
+                nodeId: `travel:${this.region.id}:${gsSlot}`,
+                equippedSlots,
+                alternatives: gearset._alternatives || {},
+                lockedAlternatives: gearset._locked_alternatives || {},
+                hiddenAlternatives: {},
+                lockedSlots: gearset.locked_slots,
+                skill: 'travel',
+                sourceType: 'travel',
+                location: this.region.id,
+                metric: 'total_steps',
+                onSelect: (payload) => this._onSlotPopupSelect(gsSlot, payload),
+            },
+        });
+    }
+
+    /**
+     * Handle a pick/lock from the slot popup: persist the per-gearset
+     * locked_slots and re-optimize that slot honoring the locks. (item 7)
+     */
+    _onSlotPopupSelect(gsSlot, payload) {
+        const gearset = this.regionConfig.gearsets?.[gsSlot];
+        if (!gearset) return;
+        gearset.locked_slots = payload.lockedSlots || gearset.locked_slots || {};
+        this.onConfigChange('gearsets', this.regionConfig.gearsets);
+        // Re-optimize this slot with the new locks so the rest of the gearset
+        // fills around the user's pick (mirrors the crafting tree recalc).
+        this._onOptimizeSlot(gsSlot);
+    }
+
     _renderColorSwatch(color, slotKey) {
         const pickerId = `color-picker-${this.region.id}-${slotKey}`;
-        // Spray paint can — white outlines, selected color fills, spray lines
-        const canIcon = `<svg class="travel-swatch-icon" viewBox="0 0 44 50" width="28" height="32">` +
-            // Can body (rounded bottom, 10% shorter)
-            `<path d="M9 14 L9 43 Q9 47 13 47 L27 47 Q31 47 31 43 L31 14 Z" fill="${color}" stroke="#fff" stroke-width="1.5"/>` +
-            // Shoulder
-            `<path d="M9 14 Q9 11 13 10 L27 10 Q31 11 31 14" fill="${color}" stroke="#fff" stroke-width="1.5"/>` +
-            // Label rectangle
-            `<rect x="13" y="21" width="14" height="16" rx="1.5" fill="rgba(255,255,255,0.15)" stroke="#fff" stroke-width="1.2"/>` +
-            // Label corner detail
-            `<path d="M16 31 L16 34 L19 34" fill="none" stroke="#fff" stroke-width="1" stroke-linecap="round"/>` +
-            // Cap dome
-            `<path d="M13 10 Q13 5 20 4 Q27 5 27 10 Z" fill="${color}" stroke="#fff" stroke-width="1.3"/>` +
-            // Nozzle
-            `<rect x="18" y="2" width="4" height="3.5" rx="1" fill="${color}" stroke="#fff" stroke-width="1"/>` +
-            // Spray cone: color fill, then white outline lines (top, middle, bottom)
-            `<path d="M24 3.5 L40 -4 L42 3.5 L40 11 Z" fill="${color}" opacity="0.75"/>` +
-            `<line x1="24" y1="3" x2="40" y2="-4" stroke="#fff" stroke-width="1.3" stroke-linecap="round"/>` +
-            `<line x1="24" y1="3.5" x2="42" y2="3.5" stroke="#fff" stroke-width="1.3" stroke-linecap="round"/>` +
-            `<line x1="24" y1="4" x2="40" y2="11" stroke="#fff" stroke-width="1.3" stroke-linecap="round"/>` +
-            `</svg>`;
+        // Color-filled circle with a white paintbrush (matches the header
+        // "edit color" paintbrush icon). Background = the selected gearset color. (item 5)
+        const brush = `<svg class="travel-swatch-brush" width="28" height="28" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.71,4.63L19.37,3.29C19,2.9 18.35,2.9 17.96,3.29L9,12.25L11.75,15L20.71,6.04C21.1,5.65 21.1,5 20.71,4.63M7,14A3,3 0 0,0 4,17C4,18.31 2.84,19 2,19C2.92,20.22 4.5,21 6,21A4,4 0 0,0 10,17A3,3 0 0,0 7,14Z"/></svg>`;
         return `<label class="travel-gearset-color-swatch-label" title="Click to change color">` +
-            `<span class="travel-gearset-color-swatch" data-slot="${slotKey}">` +
-            canIcon +
+            `<span class="travel-gearset-color-swatch" data-slot="${slotKey}" style="background:${color}">` +
+            brush +
             `</span>` +
             `<input type="color" id="${pickerId}" class="travel-gearset-color-picker" value="${color}" data-slot="${slotKey}" aria-label="Pick gearset color" />` +
             `</label>`;

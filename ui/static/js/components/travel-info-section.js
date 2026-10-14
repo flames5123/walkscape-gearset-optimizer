@@ -21,6 +21,119 @@ import LocationDropdown from './location-dropdown.js';
 import { formatFixed } from '../utils/number-format.js';
 import { wikiDarkModeSuffix } from '../utils/wiki-link.js';
 
+/**
+ * Encode an arbitrary gearset slots object to the base64 gzip export string the
+ * travel APIs (/api/travel/stats) expect.
+ *
+ * Extracted from TravelInfoSection.encodeCurrentGearset so the gearset
+ * comparison view can encode gearset 1 AND gearset 2 with the exact same,
+ * already-proven logic (pet level resolution, consumable _fine handling,
+ * rarity-code quality, etc.) instead of reimplementing it.
+ *
+ * @param {Object} gearset - gearset slots object (e.g. store.state.gearsets.current
+ *                           or store.state.gearsets.gearset2)
+ * @returns {string} Base64-encoded gzip-compressed gearset JSON
+ */
+export function encodeGearsetForTravel(gearset) {
+    gearset = gearset || {};
+
+    const items = [];
+    const slotTypeMap = {
+        'head': 'head', 'cape': 'cape', 'back': 'back',
+        'chest': 'chest', 'primary': 'primary', 'secondary': 'secondary',
+        'hands': 'hands', 'legs': 'legs', 'neck': 'neck', 'feet': 'feet'
+    };
+
+    // Helper: get the rarity code for gearset export encoding.
+    // Crafted items have quality="Good" (display name) and rarity="uncommon" (code).
+    // The backend expects the rarity code (uncommon, rare, etc.), not the display name.
+    const getExportQuality = (item) => {
+        if (!item) return 'common';
+        return item.rarity || 'common';
+    };
+
+    // Gear slots
+    for (const [slotName, slotType] of Object.entries(slotTypeMap)) {
+        const item = gearset[slotName];
+        items.push({
+            type: slotType, index: 0,
+            item: item && item.uuid
+                ? JSON.stringify({ id: item.uuid, quality: getExportQuality(item), tag: null })
+                : 'null',
+            errors: []
+        });
+    }
+
+    // Ring slots
+    for (let i = 1; i <= 2; i++) {
+        const item = gearset[`ring${i}`];
+        items.push({
+            type: 'ring', index: i - 1,
+            item: item && item.uuid
+                ? JSON.stringify({ id: item.uuid, quality: getExportQuality(item), tag: null })
+                : 'null',
+            errors: []
+        });
+    }
+
+    // Tool slots
+    for (let i = 0; i < 6; i++) {
+        const item = gearset[`tool${i}`];
+        items.push({
+            type: 'tool', index: i,
+            item: item && item.uuid
+                ? JSON.stringify({ id: item.uuid, quality: getExportQuality(item), tag: null })
+                : 'null',
+            errors: []
+        });
+    }
+
+    // Pet slot.
+    // The backend resolves pets by SPECIES + LEVEL (PETS_BY_NAME.get_level),
+    // not by uuid, and the bonus is level-scoped (e.g. Reindeer agility WE is
+    // 1/2/4% at L1/L2/L3). Resolve level the same way Combined Stats does
+    // (user_overrides.items[petId].level -> store.items[petId].level ->
+    // slot.level) so the two views never diverge.
+    const pet = gearset['pet'];
+    let petItem = 'null';
+    if (pet && (pet.species || pet.itemId || pet.id)) {
+        const species = String(pet.species || pet.itemId || pet.id || '');
+        const petId = pet.itemId || pet.id || species.toLowerCase();
+        const ov = (store.state.ui?.user_overrides?.items?.[petId]) || {};
+        const base = (store.state.items?.[petId]) || {};
+        const level = ov.level != null ? ov.level
+            : (base.level != null ? base.level
+            : (pet.level != null ? pet.level : 0));
+        const useAbility = pet.useAbility != null ? pet.useAbility : !!ov.useAbility;
+        petItem = JSON.stringify({
+            id: species, species: species, level: level,
+            use_ability: !!useAbility, quality: getExportQuality(pet), tag: null,
+        });
+    }
+    items.push({ type: 'pet', index: 0, item: petItem, errors: [] });
+
+    // Consumable (food) slot. The backend resolves via
+    // Consumable.by_export_name(id) and handles the _fine variant.
+    const cons = gearset['consumable'];
+    let consItem = 'null';
+    if (cons && (cons.itemId || cons.id || cons.name)) {
+        let consId = String(cons.itemId || cons.id || cons.name || '');
+        let consFine = !!cons.is_fine || consId.toLowerCase().endsWith('_fine');
+        consId = consId.replace(/_fine$/i, '');
+        consItem = JSON.stringify({ id: consId, is_fine: consFine });
+    }
+    items.push({ type: 'consumable', index: 0, item: consItem, errors: [] });
+
+    const jsonStr = JSON.stringify({ items });
+    const compressed = window.pako.gzip(jsonStr);
+    let binary = '';
+    const bytes = new Uint8Array(compressed);
+    for (let i = 0; i < bytes.length; i++) {
+        binary += String.fromCharCode(bytes[i]);
+    }
+    return btoa(binary);
+}
+
 class TravelInfoSection extends Component {
     /**
      * Create a travel info section
@@ -125,104 +238,7 @@ class TravelInfoSection extends Component {
      * @returns {string} Base64-encoded gzip-compressed gearset JSON
      */
     encodeCurrentGearset() {
-        const gearset = store.state.gearsets?.current || {};
-
-        const items = [];
-        const slotTypeMap = {
-            'head': 'head', 'cape': 'cape', 'back': 'back',
-            'chest': 'chest', 'primary': 'primary', 'secondary': 'secondary',
-            'hands': 'hands', 'legs': 'legs', 'neck': 'neck', 'feet': 'feet'
-        };
-
-        // Helper: get the rarity code for gearset export encoding.
-        // Crafted items have quality="Good" (display name) and rarity="uncommon" (code).
-        // The backend expects the rarity code (uncommon, rare, etc.), not the display name.
-        const getExportQuality = (item) => {
-            if (!item) return 'common';
-            return item.rarity || 'common';
-        };
-
-        // Gear slots
-        for (const [slotName, slotType] of Object.entries(slotTypeMap)) {
-            const item = gearset[slotName];
-            items.push({
-                type: slotType, index: 0,
-                item: item && item.uuid
-                    ? JSON.stringify({ id: item.uuid, quality: getExportQuality(item), tag: null })
-                    : 'null',
-                errors: []
-            });
-        }
-
-        // Ring slots
-        for (let i = 1; i <= 2; i++) {
-            const item = gearset[`ring${i}`];
-            items.push({
-                type: 'ring', index: i - 1,
-                item: item && item.uuid
-                    ? JSON.stringify({ id: item.uuid, quality: getExportQuality(item), tag: null })
-                    : 'null',
-                errors: []
-            });
-        }
-
-        // Tool slots
-        for (let i = 0; i < 6; i++) {
-            const item = gearset[`tool${i}`];
-            items.push({
-                type: 'tool', index: i,
-                item: item && item.uuid
-                    ? JSON.stringify({ id: item.uuid, quality: getExportQuality(item), tag: null })
-                    : 'null',
-                errors: []
-            });
-        }
-
-        // Pet slot.
-        // The backend resolves pets by SPECIES + LEVEL (PETS_BY_NAME.get_level),
-        // not by uuid, and the bonus is level-scoped (e.g. Reindeer agility WE is
-        // 1/2/4% at L1/L2/L3). Resolve level the same way Combined Stats does
-        // (user_overrides.items[petId].level -> store.items[petId].level ->
-        // slot.level) so the two views never diverge.
-        const pet = gearset['pet'];
-        let petItem = 'null';
-        if (pet && (pet.species || pet.itemId || pet.id)) {
-            const species = String(pet.species || pet.itemId || pet.id || '');
-            const petId = pet.itemId || pet.id || species.toLowerCase();
-            const ov = (store.state.ui?.user_overrides?.items?.[petId]) || {};
-            const base = (store.state.items?.[petId]) || {};
-            const level = ov.level != null ? ov.level
-                : (base.level != null ? base.level
-                : (pet.level != null ? pet.level : 0));
-            const useAbility = pet.useAbility != null ? pet.useAbility : !!ov.useAbility;
-            petItem = JSON.stringify({
-                id: species, species: species, level: level,
-                use_ability: !!useAbility, quality: getExportQuality(pet), tag: null,
-            });
-        }
-        items.push({ type: 'pet', index: 0, item: petItem, errors: [] });
-
-        // Consumable (food) slot. Previously omitted entirely, so food WE (e.g.
-        // Bagel +5% WE) was invisible to the Travel info section. The backend
-        // resolves via Consumable.by_export_name(id) and handles the _fine variant.
-        const cons = gearset['consumable'];
-        let consItem = 'null';
-        if (cons && (cons.itemId || cons.id || cons.name)) {
-            let consId = String(cons.itemId || cons.id || cons.name || '');
-            let consFine = !!cons.is_fine || consId.toLowerCase().endsWith('_fine');
-            consId = consId.replace(/_fine$/i, '');
-            consItem = JSON.stringify({ id: consId, is_fine: consFine });
-        }
-        items.push({ type: 'consumable', index: 0, item: consItem, errors: [] });
-
-        const jsonStr = JSON.stringify({ items });
-        const compressed = window.pako.gzip(jsonStr);
-        let binary = '';
-        const bytes = new Uint8Array(compressed);
-        for (let i = 0; i < bytes.length; i++) {
-            binary += String.fromCharCode(bytes[i]);
-        }
-        return btoa(binary);
+        return encodeGearsetForTravel(store.state.gearsets?.current || {});
     }
 
     /**
@@ -359,10 +375,23 @@ class TravelInfoSection extends Component {
 
         const total = this.statsData.total;
 
-        // WE display: offset by 100, show range if min != max
-        const weMin = formatFixed((total.work_efficiency_min + 100), 1);
-        const weMax = formatFixed((total.work_efficiency_max + 100), 1);
-        const weDisplay = weMin === weMax ? `${weMin}%` : `${weMin} - ${weMax}%`;
+        // WE display: offset by 100, show range if min != max.
+        // Game rule: total efficiency floored at 1%. If the min drops below 1%
+        // (very negative WE), show the floored "1", the raw min in parens, red.
+        const weMinRaw = total.work_efficiency_min + 100;
+        const weMaxRaw = total.work_efficiency_max + 100;
+        const weTotalClamped = weMinRaw < 1;
+        const weTotalClass = weTotalClamped ? 'stat-value-negative' : 'stat-value';
+        const weMin = formatFixed(weMinRaw, 1);
+        const weMax = formatFixed(weMaxRaw, 1);
+        let weDisplay;
+        if (weTotalClamped) {
+            weDisplay = (weMin === weMax)
+                ? `1 (${weMin}%)`
+                : `1 (${weMin}%) - ${weMax}%`;
+        } else {
+            weDisplay = (weMin === weMax) ? `${weMin}%` : `${weMin} - ${weMax}%`;
+        }
 
         // DA display: show range if min != max
         const daMin = formatFixed(total.double_action_min, 1);
@@ -429,7 +458,7 @@ class TravelInfoSection extends Component {
                     </div>
                     <div class="info-stat-row">
                         <img src="/assets/icons/attributes/work_efficiency.svg" alt="WE" class="stat-icon" title="Work Efficiency (range)" />
-                        <span class="stat-value">${weDisplay}</span>
+                        <span class="${weTotalClass}">${weDisplay}</span>
                     </div>
                     <div class="info-stat-row">
                         <img src="/assets/icons/attributes/double_action.svg" alt="DA" class="stat-icon" title="Double Action (range)" />
@@ -447,7 +476,15 @@ class TravelInfoSection extends Component {
      * @returns {string} HTML
      */
     renderSegmentBubble(segment) {
-        const weDisplay = formatFixed((segment.work_efficiency + 100), 1);
+        // Total efficiency offset (100% = no bonus). Game rule: floored at 1%.
+        // When the raw value drops below 1% (very negative WE), show the floored
+        // "1", the real (uncapped) value in parens, and paint it red.
+        const weSegRaw = segment.work_efficiency + 100;
+        const weSegClamped = weSegRaw < 1;
+        const weSegClass = weSegClamped ? 'stat-value-negative' : 'stat-value';
+        const weDisplay = weSegClamped
+            ? `1 (${formatFixed(weSegRaw, 1)}%)`
+            : `${formatFixed(weSegRaw, 1)}%`;
         const daDisplay = formatFixed(segment.double_action, 1);
 
         // Steps display: if DA=0, show single value; otherwise show ~expected
@@ -500,7 +537,7 @@ class TravelInfoSection extends Component {
                     </div>
                     <div class="info-stat-row">
                         <img src="/assets/icons/attributes/work_efficiency.svg" alt="WE" class="stat-icon" title="Work Efficiency" />
-                        <span class="stat-value">${weDisplay}%</span>
+                        <span class="${weSegClass}">${weDisplay}</span>
                     </div>
                     <div class="info-stat-row">
                         <img src="/assets/icons/attributes/double_action.svg" alt="DA" class="stat-icon" title="Double Action" />

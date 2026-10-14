@@ -26,10 +26,70 @@ if (typeof window !== 'undefined' && window.location.hash === '#stats-report') {
     }
 }
 
+// Deep-link from a trading message notification: ?trading_thread=KEY#trading.
+// Stash the thread key so TradingPage.open() can jump straight to it.
+if (typeof window !== 'undefined') {
+    try {
+        const _tt = new URLSearchParams(window.location.search).get('trading_thread');
+        if (_tt) window._tradingPendingThreadKey = _tt;
+        // Deep-link to a trader comparison: ?trading_compare=NAME[&trading_compare_site=SITE&trading_compare_remote=1]#trading
+        const _qp = new URLSearchParams(window.location.search);
+        const _cmp = _qp.get('trading_compare');
+        if (_cmp) {
+            window._tradingPendingCompare = {
+                name: _cmp,
+                site: _qp.get('trading_compare_site') || '',
+                remote: (_qp.get('trading_compare_remote') || '').toLowerCase() === '1'
+                    || (_qp.get('trading_compare_remote') || '').toLowerCase() === 'true',
+            };
+        }
+        // These are one-shot deep-link params — once captured, strip them from the
+        // address bar (preserving the hash + any unrelated params) so they don't
+        // linger and re-trigger as the user navigates to other pages.
+        const _TRADING_DEEPLINK_KEYS = ['trading_thread', 'trading_compare',
+            'trading_compare_site', 'trading_compare_remote'];
+        if (_TRADING_DEEPLINK_KEYS.some((k) => _qp.has(k))) {
+            _TRADING_DEEPLINK_KEYS.forEach((k) => _qp.delete(k));
+            const _qs = _qp.toString();
+            const _clean = window.location.pathname + (_qs ? `?${_qs}` : '') + (window.location.hash || '');
+            try { window.history.replaceState(null, '', _clean); } catch (_e) { /* ignore */ }
+        }
+        // Pretty public-profile paths: /u/<handle> (trader page) and
+        // /u/<handle>/compare (comparison). The server serves the SPA for these;
+        // we stash the handle and open the trading overlay on load.
+        const _pm = window.location.pathname.match(/^\/u\/([^/]+?)(?:\/(compare))?\/?$/);
+        if (_pm) {
+            const _handle = decodeURIComponent(_pm[1]);
+            if (_pm[2] === 'compare') {
+                window._tradingPendingCompare = { name: _handle, site: '', remote: false };
+            } else {
+                window._tradingPendingTrader = { name: _handle };
+            }
+            // Consume the pretty path: clean the address bar to /#trading so the
+            // /u/<handle>/compare path doesn't linger as the user navigates away.
+            try { window.history.replaceState(null, '', '/#trading'); }
+            catch (_e) { window.location.hash = '#trading'; }
+        }
+    } catch (_) { /* ignore */ }
+}
+
 // Number formatting prefs MUST load first — its side-effects patch
 // Number.prototype.toLocaleString so every component that follows picks up
 // the user's chosen thousand + decimal separators on first paint.
 import './utils/number-format.js';
+
+// Install transient-failure retry on $.get BEFORE any component runs a fetch
+// (bug 72dd1567): a flaky client link was dropping the large catalog GETs
+// (/api/activities, /api/recipes, ...) mid-download, leaving the activity/recipe
+// selectors and info panels permanently empty until a page reload. jQuery is
+// loaded via a script tag ahead of this module, so window.$ is available here.
+import { installGetRetry } from './utils/ajax-retry.js';
+if (typeof window !== 'undefined' && window.$) {
+    installGetRetry(window.$, {
+        onRetry: (url, attempt, status, textStatus, delay) =>
+            console.warn(`[ajax-retry] ${url} failed (status=${status} ${textStatus || ''}); retry ${attempt} in ${delay}ms`),
+    });
+}
 
 import store from './state.js';
 import api from './api.js';
@@ -37,6 +97,7 @@ import { maybeResumeLocalGoalsReport } from './local-compute.js';
 import { initLocalSpeedBenchmark } from './local-speed-warning.js';
 import './components/continue-local-run-popup.js'; // listens for goalsReportResumePrompt
 import './crafting-tree-diff.js'; // dev tool: window.__ctOptimizeDiff() server-vs-local gate
+import { initTopbarCustomization } from './topbar-customization.js';
 import ImportModal from './components/import-modal.js';
 import SettingsModal from './components/settings-modal.js';
 import CustomStatsPopup from './components/custom-stats-popup.js';
@@ -52,6 +113,7 @@ import CombinedStatsSection from './components/combined-stats-section.js';
 import NonOwnedUpgradesSection from './components/nonowned-upgrades-section.js';
 import ActivitySelectorDropdown from './components/activity-selector-dropdown.js';
 import RecipeSelectorDropdown from './components/recipe-selector-dropdown.js';
+import CombinedSelectorDropdown from './components/combined-selector-dropdown.js';
 import { StatsReportPage } from './stats-report-page.js';
 // Stats-report stale-detection broadcast (debounced funnel for state mutations).
 // See ui/static/js/stats-report-stale-broadcast.js + .kiro/specs/stats-report-stale-detection/.
@@ -74,12 +136,47 @@ import { initAnnouncementsModal } from './announcements.js';
 import { initPullToRefresh, switchToTab, TAB_ORDER } from './pull-to-refresh.js';
 import TravelConfigPage from './travel-config-page.js';
 import { SellForChipsPage } from './sell-for-chips-page.js';
+import { AchievementsPage } from './achievements-page.js';
+import { UpgradesTrackerPage } from './upgrades-tracker-page.js';
 import { WalkdlePage } from './walkdle-page.js';
 import { NotepadPage } from './notepad-page.js';
+import { BankPage } from './bank/bank-page.js';
+import { TradingPage, startTradingUnreadPolling } from './trading-page.js';
+import { initTradingButtonDelegation } from './trading-buttons.js';
 import TravelMap from './travel-map.js';
 import GearsetComparisonSection from './components/gearset-comparison-section.js';
 import { initAprilFools } from './april-fools.js';
 import { getInstantActionsPet } from './utils/pet-utils.js';
+
+// ---------------------------------------------------------------------------
+// Synchronous, load-time-safe readers for the "unlock all" family of optimizer
+// flags. These are persisted to localStorage by the settings modal / custom-
+// stats popup, so they're available IMMEDIATELY on page load — before those
+// components finish their async load from the backend. Load-time code (gearset
+// import in state.js, the gear-slot grid render) must use these instead of
+// reading window.settingsModal, which doesn't exist yet during initial load.
+window.isUnlockAllEnabled = () => {
+    try { return localStorage.getItem('unlockAll') === 'true'; } catch (_) { return false; }
+};
+window.isUsePetAbilityEnabled = () => {
+    try { const v = localStorage.getItem('usePetAbility'); return v === null ? true : v === 'true'; } catch (_) { return true; }
+};
+// Resolve a pet slot's EFFECTIVE "use ability" state for the display/stats
+// surfaces (col-2 slot grid + Combined Stats). The per-pet toggle is
+// authoritative: a boolean `useAbility` means the user made an explicit choice,
+// so we honor it (even `false`). Only when the flag is absent (undefined/null —
+// the pet toggle has never been touched) do we DEFAULT to the global "Always
+// use active applicable pet ability" setting. That global checkbox is an
+// OPTIMIZER control; here it only seeds a one-time default the moment the
+// toggle appears, and never overrides an explicit per-pet choice. This is what
+// lets the per-pet box be unchecked and stay unchecked (bug 7df8d906).
+window.getEffectivePetUseAbility = (item) => {
+    if (item && typeof item.useAbility === 'boolean') return item.useAbility;
+    return window.isUsePetAbilityEnabled ? window.isUsePetAbilityEnabled() : true;
+};
+window.isAllCustomStatsEnabled = () => {
+    try { return localStorage.getItem('allCustomStatsEnabled') === 'true'; } catch (_) { return false; }
+};
 
 /**
  * Get session UUID from cookie or generate new one
@@ -128,9 +225,34 @@ async function initializeApp() {
         const uuid = getSessionUuid();
         console.log('Session UUID:', uuid);
 
-        // Load session data from backend
+        // Kick off ALL independent initial-load requests up front, in parallel.
+        // None of these depend on another's RESPONSE: /api/feature-flags reads the
+        // session cookie via middleware (not the loadSession result), and
+        // /api/items + /api/skills are user-independent static data. Previously these
+        // were awaited one wave at a time (session -> items/skills -> flags), stacking
+        // 3 serial round trips before anything rendered (5-10s on a slow link). Firing
+        // them together collapses that into a single wave; we still await each at the
+        // point its data is first needed, preserving ordering (session before the
+        // store.state reads below, items/skills before render, flags before reveal).
+        // Static GETs keep their own ETag/304 caching since the requests are unchanged.
         window.__walkscapePerf?.mark('session_start');
-        await store.loadSession(uuid);
+        const _sessionPromise = store.loadSession(uuid);
+        window.__walkscapePerf?.mark('static_data_start');
+        const _staticDataPromise = Promise.all([
+            api.getItems(),
+            api.getSkills()
+        ]);
+        window.__walkscapePerf?.mark('flags_start');
+        // Guard the parallel flags fetch so a rejection here can't produce an
+        // unhandled promise rejection before we await it below (we re-check .ok there).
+        const _flagsPromise = fetch('/api/feature-flags').catch((err) => {
+            console.warn('Failed to load feature flags:', err);
+            return null;
+        });
+
+        // Load session data from backend (fired above; await here so store.state is
+        // populated before the ui-pref / character reads that follow).
+        await _sessionPromise;
         window.__walkscapePerf?.measure('session_load', 'session_start');
         window.dispatchEvent(new Event('session-loaded'));
         // Small summary always; full state only when ?debug=1 / localStorage walkscape_debug=1
@@ -146,12 +268,18 @@ async function initializeApp() {
             console.log('[VERBOSE] Session loaded full state:', store.state);
         }
 
-        // Fetch static data from API
-        window.__walkscapePerf?.mark('static_data_start');
-        const [itemsData, skillsData] = await Promise.all([
-            api.getItems(),
-            api.getSkills()
-        ]);
+        // Apply the persisted "Move icon bar to the bottom" preference
+        // (Settings > UI). Stored in ui_config (server-side, keyed by session
+        // UUID); the swap-mobile-bars body class only takes effect inside the
+        // <=768px media query, so desktop is unaffected regardless.
+        try {
+            if (store.state.ui && store.state.ui.swap_mobile_bars) {
+                document.body.classList.add('swap-mobile-bars');
+            }
+        } catch (_e) { /* non-fatal */ }
+
+        // Fetch static data from API (fired in parallel with the session above).
+        const [itemsData, skillsData] = await _staticDataPromise;
         window.__walkscapePerf?.measure('static_data_load', 'static_data_start');
 
         const _itemsCats = itemsData?.categories || {};
@@ -172,12 +300,17 @@ async function initializeApp() {
 
         // Check feature flags BEFORE rendering components (so generic UI is included)
         try {
-            window.__walkscapePerf?.mark('flags_start');
-            const flagsResp = await fetch('/api/feature-flags');
+            // Flags fetch was fired in parallel with the session above; await it here.
+            const flagsResp = await _flagsPromise;
             window.__walkscapePerf?.measure('feature_flags_load', 'flags_start');
-            if (flagsResp.ok) {
+            if (flagsResp && flagsResp.ok) {
                 const flags = await flagsResp.json();
                 window._featureFlags = flags;
+                // Steps-per-Recipe chip taxonomy is embedded in the flags payload
+                // (when enabled) so its sub-filter renders with no loading flash.
+                if (flags.fastest_craft_taxonomy) {
+                    window._fastestCraftTaxonomy = flags.fastest_craft_taxonomy;
+                }
                 console.log('Feature flags loaded:', flags);
                 // Resume an in-progress client-side goals-report run if one
                 // survived a page reload (fire-and-forget; no-op otherwise).
@@ -208,6 +341,27 @@ async function initializeApp() {
                 if (flags.notepad) {
                     $('#notepad-nav-btn').show();
                 }
+                if (flags.bank_layouts) {
+                    $('#bank-nav-btn').show();
+                }
+                if (flags.achievements) {
+                    $('#achievements-nav-btn').show();
+                }
+                if (flags.upgrades_tracker) {
+                    $('#upgrades-tracker-nav-btn').show();
+                }
+                if (flags.trading) {
+                    $('#trading-nav-btn').show();
+                    initTradingButtonDelegation();
+                    try { startTradingUnreadPolling(); } catch (e) { console.warn('[trading] unread polling failed:', e); }
+                }
+                // (Trading has since been RELEASED — the nav icon, button
+                // delegation, and unread polling are also initialized
+                // unconditionally in initializeApp, so a disabled flag no longer
+                // hides it. This block is retained for the no-op reveal.)
+                // Top-bar / side-bar icon customization (FAC-gated). MUST run after the
+                // reveal calls above so it only enumerates icons this session can access.
+                try { initTopbarCustomization(flags); } catch (e) { console.warn('[topbar-customization] init failed:', e); }
             }
         } catch (err) {
             console.warn('Failed to load feature flags:', err);
@@ -434,6 +588,27 @@ async function initializeApp() {
             } else {
                 history.replaceState(null, '', window.location.pathname);
             }
+        } else if (window.location.hash === '#bank') {
+            if (window._featureFlags?.bank_layouts) {
+                handleHashChange();
+            } else {
+                history.replaceState(null, '', window.location.pathname);
+            }
+        } else if (window.location.hash === '#achievements') {
+            if (window._featureFlags?.achievements) {
+                handleHashChange();
+            } else {
+                history.replaceState(null, '', window.location.pathname);
+            }
+        } else if (window.location.hash === '#upgrades-tracker') {
+            if (window._featureFlags?.upgrades_tracker) {
+                handleHashChange();
+            } else {
+                history.replaceState(null, '', window.location.pathname);
+            }
+        } else if (window.location.hash === '#trading') {
+            // Trading is RELEASED (no FAC gate) — always open on initial load.
+            handleHashChange();
         }
 
     } catch (error) {
@@ -640,6 +815,40 @@ function renderComponents(itemsData, skillsData) {
     window.activitySelector = new ActivitySelectorDropdown($activitySelectorContainer);
     window.recipeSelector = new RecipeSelectorDropdown($recipeSelectorContainer);
 
+    // Combined Activity/Recipe dropdown (Misc UI setting: combineActivityRecipeSearch).
+    // Lives at the top of Column 3, before the two standalone dropdowns. When the
+    // setting is on it takes over and the two standalone dropdowns are hidden (but
+    // kept alive — the combined dropdown delegates selection to them). Off by
+    // default. Never affects the crafting tree (which uses its own decoupled
+    // recipe dropdown).
+    const $combinedSelectorContainer = $('<div id="combined-selector-dropdown"></div>');
+    $activitySelectorContainer.before($combinedSelectorContainer);
+
+    const applyCombinedSearchMode = (enabled) => {
+        if (enabled) {
+            if (!window.combinedSelector) {
+                window.combinedSelector = new CombinedSelectorDropdown($combinedSelectorContainer);
+            } else {
+                // Refresh label/state in case selection changed while hidden.
+                window.combinedSelector.render();
+            }
+            $combinedSelectorContainer.show();
+            $activitySelectorContainer.hide();
+            $recipeSelectorContainer.hide();
+        } else {
+            $combinedSelectorContainer.hide();
+            $activitySelectorContainer.show();
+            $recipeSelectorContainer.show();
+        }
+    };
+
+    const combineSearchSaved = localStorage.getItem('combineActivityRecipeSearch');
+    applyCombinedSearchMode(combineSearchSaved === 'true');
+
+    window.addEventListener('combineActivityRecipeSearchChanged', (e) => {
+        applyCombinedSearchMode(!!e.detail?.value);
+    });
+
     // Add optimize button container after selectors
     const $optimizeButtonContainer = $('<div id="optimize-button-container"></div>');
     $recipeSelectorContainer.after($optimizeButtonContainer);
@@ -689,10 +898,14 @@ function renderComponents(itemsData, skillsData) {
         // Pin immediately — don't wait for scroll or timeout
         const isMobile = window.innerWidth < 769;
         if (isMobile) {
-            // On mobile, use sticky positioning within the scroll container
+            // On mobile the window is the scroller (body-scroll model), so a
+            // CSS sticky pins the toggle. top must clear the fixed top bar —
+            // the header normally, or the tab bar when the bars are swapped.
+            const stickyTop = document.body.classList.contains('swap-mobile-bars')
+                ? 'var(--swap-top-inset)' : 'var(--header-height, 60px)';
             $comparisonControls.addClass('pinned').css({
                 position: 'sticky',
-                top: '0',
+                top: stickyTop,
                 left: '',
                 width: '100%',
                 zIndex: 500,
@@ -735,9 +948,11 @@ function renderComponents(itemsData, skillsData) {
         // On mobile, sticky handles everything — just ensure it's set
         if (isMobile) {
             if (!$comparisonControls.hasClass('pinned')) {
+                const stickyTop = document.body.classList.contains('swap-mobile-bars')
+                    ? 'var(--swap-top-inset)' : 'var(--header-height, 60px)';
                 $comparisonControls.addClass('pinned').css({
                     position: 'sticky',
-                    top: '0',
+                    top: stickyTop,
                     left: '',
                     width: '100%',
                     zIndex: 500,
@@ -1061,6 +1276,34 @@ function renderComponents(itemsData, skillsData) {
     });
 
     // ========================================
+    // Achievement Tracker Page
+    // ========================================
+    const achievementsPage = new AchievementsPage('#achievements-page');
+    window._achievementsPage = achievementsPage;
+    $('#achievements-nav-btn').on('click', () => {
+        if (window.location.hash === '#achievements') {
+            window.location.hash = '';
+        } else {
+            window.location.hash = '#achievements';
+        }
+    });
+
+    // ========================================
+    // Item Upgrades Tracker Page
+    // ========================================
+    const upgradesTrackerPage = new UpgradesTrackerPage('#upgrades-tracker-page');
+    window._upgradesTrackerPage = upgradesTrackerPage;
+    // Hash-routed like the other report overlays so the single
+    // handleHashChange() chokepoint mutually closes them.
+    $('#upgrades-tracker-nav-btn').on('click', () => {
+        if (window.location.hash === '#upgrades-tracker') {
+            window.location.hash = '';
+        } else {
+            window.location.hash = '#upgrades-tracker';
+        }
+    });
+
+    // ========================================
     // Walkdle (daily puzzle) Page
     // ========================================
     const walkdlePage = new WalkdlePage('#walkdle-page');
@@ -1089,6 +1332,36 @@ function renderComponents(itemsData, skillsData) {
             window.location.hash = '#notepad';
         }
     });
+
+    // ========================================
+    // Bank Layout Simulator Page (FAC-gated)
+    // ========================================
+    const bankPage = new BankPage('#bank-page');
+    window._bankPage = bankPage;
+    // Hash-routed like the other report overlays so the single
+    // handleHashChange() chokepoint mutually closes them.
+    $('#bank-nav-btn').on('click', () => {
+        if (window.location.hash === '#bank') {
+            window.location.hash = '';
+        } else {
+            window.location.hash = '#bank';
+        }
+    });
+
+    // ========================================
+    // Trading marketplace page (FAC-gated)
+    // ========================================
+    const tradingPage = new TradingPage('#trading-page');
+    window._tradingPage = tradingPage;
+    $('#trading-nav-btn').on('click', () => {
+        window.location.hash = (window.location.hash === '#trading') ? '' : '#trading';
+    });
+    // Trading is RELEASED (no longer FAC-gated) — show the nav icon, wire the
+    // in-popup Wishlist/Search-market buttons, and start unread polling for all
+    // users. An in-app "testing" banner sets expectations before the full launch.
+    $('#trading-nav-btn').show();
+    try { initTradingButtonDelegation(); } catch (e) { console.warn('[trading] button delegation failed:', e); }
+    try { startTradingUnreadPolling(); } catch (e) { console.warn('[trading] unread polling failed:', e); }
 
     // TravelMap is initialized lazily on first navigation to avoid loading
     // Leaflet tiles before the user visits the page.
@@ -1349,6 +1622,8 @@ function initializeModals() {
             $container.show().removeClass('closing');
             $('#crafting-tree-nav-btn').addClass('active');
             document.body.classList.add('crafting-tree-open');
+            // Body-scroll (mobile): open at top even if a column was scrolled.
+            if (window.innerWidth <= 768) window.scrollTo(0, 0);
             document.body.classList.remove('travel-page-open', 'stats-report-open');
             // Set hash so page can be reloaded to the same state
             if (window.location.hash !== '#crafting-tree') {
@@ -1589,7 +1864,10 @@ function navigateFromCraftingTree() {
  * Show the travel config page, hide main columns
  */
 async function showTravelConfigPage() {
-    $('#travel-config-page').css('display', 'flex');
+    // Open as an animated overlay (mirrors the stats report / crafting tree
+    // popup), not a hard page swap. The .opening class runs the shared
+    // stats-report-open keyframe (fade + scale-in). (item 4)
+    $('#travel-config-page').removeClass('closing').addClass('opening').css('display', 'flex');
     $('.main-content').css('display', 'none');
     document.body.classList.add('travel-page-open');
     document.body.classList.remove('crafting-tree-open', 'stats-report-open');
@@ -1640,7 +1918,18 @@ function closeStatsReportPage() {
  * Show main columns, hide travel config page
  */
 function showMainColumns() {
-    $('#travel-config-page').css('display', 'none');
+    // Animate the travel overlay closed (mirrors closeStatsReportPage) so the
+    // exit transition matches the animated open. Degrades to a cheap hide when
+    // it isn't visible. (item 4)
+    const $travelPage = $('#travel-config-page');
+    if ($travelPage.is(':visible')) {
+        $travelPage.removeClass('opening').addClass('closing');
+        setTimeout(() => {
+            $travelPage.removeClass('closing').css('display', 'none');
+        }, 260);
+    } else {
+        $travelPage.css('display', 'none').removeClass('opening closing');
+    }
     document.body.classList.remove('travel-page-open', 'crafting-tree-open');
     // Animate stats report page closed if visible — delegates to the
     // shared helper so the close transition stays consistent across all
@@ -1675,6 +1964,18 @@ function handleHashChange() {
     // reopens it. close() is idempotent so this is safe to run unconditionally.
     if (window._notepadPage && window.location.hash !== '#notepad') {
         window._notepadPage.close();
+    }
+    if (window._bankPage && window.location.hash !== '#bank') {
+        window._bankPage.close();
+    }
+    if (window._achievementsPage && window.location.hash !== '#achievements') {
+        window._achievementsPage.close();
+    }
+    if (window._upgradesTrackerPage && window.location.hash !== '#upgrades-tracker') {
+        window._upgradesTrackerPage.close();
+    }
+    if (window._tradingPage && window.location.hash !== '#trading') {
+        window._tradingPage.close();
     }
     if (window.location.hash === '#travel-config') {
         // Close crafting tree if open
@@ -1769,6 +2070,92 @@ function handleHashChange() {
         if (window._sellForChipsPage) {
             window._sellForChipsPage.open();
         }
+    } else if (window.location.hash === '#achievements') {
+        // Guard: redirect if feature not enabled
+        if (!window._featureFlags?.achievements) {
+            window.location.hash = '';
+            return;
+        }
+        // Close the other report overlays (mirror the sell-for-chips branch).
+        if (window._craftingTreeViewGlobal) {
+            const $container = $('#crafting-tree-container');
+            $container.hide().removeClass('closing');
+            $('#crafting-tree-nav-btn').removeClass('active');
+            document.body.classList.remove('crafting-tree-open');
+            window._craftingTreeViewGlobal.destroy();
+            window._craftingTreeViewGlobal = null;
+        }
+        if (window._statsReportPage) {
+            closeStatsReportPage();
+        }
+        if (window._sellForChipsPage) {
+            window._sellForChipsPage.close();
+        }
+        if (document.body.classList.contains('travel-page-open')) {
+            showMainColumns();
+        }
+        if (window._achievementsPage) {
+            window._achievementsPage.open();
+        }
+    } else if (window.location.hash === '#upgrades-tracker') {
+        // Guard: redirect if feature not enabled
+        if (!window._featureFlags?.upgrades_tracker) {
+            window.location.hash = '';
+            return;
+        }
+        // Close the other report overlays (mirror the achievements branch).
+        if (window._craftingTreeViewGlobal) {
+            const $container = $('#crafting-tree-container');
+            $container.hide().removeClass('closing');
+            $('#crafting-tree-nav-btn').removeClass('active');
+            document.body.classList.remove('crafting-tree-open');
+            window._craftingTreeViewGlobal.destroy();
+            window._craftingTreeViewGlobal = null;
+        }
+        if (window._statsReportPage) {
+            closeStatsReportPage();
+        }
+        if (window._sellForChipsPage) {
+            window._sellForChipsPage.close();
+        }
+        if (window._achievementsPage) {
+            window._achievementsPage.close();
+        }
+        if (document.body.classList.contains('travel-page-open')) {
+            showMainColumns();
+        }
+        if (window._upgradesTrackerPage) {
+            window._upgradesTrackerPage.open();
+        }
+    } else if (window.location.hash === '#trading') {
+        // Trading is RELEASED (no-op FAC gate) — no flag guard; always open.
+        // Close the other report overlays (mirror the upgrades-tracker branch).
+        if (window._craftingTreeViewGlobal) {
+            const $container = $('#crafting-tree-container');
+            $container.hide().removeClass('closing');
+            $('#crafting-tree-nav-btn').removeClass('active');
+            document.body.classList.remove('crafting-tree-open');
+            window._craftingTreeViewGlobal.destroy();
+            window._craftingTreeViewGlobal = null;
+        }
+        if (window._statsReportPage) {
+            closeStatsReportPage();
+        }
+        if (window._sellForChipsPage) {
+            window._sellForChipsPage.close();
+        }
+        if (window._achievementsPage) {
+            window._achievementsPage.close();
+        }
+        if (window._upgradesTrackerPage) {
+            window._upgradesTrackerPage.close();
+        }
+        if (document.body.classList.contains('travel-page-open')) {
+            showMainColumns();
+        }
+        if (window._tradingPage) {
+            window._tradingPage.open();
+        }
     } else if (window.location.hash === '#walkdle') {
         // Guard: redirect if feature not enabled
         if (!window._featureFlags?.walkdle) {
@@ -1822,6 +2209,33 @@ function handleHashChange() {
         }
         if (window._notepadPage) {
             window._notepadPage.open();
+        }
+    } else if (window.location.hash === '#bank') {
+        // Guard: redirect if feature not enabled
+        if (!window._featureFlags?.bank_layouts) {
+            window.location.hash = '';
+            return;
+        }
+        // Close the other report overlays (mirror the notepad branch).
+        if (window._craftingTreeViewGlobal) {
+            const $container = $('#crafting-tree-container');
+            $container.hide().removeClass('closing');
+            $('#crafting-tree-nav-btn').removeClass('active');
+            document.body.classList.remove('crafting-tree-open');
+            window._craftingTreeViewGlobal.destroy();
+            window._craftingTreeViewGlobal = null;
+        }
+        if (window._statsReportPage) {
+            closeStatsReportPage();
+        }
+        if (window._sellForChipsPage) {
+            window._sellForChipsPage.close();
+        }
+        if (document.body.classList.contains('travel-page-open')) {
+            showMainColumns();
+        }
+        if (window._bankPage) {
+            window._bankPage.open();
         }
     } else {
         // Close crafting tree if open (back button / hash cleared)
@@ -1889,8 +2303,38 @@ $(document).ready(() => {
         document.documentElement.style.setProperty('--popup-item-list-min', `${savedListMin}vh`);
     }
 
+    // Apply saved text-scaling controls (Settings → UI → Misc). Only override
+    // the :root defaults (--min-text 8px, --text-scale 1) when a non-default
+    // value was saved, so there's no change for users who never touched them.
+    const savedMinText = localStorage.getItem('minTextSize');
+    if (savedMinText && savedMinText !== '8') {
+        document.documentElement.style.setProperty('--min-text', `${parseInt(savedMinText, 10)}px`);
+    }
+    const savedTextScale = localStorage.getItem('textScale');
+    if (savedTextScale && savedTextScale !== '1') {
+        document.documentElement.style.setProperty('--text-scale', savedTextScale);
+    }
+
     // Wire anchor-based routing for #travel-config
     window.addEventListener('hashchange', handleHashChange);
+
+    // Service-worker notification clicks post {type:'navigate', hash, trading_thread}
+    // when a tab is already open. Honour the hash and, for trading, jump to the
+    // specific message thread.
+    if (navigator.serviceWorker) {
+        navigator.serviceWorker.addEventListener('message', (event) => {
+            const d = event.data || {};
+            if (d.type !== 'navigate') return;
+            if (d.trading_thread) window._tradingPendingThreadKey = d.trading_thread;
+            if (d.hash && window.location.hash !== d.hash) {
+                window.location.hash = d.hash; // triggers handleHashChange → open()
+            } else if (d.hash === '#trading' && window._tradingPage) {
+                // Already on #trading — open the thread directly.
+                if (window._tradingPendingThreadKey) window._tradingPage._openPendingThread(window._tradingPendingThreadKey);
+                else window._tradingPage.open();
+            }
+        });
+    }
 
     // When the user changes thousand/decimal separator prefs, force every
     // already-rendered view to refresh by notifying the same top-level state

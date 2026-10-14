@@ -19,6 +19,7 @@ import CollapsibleSection from './collapsible.js';
 import store from '../state.js';
 import api from '../api.js';
 import { getPetIconPath, SMELTING_RECIPE_NAMES } from '../utils/pet-utils.js';
+import { getOwnedCollectiblesCount } from '../utils/collectibles-ownership.js';
 
 /**
  * Format condition text for stat contributor display
@@ -32,7 +33,9 @@ function formatStatCondition(skill, location) {
     const formatLocation = (loc) => {
         if (loc === 'gdte') return 'GDTE location';
         if (loc === 'underwater') return 'Underwater location';
-        return `${capitalize(loc)} location`;
+        // Multi-word regions arrive snake_cased (e.g. 'halfling_rebels');
+        // render as title-cased words ('Halfling Rebels location').
+        return `${loc.split('_').map(w => capitalize(w)).join(' ')} location`;
     };
 
     const skillGroupNames = {
@@ -112,6 +115,15 @@ class CombinedStatsSection extends CollapsibleSection {
         this.currentService = null;   // Will be set by Column 3 (for recipes)
         this.currentRequiredKeywords = [];  // Keywords required by current activity (e.g., ['Light source', 'Diving gear'])
 
+        // Pre-warm the location→regions map so comparison-mode location handling
+        // (which sets currentLocation synchronously in the selectedService
+        // subscriber) can resolve a raw location id to its region tags from
+        // cache. Without regions, realm/region-scoped gated stats — e.g.
+        // Quickdraw map's per-realm WE/DA — never match in the comparison view
+        // (bug #2: Quickdraw contributed nothing so Skydisc/Machete won).
+        // Fire-and-forget; populates this._locationRegionsMap.
+        this._getLocationRegionsMap();
+
         // Subscribe to gear changes
         this.subscribe('gearsets.current', () => {
             console.log('Gear changed subscription fired, recalculating stats');
@@ -146,7 +158,15 @@ class CombinedStatsSection extends CollapsibleSection {
                     this._slotContentCache[slot] = null;
                 }
             }
-            this._renderPreservingScroll();
+            // Coalesce rapid gear changes. Each quality-chip click (and item
+            // swap) mutates the gearset and fires 'gearsets.current'; without
+            // debouncing, clicking through several qualities queued one full
+            // ~1s _renderPreservingScroll() per click, which serialized into a
+            // 20s+ stall (reported after the gear popup fix removed the freeze).
+            // The comparison-mode slot-switch cache path above returns
+            // synchronously (instant), so only the expensive recompute is
+            // debounced — the last gear state wins after clicks settle.
+            this._scheduleStatsRecalc();
         });
 
         // Also re-render when gearset2 changes or active slot switches (comparison mode)
@@ -164,7 +184,17 @@ class CombinedStatsSection extends CollapsibleSection {
                 const loc = store.state.column3.selectedLocation;
                 // Update service and location, then re-render
                 this.currentService = svc;
-                this.currentLocation = loc ? [loc] : null;
+                // Resolve the location id to its region tags (e.g. cactus_canyon
+                // → ['wrentmark', 'desert']) so region/realm-scoped bonuses apply
+                // in comparison mode exactly like single view. Using the raw id
+                // meant realm-scoped gated stats (Quickdraw map's per-realm WE/DA,
+                // scoped to location 'wrentmark') never matched, so Quickdraw
+                // contributed nothing in the comparison view (bug #2). Resolved
+                // synchronously from the pre-warmed region map; falls back to the
+                // raw id if the map isn't loaded yet.
+                this.currentLocation = loc
+                    ? ((this._locationRegionsMap && this._locationRegionsMap[String(loc).toLowerCase()]) || [loc])
+                    : null;
                 // Don't invalidate cache here — slot switches fire this before gearsets.current.
                 // The cache will be used by the gearsets.current handler.
                 // Only re-render if NOT about to get a gearsets.current notification (i.e., user manually changed service).
@@ -238,6 +268,21 @@ class CombinedStatsSection extends CollapsibleSection {
             this._renderPreservingScroll();
         };
         window.addEventListener('travelRouteChanged', this._travelRouteChangedHandler);
+    }
+
+    /**
+     * Debounced wrapper around _renderPreservingScroll(). Coalesces bursts of
+     * gear changes (e.g. clicking through every quality chip in the gear slot
+     * popup) into a single recompute after the burst settles, instead of
+     * running one full ~1s recompute per intermediate change. The trailing
+     * edge fires so the final gear state is always the one rendered.
+     */
+    _scheduleStatsRecalc() {
+        clearTimeout(this._statsRecalcTimer);
+        this._statsRecalcTimer = setTimeout(() => {
+            this._statsRecalcTimer = null;
+            this._renderPreservingScroll();
+        }, 120);
     }
 
     /**
@@ -617,6 +662,24 @@ class CombinedStatsSection extends CollapsibleSection {
         console.log('New location:', location);
         console.log('Current location:', this.currentLocation);
         console.log('Skip render:', skipRender);
+
+        // Normalize any raw location id to its region tags. Comparison mode can
+        // pass a raw id (e.g. 'cactus_canyon') when its region resolver couldn't
+        // find regions; single view passes already-resolved regions. Expanding
+        // here makes region/realm-scoped matching (e.g. Quickdraw map's
+        // 'wrentmark' scope) work regardless of the caller. Region tags are not
+        // location-id keys in the map, so already-resolved arrays pass through
+        // unchanged. (bug #2: Quickdraw not applied in comparison view.)
+        if (this._locationRegionsMap && location != null) {
+            const arr = Array.isArray(location) ? location : [location];
+            const expanded = [];
+            for (const el of arr) {
+                const regions = this._locationRegionsMap[String(el).toLowerCase()];
+                if (regions && regions.length) expanded.push(...regions);
+                else expanded.push(el);
+            }
+            location = [...new Set(expanded)];
+        }
 
         // Normalize to array for comparison
         const newLocationArray = Array.isArray(location) ? location : (location ? [location] : []);
@@ -1120,13 +1183,50 @@ class CombinedStatsSection extends CollapsibleSection {
                     const overrides = store.state.ui?.user_overrides || {};
                     const petOverride = (overrides.items && overrides.items[fullItem.id]) || {};
                     const petBase = store.state.items[fullItem.id] || {};
-                    const petLevel = petOverride.level !== undefined ? petOverride.level : (petBase.level !== undefined ? petBase.level : (slotItem.level || 0));
+                    const _unlockAll = !!(window.isUnlockAllEnabled && window.isUnlockAllEnabled());
+                    const _maxPetLevel = fullItem.max_level || Math.max(0, ...Object.keys(fullItem.levels).map(k => parseInt(k, 10) || 0));
+                    const petLevel = _unlockAll
+                        ? _maxPetLevel
+                        : (petOverride.level !== undefined ? petOverride.level : (petBase.level !== undefined ? petBase.level : (slotItem.level || 0)));
                     const levelData = fullItem.levels[String(petLevel)];
                     itemStats = levelData?.stats || {};
 
+                    // Golden Frog etc.: the pet's stats live in per-level
+                    // gated_stats.total_wealth (base _stats is empty). Apply
+                    // only the thresholds the character's total wealth (value of
+                    // all items) meets — mirroring the col2 slot popup, which
+                    // dims unmet tiers. Without this, combined stats over-counts
+                    // (e.g. the -2 steps that need 1,000,000 wealth).
+                    if (levelData?.gated_stats?.total_wealth) {
+                        const twOverrides = store.state.ui?.user_overrides || {};
+                        const wealth = _unlockAll ? Infinity : (twOverrides.inventory_value !== undefined
+                            ? twOverrides.inventory_value
+                            : ((store.state.character?.coins || 0) + (store.state.character?.inventory_value || 0)));
+                        itemStats = JSON.parse(JSON.stringify(itemStats));
+                        for (const [threshold, twStats] of Object.entries(levelData.gated_stats.total_wealth)) {
+                            if (wealth < Number(threshold)) continue;  // unmet tier — skip
+                            for (const [sk, locs] of Object.entries(twStats)) {
+                                itemStats[sk] = itemStats[sk] || {};
+                                for (const [loc, sm] of Object.entries(locs)) {
+                                    itemStats[sk][loc] = itemStats[sk][loc] || {};
+                                    for (const [stat, val] of Object.entries(sm)) {
+                                        itemStats[sk][loc][stat] = (itemStats[sk][loc][stat] || 0) + val;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     // If "use ability" is checked, aggregate ability stats as a SEPARATE contributor
-                    // so it shows as its own line (e.g., "The Hunt Is On +6% WE") instead of merged
-                    if (slotItem.useAbility && levelData?.abilities) {
+                    // so it shows as its own line (e.g., "The Hunt Is On +6% WE") instead of merged.
+                    // Honor the per-pet toggle (bug 7df8d906): the global "Always use active
+                    // applicable pet ability" setting only seeds the one-time default via
+                    // getEffectivePetUseAbility — it must not force the ability on when the user
+                    // has explicitly unchecked the per-pet box.
+                    const _petUseAbility = window.getEffectivePetUseAbility
+                        ? window.getEffectivePetUseAbility(slotItem)
+                        : (slotItem.useAbility || (window.isUsePetAbilityEnabled && window.isUsePetAbilityEnabled()));
+                    if ((_petUseAbility || _unlockAll) && levelData?.abilities) {
                         const abilityWithStats = levelData.abilities.find(a => a.ability_stats && Object.keys(a.ability_stats).length > 0);
                         if (abilityWithStats) {
                             // Build a separate item data object for the ability contributor
@@ -1312,9 +1412,11 @@ class CombinedStatsSection extends CollapsibleSection {
                         // steps/item ignored it.
                         const _gs = gateSkill.toLowerCase();
                         const _ovSkills = store.state.ui?.user_overrides?.skills || {};
-                        const charLevel = (_ovSkills[_gs] !== undefined)
-                            ? _ovSkills[_gs]
-                            : (character.skills?.[_gs] || 0);
+                        const charLevel = (window.isUnlockAllEnabled && window.isUnlockAllEnabled())
+                            ? 99
+                            : ((_ovSkills[_gs] !== undefined)
+                                ? _ovSkills[_gs]
+                                : (character.skills?.[_gs] || 0));
 
                         for (const [threshold, skillStats] of Object.entries(thresholds)) {
                             const requiredLevel = parseInt(threshold, 10);
@@ -1426,12 +1528,11 @@ class CombinedStatsSection extends CollapsibleSection {
                 // Handle obtained-collectibles gated stats (Collection ring:
                 // cumulative tiers at 10/20/30/40/50/60 collectibles owned).
                 if (fullItem.gated_stats && fullItem.gated_stats.total_collectibles) {
-                    const overrideTC = store.state.ui?.user_overrides?.total_collectibles;
-                    // character.collectibles is the ARRAY of owned collectible IDs; count via length.
-                    const _coll = character.collectibles;
-                    const collectiblesOwned = overrideTC !== undefined
-                        ? overrideTC
-                        : (Array.isArray(_coll) ? _coll.length : (_coll || 0));
+                    // getOwnedCollectiblesCount merges the imported collectibles
+                    // with manual "owned" checks (ui.user_overrides.items[slug].has)
+                    // and respects a numeric total_collectibles override
+                    // (bug 5d24decc — manual checks used to be ignored here).
+                    const collectiblesOwned = getOwnedCollectiblesCount();
                     for (const [threshold, tcStats] of Object.entries(fullItem.gated_stats.total_collectibles)) {
                         const tcMet = collectiblesOwned >= parseInt(threshold, 10);
                         this.aggregateStatsWithContributors(
@@ -1467,6 +1568,34 @@ class CombinedStatsSection extends CollapsibleSection {
                             itemData,
                             requirementMet
                         );
+                    }
+                }
+
+                // Handle explore-realm gated stats (global bonuses unlocked by
+                // fully exploring a realm, e.g. Globetrotter's backpack /
+                // Quickdraw map). Gate = character-wide custom stat
+                // `explored_realm_<slug>`. Like activity_completion, add the
+                // stats only when explored and WITHOUT forceApplied, so the
+                // realm SCOPE on Quickdraw map (global/<region>) is honored by
+                // normal location matching rather than force-applied to every
+                // region (see learned correction on location-scoped gated stats).
+                if (fullItem.gated_stats && fullItem.gated_stats.explore_realm) {
+                    const customStats = store.state.ui?.custom_stats || {};
+                    const overrides = store.state.ui?.user_overrides || {};
+                    const allCustomStats = { ...customStats, ...(overrides.custom_stats || {}) };
+
+                    for (const [realmSlug, realmStats] of Object.entries(fullItem.gated_stats.explore_realm)) {
+                        const explored = allCustomStats[`explored_realm_${realmSlug}`] === true;
+                        if (explored) {
+                            this.aggregateStatsWithContributors(
+                                stats,
+                                realmStats,
+                                `${slot} (explored ${realmSlug})`,
+                                itemData
+                                // No forceApplied — normal skill/location matching
+                                // keeps realm-scoped bonuses on their own region.
+                            );
+                        }
                     }
                 }
 
@@ -1507,6 +1636,54 @@ class CombinedStatsSection extends CollapsibleSection {
                             `${slot} (during ${activityName})`,
                             itemData,
                             activityMatches
+                        );
+                    }
+                }
+
+                // Handle item-ownership gated stats (e.g. Map of Arenum grants
+                // +15% DA while travelling in each region IF you own that
+                // region's map). Applied when the character OWNS the required
+                // item anywhere — mirrors util/stats_mixin.py's item_ownership
+                // gate. Ownership is read from store.state.items (+ overrides).
+                if (fullItem.gated_stats && fullItem.gated_stats.item_ownership) {
+                    const ovItems = store.state.ui?.user_overrides?.items || {};
+                    const baseItems = store.state.items || {};
+                    for (const [requiredItemName, ownStats] of Object.entries(fullItem.gated_stats.item_ownership)) {
+                        const slug = requiredItemName.toLowerCase()
+                            .replace(/['`’]/g, '')
+                            .replace(/[\s-]+/g, '_');
+                        const ovHas = ovItems[slug] ? ovItems[slug].has : undefined;
+                        const owned = (ovHas !== undefined ? ovHas : (baseItems[slug] && baseItems[slug].has)) === true;
+
+                        // Only surface the bonus when the required item is owned.
+                        if (!owned) continue;
+
+                        // Do NOT force-apply: pass through normal skill/location
+                        // matching (including the travel-segment-region check) so a
+                        // per-region traveling bonus is only counted for regions
+                        // actually on the current route — matching col 3 and the
+                        // individual regional maps. Force-applying counted all 5
+                        // regions regardless of the route being travelled.
+                        this.aggregateStatsWithContributors(
+                            stats,
+                            ownStats,
+                            slot,
+                            itemData
+                        );
+                    }
+                }
+
+                // Keyword-in-inventory (e.g. quivers + 'arrows'). We can't see
+                // the full inventory at scoring time, so ASSUME it's active and
+                // always aggregate. No forceApplied — normal skill/location
+                // matching still applies.
+                if (fullItem.gated_stats && fullItem.gated_stats.keyword_in_inventory) {
+                    for (const [keyword, kwStats] of Object.entries(fullItem.gated_stats.keyword_in_inventory)) {
+                        this.aggregateStatsWithContributors(
+                            stats,
+                            kwStats,
+                            slot,
+                            itemData
                         );
                     }
                 }
@@ -1593,8 +1770,13 @@ class CombinedStatsSection extends CollapsibleSection {
                 }
             }
 
-            // Add global fine input bonus when "Fine Inputs" is checked AND there are input items
-            if (this._useFineInputs && Object.keys(this._inputItems || {}).length > 0) {
+            // Add global fine input bonus when "Fine Inputs" is checked AND there are input
+            // items AND the activity actually benefits (Hunting only). Fine variants of other
+            // skills' inputs (e.g. Fine Fabric for sail repair) have identical stats, so the
+            // flat bonus must not apply — guards against a stale useFineInputs flag carried
+            // over from a hunting activity. See bug 8cb1876f.
+            const _fineInputsBenefit = (this.currentActivitySkill || '').toLowerCase() === 'hunting';
+            if (this._useFineInputs && _fineInputsBenefit && Object.keys(this._inputItems || {}).length > 0) {
                 const fineBonus = {
                     global: {
                         global: {
@@ -1629,6 +1811,14 @@ class CombinedStatsSection extends CollapsibleSection {
                         try {
                             const defId = this.currentService.replace('generic::', '');
                             const svcData = await api.getGenericDefinitionView(defId);
+                            // Bail out if a newer calculateStats started while we awaited the
+                            // generic service fetch. Without this, a superseded calc would still
+                            // push its service contributor into the now-current calc's shared
+                            // contributorsByStat, double-counting the service bonus (bug 41654607).
+                            if (myCalcId !== this._currentCalcId) {
+                                console.log('[RENDER-DEBUG] calculateStats STALE after generic service fetch, bailing out');
+                                return stats;
+                            }
                             if (svcData && svcData.stats) {
                                 const serviceItem = {
                                     name: `🔧 ${svcData.name || 'Generic Service'}`,
@@ -1654,6 +1844,18 @@ class CombinedStatsSection extends CollapsibleSection {
                             serviceResponse = await $.get(`/api/services/for-recipe/${this.currentRecipe}`);
                         }
                         console.log('Service API response:', serviceResponse);
+
+                        // Bail out if a newer calculateStats started while we awaited the
+                        // service fetch. The service fetch is a network round-trip that runs
+                        // last, so a re-render (e.g. changing recipe/service) can supersede
+                        // this calc mid-flight. Without this guard the stale calc still pushes
+                        // its service contributor into the now-current calc's shared
+                        // contributorsByStat, double-counting the service bonus and listing the
+                        // service twice (bug 41654607: two Underwater Kitchen NMC rows).
+                        if (myCalcId !== this._currentCalcId) {
+                            console.log('[RENDER-DEBUG] calculateStats STALE after service fetch, bailing out');
+                            return stats;
+                        }
 
                         let service = null;
                         let locationData = null;
@@ -1915,7 +2117,7 @@ class CombinedStatsSection extends CollapsibleSection {
                     // Get skill level - check override first, then character
                     const overrideLevel = overrides.skills?.[primarySkill];
                     const characterLevel = character.skills?.[primarySkill];
-                    const charLevel = overrideLevel !== undefined ? overrideLevel : (characterLevel || 0);
+                    const charLevel = (window.isUnlockAllEnabled && window.isUnlockAllEnabled()) ? 99 : (overrideLevel !== undefined ? overrideLevel : (characterLevel || 0));
 
                     if (activity.is_travel) {
                         // Travel: 0.5% per agility level (no cap)
@@ -1971,7 +2173,7 @@ class CombinedStatsSection extends CollapsibleSection {
                     // Get skill level - check override first, then character
                     const overrideLevel = overrides.skills?.[skill];
                     const characterLevel = character.skills?.[skill];
-                    const charLevel = overrideLevel !== undefined ? overrideLevel : (characterLevel || 1);
+                    const charLevel = (window.isUnlockAllEnabled && window.isUnlockAllEnabled()) ? 99 : (overrideLevel !== undefined ? overrideLevel : (characterLevel || 1));
 
                     const requiredLevel = recipe.level || 1;
 
@@ -2109,6 +2311,38 @@ class CombinedStatsSection extends CollapsibleSection {
                 if (fullItem.type === 'crafted_item' && fullItem.stats_by_quality) {
                     const quality = slotItem.quality || 'Normal';
                     itemStats = fullItem.stats_by_quality[quality] || {};
+                }
+                // Pets: use the equipped level's stats, plus per-level
+                // total_wealth gated stats (Golden Frog) merged in.
+                if (fullItem.type === 'pet' && fullItem.levels) {
+                    const overrides = store.state.ui?.user_overrides || {};
+                    const petOverride = (overrides.items && overrides.items[fullItem.id]) || {};
+                    const petBase = store.state.items[fullItem.id] || {};
+                    const _unlockAll = !!(window.isUnlockAllEnabled && window.isUnlockAllEnabled());
+                    const _maxPetLevel = fullItem.max_level || Math.max(0, ...Object.keys(fullItem.levels).map(k => parseInt(k, 10) || 0));
+                    const petLevel = _unlockAll
+                        ? _maxPetLevel
+                        : (petOverride.level !== undefined ? petOverride.level : (petBase.level !== undefined ? petBase.level : (slotItem.level || 0)));
+                    const levelData = fullItem.levels[String(petLevel)];
+                    itemStats = levelData?.stats || {};
+                    if (levelData?.gated_stats?.total_wealth) {
+                        const wealth = overrides.inventory_value !== undefined
+                            ? overrides.inventory_value
+                            : ((store.state.character?.coins || 0) + (store.state.character?.inventory_value || 0));
+                        itemStats = JSON.parse(JSON.stringify(itemStats));
+                        for (const [threshold, twStats] of Object.entries(levelData.gated_stats.total_wealth)) {
+                            if (wealth < Number(threshold)) continue;  // unmet tier — skip
+                            for (const [sk, locs] of Object.entries(twStats)) {
+                                itemStats[sk] = itemStats[sk] || {};
+                                for (const [loc, sm] of Object.entries(locs)) {
+                                    itemStats[sk][loc] = itemStats[sk][loc] || {};
+                                    for (const [stat, val] of Object.entries(sm)) {
+                                        itemStats[sk][loc][stat] = (itemStats[sk][loc][stat] || 0) + val;
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
 
                 // Check if this item has the stat

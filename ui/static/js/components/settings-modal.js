@@ -13,8 +13,13 @@
 import Component from './base.js';
 import api from '../api.js';
 import store from '../state.js';
+// Side-effect + deep-link: installs the .consumable-options-change-link
+// delegation so "Adjust consumable options here" works from the settings modal
+// on every page (not just pages that render the per-page consumables checkbox).
+import { openConsumableOptionsSettings } from '../utils/consumable-options-info.js';
 import { isAnimationsEnabled, isTextEnabled, setAnimationsEnabled, setTextEnabled } from '../april-fools.js';
 import { LINE_COLOR_PALETTES, DEFAULT_PALETTE } from './crafting-tree-settings.js';
+import { attachTabScrollIndicators } from '../utils/tab-scroll-indicators.js';
 import { mountXyPriorityList, defaultRecipeEntries, ensureXyStyles, findScrollParent, updateAutoScroll, stopAutoScroll } from './xy-recipe-priority-list.js';
 import { mountXyActivityPriorityList, defaultActivityEntries } from './xy-activity-priority-list.js';
 import { mountTravelPriorityList, defaultTravelEntries, normalizeTravelEntries } from './travel-priority-list.js';
@@ -53,12 +58,33 @@ class SettingsModal extends Component {
         this.customColorTertiary = this.loadCustomColor('customBgTertiary', '#2e2e2e');
         this.customColorHover = this.loadCustomColor('customBgHover', '#333333');
         this.orderByLevel = this.loadBoolSetting('orderActivitiesByLevel', true);
+        // Settings → UI → Upgrades Tracker. When on, the goals-report "+" add
+        // buttons add straight to the current tracker (no popup) and the
+        // per-item button hides once that item is already tracked.
+        this.alwaysAddToCurrentTracker = this.loadBoolSetting('alwaysAddToCurrentTracker', false);
+        // Combine the Column-3 Activity and Recipe dropdowns into one searchable
+        // dropdown (search all activities AND recipes at once). Default OFF.
+        // Does not affect the crafting tree's own recipe dropdown.
+        this.combineActivityRecipeSearch = this.loadBoolSetting('combineActivityRecipeSearch', false);
         this.hideUnapplicableStats = this.loadBoolSetting('hideUnapplicableStats', false);
+        // "Temporary crafted quality selection for equipped items" — when on,
+        // the gear slot popup's equipped-item view shows a quality chip row
+        // (Normal..Eternal) for crafted items so the user can preview/lock a
+        // different quality without owning it. Default OFF. Read at popup
+        // render time via window.isCraftedQualitySelectEnabled().
+        this.enableCraftedQualitySelect = this.loadBoolSetting('enableCraftedQualitySelect', false);
         this.popupAutoCollapseOnScroll = this.loadBoolSetting('popupAutoCollapseOnScroll', true);
         this.popupAutoCollapseNoRestore = this.loadBoolSetting('popupAutoCollapseNoRestore', false);
         this.popupAutoCollapseTopMin = parseInt(localStorage.getItem('popupAutoCollapseTopMin') || '10', 10);
         this.popupAutoCollapseAltMin = parseInt(localStorage.getItem('popupAutoCollapseAltMin') || '10', 10);
         this.popupItemListMin = parseInt(localStorage.getItem('popupItemListMin') || '0', 10);
+        // Text scaling (Settings → UI → Misc). minTextSize is the px floor
+        // (default 8 = app's smallest real text, no-op); textScale multiplies every
+        // font-size (default 1). Applied to <html> as --min-text / --text-scale.
+        this.minTextSize = parseInt(localStorage.getItem('minTextSize') || '8', 10);
+        this.textScale = parseFloat(localStorage.getItem('textScale') || '1');
+        if (!Number.isFinite(this.minTextSize)) this.minTextSize = 8;
+        if (!Number.isFinite(this.textScale)) this.textScale = 1;
         // Non-owned upgrade display mode for the gear slot popup's
         // "Non-owned/Locked Upgrades" section. One of:
         //   'average' — old ⟶ new aggregate of all target drops (default)
@@ -79,11 +105,41 @@ class SettingsModal extends Component {
         this.travelSorting = [];
         this.sortingOptions = { activity: [], recipe: [], travel: [] };
         this.includeConsumables = false;
+        // Consumable Options (global) — surfaced in the "Consumable Options"
+        // settings section and applied wherever consumables are used.
+        this.includeFineConsumables = true;      // default on
+        this.useFineInputs = false;              // default off — goals-report hunting input slot only (R2)
+        this.consumableMinOwnedEnabled = false;  // default off
+        this.consumableMinOwned = 5;             // seeded to 5 when first enabled
+        this.consumableMinOwnedOperator = 'lt';  // 'lt' (<) or 'lte' (<=)
+        this.consumableUseHidden = false;        // default off (hidden excluded)
         this.includePets = false;
+        // Part 2: optimize using all game items (not just owned) when
+        // "only show owned items" is off. Default ON.
+        this.optimizeAllItems = true;
+        // "Optimize services": when on, the recipe optimizer tries every
+        // unlocked + region-accessible service valid for the recipe and picks
+        // the best-scoring service + gearset (instead of the pinned service).
+        // Default OFF. Persisted server-side in ui_config.optimize_services.
+        this.optimizeServices = false;
+        // Part 4: assume a pet's active applicable ability is charged when the
+        // optimizer considers pets. Child of "Include pets". Default ON.
+        this.usePetAbility = this.loadBoolSetting('usePetAbility', true);
+        // "Unlock all": treat every item/stat as fully unlocked (max AP,
+        // reputation, skill levels, %/total level, wealth, custom stats).
+        // Powerful hypothetical mode — default OFF. Read synchronously from
+        // localStorage so load-time code (gearset import, gear-slot grid) sees
+        // the right value before the async backend load completes.
+        this.unlockAll = this.loadBoolSetting('unlockAll', false);
         this.runLocalOptimization = false;
         this.finishOnServerOnLeave = false;
         this.disableLocalOptWarning = false;
         this.showItemFindingDrops = this.loadShowItemFindingDrops();
+        this.suggestMatchingActivity = this.loadSuggestMatchingActivity();
+        // Opt-in (default OFF): when opening the saved gear-set dropdown, float
+        // sets whose name matches the current activity/recipe/travel to the top
+        // and highlight them. Reverse of suggestMatchingActivity.
+        this.sortMatchingGearsetsFirst = this.loadBoolSetting('sortMatchingGearsetsFirst', false);
         this.autoEquipOptimized = false;
         this.lockCurrentGearSlots = false;
         this.showNonOwnedAlternatives = true;  // Always on for everyone
@@ -92,11 +148,13 @@ class SettingsModal extends Component {
         // Collapsible section state (persisted in localStorage)
         this.collapsedSections = {
             global: this.loadBoolSetting('settingsCollapsed_global', false),
+            consumables: this.loadBoolSetting('settingsCollapsed_consumables', false),
             activity: this.loadBoolSetting('settingsCollapsed_activity', false),
             recipe: this.loadBoolSetting('settingsCollapsed_recipe', false),
             travel: this.loadBoolSetting('settingsCollapsed_travel', false),
             popup: this.loadBoolSetting('settingsCollapsed_popup', false),
             misc: this.loadBoolSetting('settingsCollapsed_misc', false),
+            upgradesTracker: this.loadBoolSetting('settingsCollapsed_upgradesTracker', false),
             themeColors: this.loadBoolSetting('settingsCollapsed_themeColors', false),
             numberFormat: this.loadBoolSetting('settingsCollapsed_numberFormat', false),
         };
@@ -118,7 +176,7 @@ class SettingsModal extends Component {
         // Push notification state
         this._pushSubscription = null;
         this._pushPermission = (typeof Notification !== 'undefined') ? Notification.permission : 'default';
-        this._pushPrefs = { global_announcements: false, targeted_announcements: false };
+        this._pushPrefs = { global_announcements: false, targeted_announcements: false, trading: false };
         this._pushVapidKey = null;
         this._pushLoading = false;
         this._pushConfigError = false;
@@ -163,9 +221,31 @@ class SettingsModal extends Component {
 
             // Load consumables flags from response or default to false
             this.includeConsumables = response.include_consumables || false;
+            // Consumable Options (global). Fine defaults ON; min-owned
+            // threshold defaults OFF, seeded to 5 when first enabled.
+            this.includeFineConsumables = response.include_fine_consumables !== false;
+            // "Use fine inputs" (R2): goals-report hunting input slot only. Default off.
+            this.useFineInputs = response.use_fine_inputs === true;
+            this.consumableMinOwnedEnabled = response.consumable_min_owned_enabled === true;
+            this.consumableMinOwned = Number.isFinite(response.consumable_min_owned)
+                ? Math.max(1, Math.min(100, Math.round(response.consumable_min_owned)))
+                : 5;
+            this.consumableMinOwnedOperator = (response.consumable_min_owned_operator === 'lte') ? 'lte' : 'lt';
+            this.consumableUseHidden = response.consumable_use_hidden === true;
 
             // Load global optimization flags
             this.includePets = response.include_pets || false;
+            // Part 2 / Part 4 — default ON when the backend omits them.
+            this.optimizeAllItems = response.optimize_all_items !== false;
+            this.usePetAbility = response.use_pet_ability !== false;
+            this.optimizeServices = response.optimize_services === true;
+            this.unlockAll = response.unlock_all === true;
+            // Mirror to localStorage so load-time readers (window.isUnlockAll…)
+            // have the correct value on the next page load, synchronously.
+            try {
+                localStorage.setItem('usePetAbility', this.usePetAbility ? 'true' : 'false');
+                localStorage.setItem('unlockAll', this.unlockAll ? 'true' : 'false');
+            } catch (_) { /* non-fatal */ }
             this.runLocalOptimization = response.run_local_optimization || false;
             this.finishOnServerOnLeave = response.finish_on_server_on_leave || false;
             this.disableLocalOptWarning = response.disable_local_opt_warning || false;
@@ -362,6 +442,29 @@ class SettingsModal extends Component {
      * Load show item finding drops setting from localStorage
      * @returns {boolean} Whether to show item finding drops
      */
+    /**
+     * Load suggest matching activity setting from localStorage
+     * @returns {boolean} Whether to suggest matching activity (default true)
+     */
+    loadSuggestMatchingActivity() {
+        const saved = localStorage.getItem('suggestMatchingActivity');
+        return saved === null ? true : saved === 'true';
+    }
+
+    /**
+     * Save suggest matching activity setting to localStorage
+     * @param {boolean} value - Whether to suggest matching activity
+     */
+    saveSuggestMatchingActivity(value) {
+        this.suggestMatchingActivity = value;
+        localStorage.setItem('suggestMatchingActivity', value.toString());
+        window.dispatchEvent(new CustomEvent('suggestMatchingActivityChanged', { detail: { value } }));
+    }
+
+    /**
+     * Load show item finding drops setting from localStorage
+     * @returns {boolean} Whether to show item finding drops (default true)
+     */
     loadShowItemFindingDrops() {
         const saved = localStorage.getItem('showItemFindingDrops');
         return saved === null ? true : saved === 'true';  // Default to true (respect explicit opt-out)
@@ -482,6 +585,7 @@ class SettingsModal extends Component {
                     class="uuid-display" 
                     value="${currentUuid}" 
                     readonly
+                    title="Click to copy UUID"
                     style="
                         width: 100%;
                         padding: var(--spacing-sm);
@@ -491,6 +595,7 @@ class SettingsModal extends Component {
                         color: var(--text-secondary);
                         font-family: monospace;
                         font-size: 0.9em;
+                        cursor: pointer;
                     "
                 >
             </div>
@@ -818,6 +923,38 @@ class SettingsModal extends Component {
                     
                     <div style="margin-bottom: var(--spacing-md);">
                         <label class="optimizer-checkbox">
+                            <input type="checkbox" class="optimize-all-items-checkbox" ${this.optimizeAllItems ? 'checked' : ''} />
+                            <span class="optimizer-checkbox-label">Optimize using all items (not just owned) when "only show owned items" is off</span>
+                        </label>
+                        <p style="
+                            color: var(--text-muted);
+                            font-size: 0.85em;
+                            margin-top: var(--spacing-xs);
+                            margin-left: 26px;
+                            font-style: italic;
+                        ">When "only show owned items" (Column 2) is unchecked, the default optimizer considers <strong>every</strong> game item — crafted at Eternal, consumables/inputs at Fine, pets at level 4 — to find the best possible gear set, not just what you own. (Applies to the activity/recipe optimizer only.)<br/><br/><strong>You most likely also want to temporarily enable all custom stats</strong> so items gated behind stats you haven't set (e.g. explored realms, one-time activities) are still considered:</p>
+                        <div style="margin-left: 26px; margin-top: 6px; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+                            <button class="all-items-enable-all-stats-btn optimize-btn" type="button" style="padding:4px 10px; font-size:0.85em;">Enable all stats now</button>
+                            <button class="all-items-open-custom-stats-btn" type="button" style="padding:4px 10px; font-size:0.85em;">Open custom stats</button>
+                        </div>
+                    </div>
+
+                    <div style="margin-bottom: var(--spacing-md);">
+                        <label class="optimizer-checkbox">
+                            <input type="checkbox" class="unlock-all-checkbox" ${this.unlockAll ? 'checked' : ''} />
+                            <span class="optimizer-checkbox-label">Unlock all (treat every item &amp; stat as unlocked)</span>
+                        </label>
+                        <p style="
+                            color: var(--text-muted);
+                            font-size: 0.85em;
+                            margin-top: var(--spacing-xs);
+                            margin-left: 26px;
+                            font-style: italic;
+                        ">Optimizes as if <strong>every</strong> requirement is met and every gated stat is maxed — achievement points, faction reputation, skill levels, %/total level, character level, total wealth, and all custom stats. Great for planning your best-possible gear. Applies to the activity/recipe, travel, and crafting-tree optimizers. Leave off for results based on your real character.</p>
+                    </div>
+
+                    <div style="margin-bottom: var(--spacing-md);">
+                        <label class="optimizer-checkbox">
                             <input type="checkbox" class="include-pets-checkbox" ${this.includePets ? 'checked' : ''} />
                             <span class="optimizer-checkbox-label">Include pets in optimization</span>
                         </label>
@@ -828,6 +965,21 @@ class SettingsModal extends Component {
                             margin-left: 26px;
                             font-style: italic;
                         ">The optimizer will try your owned pets at their current level to find the best one for the activity or recipe.</p>
+                        <div class="use-pet-ability-slide ${this.includePets ? 'open' : ''}">
+                            <div class="use-pet-ability-slide-inner">
+                                <label class="optimizer-checkbox" style="margin-left: 26px; margin-top: var(--spacing-xs);">
+                                    <input type="checkbox" class="use-pet-ability-checkbox" ${this.usePetAbility ? 'checked' : ''} />
+                                    <span class="optimizer-checkbox-label">Always use active applicable pet ability</span>
+                                </label>
+                                <p style="
+                                    color: var(--text-muted);
+                                    font-size: 0.85em;
+                                    margin-top: var(--spacing-xs);
+                                    margin-left: 52px;
+                                    font-style: italic;
+                                "><strong>e.g.</strong> Assumes a pet's ability is charged and active when it applies to the activity being optimized. These abilities require you to actively load charges (inputs — coins and/or items) which then apply passively to the activity (e.g. Tiger, Pixie, Pet Rock). With this on, the optimizer counts the ability's stats/effects as if the charges are loaded.</p>
+                            </div>
+                        </div>
                     </div>
                     
                     <div style="margin-bottom: var(--spacing-md);">
@@ -842,6 +994,9 @@ class SettingsModal extends Component {
                             margin-left: 26px;
                             font-style: italic;
                         ">The optimizer will try your owned consumables to find the best one for the activity or recipe.</p>
+                        <p style="margin-top: var(--spacing-xs); margin-left: 26px;">
+                            <a href="#" class="consumable-options-change-link" style="color: var(--accent-color, #4ea1ff); text-decoration: underline; cursor: pointer; font-size: 0.85em;">Adjust consumable options here →</a>
+                        </p>
                     </div>
                     ${(window._featureFlags && window._featureFlags.local_optimization) ? `
                     <div style="margin-bottom: var(--spacing-md);">
@@ -886,6 +1041,60 @@ class SettingsModal extends Component {
                 </div>
                 </div>
                 
+                <div class="setting-section" style="margin-bottom: var(--spacing-lg);">
+                    ${collapsibleHeader('Consumable Options', 'consumables')}
+                    <div class="settings-collapsible-body" data-section="consumables" style="${this.collapsedSections.consumables ? 'display:none;' : ''}">
+                    <p style="
+                        color: var(--text-secondary);
+                        font-size: 0.9em;
+                        margin-bottom: var(--spacing-md);
+                    ">Control which consumables the optimizer will try, wherever consumables are enabled (activity/recipe, crafting tree, travel, and goals report).</p>
+
+                    <div style="margin-bottom: var(--spacing-md);">
+                        <label class="optimizer-checkbox">
+                            <input type="checkbox" class="include-fine-consumables-checkbox" ${this.includeFineConsumables ? 'checked' : ''} />
+                            <span class="optimizer-checkbox-label">Include Fine Consumables</span>
+                        </label>
+                    </div>
+
+                    <div style="margin-bottom: var(--spacing-md);">
+                        <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
+                            <label class="optimizer-checkbox" style="margin-bottom:0;">
+                                <input type="checkbox" class="consumable-min-owned-checkbox" ${this.consumableMinOwnedEnabled ? 'checked' : ''} />
+                                <span class="optimizer-checkbox-label">Ignore consumables I own</span>
+                            </label>
+                            <select class="consumable-min-owned-op-select" style="padding:2px 4px;" ${this.consumableMinOwnedEnabled ? '' : 'disabled'}>
+                                <option value="lt" ${this.consumableMinOwnedOperator !== 'lte' ? 'selected' : ''}>fewer than</option>
+                                <option value="lte" ${this.consumableMinOwnedOperator === 'lte' ? 'selected' : ''}>fewer than or equal to</option>
+                            </select>
+                            <input type="number" class="consumable-min-owned-input${this.consumableMinOwnedEnabled ? '' : ' input-disabled-look'}" inputmode="numeric" pattern="[0-9]*" min="1" max="100" step="1" value="${this.consumableMinOwned}" ${this.consumableMinOwnedEnabled ? '' : 'readonly'} style="width:56px; padding:2px 6px; text-align:center;" />
+                        </div>
+                        <p style="
+                            color: var(--text-muted);
+                            font-size: 0.85em;
+                            margin-top: var(--spacing-xs);
+                            margin-left: 26px;
+                            font-style: italic;
+                        ">Fine and normal versions are counted separately.</p>
+                    </div>
+
+                    <div style="margin-bottom: var(--spacing-md);">
+                        <label class="optimizer-checkbox">
+                            <input type="checkbox" class="consumable-use-hidden-checkbox" ${this.consumableUseHidden ? 'checked' : ''} />
+                            <span class="optimizer-checkbox-label">Use hidden consumables</span>
+                        </label>
+                        <p style="
+                            color: var(--text-muted);
+                            font-size: 0.85em;
+                            margin-top: var(--spacing-xs);
+                            margin-left: 26px;
+                            font-style: italic;
+                        ">Also consider consumables you've hidden (via the Hide checkbox in Owned Items).</p>
+                    </div>
+
+                    </div>
+                </div>
+
                 <div class="setting-section">
                     ${collapsibleHeader('Activity Gear Set Optimization', 'activity')}
                     <div class="settings-collapsible-body" data-section="activity" style="${this.collapsedSections.activity ? 'display:none;' : ''}">
@@ -911,6 +1120,15 @@ class SettingsModal extends Component {
 
                     ${this.renderPresetBar('recipe')}
                     <div class="xy-recipe-mount" data-mount-id="settings-modal-recipe"></div>
+                    <label class="optimizer-checkbox-row" style="display:flex;align-items:center;gap:8px;margin-top:var(--spacing-md);cursor:pointer;">
+                        <input type="checkbox" class="optimize-services-checkbox" ${this.optimizeServices ? 'checked' : ''} />
+                        <span class="optimizer-checkbox-label">Optimize services</span>
+                    </label>
+                    <p style="
+                        color: var(--text-secondary);
+                        font-size: 0.85em;
+                        margin: 4px 0 0 26px;
+                    ">Try every service you've unlocked and can reach (region access is respected — e.g. Myriadian Arc needs the Charter of the drowned) and pick the one whose optimized gear set scores best. Gear-gated services (e.g. 3&times; diving gear) are included and the optimizer will equip the required gear. When off, the optimizer uses the service selected in Column 3.</p>
                     </div>
                 </div>
 
@@ -943,6 +1161,9 @@ class SettingsModal extends Component {
         const ctSettings = store.get('ui.crafting_tree.global_settings') || {};
         const palette = ctSettings.line_colors || DEFAULT_PALETTE;
         const customColors = ctSettings.custom_colors || LINE_COLOR_PALETTES['Custom'];
+        // "Move icon bar to the bottom" (mobile-only effect). Read fresh from
+        // ui_config so the checkbox reflects the current server-persisted value.
+        const swapMobileBars = !!store.get('ui.swap_mobile_bars');
 
         const paletteRowsHtml = Object.entries(LINE_COLOR_PALETTES).map(([name, colors]) => {
             const isSelected = palette === name;
@@ -970,6 +1191,19 @@ class SettingsModal extends Component {
                     Gear slot selection popup
                 </h3>
                 <div class="settings-collapsible-body" data-section="popup" style="${this.collapsedSections.popup ? 'display:none;' : ''}">
+                    <div class="setting-row" style="margin-bottom: var(--spacing-lg);">
+                        <label class="optimizer-checkbox">
+                            <input type="checkbox" class="enable-crafted-quality-select-checkbox" ${this.enableCraftedQualitySelect ? 'checked' : ''} />
+                            <span class="optimizer-checkbox-label">Enable temporary crafted quality selection for equipped items</span>
+                        </label>
+                        <p style="
+                            color: var(--text-muted);
+                            font-size: 0.85em;
+                            margin-top: var(--spacing-xs);
+                            margin-left: 26px;
+                            font-style: italic;
+                        ">When enabled, the equipped-item view of a gear slot popup shows a quality chip row (Normal&nbsp;…&nbsp;Eternal) for crafted items. Pick a quality to preview its stats; the choice saves to the gear set and persists on reload. It does <b>not</b> change your owned items. If the slot is locked, the chosen item&nbsp;+&nbsp;quality is passed into optimization so the resulting stats reflect it.</p>
+                    </div>
                     <div class="setting-row" style="margin-bottom: var(--spacing-lg);">
                         <div style="display: flex; align-items: center; gap: var(--spacing-md); flex-wrap: wrap;">
                             <select class="popup-item-list-min-select" style="
@@ -1085,6 +1319,58 @@ class SettingsModal extends Component {
                 </h3>
                 <div class="settings-collapsible-body" data-section="misc" style="${this.collapsedSections.misc ? 'display:none;' : ''}">
                     <div class="setting-row" style="margin-bottom: var(--spacing-lg);">
+                        <div style="display: flex; align-items: center; gap: var(--spacing-md); flex-wrap: wrap;">
+                            <label style="color: var(--text-primary); font-size: 0.9em; min-width: 140px;">Minimum text size</label>
+                            <select class="min-text-size-select" style="
+                                background: var(--bg-tertiary);
+                                color: var(--text-primary);
+                                border: 1px solid var(--border-color);
+                                border-radius: 4px;
+                                padding: 4px 8px;
+                                min-width: 110px;
+                            ">
+                                ${Array.from({ length: 17 }, (_, i) => i + 8).map(v =>
+            `<option value="${v}" ${v === this.minTextSize ? 'selected' : ''}>${v}px${v === 8 ? ' (default)' : ''}</option>`
+        ).join('')}
+                            </select>
+                            <span class="min-text-size-example" style="font-size: max(var(--min-text, 5px), calc(5px * var(--text-scale, 1))); color: var(--text-secondary); border: 1px dashed var(--border-color); border-radius: 4px; padding: 2px 6px;">Aa — smallest text preview</span>
+                        </div>
+                        <p style="
+                            color: var(--text-muted);
+                            font-size: 0.85em;
+                            margin-top: var(--spacing-xs);
+                            margin-left: 0;
+                            font-style: italic;
+                        ">Clamps the smallest text in the app up to this size (applies app-wide, instantly). Default 5px is the app's true smallest, so it changes nothing. The preview shows how the smallest text will look.</p>
+                    </div>
+                    <div class="setting-row" style="margin-bottom: var(--spacing-lg);">
+                        <div style="display: flex; align-items: center; gap: var(--spacing-md); flex-wrap: wrap;">
+                            <label style="color: var(--text-primary); font-size: 0.9em; min-width: 140px;">Augment text size</label>
+                            <select class="text-scale-select" style="
+                                background: var(--bg-tertiary);
+                                color: var(--text-primary);
+                                border: 1px solid var(--border-color);
+                                border-radius: 4px;
+                                padding: 4px 8px;
+                                min-width: 140px;
+                            ">
+                                ${Array.from({ length: 21 }, (_, i) => 100 + i * 5).map(s => {
+            const val = (s / 100).toFixed(2);
+            const pct = s - 100;
+            const label = `${val}×` + (pct === 0 ? ' (default)' : ` (+${pct}%)`);
+            return `<option value="${val}" ${this.textScale.toFixed(2) === val ? 'selected' : ''}>${label}</option>`;
+        }).join('')}
+                            </select>
+                        </div>
+                        <p style="
+                            color: var(--text-muted);
+                            font-size: 0.85em;
+                            margin-top: var(--spacing-xs);
+                            margin-left: 0;
+                            font-style: italic;
+                        ">Scales every text size in the app by this multiplier (applies app-wide, instantly). Default 1.00× changes nothing. The minimum size above is still enforced as a floor.</p>
+                    </div>
+                    <div class="setting-row" style="margin-bottom: var(--spacing-lg);">
                         <label class="optimizer-checkbox">
                             <input type="checkbox" class="order-by-level-checkbox" ${this.orderByLevel ? 'checked' : ''} />
                             <span class="optimizer-checkbox-label">Order activities and recipes by level</span>
@@ -1096,6 +1382,19 @@ class SettingsModal extends Component {
                             margin-left: 26px;
                             font-style: italic;
                         ">Sort activities and recipes by level within each skill category. When unchecked, they are sorted alphabetically.</p>
+                    </div>
+                    <div class="setting-row" style="margin-bottom: var(--spacing-lg);">
+                        <label class="optimizer-checkbox">
+                            <input type="checkbox" class="combine-activity-recipe-search-checkbox" ${this.combineActivityRecipeSearch ? 'checked' : ''} />
+                            <span class="optimizer-checkbox-label">Combine activity &amp; recipe search into one dropdown</span>
+                        </label>
+                        <p style="
+                            color: var(--text-muted);
+                            font-size: 0.85em;
+                            margin-top: var(--spacing-xs);
+                            margin-left: 26px;
+                            font-style: italic;
+                        ">In the main optimizer's Activity/Craft column, replace the separate Activity and Recipe dropdowns with a single dropdown that searches every activity and recipe at once. Off by default. Does not affect the crafting tree, which keeps its own recipe dropdown.</p>
                     </div>
                     <div class="setting-row" style="margin-bottom: var(--spacing-lg);">
                         <label class="optimizer-checkbox">
@@ -1122,6 +1421,19 @@ class SettingsModal extends Component {
                             margin-left: 26px;
                             font-style: italic;
                         ">When enabled, "Wiki" links open wiki.walkscape.app in its dark theme (adds <code>?usedarkmode=1</code> to the URL). Turn this off if you prefer the wiki's default theme.</p>
+                    </div>
+                    <div class="setting-row" style="margin-bottom: var(--spacing-lg);">
+                        <label class="optimizer-checkbox">
+                            <input type="checkbox" class="swap-mobile-bars-checkbox" ${swapMobileBars ? 'checked' : ''} />
+                            <span class="optimizer-checkbox-label">Move icon bar to the bottom</span>
+                        </label>
+                        <p style="
+                            color: var(--text-muted);
+                            font-size: 0.85em;
+                            margin-top: var(--spacing-xs);
+                            margin-left: 26px;
+                            font-style: italic;
+                        ">📱 <strong>Mobile only.</strong> Swaps the top and bottom bars: the icon/menu bar moves to the bottom of the screen and the Character/Gear/Activity tab bar moves to the top. Has no effect on desktop. Saved to your session.</p>
                     </div>
                     <div class="setting-row" style="margin-bottom: var(--spacing-lg);">
                         <label class="optimizer-checkbox">
@@ -1155,8 +1467,57 @@ class SettingsModal extends Component {
                             ${window._featureFlags?.sell_for_chips ? `<kbd class="hotkey-badge">M</kbd><span>Sell for Chips</span>` : ''}
                         </div>
                     </div>
+                    <div class="setting-row" style="margin-bottom: var(--spacing-lg);">
+                        <label class="optimizer-checkbox">
+                            <input type="checkbox" class="suggest-matching-activity-checkbox" ${this.suggestMatchingActivity ? 'checked' : ''} />
+                            <span class="optimizer-checkbox-label">Suggest matching activity when I pick a saved gear set</span>
+                        </label>
+                        <p style="
+                            color: var(--text-muted);
+                            font-size: 0.85em;
+                            margin-top: var(--spacing-xs);
+                            margin-left: 26px;
+                            font-style: italic;
+                        ">When you select a saved gear set whose name matches an activity, recipe, or travel route, show a button to switch to it.</p>
+                    </div>
+                    <div class="setting-row" style="margin-bottom: var(--spacing-lg);">
+                        <label class="optimizer-checkbox">
+                            <input type="checkbox" class="sort-matching-gearsets-first-checkbox" ${this.sortMatchingGearsetsFirst ? 'checked' : ''} />
+                            <span class="optimizer-checkbox-label">Show matching gear sets first in the saved list</span>
+                        </label>
+                        <p style="
+                            color: var(--text-muted);
+                            font-size: 0.85em;
+                            margin-top: var(--spacing-xs);
+                            margin-left: 26px;
+                            font-style: italic;
+                        ">When you open the saved gear-set dropdown, sets whose name matches your currently selected activity, recipe, or travel route are moved to the top and highlighted. Off by default.</p>
+                    </div>
                 </div>
             </div>
+            ${window._featureFlags?.upgrades_tracker ? `
+            <div class="setting-section" style="margin-bottom: var(--spacing-lg);">
+                <h3 class="settings-collapsible-header ${this.collapsedSections.upgradesTracker ? 'collapsed' : ''}" data-section="upgradesTracker">
+                    <span class="expand-arrow ${this.collapsedSections.upgradesTracker ? '' : 'expanded'}">▼</span>
+                    Upgrades Tracker
+                </h3>
+                <div class="settings-collapsible-body" data-section="upgradesTracker" style="${this.collapsedSections.upgradesTracker ? 'display:none;' : ''}">
+                    <div class="setting-row" style="margin-bottom: var(--spacing-lg);">
+                        <label class="optimizer-checkbox">
+                            <input type="checkbox" class="always-add-to-current-tracker-checkbox" ${this.alwaysAddToCurrentTracker ? 'checked' : ''} />
+                            <span class="optimizer-checkbox-label">Always add to current upgrades tracker</span>
+                        </label>
+                        <p style="
+                            color: var(--text-muted);
+                            font-size: 0.85em;
+                            margin-top: var(--spacing-xs);
+                            margin-left: 26px;
+                            font-style: italic;
+                        ">When on, the "+" add buttons in the Optimized Goals Report add straight to your current tracker (no "Add to current / Add to existing" popup). The per-item button hides once that item is already in the current tracker, and reappears if you remove it. Off by default.</p>
+                    </div>
+                </div>
+            </div>
+            ` : ''}
             <div class="setting-section" style="margin-bottom: var(--spacing-lg);">
                 <h3 class="settings-collapsible-header ${this.collapsedSections.numberFormat ? 'collapsed' : ''}" data-section="numberFormat">
                     <span class="expand-arrow ${this.collapsedSections.numberFormat ? '' : 'expanded'}">▼</span>
@@ -1548,6 +1909,7 @@ class SettingsModal extends Component {
         } else if (permission === 'granted' && sub) {
             const globalChecked = prefs.global_announcements ? 'checked' : '';
             const targetedChecked = prefs.targeted_announcements ? 'checked' : '';
+            const tradingChecked = (prefs.trading !== undefined ? prefs.trading : prefs.targeted_announcements) ? 'checked' : '';
             content = `
                 <label class="optimizer-checkbox" style="margin-bottom:var(--spacing-sm);">
                     <input type="checkbox" class="push-pref-global" ${globalChecked} />
@@ -1560,8 +1922,15 @@ class SettingsModal extends Component {
                     <input type="checkbox" class="push-pref-targeted" ${targetedChecked} />
                     <span class="optimizer-checkbox-label">Personal notifications</span>
                 </label>
-                <p style="color:var(--text-muted);font-size:0.8em;margin:0 0 0 26px;font-style:italic;">
+                <p style="color:var(--text-muted);font-size:0.8em;margin:0 0 var(--spacing-sm) 26px;font-style:italic;">
                     Responses to your bug reports, fixes for issues you reported, and other messages just for you.
+                </p>
+                <label class="optimizer-checkbox" style="margin-bottom:var(--spacing-sm);">
+                    <input type="checkbox" class="push-pref-trading" ${tradingChecked} />
+                    <span class="optimizer-checkbox-label">Trading notifications</span>
+                </label>
+                <p style="color:var(--text-muted);font-size:0.8em;margin:0 0 0 26px;font-style:italic;">
+                    New trade messages and wishlist matches on the Trading page.
                 </p>
             `;
         }
@@ -1631,7 +2000,7 @@ class SettingsModal extends Component {
 
             // Auto-enable both on first subscribe (when neither is set yet)
             if (!this._pushPrefs.global_announcements && !this._pushPrefs.targeted_announcements) {
-                this._pushPrefs = { global_announcements: true, targeted_announcements: true };
+                this._pushPrefs = { global_announcements: true, targeted_announcements: true, trading: true };
                 await fetch('/api/push/preferences', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -1713,6 +2082,14 @@ class SettingsModal extends Component {
         this.$element.off();
         $(document).off('keydown.settings-modal');
 
+        // Overflow affordance: the tab row scrolls horizontally on narrow /
+        // mobile widths with its scrollbar hidden — overlay ‹ / › chevrons so
+        // off-screen tabs are discoverable and reachable. render() rebuilds the
+        // strip each time, so this re-wraps the fresh element every call. The
+        // modal surface is --bg-secondary, so match the edge fade to it.
+        const tabStrip = this.$element.find('.settings-tabs').get(0);
+        if (tabStrip) attachTabScrollIndicators(tabStrip, { fade: 'var(--bg-secondary)' });
+
         // Tab switching - just toggle visibility, don't re-render
         this.$element.on('click', '.settings-tab', (e) => {
             e.preventDefault();
@@ -1761,6 +2138,25 @@ class SettingsModal extends Component {
             this.handleSwitchSession();
         });
 
+        // Click the current-session UUID to copy it to the clipboard
+        this.$element.on('click', '.uuid-display', (e) => {
+            const input = e.currentTarget;
+            const uuid = input.value;
+            if (!uuid || uuid === 'No session loaded') return;
+            // Visually select the text as a fallback affordance
+            try { input.select(); } catch (_) { /* ignore */ }
+            const notify = () => {
+                if (api && api.showSuccess) api.showSuccess('Copied UUID');
+            };
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(uuid).then(notify).catch(() => {
+                    try { document.execCommand('copy'); notify(); } catch (_) { /* ignore */ }
+                });
+            } else {
+                try { document.execCommand('copy'); notify(); } catch (_) { /* ignore */ }
+            }
+        });
+
         // Enter key in input
         this.$element.on('keypress', '.uuid-input', (e) => {
             if (e.which === 13) { // Enter key
@@ -1791,6 +2187,20 @@ class SettingsModal extends Component {
             window.dispatchEvent(new CustomEvent('orderByLevelChanged', { detail: { value: this.orderByLevel } }));
         });
 
+        // Upgrades Tracker: "Always add to current upgrades tracker"
+        this.$element.on('change', '.always-add-to-current-tracker-checkbox', (e) => {
+            this.alwaysAddToCurrentTracker = e.target.checked;
+            localStorage.setItem('alwaysAddToCurrentTracker', this.alwaysAddToCurrentTracker.toString());
+            window.dispatchEvent(new CustomEvent('alwaysAddToCurrentTrackerChanged', { detail: { value: this.alwaysAddToCurrentTracker } }));
+        });
+
+        // Combine activity & recipe search into one dropdown
+        this.$element.on('change', '.combine-activity-recipe-search-checkbox', (e) => {
+            this.combineActivityRecipeSearch = e.target.checked;
+            localStorage.setItem('combineActivityRecipeSearch', this.combineActivityRecipeSearch.toString());
+            window.dispatchEvent(new CustomEvent('combineActivityRecipeSearchChanged', { detail: { value: this.combineActivityRecipeSearch } }));
+        });
+
         // Hide unapplicable stats checkbox
         this.$element.on('change', '.hide-unapplicable-stats-checkbox', (e) => {
             this.hideUnapplicableStats = e.target.checked;
@@ -1798,11 +2208,31 @@ class SettingsModal extends Component {
             window.dispatchEvent(new CustomEvent('hideUnapplicableStatsChanged', { detail: { value: this.hideUnapplicableStats } }));
         });
 
+        // Enable temporary crafted quality selection for equipped items
+        this.$element.on('change', '.enable-crafted-quality-select-checkbox', (e) => {
+            this.enableCraftedQualitySelect = e.target.checked;
+            localStorage.setItem('enableCraftedQualitySelect', this.enableCraftedQualitySelect.toString());
+            // Any open gear slot popup listens for this and re-renders its
+            // equipped-item view to show/hide the quality chip row.
+            window.dispatchEvent(new CustomEvent('craftedQualitySelectChanged', { detail: { value: this.enableCraftedQualitySelect } }));
+        });
+
         // Use wiki dark mode checkbox
         this.$element.on('change', '.use-wiki-dark-mode-checkbox', (e) => {
             this.useWikiDarkMode = e.target.checked;
             localStorage.setItem('useWikiDarkMode', this.useWikiDarkMode.toString());
             window.dispatchEvent(new CustomEvent('useWikiDarkModeChanged', { detail: { value: this.useWikiDarkMode } }));
+        });
+
+        // "Move icon bar to the bottom" (mobile only). Persisted to ui_config
+        // via store.update (auto-syncs to the server), so it survives across
+        // sessions/devices. The `swap-mobile-bars` body class only has any
+        // effect inside the <=768px media query (see styles.css), so toggling
+        // it on desktop is a no-op the user is told about in the label text.
+        this.$element.on('change', '.swap-mobile-bars-checkbox', (e) => {
+            const value = e.target.checked;
+            store.update('ui.swap_mobile_bars', value);
+            document.body.classList.toggle('swap-mobile-bars', value);
         });
 
         // Popup auto-collapse on scroll checkbox
@@ -1854,6 +2284,24 @@ class SettingsModal extends Component {
             }
         });
 
+        // Minimum text size floor (applies app-wide via --min-text).
+        this.$element.on('change', '.min-text-size-select', (e) => {
+            const v = parseInt(e.target.value, 10);
+            this.minTextSize = Number.isFinite(v) ? v : 5;
+            localStorage.setItem('minTextSize', this.minTextSize.toString());
+            document.documentElement.style.setProperty('--min-text', `${this.minTextSize}px`);
+            // The preview span uses var(--min-text)/var(--text-scale) so it
+            // updates automatically; no manual refresh needed.
+        });
+
+        // Augment (scalar multiplier) for all text (applies app-wide via --text-scale).
+        this.$element.on('change', '.text-scale-select', (e) => {
+            const v = parseFloat(e.target.value);
+            this.textScale = Number.isFinite(v) && v > 0 ? v : 1;
+            localStorage.setItem('textScale', this.textScale.toString());
+            document.documentElement.style.setProperty('--text-scale', this.textScale.toString());
+        });
+
         // Non-owned upgrade display mode (gear slot popup upgrades section)
         this.$element.on('change', '.nonowned-upgrade-display-select', (e) => {
             const v = e.target.value;
@@ -1871,6 +2319,35 @@ class SettingsModal extends Component {
             this.hotkeysEnabled = e.target.checked;
             localStorage.setItem('hotkeysEnabled', this.hotkeysEnabled.toString());
             window.dispatchEvent(new CustomEvent('hotkeysEnabledChanged', { detail: { value: this.hotkeysEnabled } }));
+        });
+
+        // Suggest matching activity checkbox
+        this.$element.on('change', '.suggest-matching-activity-checkbox', (e) => {
+            this.saveSuggestMatchingActivity(e.target.checked);
+        });
+
+        // Show matching gear sets first in the saved dropdown (opt-in, default OFF)
+        this.$element.on('change', '.sort-matching-gearsets-first-checkbox', (e) => {
+            this.sortMatchingGearsetsFirst = e.target.checked;
+            localStorage.setItem('sortMatchingGearsetsFirst', this.sortMatchingGearsetsFirst.toString());
+            window.dispatchEvent(new CustomEvent('sortMatchingGearsetsFirstChanged', { detail: { value: this.sortMatchingGearsetsFirst } }));
+        });
+
+        // Keep the checkbox in sync if the setting is toggled elsewhere. Only
+        // updates DOM + state — does NOT re-dispatch, so no feedback loop.
+        window.addEventListener('sortMatchingGearsetsFirstChanged', (e) => {
+            const value = !!(e.detail && e.detail.value);
+            this.sortMatchingGearsetsFirst = value;
+            this.$element.find('.sort-matching-gearsets-first-checkbox').prop('checked', value);
+        });
+
+        // Keep the checkbox in sync when the setting is toggled elsewhere (e.g.
+        // the gear-set suggestion's "Never show again" turns it off). Only
+        // updates the DOM + state — does NOT re-dispatch, so no feedback loop.
+        window.addEventListener('suggestMatchingActivityChanged', (e) => {
+            const value = !!(e.detail && e.detail.value);
+            this.suggestMatchingActivity = value;
+            this.$element.find('.suggest-matching-activity-checkbox').prop('checked', value);
         });
 
         // Number formatting — thousand separator
@@ -2799,6 +3276,107 @@ class SettingsModal extends Component {
         this.$element.on('change', '.include-consumables-checkbox', (e) => {
             this.includeConsumables = e.target.checked;
             this.saveGlobalOptimizationSettings();
+            // Broadcast so the Column 3 quick "Include consumables" toggle
+            // (both designs) updates live without needing a re-render.
+            try {
+                window.dispatchEvent(new CustomEvent('includeConsumablesChanged', { detail: { enabled: e.target.checked } }));
+            } catch (_) { /* non-fatal */ }
+        });
+
+        // ---- Consumable Options (global) ----
+        // Include Fine Consumables
+        this.$element.on('change', '.include-fine-consumables-checkbox', (e) => {
+            this.includeFineConsumables = e.target.checked;
+            this.saveGlobalOptimizationSettings();
+            try {
+                window.dispatchEvent(new CustomEvent('consumableOptionsChanged'));
+            } catch (_) { /* non-fatal */ }
+        });
+        // "Use fine inputs" (R2) — goals-report hunting input slot only.
+        this.$element.on('change', '.use-fine-inputs-checkbox', (e) => {
+            this.useFineInputs = e.target.checked;
+            this.saveGlobalOptimizationSettings();
+        });
+
+        // "Ignore consumables I own fewer than X" — checkbox enables the input.
+        this.$element.on('change', '.consumable-min-owned-checkbox', (e) => {
+            this.consumableMinOwnedEnabled = e.target.checked;
+            // Seed to 5 when first enabled if the current value is unset/invalid.
+            if (this.consumableMinOwnedEnabled) {
+                const cur = parseInt(this.consumableMinOwned, 10);
+                if (!Number.isFinite(cur) || cur < 1 || cur > 100) {
+                    this.consumableMinOwned = 5;
+                }
+            }
+            const $input = this.$element.find('.consumable-min-owned-input');
+            if (this.consumableMinOwnedEnabled) {
+                $input.prop('readonly', false).removeClass('input-disabled-look').val(this.consumableMinOwned);
+            } else {
+                $input.prop('readonly', true).addClass('input-disabled-look');
+            }
+            this.$element.find('.consumable-min-owned-op-select').prop('disabled', !this.consumableMinOwnedEnabled);
+            this.saveGlobalOptimizationSettings();
+            try {
+                window.dispatchEvent(new CustomEvent('consumableOptionsChanged'));
+            } catch (_) { /* non-fatal */ }
+        });
+
+        // Operator dropdown: "fewer than" (lt / <) vs "fewer than or equal to"
+        // (lte / <=). Editing it also enables the option.
+        this.$element.on('change', '.consumable-min-owned-op-select', (e) => {
+            const v = (e.target.value === 'lte') ? 'lte' : 'lt';
+            this.consumableMinOwnedOperator = v;
+            if (!this.consumableMinOwnedEnabled) {
+                this.consumableMinOwnedEnabled = true;
+                this.$element.find('.consumable-min-owned-checkbox').prop('checked', true);
+                const $inp = this.$element.find('.consumable-min-owned-input');
+                $inp.prop('readonly', false).removeClass('input-disabled-look');
+            }
+            this.saveGlobalOptimizationSettings();
+            try {
+                window.dispatchEvent(new CustomEvent('consumableOptionsChanged'));
+            } catch (_) { /* non-fatal */ }
+        });
+
+        // Clicking/focusing the (disabled-looking) number box also enables the
+        // option — matches "clicking it OR the checkbox enables it".
+        this.$element.on('mousedown focus', '.consumable-min-owned-input', (e) => {
+            if (this.consumableMinOwnedEnabled) return;
+            this.consumableMinOwnedEnabled = true;
+            const cur = parseInt(this.consumableMinOwned, 10);
+            if (!Number.isFinite(cur) || cur < 1 || cur > 100) {
+                this.consumableMinOwned = 5;
+            }
+            this.$element.find('.consumable-min-owned-checkbox').prop('checked', true);
+            const $input = this.$element.find('.consumable-min-owned-input');
+            $input.prop('readonly', false).removeClass('input-disabled-look').val(this.consumableMinOwned);
+            this.saveGlobalOptimizationSettings();
+            try {
+                window.dispatchEvent(new CustomEvent('consumableOptionsChanged'));
+            } catch (_) { /* non-fatal */ }
+            try { setTimeout(() => e.target.focus(), 0); } catch (_) { /* non-fatal */ }
+        });
+
+        // Numeric threshold — clamp to integer 1..100 on change/blur.
+        this.$element.on('change blur', '.consumable-min-owned-input', (e) => {
+            let v = parseInt(e.target.value, 10);
+            if (!Number.isFinite(v)) v = 5;
+            v = Math.max(1, Math.min(100, Math.round(v)));
+            this.consumableMinOwned = v;
+            e.target.value = v;  // reflect the clamped value back to the field
+            this.saveGlobalOptimizationSettings();
+            try {
+                window.dispatchEvent(new CustomEvent('consumableOptionsChanged'));
+            } catch (_) { /* non-fatal */ }
+        });
+
+        // "Use hidden consumables" toggle.
+        this.$element.on('change', '.consumable-use-hidden-checkbox', (e) => {
+            this.consumableUseHidden = e.target.checked;
+            this.saveGlobalOptimizationSettings();
+            try {
+                window.dispatchEvent(new CustomEvent('consumableOptionsChanged'));
+            } catch (_) { /* non-fatal */ }
         });
 
         // Show item finding drops checkbox
@@ -2828,7 +3406,67 @@ class SettingsModal extends Component {
 
         this.$element.on('change', '.include-pets-checkbox', (e) => {
             this.includePets = e.target.checked;
+            // Part 4: slide the "Always use active applicable pet ability"
+            // child open/closed with the parent.
+            this.$element.find('.use-pet-ability-slide').toggleClass('open', e.target.checked);
             this.saveGlobalOptimizationSettings();
+            try { window.dispatchEvent(new CustomEvent('includePetsChanged', { detail: { enabled: e.target.checked } })); } catch (_) { /* non-fatal */ }
+        });
+
+        // Part 4: "Always use active applicable pet ability" child checkbox
+        this.$element.on('change', '.use-pet-ability-checkbox', (e) => {
+            this.usePetAbility = e.target.checked;
+            try { localStorage.setItem('usePetAbility', this.usePetAbility ? 'true' : 'false'); } catch (_) {}
+            this.saveGlobalOptimizationSettings();
+            try { window.dispatchEvent(new CustomEvent('usePetAbilityChanged', { detail: { enabled: e.target.checked } })); } catch (_) { /* non-fatal */ }
+        });
+
+        // Part 2: "Optimize using all items" toggle
+        this.$element.on('change', '.optimize-all-items-checkbox', (e) => {
+            this.optimizeAllItems = e.target.checked;
+            this.saveGlobalOptimizationSettings();
+        });
+
+        // "Optimize services" toggle (recipe optimizer picks the best unlocked
+        // + reachable service). Shared state across all mounts — mirror to any
+        // other rendered .optimize-services-checkbox and notify listeners so the
+        // Column 3 quick/inline copies stay in sync.
+        this.$element.on('change', '.optimize-services-checkbox', (e) => {
+            this.optimizeServices = e.target.checked;
+            this.saveGlobalOptimizationSettings();
+            try {
+                document.querySelectorAll('.optimize-services-checkbox').forEach(cb => {
+                    if (cb !== e.target) cb.checked = this.optimizeServices;
+                });
+                window.dispatchEvent(new CustomEvent('optimizeServicesChanged',
+                    { detail: { enabled: this.optimizeServices } }));
+            } catch (_) { /* non-fatal */ }
+        });
+
+        // "Unlock all" toggle
+        this.$element.on('change', '.unlock-all-checkbox', (e) => {
+            this.unlockAll = e.target.checked;
+            try { localStorage.setItem('unlockAll', this.unlockAll ? 'true' : 'false'); } catch (_) {}
+            this.saveGlobalOptimizationSettings();
+        });
+
+        // Part 2: help-text action buttons
+        this.$element.on('click', '.all-items-enable-all-stats-btn', (e) => {
+            e.preventDefault();
+            const $btn = $(e.currentTarget);
+            if (window.customStatsPopup && typeof window.customStatsPopup.setAllStatsEnabled === 'function') {
+                window.customStatsPopup.setAllStatsEnabled(true);
+                $btn.text('✓ All stats enabled');
+                setTimeout(() => { $btn.text('Enable all stats now'); }, 2500);
+            } else {
+                api.showWarning('Custom stats are not ready yet — try "Open custom stats".');
+            }
+        });
+        this.$element.on('click', '.all-items-open-custom-stats-btn', (e) => {
+            e.preventDefault();
+            if (window.customStatsPopup && typeof window.customStatsPopup.show === 'function') {
+                window.customStatsPopup.show();
+            }
         });
 
         this.$element.on('change', '.run-local-optimization-checkbox', (e) => {
@@ -2902,6 +3540,10 @@ class SettingsModal extends Component {
         });
         this.$element.on('change', '.push-pref-targeted', (e) => {
             this._pushPrefs.targeted_announcements = e.target.checked;
+            this._savePushPreferences();
+        });
+        this.$element.on('change', '.push-pref-trading', (e) => {
+            this._pushPrefs.trading = e.target.checked;
             this._savePushPreferences();
         });
 
@@ -3548,10 +4190,20 @@ class SettingsModal extends Component {
                     recipe_sorting: recipeEntries,
                     travel_sorting: this.travelSorting,
                     include_consumables: this.includeConsumables,
+                    include_fine_consumables: this.includeFineConsumables,
+                    use_fine_inputs: this.useFineInputs,
+                    consumable_min_owned_enabled: this.consumableMinOwnedEnabled,
+                    consumable_min_owned: this.consumableMinOwned,
+                    consumable_min_owned_operator: this.consumableMinOwnedOperator,
+                    consumable_use_hidden: this.consumableUseHidden,
                     auto_equip_optimized: this.autoEquipOptimized,
                     auto_copy_export: this.autoCopyExport,
                     lock_current_gear_slots: this.lockCurrentGearSlots,
                     include_pets: this.includePets,
+                    optimize_all_items: this.optimizeAllItems,
+                    use_pet_ability: this.usePetAbility,
+                    unlock_all: this.unlockAll,
+                    optimize_services: this.optimizeServices,
                     run_local_optimization: this.runLocalOptimization,
                     finish_on_server_on_leave: this.finishOnServerOnLeave,
                     disable_local_opt_warning: this.disableLocalOptWarning,
@@ -3902,6 +4554,12 @@ class SettingsModal extends Component {
     encodePreset(presetType) {
         const sorting = this[presetType + 'Sorting'];
         const data = { sorting };
+        // Activity presets carry the "Skip if all collectibles owned" flag so a
+        // shared/imported rule set preserves (and overrides the recipient's)
+        // checked state. Recipe/travel presets have no collectibles target.
+        if (presetType === 'activity') {
+            data.skip_obtained_collectibles = !!this.skipObtainedCollectibles;
+        }
         const jsonStr = JSON.stringify(data);
         const compressed = window.pako.gzip(jsonStr);
         let binary = '';
@@ -3939,6 +4597,13 @@ class SettingsModal extends Component {
                 this.activitySorting = this._normalizeSortingTuples(data.sorting);
                 this.selectedActivityPresetId = null;
                 this._activityPresetName = '';
+                // Adopt the imported "Skip if all collectibles owned" flag
+                // (overrides the recipient's current value, per spec).
+                if (typeof data.skip_obtained_collectibles === 'boolean') {
+                    this.skipObtainedCollectibles = data.skip_obtained_collectibles;
+                    try { localStorage.setItem('skipObtainedCollectibles', String(data.skip_obtained_collectibles)); } catch (_e) { /* noop */ }
+                }
+                this._propagateActivitySortingToMounts();
             } else if (presetType === 'travel') {
                 this.travelSorting = normalizeTravelEntries(data.sorting);
                 this.selectedTravelPresetId = null;

@@ -18,6 +18,7 @@ const _CATEGORY_LABELS = {
     'chests': 'Chest farming',
     'chests_recipes': 'Recipe chests',
     'new_items': 'New items',
+    'target_items': 'Fastest Target Items',
 };
 
 const _NEW_ITEMS_KIND_LABELS = {
@@ -67,6 +68,8 @@ const BADGE_CLASS = 'stats-report-stale-badge';
 const POPOVER_CLASS = 'stats-report-stale-popover';
 
 let _lastStaleData = null;
+let _staleInFlight = null;       // coalesce concurrent/burst calls into one fetch
+let _staleDebounceTimer = null;  // trailing-edge debounce for event bursts
 
 /**
  * Fetch stale-check data and annotate the UI.
@@ -74,20 +77,46 @@ let _lastStaleData = null;
  * Call this on page open and whenever 'stats-report-stale-refresh' event fires.
  */
 export async function refreshStaleAnnotations() {
-    try {
-        const resp = await fetch('/api/stats-report/stale-check', {
-            credentials: 'same-origin',
-        });
-        if (!resp.ok) return;
-        const data = await resp.json();
-        _lastStaleData = data;
-        // Expose globally for other modules (Optimize button reads this to
-        // decide whether to run in stale_only mode by default).
-        if (typeof window !== 'undefined') {
-            window._lastStaleStatsReportData = data;
+    // Coalesce: a single goals-report open fires this ~7x within the first
+    // second, and each /stale-check can take several seconds server-side for a
+    // large character. If a fetch is already in flight, reuse it instead of
+    // stacking duplicate requests that all serialize on the server's shared
+    // DB connection (2026-08-31 jwbail — page-load perf).
+    if (_staleInFlight) return _staleInFlight;
+    _staleInFlight = (async () => {
+        try {
+            const resp = await fetch('/api/stats-report/stale-check', {
+                credentials: 'same-origin',
+            });
+            if (!resp.ok) return;
+            const data = await resp.json();
+            _lastStaleData = data;
+            // Expose globally for other modules (Optimize button reads this to
+            // decide whether to run in stale_only mode by default).
+            if (typeof window !== 'undefined') {
+                window._lastStaleStatsReportData = data;
+            }
+            _annotate(data);
+        } catch (_) {
+        } finally {
+            _staleInFlight = null;
         }
-        _annotate(data);
-    } catch (_) {}
+    })();
+    return _staleInFlight;
+}
+
+/**
+ * Trailing-edge debounce for bursty triggers. A page open dispatches several
+ * `stats-report-stale-refresh` events in quick succession; this collapses them
+ * into a single refresh. Combined with the in-flight guard above and the
+ * server-side fingerprint cache, one open costs one recompute instead of ~7.
+ */
+export function scheduleStaleRefresh(delay = 300) {
+    if (_staleDebounceTimer) clearTimeout(_staleDebounceTimer);
+    _staleDebounceTimer = setTimeout(() => {
+        _staleDebounceTimer = null;
+        refreshStaleAnnotations();
+    }, delay);
 }
 
 function _annotate(data) {
@@ -155,6 +184,23 @@ function _annotate(data) {
             const kind = (el.getAttribute('data-kind-name') || '').toLowerCase();
             if (kind === sub.toLowerCase()) {
                 _addBadge(el, {staleCat: 'new_items', staleSub: sub});
+            }
+        }
+    }
+
+    // 2026-08-13 (jwbail): target_items — badge each stale group chip
+    // (AGT / Sea Shells / Bird Nest / Alcohol / ...). The chips carry
+    // data-targetcat-name="<group_slug>" + data-category="target_items", and
+    // /stale-check returns the stale group slugs as chips['target_items'].
+    const targetItemsSubs = chips['target_items'] || [];
+    for (const sub of targetItemsSubs) {
+        const candidates = document.querySelectorAll(
+            `[data-targetcat-name][data-category="target_items"]`
+        );
+        for (const el of candidates) {
+            const name = (el.getAttribute('data-targetcat-name') || '').toLowerCase();
+            if (name === sub.toLowerCase()) {
+                _addBadge(el, {staleCat: 'target_items', staleSub: sub});
             }
         }
     }
@@ -311,6 +357,35 @@ function _showPopover(e, badge, options, pinned = true) {
     }
     html.push('<div style="font-size:0.92em;line-height:1.4">');
 
+    // 2026-08-13 (jwbail): target_items scopes are per-ITEM (source_name is an
+    // item slug, location is an activity slug or NONE), so the generic
+    // "<activity> in <location>" / "Newly unlocked activities" rendering reads
+    // as nonsense ("adventurers_guild_tokens in NONE"). Render a clean, deduped
+    // list of the item NAMES that need optimizing instead.
+    if (filterCat === 'target_items') {
+        const _names = [];
+        const _seen = new Set();
+        for (const s of scopes) {
+            const nm = _humanizeSlug(s.source_name);
+            const k = nm.toLowerCase();
+            if (!nm || _seen.has(k)) continue;
+            _seen.add(k);
+            _names.push(nm);
+        }
+        if (_names.length) {
+            html.push(`<div style="margin-top:2px">${_names.length} item${_names.length === 1 ? '' : 's'} to optimize:</div>`);
+            html.push('<ul style="margin:2px 0 0 16px;padding:0">');
+            for (const nm of _names.slice(0, 12)) {
+                html.push(`<li>${_escapeHtml(nm)}</li>`);
+            }
+            if (_names.length > 12) {
+                html.push(`<li style="opacity:0.7">+${_names.length - 12} more</li>`);
+            }
+            html.push('</ul>');
+        } else {
+            html.push('<div style="margin-top:2px;opacity:0.85">This group has items that need optimizing.</div>');
+        }
+    } else {
     // 2026-06-16 (jwbail): "What changed" summary — global state deltas (pet
     // levels, custom-stat toggles, skill levels) that drove the staleness but
     // don't show as added/removed items. e.g. "Tiger: level 1 -> 3".
@@ -414,6 +489,7 @@ function _showPopover(e, badge, options, pinned = true) {
     if (!newlyApplicable.size && !noLongerApplicable.size && !newlyUnlocked.length && !otherChanges.length && !versionBumped) {
         html.push('<div style="margin-top:6px;opacity:0.7">No detail available — try re-running the optimizer.</div>');
     }
+    }
 
     html.push('<div style="margin-top:8px;padding-top:6px;border-top:1px solid #444;font-size:0.85em;opacity:0.85">Click <strong>Optimize</strong> to refresh.</div>');
     html.push('</div>');
@@ -441,11 +517,11 @@ function _escapeHtml(s) {
 // Auto-refresh on broadcast event
 if (typeof window !== 'undefined') {
     window.addEventListener('stats-report-stale-refresh', () => {
-        refreshStaleAnnotations();
+        scheduleStaleRefresh();
     });
     // Refresh whenever stats report page opens
     window.addEventListener('stats-report-opened', () => {
-        refreshStaleAnnotations();
+        scheduleStaleRefresh();
         annotateEmptyNewItems();
     });
     // Also refresh once on initial page load (in case user is on a page

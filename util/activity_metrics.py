@@ -15,6 +15,14 @@ Functions:
 import math
 from typing import Dict, Optional
 
+# Game rule (Work Efficiency mechanics): the TOTAL efficiency multiplier
+# (base 100% + added WE, after the max cap) is floored at 1%. Per the wiki:
+# "These bonuses are then added to the base 100% efficiency... If your
+# calculated efficiency is negative or zero it is set to a minimum of 1%."
+# Without this floor, negative-WE gear drives total_efficiency to 0 (crash)
+# or negative (the min_steps safety net then inverts to the FEWEST steps).
+MIN_TOTAL_EFFICIENCY = 0.01
+
 # ============================================================================
 # ACTIVITY METRICS
 # ============================================================================
@@ -94,7 +102,11 @@ def calculate_activity_metrics(
         steps_add = 0
         steps_percent = 0.0
     capped_we = min(work_efficiency, max_efficiency)
-    total_efficiency = 1.0 + capped_we
+    # Floor the TOTAL efficiency multiplier at 1% (game rule — see
+    # MIN_TOTAL_EFFICIENCY). This stops negative-WE gear from crashing
+    # (total_efficiency == 0) or inverting the min_steps safety net below into
+    # the FEWEST possible steps.
+    total_efficiency = max(1.0 + capped_we, MIN_TOTAL_EFFICIENCY)
     # Match the game's formula (per KamiTzayig reference): single ceil at the END
     # of the chain. Applying ceil before the pct multiplier introduces off-by-one
     # errors (e.g. Flowing pocketwatch -5% on Lizard Hunting reads 105.86 with an
@@ -218,7 +230,10 @@ def calculate_crafting_metrics(
     
     # Apply work efficiency (capped at max)
     capped_we = min(work_efficiency, max_efficiency)
-    total_efficiency = 1.0 + capped_we
+    # Floor the TOTAL efficiency multiplier at 1% (game rule — see
+    # MIN_TOTAL_EFFICIENCY). Prevents negative-WE gear from crashing
+    # (total_efficiency == 0) or producing nonsensical step counts.
+    total_efficiency = max(1.0 + capped_we, MIN_TOTAL_EFFICIENCY)
     # Match the game's formula (per KamiTzayig reference): single ceil at the END
     # of the chain. Applying ceil before the pct multiplier introduces off-by-one
     # errors whenever a steps_percent modifier is present.
@@ -227,8 +242,17 @@ def calculate_crafting_metrics(
     # Apply percentage and flat modifiers (no intermediate ceil).
     steps_with_pct = base_over_eff * (1 + steps_percent)
     steps_with_flat = steps_with_pct + steps_add
-    # Single ceil at the end. Minimum of 1 step (crafting has lower floor than activities).
-    current_steps = max(math.ceil(steps_with_flat), 1)
+    # Single ceil at the end, then apply the game's 10-step-per-action floor.
+    # Crafting obeys the SAME minimum-10-steps rule as activities: no action can
+    # cost fewer than 10 steps, no matter how much work-efficiency / step-add gear
+    # is stacked. The frontend already floors crafts at 10 in every display
+    # component (calculator-section, recipe-info-section, item-selection-popup,
+    # gearset-comparison-section, drops-section) and the crafting tree floors at
+    # 10 too; this backend function was the lone outlier flooring at 1, which made
+    # the goals report (Recipes for Chests) under-count steps ~5x for high
+    # step-reduction gearsets vs the activity view (bug c61d7623: mud pie showed
+    # 2 steps/craft -> ~110 steps/chest instead of the real 10 steps/craft -> 550).
+    current_steps = max(math.ceil(steps_with_flat), 10)
     
     # Calculate expected steps with double action (no ceil - keep as float for accurate XP/step)
     expected_paid_actions = 1.0 / (1 + double_action)

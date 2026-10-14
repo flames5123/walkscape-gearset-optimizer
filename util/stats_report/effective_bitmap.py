@@ -435,4 +435,40 @@ def _runtime_eval_stats(item, state: CharacterStateSnapshot, skill: str, locatio
                                                         base[stat] = base.get(stat, 0.0) + float(val)
                                                     except (TypeError, ValueError):
                                                         pass
+
+    # Gated EQUIPMENT (explore_realm / item_ownership / total_collectibles):
+    # add the gated stats whose gate the character CURRENTLY satisfies, so this
+    # item enters the maximal set exactly when it would actually contribute.
+    # When the gate condition flips (explore the realm / acquire the map / cross
+    # the collectible threshold) the snapshot changes -> stale detection re-runs
+    # -> the bit flips -> the affected scope goes stale (2026-08-11, jwbail
+    # [fix:stale-detection]). Mirrors the optimizer's gate semantics in
+    # stats_mixin._add_gated_stats.
+    from .precompute.build_dominators import gated_stats_in_scope
+    for stat, val in gated_stats_in_scope(
+        item, skill, location, quality_mode,
+        active=lambda gt, gk: _snapshot_gate_active(state, gt, gk),
+    ).items():
+        base[stat] = base.get(stat, 0.0) + val
     return base
+
+
+def _snapshot_gate_active(state: CharacterStateSnapshot, gate_type: str, gate_key) -> bool:
+    """Is a gated-equipment gate currently satisfied by the character snapshot?
+    Mirrors stats_mixin._add_gated_stats exactly for the three snapshot-derivable
+    gates. Any other gate / error -> not active (conservative)."""
+    try:
+        if gate_type == "explore_realm":
+            # stats_mixin: custom stat `explored_realm_<realm_slug>`
+            return bool(state.custom_stats.get(f"explored_realm_{gate_key}", False))
+        if gate_type == "item_ownership":
+            # stats_mixin: owned iff the required item's name is in owned names.
+            # Snapshot owns (slug, quality) pairs; normalize the required display
+            # name to a slug (lower, spaces->_, strip apostrophes) and match.
+            slug = str(gate_key).lower().replace(" ", "_").replace("'", "")
+            return any(s == slug for (s, _q) in state.owned_items)
+        if gate_type == "total_collectibles":
+            return len(state.owned_collectibles) >= int(gate_key)
+    except Exception:
+        return False
+    return False

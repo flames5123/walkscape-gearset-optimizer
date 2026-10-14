@@ -234,6 +234,7 @@ HERBERTS_GUIDING_GROUNDS = FactionRewardTrack(
             FactionRewardEntry('Foraging chest', 1, 'Container', 'Container.FORAGING_CHEST'),
             FactionRewardEntry('Mining chest', 1, 'Container', 'Container.MINING_CHEST'),
             FactionRewardEntry('Woodcutting chest', 1, 'Container', 'Container.WOODCUTTING_CHEST'),
+            FactionRewardEntry('Hunting chest', 1, 'Container', 'Container.HUNTING_CHEST'),
         ]),
         FactionTier(reputation_required=5, title="Herbert's Friend", rewards=[
             FactionRewardEntry('Rusty chest', 3, 'Container', 'Container.RUSTY_CHEST'),
@@ -241,6 +242,7 @@ HERBERTS_GUIDING_GROUNDS = FactionRewardTrack(
             FactionRewardEntry('Cooking chest', 1, 'Container', 'Container.COOKING_CHEST'),
             FactionRewardEntry('Crafting chest', 1, 'Container', 'Container.CRAFTING_CHEST'),
             FactionRewardEntry('Smithing chest', 1, 'Container', 'Container.SMITHING_CHEST'),
+            FactionRewardEntry('Tailoring chest', 1, 'Container', 'Container.TAILORING_CHEST'),
         ]),
     ]
 )

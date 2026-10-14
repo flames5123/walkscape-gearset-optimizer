@@ -12,6 +12,8 @@
  * - Maximum history size to prevent memory issues
  */
 
+import { favoritesEqual, normalizeFavorites } from './utils/favorites-ui.js';
+
 class UndoRedoManager {
     constructor() {
         this.history = [];
@@ -19,6 +21,13 @@ class UndoRedoManager {
         this.maxHistorySize = 50;
         this.isApplyingState = false;
         this.initialized = false;
+
+        // Optional external context provider (e.g. Bank Layout Simulator). When set,
+        // capture/apply/compare delegate to it and the gearset/tree logic is bypassed.
+        // The prior gearset history is stashed and restored on unregister.
+        this.provider = null;
+        this._savedHistory = null;
+        this._savedIndex = -1;
 
         // Observers called whenever the history or current index changes.
         // Used by the UI to keep an open history popup in sync with
@@ -45,10 +54,35 @@ class UndoRedoManager {
     }
 
     /**
+     * Register an external undo/redo context (e.g. the Bank page). Stashes the
+     * current gearset history and starts a fresh history for the provider; call
+     * unregisterProvider() to restore the gearset history.
+     * provider = { capture(): serializable, apply(snapshot): void }
+     */
+    registerProvider(provider) {
+        this._savedHistory = this.history;
+        this._savedIndex = this.currentIndex;
+        this.provider = provider;
+        this.history = [];
+        this.currentIndex = -1;
+        this.pushState();       // seed initial snapshot
+        this.updateButtons();
+    }
+
+    unregisterProvider() {
+        this.provider = null;
+        if (this._savedHistory) { this.history = this._savedHistory; this.currentIndex = this._savedIndex; }
+        this._savedHistory = null;
+        this._savedIndex = -1;
+        this.updateButtons();
+    }
+
+    /**
      * Capture current gearset state
      * @returns {Object} Deep copy of current gearset
      */
     captureState() {
+        if (this.provider) return { __ext: this.provider.capture() };
         const currentGear = window.store.state.gearsets?.current || {};
 
         // Deep copy the gearset
@@ -67,6 +101,7 @@ class UndoRedoManager {
         // Capture alternatives state (so undo restores them after equipping an alternative)
         state._alternatives = window.store.state.gearsets?.alternatives || null;
         state._lockedAlternatives = window.store.state.gearsets?.lockedAlternatives || null;
+        state._hiddenAlternatives = window.store.state.gearsets?.hiddenAlternatives || null;
 
         // Capture activity/recipe selection
         const col3 = window.store.state.column3 || {};
@@ -92,6 +127,10 @@ class UndoRedoManager {
             state._craftingTreeNodes = JSON.parse(JSON.stringify(ctNodes));
         }
 
+        // Capture recipe/activity favorites (account-synced) so undo/redo can
+        // step through favorite/unfavorite actions.
+        state._favorites = normalizeFavorites(window.store.state.ui?.favorites);
+
         return state;
     }
 
@@ -102,6 +141,15 @@ class UndoRedoManager {
      * @returns {string} Human-readable description of changes
      */
     describeChanges(fromState, toState) {
+        if ((fromState && Object.prototype.hasOwnProperty.call(fromState, '__ext')) || (toState && Object.prototype.hasOwnProperty.call(toState, '__ext'))) {
+            if (this.provider && typeof this.provider.describe === 'function') {
+                try {
+                    const d = this.provider.describe(fromState && fromState.__ext, toState && toState.__ext);
+                    if (d) return d;
+                } catch (_) { /* fall through to the generic label */ }
+            }
+            return 'Bank layout change';
+        }
         const changes = [];
 
         // Get all slots from both states
@@ -324,6 +372,11 @@ class UndoRedoManager {
             else if (fromItem && toItem && fromItem.uuid !== toItem.uuid) changes.push(`GS2 ${slotName}: → ${toItem.name}`);
         }
 
+        // Describe recipe/activity favorites changes
+        for (const d of this._describeFavoriteChanges(fromState._favorites, toState._favorites)) {
+            changes.push(d);
+        }
+
         if (changes.length === 0) {
             return 'No changes';
         }
@@ -338,6 +391,52 @@ class UndoRedoManager {
 
         // More than 3 changes - show count and first few
         return `${changes.length} changes: ${changes.slice(0, 2).join(', ')}, ...`;
+    }
+
+    /**
+     * Describe favorite/unfavorite changes between two snapshots for the
+     * undo/redo history popup (e.g. "Favorited Beef Stew").
+     * @param {*} from - fromState._favorites
+     * @param {*} to - toState._favorites
+     * @returns {string[]}
+     */
+    _describeFavoriteChanges(from, to) {
+        const out = [];
+        const nf = normalizeFavorites(from);
+        const nt = normalizeFavorites(to);
+        const keyOf = (e) => `${e.type}\u0000${e.id}`;
+        const setF = new Set(nf.map(keyOf));
+        const setT = new Set(nt.map(keyOf));
+        for (const e of nt) if (!setF.has(keyOf(e))) out.push(`Favorited ${this._favName(e.type, e.id)}`);
+        for (const e of nf) if (!setT.has(keyOf(e))) out.push(`Unfavorited ${this._favName(e.type, e.id)}`);
+        // Same membership but different order → a manual reorder.
+        if (out.length === 0 && nf.length === nt.length) {
+            for (let i = 0; i < nf.length; i++) {
+                if (keyOf(nf[i]) !== keyOf(nt[i])) { out.push('Reordered favorites'); break; }
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Resolve a favorite id to its display name using the loaded dropdown data,
+     * falling back to the id.
+     * @param {'activity'|'recipe'} type
+     * @param {string} id
+     * @returns {string}
+     */
+    _favName(type, id) {
+        try {
+            const data = type === 'recipe'
+                ? window.recipeSelector?.recipesData
+                : window.activitySelector?.activitiesData;
+            const bySkill = data?.by_skill || {};
+            for (const arr of Object.values(bySkill)) {
+                const found = arr.find(x => x.id === id);
+                if (found) return found.name;
+            }
+        } catch (_) { /* fall through to id */ }
+        return id;
     }
 
     /**
@@ -445,6 +544,9 @@ class UndoRedoManager {
      * @returns {boolean} True if states are equal
      */
     statesEqual(state1, state2) {
+        if ((state1 && Object.prototype.hasOwnProperty.call(state1, '__ext')) || (state2 && Object.prototype.hasOwnProperty.call(state2, '__ext'))) {
+            return !!state1 && !!state2 && state1.__ext === state2.__ext;
+        }
         const slots1 = Object.keys(state1).filter(k => k !== '_lockedSlots').sort();
         const slots2 = Object.keys(state2).filter(k => k !== '_lockedSlots').sort();
 
@@ -492,6 +594,9 @@ class UndoRedoManager {
         const col3_2 = state2._column3 || {};
         if (col3_1.selectedActivity !== col3_2.selectedActivity) return false;
         if (col3_1.selectedRecipe !== col3_2.selectedRecipe) return false;
+
+        // Compare recipe/activity favorites
+        if (!favoritesEqual(state1._favorites, state2._favorites)) return false;
 
         // Compare crafting tree nodes
         const ct1 = state1._craftingTreeNodes;
@@ -562,6 +667,11 @@ class UndoRedoManager {
      * @param {Object} state - State to apply
      */
     applyState(state) {
+        if (state && Object.prototype.hasOwnProperty.call(state, '__ext')) {
+            this.isApplyingState = true;
+            try { if (this.provider) this.provider.apply(state.__ext); } finally { this.isApplyingState = false; }
+            return;
+        }
         this.isApplyingState = true;
 
         // Save scroll position before applying state
@@ -613,6 +723,7 @@ class UndoRedoManager {
             // Restore alternatives state
             window.store.state.gearsets.alternatives = state._alternatives || null;
             window.store.state.gearsets.lockedAlternatives = state._lockedAlternatives || null;
+            window.store.state.gearsets.hiddenAlternatives = state._hiddenAlternatives || null;
             // Notify AFTER restoring — the gearsets.current notify above fires
             // before this block, so subscribers that render from alternatives
             // (e.g. the column-2 Non-owned/Locked Upgrades section) would
@@ -620,6 +731,7 @@ class UndoRedoManager {
             // never see the restored alternatives on undo/redo.
             window.store._notifySubscribers('gearsets.alternatives');
             window.store._notifySubscribers('gearsets.lockedAlternatives');
+            window.store._notifySubscribers('gearsets.hiddenAlternatives');
 
             // Restore gearset2 if it was captured
             if (state._gearset2 !== undefined && window.store.state.gearsets?.comparisonMode) {
@@ -691,6 +803,15 @@ class UndoRedoManager {
                     window._craftingTreeViewGlobal.treeNodes = ctNodes;
                     window._craftingTreeViewGlobal._renderTree();
                 }
+            }
+
+            // Restore recipe/activity favorites. setFavorites notifies
+            // 'ui.favorites' (dropdowns refresh their hearts + Favorites
+            // category) and persists the restored set. It does NOT push a new
+            // undo snapshot, so this stays a clean undo/redo step.
+            if (state._favorites !== undefined &&
+                !favoritesEqual(state._favorites, window.store.state.ui?.favorites)) {
+                window.store.setFavorites(state._favorites, { save: true });
             }
 
             console.log('Undo/Redo: Applied state', state);

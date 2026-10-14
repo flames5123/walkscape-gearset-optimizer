@@ -1,3 +1,4 @@
+import { rewardSourceGroupsHtml, openAchievementFromSource } from '../utils/reward-sources.js';
 /**
  * ItemRow component
  * 
@@ -18,12 +19,16 @@ import Component from './base.js';
 import store from '../state.js';
 import api from '../api.js';
 import { getPetIconPath, getPetStageLabel, getPetVariants } from '../utils/pet-utils.js';
+import { abilityExtraLines } from '../utils/ability-detail.js';
 import { ownedCountLabel } from '../utils/owned-quantity.js';
+import { ownedByQualityCache, ownedBlockHtml } from '../utils/owned-quality-breakdown.js';
 import { renderRequirementsRow } from '../utils/requirements.js';
 import { wikiDarkModeSuffix } from '../utils/wiki-link.js';
 import { switchToTab } from '../pull-to-refresh.js';
 
 import { formatFixed } from '../utils/number-format.js';
+import { getOwnedCollectiblesCount } from '../utils/collectibles-ownership.js';
+import { consumableDurationHtml } from '../utils/consumable-duration.js';
 
 /**
  * Format condition text for stat display
@@ -49,7 +54,10 @@ function formatCondition(skill, location) {
         } else if (loc === 'underwater') {
             return 'Underwater location';
         } else {
-            return `${capitalize(loc)} location`;
+            // Multi-word regions arrive snake_cased (e.g. 'halfling_rebels');
+            // render as title-cased words ('Halfling Rebels location').
+            const pretty = loc.split('_').map(w => capitalize(w)).join(' ');
+            return `${pretty} location`;
         }
     };
 
@@ -189,7 +197,7 @@ class ItemRow extends Component {
         }
         const dimClass = isHidden ? 'item-row-hidden' : '';
         const hiddenClass = isHidden ? 'is-hidden' : '';
-        const eyeHtml = `<svg class="eye-icon eye-open" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg><svg class="eye-icon eye-closed" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 12c2 5 5.5 8 10 8s8-3 10-8"/><path d="M7 16l-1 2"/><path d="M12 18v2"/><path d="M17 16l1 2"/></svg>`;
+        const eyeHtml = `<svg class="eye-icon eye-open" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg><svg class="eye-icon eye-closed" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 12c2 5 5.5 8 10 8s8-3 10-8"/><path d="M6.5 18.5l-1.5 2.5"/><path d="M12 20.5v3"/><path d="M17.5 18.5l1.5 2.5"/></svg>`;
 
         const html = `
             <div class="item-row ${rarity} ${dimClass}" data-item="${this.props.item.id}">
@@ -374,8 +382,38 @@ class ItemRow extends Component {
         let ownedHtml = '';
         const ownedQuantities = (store.state.character && store.state.character.owned_quantities) || null;
         const ownedText = ownedCountLabel(ownedQuantities, this.props.item.id);
-        if (ownedText) {
-            ownedHtml = `<div class="item-owned-count pet-xp-info">${ownedText}</div>`;
+        // Per-quality breakdown (shared with the hover popovers): line 1 is the
+        // TOTAL owned, line 2 lists every owned quality in its colour. Falls
+        // back to the "N owned" / "N owned (Fine)" lines below when there's no
+        // per-quality variety (fixed-rarity items, Normal-only stacks) or the
+        // live per-quality map hasn't loaded yet.
+        const perQ = ownedByQualityCache()[this.props.item.id] || null;
+        const breakdown = ownedBlockHtml({
+            ownedMap: perQ, totalActive: true,
+            line1Class: 'item-owned-count pet-xp-info', line1Style: 'margin:0',
+            breakdownStyle: 'margin:0;font-size:0.85em;text-align:center',
+        });
+        // Owned counts: normal on one line, plus a second "N owned (Fine)"
+        // line in the fine color for items with a Fine variant. Wrap both in a
+        // single tight-gap centered column so they sit close together — the
+        // parent .item-details is a flex column with `gap: var(--spacing-sm)`,
+        // and each pet-xp-info line adds `margin: 4px 0`, which together pushed
+        // the two lines far apart. One wrapper = one flex child (normal spacing
+        // to siblings) with zeroed inner margins and a 2px inner gap.
+        const fineText = this.props.item.has_fine
+            ? ownedCountLabel(ownedQuantities, this.props.item.id, { fine: true })
+            : '';
+        if (breakdown) {
+            ownedHtml = `<div class="item-owned-counts" style="display:flex;flex-direction:column;align-items:center;gap:2px">${breakdown}</div>`;
+        } else if (ownedText || fineText) {
+            const ownedLines = [];
+            if (ownedText) {
+                ownedLines.push(`<div class="item-owned-count pet-xp-info" style="margin:0">${ownedText}</div>`);
+            }
+            if (fineText) {
+                ownedLines.push(`<div class="item-owned-count item-owned-count-fine pet-xp-info" style="margin:0;color:var(--fine-color)">${fineText} (Fine)</div>`);
+            }
+            ownedHtml = `<div class="item-owned-counts" style="display:flex;flex-direction:column;align-items:center;gap:2px">${ownedLines.join('')}</div>`;
         }
 
         return `
@@ -388,9 +426,48 @@ class ItemRow extends Component {
                 ${hideCheckboxesHtml}
                 ${renderRequirementsRow(this.props.item.requirements)}
                 <div class="keywords">${this.renderKeywords()}</div>
+                ${consumableDurationHtml(this.props.item)}
                 <div class="stats">${this.renderStats()}</div>
+                ${this.renderItemAbilities()}
             </div>
         `;
+    }
+
+    /**
+     * Render item-equipped abilities (e.g. Hat of Wisdom's Study Time) for the
+     * Col 1 owned-items row. Pets use renderPetDetails; regular items funnel
+     * their `abilities` through here so the ability shows in Col 1, not just
+     * the slot popup.
+     * @returns {string} HTML string (empty when the item has no abilities)
+     */
+    renderItemAbilities() {
+        const abilities = this.props.item.abilities;
+        if (!Array.isArray(abilities) || abilities.length === 0) return '';
+        let html = `<div class="pet-abilities"><div class="pet-abilities-header">Abilities</div>`;
+        for (const ability of abilities) {
+            const abIcon = ability.icon
+                ? `<img src="/assets/icons/abilities/${ability.icon}.svg" class="pet-ability-icon" width="32" height="32" style="vertical-align:middle;margin-right:6px" alt="" onerror="this.style.display='none'">`
+                : '';
+            let bodyHtml = '';
+            if (ability.ability_stats && Object.keys(ability.ability_stats).length > 0) {
+                bodyHtml = `<div class="stats">${this.renderStatsFromObject(ability.ability_stats, false, '')}</div>`;
+            } else if (ability.effect) {
+                bodyHtml = `<div class="pet-ability-effect">${ability.effect}</div>`;
+            }
+            let metaHtml = '';
+            metaHtml += abilityExtraLines(ability, 'pet-ability-meta');
+            if (ability.cooldown) metaHtml += `<div class="pet-ability-meta">Cooldown: ${ability.cooldown}</div>`;
+            if (ability.charges) metaHtml += `<div class="pet-ability-meta">Charges: ${ability.charges}</div>`;
+            html += `
+                <div class="pet-ability">
+                    <span class="pet-ability-name">${abIcon}${ability.name || 'Unknown'}</span>
+                    ${bodyHtml}
+                    ${metaHtml}
+                </div>
+            `;
+        }
+        html += `</div>`;
+        return html;
     }
 
     /**
@@ -601,6 +678,13 @@ class ItemRow extends Component {
                 detailsHtml += `<div class="stats">${this.renderStatsForVersion(levelData.stats, false)}</div>`;
             }
 
+            // Per-level gated stats (e.g. Golden Frog's total_wealth gate). Pets
+            // carry gated_stats per level (not item-level), so render them from
+            // levelData here — renderStatsForVersion only reads item-level gates.
+            if (levelData.gated_stats && Object.keys(levelData.gated_stats).length > 0) {
+                detailsHtml += `<div class="stats">${this.renderGatedStats(levelData.gated_stats, false).join('')}</div>`;
+            }
+
             // Abilities
             if (levelData.abilities && levelData.abilities.length > 0) {
                 detailsHtml += `<div class="pet-abilities"><div class="pet-abilities-header">Abilities</div>`;
@@ -624,13 +708,35 @@ class ItemRow extends Component {
                         for (const [skill, locations] of Object.entries(ability.ability_stats)) {
                             for (const [location, stats] of Object.entries(locations)) {
                                 for (const [stat, value] of Object.entries(stats)) {
-                                    const statName = stat.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
                                     const sign = value > 0 ? '+' : '';
-                                    const isFlat = stat.includes('_add') || stat.includes('inventory');
-                                    const suffix = isFlat ? '' : '%';
                                     const skillLabel = skill === 'global' ? '' : ` While doing ${skill.charAt(0).toUpperCase() + skill.slice(1)}`;
                                     const locLabel = location === 'global' ? '' : ` in ${location}`;
-                                    effectLines.push(`${sign}${value}${suffix} ${statName}${skillLabel}${locLabel}`);
+                                    // ItemFindingCategory stats (e.g. Pet Rock's
+                                    // Rockslide -> RANDOM_GEM) use the same
+                                    // category cache as every other surface, so
+                                    // they read "Chance to find 1 Rough gem" with
+                                    // the matching attribute icon — not the raw enum.
+                                    if (stat.startsWith('ItemFindingCategory.')) {
+                                        const cc = stat.split('.')[1] || '';
+                                        const cat = window.itemFindingCategories && window.itemFindingCategories[cc];
+                                        let label, iconName = `find_${cc.toLowerCase()}`;
+                                        if (cat) {
+                                            const qty = cat.min_qty === cat.max_qty ? cat.min_qty : `${cat.min_qty} to ${cat.max_qty}`;
+                                            label = `Chance to find ${qty} ${cat.display_name_singular}`;
+                                            if (cat.icon_name) iconName = cat.icon_name;
+                                        } else {
+                                            const words = cc.split('_').join(' ').toLowerCase();
+                                            label = `Chance to find ${words}`;
+                                        }
+                                        const iconImg = `<img src="/assets/icons/attributes/${iconName}.svg" width="16" height="16" style="vertical-align:middle;margin-right:4px" alt="" onerror="this.style.display='none'">`;
+                                        effectLines.push(`${iconImg}${sign}${value}% ${label}${skillLabel}${locLabel}`);
+                                    } else {
+                                        const statName = stat.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+                                        // quality_outcome and *_add / inventory are flat values, not percentages.
+                                        const isFlat = stat.includes('_add') || stat.includes('inventory') || stat === 'quality_outcome';
+                                        const suffix = isFlat ? '' : '%';
+                                        effectLines.push(`${sign}${value}${suffix} ${statName}${skillLabel}${locLabel}`);
+                                    }
                                 }
                             }
                         }
@@ -666,6 +772,25 @@ class ItemRow extends Component {
                                     cooldownHtml += `<div class="pet-ability-meta pet-ability-items">${inlineIcon} <strong>${item.qty}</strong> gained from ${item.name}</div>`;
                                 }
                             }
+                        } else if (cooldown.includes('charged by spending coins')) {
+                            // Coin-charged abilities (e.g. Golden Frog's Lucky
+                            // Day) render identically to item-charged ones (Tiger):
+                            // a "One full charge requires N" header + per-input rows.
+                            const chargeMatch = cooldown.match(/requires.*?(\d+)/);
+                            const chargeNeeded = chargeMatch ? chargeMatch[1] : '?';
+                            const coinInputs = [];
+                            const coinRegex = /(\d+)\s+gained from\s+([\d,]+\s+coins)/gi;
+                            let cm;
+                            while ((cm = coinRegex.exec(cooldown)) !== null) {
+                                coinInputs.push({ qty: cm[1], src: cm[2] });
+                            }
+                            const drIcon = '/assets/icons/attributes/double_rewards.svg';
+                            const inlineIcon = `<img src="${drIcon}" style="width:14px;height:14px;vertical-align:middle" alt="charge">`;
+                            const coinIcon = `<img src="/assets/icons/items/coins.svg" style="width:14px;height:14px;vertical-align:middle" alt="coins" onerror="this.style.display='none'">`;
+                            cooldownHtml = `<div class="pet-ability-meta">Charged by coins. One full charge requires ${inlineIcon} <strong>${chargeNeeded}</strong></div>`;
+                            for (const ci of coinInputs) {
+                                cooldownHtml += `<div class="pet-ability-meta pet-ability-items">${inlineIcon} <strong>${ci.qty}</strong> gained from ${coinIcon} ${ci.src}</div>`;
+                            }
                         } else {
                             cooldownHtml = `<div class="pet-ability-meta">Cooldown: ${cooldown}</div>`;
                         }
@@ -678,6 +803,7 @@ class ItemRow extends Component {
                         <div class="pet-ability">
                             <span class="pet-ability-name">${abIcon}${ability.name || 'Unknown'}</span>
                             <div class="pet-ability-effect">${effectHtml}</div>
+                            ${abilityExtraLines(ability, 'pet-ability-meta')}
                             ${cooldownHtml}
                             ${ability.charges ? `<div class="pet-ability-meta">Charges: ${ability.charges}</div>` : ''}
                         </div>
@@ -697,14 +823,14 @@ class ItemRow extends Component {
     attachEvents() {
         // Has checkbox - toggle normal ownership (store as user override)
         this.$element.on('change', '.has-checkbox', (e) => {
-            store.update(`ui.user_overrides.items.${this.props.item.id}.has`, e.target.checked);
+            store.update(['ui', 'user_overrides', 'items', this.props.item.id, 'has'], e.target.checked);
 
             // For non-crafted rings, default quantity to 1 when checked
             const isNonCraftedRing = this.props.item.slot === 'ring' && this.props.item.type !== 'crafted_item';
             if (isNonCraftedRing && e.target.checked) {
                 const currentQuantity = store.state.ui.user_overrides?.items?.[this.props.item.id]?.ring_quantity;
                 if (currentQuantity === undefined) {
-                    store.update(`ui.user_overrides.items.${this.props.item.id}.ring_quantity`, 1);
+                    store.update(['ui', 'user_overrides', 'items', this.props.item.id, 'ring_quantity'], 1);
                 }
             }
             // 2026-05-29: ownership change must trigger stats-report stale
@@ -716,50 +842,50 @@ class ItemRow extends Component {
         // Ring quantity dropdown - update quantity for non-crafted rings
         this.$element.on('change', '.ring-quantity-dropdown', (e) => {
             const quantity = parseInt(e.target.value);
-            store.update(`ui.user_overrides.items.${this.props.item.id}.ring_quantity`, quantity);
+            store.update(['ui', 'user_overrides', 'items', this.props.item.id, 'ring_quantity'], quantity);
             if (window.statsReportBroadcastStateChange) window.statsReportBroadcastStateChange();
         });
 
         // Fine checkbox - toggle fine ownership (store as user override)
         this.$element.on('change', '.has-checkbox-fine', (e) => {
-            store.update(`ui.user_overrides.items.${this.props.item.id}.has_fine`, e.target.checked);
+            store.update(['ui', 'user_overrides', 'items', this.props.item.id, 'has_fine'], e.target.checked);
             if (window.statsReportBroadcastStateChange) window.statsReportBroadcastStateChange();
         });
 
         // Hide checkbox (normal) - toggle visibility in optimization (store as user override)
         this.$element.on('change', '.hide-checkbox input:not(.hide-checkbox-fine):not(.hide-checkbox-ring1):not(.hide-checkbox-ring2)', (e) => {
-            store.update(`ui.user_overrides.items.${this.props.item.id}.hide`, e.target.checked);
+            store.update(['ui', 'user_overrides', 'items', this.props.item.id, 'hide'], e.target.checked);
             if (window.statsReportBroadcastStateChange) window.statsReportBroadcastStateChange();
         });
 
         // Hide checkbox (fine) - toggle fine visibility in optimization (store as user override)
         this.$element.on('change', '.hide-checkbox-fine', (e) => {
-            store.update(`ui.user_overrides.items.${this.props.item.id}.hide_fine`, e.target.checked);
+            store.update(['ui', 'user_overrides', 'items', this.props.item.id, 'hide_fine'], e.target.checked);
             if (window.statsReportBroadcastStateChange) window.statsReportBroadcastStateChange();
         });
 
         // Hide checkbox (ring1) - toggle ring1 visibility in optimization
         this.$element.on('change', '.hide-checkbox-ring1', (e) => {
-            store.update(`ui.user_overrides.items.${this.props.item.id}.hide_ring1`, e.target.checked);
+            store.update(['ui', 'user_overrides', 'items', this.props.item.id, 'hide_ring1'], e.target.checked);
             if (window.statsReportBroadcastStateChange) window.statsReportBroadcastStateChange({immediate: true});
         });
 
         // Hide checkbox (ring2) - toggle ring2 visibility in optimization
         this.$element.on('change', '.hide-checkbox-ring2', (e) => {
-            store.update(`ui.user_overrides.items.${this.props.item.id}.hide_ring2`, e.target.checked);
+            store.update(['ui', 'user_overrides', 'items', this.props.item.id, 'hide_ring2'], e.target.checked);
             if (window.statsReportBroadcastStateChange) window.statsReportBroadcastStateChange({immediate: true});
         });
 
         // Quality dropdown - update item quality (store as user override)
         this.$element.on('change', '.quality-dropdown:not(.ring-dropdown)', (e) => {
             const newQuality = e.target.value;
-            store.update(`ui.user_overrides.items.${this.props.item.id}.quality`, newQuality);
+            store.update(['ui', 'user_overrides', 'items', this.props.item.id, 'quality'], newQuality);
         });
 
         // Ring dropdown 1 - update ring1 quality
         this.$element.on('change', '.ring-dropdown-1', (e) => {
             const newQuality = e.target.value;
-            store.update(`ui.user_overrides.items.${this.props.item.id}.ring1_quality`, newQuality);
+            store.update(['ui', 'user_overrides', 'items', this.props.item.id, 'ring1_quality'], newQuality);
 
             // Update border color
             const qualityToRarity = {
@@ -776,7 +902,7 @@ class ItemRow extends Component {
         // Ring dropdown 2 - update ring2 quality
         this.$element.on('change', '.ring-dropdown-2', (e) => {
             const newQuality = e.target.value;
-            store.update(`ui.user_overrides.items.${this.props.item.id}.ring2_quality`, newQuality);
+            store.update(['ui', 'user_overrides', 'items', this.props.item.id, 'ring2_quality'], newQuality);
 
             // Update border color
             const qualityToRarity = {
@@ -793,17 +919,17 @@ class ItemRow extends Component {
         // Pet level dropdown - update pet level (store as user override)
         this.$element.on('change', '.pet-level-select', (e) => {
             const newLevel = parseInt(e.target.value);
-            store.update(`ui.user_overrides.items.${this.props.item.id}.level`, newLevel);
+            store.update(['ui', 'user_overrides', 'items', this.props.item.id, 'level'], newLevel);
         });
 
         // Pet variant dropdown - update pet color variant (store as user override)
         this.$element.on('change', '.pet-variant-select', (e) => {
-            store.update(`ui.user_overrides.items.${this.props.item.id}.variant`, e.target.value);
+            store.update(['ui', 'user_overrides', 'items', this.props.item.id, 'variant'], e.target.value);
         });
 
         // Pet name input - update custom pet name (store as user override, on blur/enter)
         this.$element.on('change', '.pet-name-input', (e) => {
-            store.update(`ui.user_overrides.items.${this.props.item.id}.petName`, e.target.value);
+            store.update(['ui', 'user_overrides', 'items', this.props.item.id, 'petName'], e.target.value);
         });
 
         // Generic item edit button
@@ -878,6 +1004,11 @@ class ItemRow extends Component {
                     store._notifySubscribers('column3.selectedActivity');
                     store._saveColumn3Selection();
                 }
+            } else if (sourceType === 'achievement_reward') {
+                // Achievement-reward source → open the Achievements page to this
+                // achievement (scroll + highlight); skip the column-3 navigation.
+                openAchievementFromSource(sourceId);
+                return;
             }
 
             // Navigate to column 3 — on mobile, swap tab with animation; on desktop, scroll
@@ -914,16 +1045,16 @@ class ItemRow extends Component {
             if (isRing) {
                 // Toggle both ring qualities — hidden if EITHER is hidden (toggle to all-show or all-hide)
                 newHide = !(itemState.hide_ring1 || itemState.hide_ring2);
-                store.update(`ui.user_overrides.items.${itemId}.hide_ring1`, newHide);
-                store.update(`ui.user_overrides.items.${itemId}.hide_ring2`, newHide);
+                store.update(['ui', 'user_overrides', 'items', itemId, 'hide_ring1'], newHide);
+                store.update(['ui', 'user_overrides', 'items', itemId, 'hide_ring2'], newHide);
             } else if (isMat && hasFineVar) {
                 // Toggle both normal and fine — hidden if EITHER is hidden
                 newHide = !(itemState.hide || itemState.hide_fine);
-                store.update(`ui.user_overrides.items.${itemId}.hide`, newHide);
-                store.update(`ui.user_overrides.items.${itemId}.hide_fine`, newHide);
+                store.update(['ui', 'user_overrides', 'items', itemId, 'hide'], newHide);
+                store.update(['ui', 'user_overrides', 'items', itemId, 'hide_fine'], newHide);
             } else {
                 newHide = !itemState.hide;
-                store.update(`ui.user_overrides.items.${itemId}.hide`, newHide);
+                store.update(['ui', 'user_overrides', 'items', itemId, 'hide'], newHide);
             }
 
             // Surgical DOM update — just toggle classes (CSS handles crossfade + dim)
@@ -1223,6 +1354,7 @@ class ItemRow extends Component {
                 }
             }
 
+            html += rewardSourceGroupsHtml(sources);
             html += '</div>';
             $container.html(html);
         } catch (err) {
@@ -1458,14 +1590,23 @@ class ItemRow extends Component {
      */
     renderStatsForVersion(stats, isFine) {
 
-        if (!stats || Object.keys(stats).length === 0) {
+        const hasBase = stats && Object.keys(stats).length > 0;
+        const hasGated = this.props.item.gated_stats
+            && Object.keys(this.props.item.gated_stats).length > 0;
+
+        // Only bail when there is genuinely nothing to show. Items with empty
+        // always-on stats but non-empty gated_stats (e.g. Map of Arenum's
+        // item_ownership per-region DA) must still render their gated rows.
+        if (!hasBase && !hasGated) {
             return '';  // Return empty string instead of "No stats"
         }
 
         const statsHtml = [];
 
         // Render regular stats
-        statsHtml.push(...this.renderStatsFromObject(stats, isFine, ''));
+        if (hasBase) {
+            statsHtml.push(...this.renderStatsFromObject(stats, isFine, ''));
+        }
 
         // Render gated stats if present
         if (this.props.item.gated_stats) {
@@ -1565,6 +1706,55 @@ class ItemRow extends Component {
                 const formattedThreshold = parseInt(threshold).toLocaleString();
                 const requirement = `${formattedThreshold} Travel Steps`;
                 statsHtml.push(this.renderStatsFromObject(travelStats, isFine, requirement));
+            }
+        }
+
+        // Explore-realm requirements (global bonuses unlocked by fully
+        // exploring a realm, e.g. Globetrotter's backpack / Quickdraw map).
+        if (gatedStats.explore_realm) {
+            const REALM_LABELS = { jarvonia: 'Jarvonia', gdte: 'Grand Duchy of Trellin-Erdwise', syrenthia: 'Syrenthia', wallisia: 'Wallisia', wrentmark: 'Wrentmark' };
+            for (const [realmSlug, realmStats] of Object.entries(gatedStats.explore_realm)) {
+                const realmLabel = REALM_LABELS[realmSlug] || realmSlug.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+                const requirement = `Explored: ${realmLabel}`;
+                statsHtml.push(this.renderStatsFromObject(realmStats, isFine, requirement));
+            }
+        }
+
+        // Item-ownership requirements (e.g. Map of Arenum grants +15% DA while
+        // travelling in each region if you own that region's map). Structure:
+        // {'item_ownership': {required_item_name: {skill: {location: {stat: value}}}}}
+        if (gatedStats.item_ownership) {
+            const small = new Set(['of', 'the', 'a', 'an', 'and']);
+            for (const [requiredItemName, ownStats] of Object.entries(gatedStats.item_ownership)) {
+                const displayName = String(requiredItemName || '').split(/\s+/).map((w, i) =>
+                    (i > 0 && small.has(w.toLowerCase()))
+                        ? w.toLowerCase()
+                        : (w.charAt(0).toUpperCase() + w.slice(1))
+                ).join(' ');
+                const requirement = `Requires: ${displayName}`;
+                statsHtml.push(this.renderStatsFromObject(ownStats, isFine, requirement));
+            }
+        }
+
+        // Keyword-in-inventory requirements (e.g. quivers: bonus while carrying
+        // an 'arrows' item). Assumed always active (inventory unavailable at
+        // scoring time); rendered with an informational note, not dimmed.
+        if (gatedStats.keyword_in_inventory) {
+            for (const [keyword, kwStats] of Object.entries(gatedStats.keyword_in_inventory)) {
+                const kwLabel = keyword.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+                const requirement = `Requires: ${kwLabel} in inventory`;
+                statsHtml.push(this.renderStatsFromObject(kwStats, isFine, requirement));
+            }
+        }
+
+        // Total-wealth requirements (e.g. Golden Frog: stats apply only while
+        // holding >= 100,000 coins). Assumed always active (coin balance
+        // unavailable at scoring time); rendered as an informational note.
+        if (gatedStats.total_wealth) {
+            for (const [threshold, twStats] of Object.entries(gatedStats.total_wealth)) {
+                const amount = Number(threshold).toLocaleString();
+                const requirement = `Requires: ${amount} Total Wealth`;
+                statsHtml.push(this.renderStatsFromObject(twStats, isFine, requirement));
             }
         }
 
@@ -1698,13 +1888,13 @@ class ItemRow extends Component {
                             }
                         } else if (requirement.includes('Obtained Collectibles')) {
                             // Obtained-collectibles requirement (e.g. "10 Obtained
-                            // Collectibles" — Collection ring). character.collectibles
-                            // is the ARRAY of owned collectible IDs, so count via length.
+                            // Collectibles" — Collection ring). getOwnedCollectiblesCount
+                            // merges imported collectibles with manual "owned" checks
+                            // (ui.user_overrides.items[slug].has) — bug 5d24decc.
                             const match = requirement.match(/(\d+) Obtained Collectibles/);
                             if (match) {
                                 const reqCount = parseInt(match[1]);
-                                const coll = store.state.character?.collectibles;
-                                const owned = Array.isArray(coll) ? coll.length : (coll || 0);
+                                const owned = getOwnedCollectiblesCount();
                                 requirementMet = owned >= reqCount;
                                 console.log(`  Collectibles: char has ${owned} >= required ${reqCount}? ${requirementMet}`);
                             }
@@ -1770,6 +1960,32 @@ class ItemRow extends Component {
                                 const customStats = store.state.ui?.custom_stats || {};
                                 requirementMet = customStats[customStatKey] === true;
                             }
+                        } else if (requirement.includes('Total Wealth')) {
+                            // Golden Frog: met when the character's total wealth
+                            // (value of all items — shown in col1/col2) is >= N.
+                            const match = requirement.match(/([\d,]+) Total Wealth/);
+                            if (match) {
+                                const reqWealth = parseInt(match[1].replace(/,/g, ''), 10);
+                                const overrides = store.state.ui?.user_overrides || {};
+                                const wealth = overrides.inventory_value !== undefined
+                                    ? overrides.inventory_value
+                                    : ((store.state.character?.coins || 0) + (store.state.character?.inventory_value || 0));
+                                requirementMet = wealth >= reqWealth;
+                            }
+                        } else if (requirement.startsWith('Explored: ')) {
+                            // Explore-realm requirement (e.g., "Explored: Jarvonia").
+                            // Character-wide custom stat `explored_realm_<slug>`.
+                            const REALM_LABEL_TO_SLUG = { 'Jarvonia': 'jarvonia', 'Grand Duchy of Trellin-Erdwise': 'gdte', 'Syrenthia': 'syrenthia', 'Wallisia': 'wallisia', 'Wrentmark': 'wrentmark' };
+                            const label = requirement.slice('Explored: '.length);
+                            const slug = REALM_LABEL_TO_SLUG[label] || label.toLowerCase().replace(/ /g, '_');
+                            const customStats = store.state.ui?.custom_stats || {};
+                            const overrides = store.state.ui.user_overrides || {};
+                            const allCustomStats = { ...customStats, ...(overrides.custom_stats || {}) };
+                            requirementMet = allCustomStats[`explored_realm_${slug}`] === true;
+                        } else if (requirement.endsWith('in inventory')) {
+                            // keyword_in_inventory (e.g. "Requires: Arrows in inventory").
+                            // We can't see the full inventory, so treat as always active.
+                            requirementMet = true;
                         }
                     }
 

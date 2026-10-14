@@ -1,3 +1,4 @@
+import { rewardSourceGroupsHtml, openAchievementFromSource } from '../utils/reward-sources.js';
 /**
  * Gearset Comparison Section - Side-by-side comparison of two gearsets
  * 
@@ -8,11 +9,14 @@
 import Component from './base.js';
 import store from '../state.js';
 import LocationDropdown from './location-dropdown.js';
+import { encodeGearsetForTravel } from './travel-info-section.js';
+import { renderTravelComparisonTable, renderTravelDropsComparisonTable } from '../utils/travel-comparison.js';
 import { getInstantActionsPet, SMELTING_RECIPE_NAMES } from '../utils/pet-utils.js';
 import { getPetIconPath } from '../utils/pet-utils.js';
 import { wireDropAnchor } from '../drop-item-popover.js';
 
 import { formatFixed } from '../utils/number-format.js';
+import { isCollectibleOwned } from '../utils/collectibles-ownership.js';
 
 class GearsetComparisonSection extends Component {
     constructor(element, props = {}) {
@@ -27,12 +31,44 @@ class GearsetComparisonSection extends Component {
         this._selectedMaterialGroup = 0;
         this._selectedInputItems = { 1: {}, 2: {} }; // Per-gearset input item selections
 
+        // Travel comparison state. Start/End are a SINGLE shared selection for
+        // both gearsets (the route is gearset-independent — only the per-gearset
+        // step/WE/DA stats differ). Restored from the same column3 keys the
+        // single-view TravelInfoSection uses so the selection survives toggling
+        // comparison mode on/off.
+        this.travelStart = store.state.column3?.travelStart ?? null;
+        this.travelEnd = store.state.column3?.travelEnd ?? null;
+        this.travelRouteData = null;
+        this._travelRouteKey = null;
+        this.travelStats1 = null;
+        this.travelStats2 = null;
+        this._travelStatsKey = null;
+        this._travelFetchToken = 0;
+        // Per-gearset "Gear set optimized for <regions>" caption state (report
+        // 30c7ea11 follow-up). gsNum -> {names, allRegions}; baseline sig is
+        // captured on the optimizer's own equip so it isn't self-dismissed.
+        this._optRegionsByGs = {};
+        this._optRegionsBaselineSig = {};
+
         // Subscribe to relevant state changes
         this.subscribe('gearsets.comparisonMode', () => this.onComparisonModeChange());
         this.subscribe('gearsets.current', () => this.onGearsetChange());
         this.subscribe('gearsets.gearset2', () => this.onGearsetChange());
         this.subscribe('column3.selectedActivity', () => this.onActivityChange());
         this.subscribe('column3.selectedRecipe', () => this.onRecipeChange());
+        // Re-render when the shared "Hide owned collectibles" filter toggles
+        // (kept in sync with the single-view drops checkbox — same store key).
+        // This filter only changes which collectible ROWS are shown; the gearset
+        // stats and item-finding drops are unchanged. Set _reuseStatsForFilter
+        // so render() reuses the cached stats + ifDrops and skips the (slow)
+        // backend stats + expand-equipment-drops API calls — otherwise toggling
+        // the checkbox took a few seconds while the single view was instant.
+        this.subscribe('column3.hideOwnedCollectibles', () => {
+            if (store.state.gearsets.comparisonMode) {
+                this._reuseStatsForFilter = true;
+                this.render();
+            }
+        });
         // Re-render when gear sets finish loading (ensures correct stats after session restore)
         this.subscribe('gearsets.saved', () => {
             if (store.state.gearsets.comparisonMode) this.onComparisonModeChange();
@@ -46,7 +82,7 @@ class GearsetComparisonSection extends Component {
             // Delay to let other components finish initializing, then render.
             // A second render is triggered by _loadGearSets completing (via gearsets.comparisonMode notify).
             setTimeout(() => {
-                console.log('[Comparison] Constructor timeout fired, activity=', this.activity?.name, 'selectedActivity=', store.state.column3?.selectedActivity);
+                window.__walkscapeVerboseDebug && console.log('[Comparison] Constructor timeout fired, activity=', this.activity?.name, 'selectedActivity=', store.state.column3?.selectedActivity);
                 this.onComparisonModeChange();
             }, 500);
         } else {
@@ -81,7 +117,8 @@ class GearsetComparisonSection extends Component {
 
     async onActivityChange() {
         const activityId = store.state.column3?.selectedActivity;
-        console.log('[Comparison] onActivityChange: activityId=', activityId);
+        window.__walkscapeVerboseDebug && console.log('[Comparison] onActivityChange: activityId=', activityId);
+        this._resetComparisonOptimizedRegions();
         if (activityId && !activityId.startsWith('generic')) {
             try {
                 const response = await $.get('/api/activities');
@@ -116,6 +153,28 @@ class GearsetComparisonSection extends Component {
                             };
                         }
 
+                        // Drop input items that don't match this activity's input-slot
+                        // keywords (mirror single view). Without this, switching from one
+                        // input activity (e.g. linens for Large sail repair) to another
+                        // (e.g. Bear hunting) leaves the stale linens equipped in the input
+                        // slot, which skews the optimizer and the upgrades list.
+                        this._selectedInputItems = {
+                            1: this._filterInputItemsForActivity(this._selectedInputItems[1], activity),
+                            2: this._filterInputItemsForActivity(this._selectedInputItems[2], activity)
+                        };
+                        // Persist the filtered inputs back to each gearset context so the
+                        // optimizer and stats requests read clean, activity-matched inputs.
+                        {
+                            const c1 = store.state.gearsets.gs1Context || {};
+                            const c2 = store.state.gearsets.gs2Context || {};
+                            c1.selectedInputItems = { ...this._selectedInputItems[1] };
+                            c2.selectedInputItems = { ...this._selectedInputItems[2] };
+                            store.update('gearsets.gs1Context', { ...c1 });
+                            store.update('gearsets.gs2Context', { ...c2 });
+                            store._syncToBackend('ui.gearsets.gs1Context', c1);
+                            store._syncToBackend('ui.gearsets.gs2Context', c2);
+                        }
+
                         // Auto-select first location for each gearset if not already set
                         if (activity.locations && activity.locations.length > 0) {
                             const firstLocId = activity.locations[0].id;
@@ -147,8 +206,38 @@ class GearsetComparisonSection extends Component {
         this.render();
     }
 
+    /**
+     * Keep only the input items whose keywords match the given activity's
+     * input-slot requirements. Mirrors the single-view filter in
+     * activity-info-section.js so switching between input activities in
+     * comparison view clears stale, mismatched inputs (e.g. linens left over
+     * from Large sail repair when switching to Bear hunting).
+     *
+     * @param {Object} inputItems - dict keyed by validInputs index -> item
+     * @param {Object} activity    - the newly-selected activity
+     * @returns {Object} filtered dict (same shape)
+     */
+    _filterInputItemsForActivity(inputItems, activity) {
+        if (!inputItems || typeof inputItems !== 'object') return {};
+        const validInputs = (activity && activity.input_items || []).filter(ii => ii && ii.name);
+        if (validInputs.length === 0) return {};
+        const filtered = {};
+        for (const [idx, item] of Object.entries(inputItems)) {
+            const slot = validInputs[parseInt(idx)];
+            if (!slot || !item) continue;
+            if (slot.type !== 'keyword') continue;
+            const requiredKeyword = (slot.reference || slot.name || '').toLowerCase();
+            const itemKeywords = (item.keywords || []).map(k => k.toLowerCase());
+            if (itemKeywords.includes(requiredKeyword)) {
+                filtered[idx] = item;
+            }
+        }
+        return filtered;
+    }
+
     async onRecipeChange() {
         const recipeId = store.state.column3?.selectedRecipe;
+        this._resetComparisonOptimizedRegions();
         if (recipeId && !recipeId.startsWith('generic')) {
             try {
                 const response = await $.get('/api/recipes');
@@ -244,6 +333,291 @@ class GearsetComparisonSection extends Component {
     }
 
     /**
+     * Reflect the service + location chosen by an "Optimize services" run into
+     * a specific gearset's context (gs1Context / gs2Context) in comparison
+     * mode. This is the comparison-view analogue of
+     * recipeInfoSection.applyOptimizedService (single view): without it, the
+     * optimizer equips the gear best for the winning service but the per-gearset
+     * service selector, stats, and requirements panel stay pinned to the old
+     * service — so the service "doesn't swap". Called by optimize-button
+     * _handleOptimizationResult when the saved gear set carries
+     * slots_json._optimized_service and we're in comparison mode.
+     * Mirrors the .service-item[data-gs] click handler in attachEvents().
+     * @param {number} gsNum - 1 or 2 (which gearset the optimize targeted)
+     * @param {string} groupedId - grouped service id (e.g. "sawmill_of_barbantok")
+     * @param {string|null} locationId - winning location id (e.g. "barbantok")
+     */
+    async applyOptimizedServiceForGearset(gsNum, groupedId, locationId) {
+        if (!this.recipe || !groupedId) return;
+        // Generic recipes resolve services differently; skip reflection for them.
+        if (this.recipe.id && String(this.recipe.id).startsWith('generic::')) return;
+        try {
+            // Services may not be loaded yet (e.g. optimize fired right after
+            // entering comparison mode). _findServiceById returns null without
+            // them, so ensure they're present before resolving the winner.
+            if (!this.recipeServices) {
+                await this._loadServicesForRecipe();
+            }
+            const svc = this._findServiceById(groupedId);
+            if (!svc || !svc.locations || svc.locations.length === 0) return;
+
+            const loc = (locationId && svc.locations.find(
+                l => l.location && l.location.id === locationId)) || svc.locations[0];
+            if (!loc || !loc.location) return;
+
+            const ctxKey = gsNum === 1 ? 'gs1Context' : 'gs2Context';
+            const ctx = { ...(store.state.gearsets[ctxKey] || {}) };
+            ctx.selectedService = svc.id;
+            ctx.selectedServiceSpecific = loc.service_id;
+            ctx.selectedLocation = loc.location.id;
+
+            store.update(`gearsets.${ctxKey}`, ctx);
+            store._syncToBackend(`ui.gearsets.${ctxKey}`, ctx);
+            this._notifyCombinedStatsForActiveSlot(gsNum);
+            this.render();
+        } catch (e) {
+            console.error('applyOptimizedServiceForGearset failed:', e);
+        }
+    }
+
+    /**
+     * Comparison-view analogue of recipeInfoSection.applyOptimizedLocation for
+     * a NO-SERVICE recipe: reflect the "optimize services" winning ZONE into the
+     * targeted gearset's per-gearset context so Column 2 gear bonuses re-scope
+     * to that zone. Without it, the optimizer equips the gear best for the
+     * winning zone but the per-gearset location stays pinned, so the bonus
+     * "doesn't apply" in comparison. Called by optimize-button
+     * _handleOptimizationResult when the saved gear set carries
+     * slots_json._optimized_location and we're in comparison mode. Report 30c7ea11.
+     * @param {number} gsNum - 1 or 2 (which gearset the optimize targeted)
+     * @param {string} locationId - winning location id (e.g. "wraithwater")
+     * @param {string[]} [regionTags] - raw region tags the winning set applies
+     *        to (union of tying zones). Mapped to named-region display names.
+     * @param {boolean} [allRegions] - set is location-agnostic (works anywhere).
+     */
+    async applyOptimizedLocationForGearset(gsNum, locationId, regionTags, allRegions) {
+        if (!this.recipe || !locationId) return;
+        if (this.recipe.id && String(this.recipe.id).startsWith('generic::')) return;
+        try {
+            // Resolve applicable region tags -> named-region display names via
+            // /api/locations (biome-only tags like 'ghostly' aren't named
+            // regions and are dropped), for the per-gearset caption.
+            let regionNames = [];
+            try {
+                const locResp = await $.get('/api/locations');
+                const regions = locResp.regions || [];
+                let locRegions = [locationId];
+                for (const region of regions) {
+                    const loc = (region.locations || []).find(l => l.id === locationId);
+                    if (loc) {
+                        locRegions = (loc.regions && loc.regions.length > 0)
+                            ? loc.regions : [locationId];
+                        break;
+                    }
+                }
+                const tags = (regionTags && regionTags.length) ? regionTags : locRegions;
+                const tagSet = new Set(tags.map(t => String(t).toLowerCase()));
+                regionNames = regions
+                    .filter(r => tagSet.has(String(r.id).toLowerCase()))
+                    .map(r => r.name);
+            } catch (e) {
+                console.error('applyOptimizedLocationForGearset: region resolve failed:', e);
+            }
+
+            const ctxKey = gsNum === 1 ? 'gs1Context' : 'gs2Context';
+            const ctx = { ...(store.state.gearsets[ctxKey] || {}) };
+            // No service for these recipes — only the zone varies.
+            ctx.selectedService = '__none__';
+            ctx.selectedServiceSpecific = null;
+            ctx.selectedLocation = locationId;
+
+            // Arm the caption for this gearset; baseline sig captured on the
+            // optimizer's own equip (first gear change after this).
+            this._optRegionsByGs[gsNum] = { names: regionNames, allRegions: !!allRegions };
+            this._optRegionsBaselineSig[gsNum] = null;
+
+            store.update(`gearsets.${ctxKey}`, ctx);
+            store._syncToBackend(`ui.gearsets.${ctxKey}`, ctx);
+            this._notifyCombinedStatsForActiveSlot(gsNum);
+            this.render();
+        } catch (e) {
+            console.error('applyOptimizedLocationForGearset failed:', e);
+        }
+    }
+
+    /** Per-gearset "Gear set optimized for <regions>" caption HTML (report
+     * 30c7ea11 follow-up). Empty when no optimize-location result is active for
+     * that gearset. */
+    _optimizedRegionsCaptionHtml(gsNum) {
+        const info = this._optRegionsByGs && this._optRegionsByGs[gsNum];
+        if (!info) return '';
+        let text;
+        if (info.allRegions || !info.names || info.names.length === 0) {
+            text = 'Gear set optimized for any region';
+        } else {
+            const names = info.names.slice();
+            let list;
+            if (names.length === 1) list = names[0];
+            else if (names.length === 2) list = `${names[0]} or ${names[1]}`;
+            else list = `${names.slice(0, -1).join(', ')}, or ${names[names.length - 1]}`;
+            text = `Gear set optimized for ${list}`;
+        }
+        return `<div class="optimized-regions-caption" data-gs="${gsNum}">${this._escapeHtml(text)}</div>`;
+    }
+
+    _escapeHtml(s) {
+        return String(s).replace(/[&<>"']/g, c => ({
+            '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+        }[c]));
+    }
+
+    /** Stable signature of a comparison gearset's equipped gear (slot ->
+     * itemId:quality). gs1 = gearsets.current, gs2 = gearsets.gearset2. */
+    _gearSigForGs(gsNum) {
+        const cur = (gsNum === 2
+            ? (store.state.gearsets && store.state.gearsets.gearset2)
+            : (store.state.gearsets && store.state.gearsets.current)) || {};
+        return Object.keys(cur)
+            .filter(k => !k.startsWith('_'))
+            .sort()
+            .map(k => { const v = cur[k] || {}; return `${k}:${v.itemId || v.id || ''}:${v.quality || ''}`; })
+            .join('|');
+    }
+
+    /** On any gear change: for each armed gearset, record the equip baseline on
+     * the first fire, then dismiss the caption when the gear differs from it. */
+    _watchComparisonOptimizedRegions() {
+        if (!this._optRegionsByGs) return;
+        for (const gsNum of [1, 2]) {
+            if (!this._optRegionsByGs[gsNum]) continue;
+            const sig = this._gearSigForGs(gsNum);
+            if (this._optRegionsBaselineSig[gsNum] == null) {
+                this._optRegionsBaselineSig[gsNum] = sig;
+                continue;
+            }
+            if (sig !== this._optRegionsBaselineSig[gsNum]) {
+                this._dismissComparisonCaption(gsNum);
+            }
+        }
+    }
+
+    /** Slide the caption for one gearset up and clear its state. */
+    _dismissComparisonCaption(gsNum) {
+        this._optRegionsByGs[gsNum] = null;
+        this._optRegionsBaselineSig[gsNum] = null;
+        const $cap = this.$element && this.$element.find(`.optimized-regions-caption[data-gs="${gsNum}"]`);
+        if ($cap && $cap.length) {
+            $cap.slideUp(180, function () { $(this).remove(); });
+        }
+    }
+
+    /** Drop all optimize-location captions (recipe/activity switched). */
+    _resetComparisonOptimizedRegions() {
+        this._optRegionsByGs = {};
+        this._optRegionsBaselineSig = {};
+    }
+
+    /**
+     * Build a red/green requirements panel shown under a selected service in
+     * the comparison view. Fulfillment is evaluated per gearset: skill level
+     * and reputation come from the entered character, keyword (gear)
+     * requirements — e.g. "3x diving gear" — from that gearset's equipped
+     * items (plus its selected input items).
+     * @param {Object} svc - grouped service object
+     * @param {Object} ctx - the gearset context (gs1Context / gs2Context)
+     * @param {number} gsNum - 1 or 2
+     * @returns {string} HTML (empty when the service has no requirements)
+     */
+    _renderComparisonServiceRequirements(svc, ctx, gsNum) {
+        if (!svc) return '';
+        ctx = ctx || {};
+
+        // Resolve the requirements for this gearset's selected location.
+        let reqs = null;
+        if (Array.isArray(svc.locations) && svc.locations.length > 0) {
+            const loc = svc.locations.find(l => l.service_id === ctx.selectedServiceSpecific)
+                || svc.locations.find(l => l.location && l.location.id === ctx.selectedLocation)
+                || svc.locations[0];
+            reqs = loc && loc.requirements;
+        }
+        reqs = reqs || svc.requirements || {};
+
+        const skillReqs = reqs.skill || {};
+        const repReqs = reqs.reputation || {};
+        const keywordReqs = reqs.keyword_counts || {};
+
+        // Character accessors (user overrides win).
+        const overrides = store.state.ui?.user_overrides || {};
+        const getSkill = (sk) => {
+            const skLower = sk.toLowerCase();
+            if (overrides.skills && overrides.skills[skLower] !== undefined) return overrides.skills[skLower];
+            return store.state.character?.skills?.[skLower] || 0;
+        };
+        const getRep = (f) => {
+            if (overrides.reputation && overrides.reputation[f] !== undefined) return overrides.reputation[f];
+            return store.state.character?.reputation?.[f] || 0;
+        };
+
+        // Count a keyword across this gearset's equipped items + input items.
+        const gs = gsNum === 1 ? store.state.gearsets.current : store.state.gearsets.gearset2;
+        const countKw = (keyword) => {
+            const kw = String(keyword).toLowerCase();
+            let count = 0;
+            for (const item of Object.values(gs || {})) {
+                if (item && Array.isArray(item.keywords) &&
+                    item.keywords.some(k => String(k).toLowerCase() === kw)) count++;
+            }
+            const inputItems = this._selectedInputItems?.[gsNum] || {};
+            for (const item of Object.values(inputItems)) {
+                if (item && Array.isArray(item.keywords) &&
+                    item.keywords.some(k => String(k).toLowerCase() === kw)) count++;
+            }
+            return count;
+        };
+
+        const rows = [];
+        for (const [skill, level] of Object.entries(skillReqs)) {
+            if (!level) continue;
+            const have = getSkill(skill);
+            const met = have >= level;
+            rows.push(`<div class="requirement-item ${met ? 'requirement-fulfilled' : 'requirement-not-fulfilled'}">
+                <img src="/assets/icons/text/skill_icons/${skill.toLowerCase()}.svg" alt="${skill}" class="requirement-icon" onerror="this.style.display='none'" />
+                <span class="requirement-label">${skill.charAt(0).toUpperCase() + skill.slice(1)}</span>
+                <span class="requirement-value">${have}/${level}</span>
+            </div>`);
+        }
+        for (const [faction, amount] of Object.entries(repReqs)) {
+            if (!amount) continue;
+            const have = getRep(faction);
+            const met = have >= amount;
+            const factionId = faction.toLowerCase().replace(/ /g, '_').replace(/'/g, '');
+            const factionName = faction.split(/[_ ]/).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+            rows.push(`<div class="requirement-item ${met ? 'requirement-fulfilled' : 'requirement-not-fulfilled'}">
+                <img src="/assets/icons/factions/${factionId}.svg" alt="${factionName}" class="requirement-icon" onerror="this.style.display='none'" />
+                <span class="requirement-label">${factionName} rep</span>
+                <span class="requirement-value">${have}/${amount}</span>
+            </div>`);
+        }
+        for (const [kw, count] of Object.entries(keywordReqs)) {
+            if (!count || count <= 0) continue;
+            const have = countKw(kw);
+            const met = have >= count;
+            const kwId = kw.replace(/ /g, '_').replace(/'/g, '');
+            rows.push(`<div class="requirement-item ${met ? 'requirement-fulfilled' : 'requirement-not-fulfilled'}">
+                <img src="/assets/icons/keywords/${kwId}.svg" alt="${kw}" class="requirement-icon" onerror="this.style.display='none'" />
+                <span class="requirement-label">${kw}</span>
+                <span class="requirement-value">${have}/${count}</span>
+            </div>`);
+        }
+
+        if (rows.length === 0) return '';
+        return `<div class="service-requirements-panel">
+            <div class="service-req-title">Requirements</div>
+            ${rows.join('')}
+        </div>`;
+    }
+
+    /**
      * Resolve the regions for a location id from the currently loaded recipe-service
      * or activity data. Returns an array of region names (e.g. ['syrenthia', 'underwater'])
      * so that region-scoped gear bonuses match in the Combined Stats section. Falls back
@@ -270,6 +644,21 @@ class GearsetComparisonSection extends Component {
                 return loc.regions;
             }
         }
+        // Global fallback: the recipe/activity object may not be populated with
+        // this location's regions yet (e.g. the activity was selected before
+        // comparison mode, so this.activity / this.recipeServices is null/stale).
+        // The global locations list always carries regions — use it before
+        // giving up and returning the raw id. Returning the raw id (e.g.
+        // 'cactus_canyon') breaks region/realm-scoped matching in Combined Stats:
+        // Quickdraw map's per-realm bonus is scoped to location 'wrentmark', so
+        // the raw id never matched and the bonus was dropped in comparison view
+        // (bug #2), even though single view worked.
+        if (this._allLocations) {
+            const gl = this._allLocations.find(l => l.id === locationId);
+            if (gl && gl.regions && gl.regions.length > 0) {
+                return gl.regions;
+            }
+        }
         return [locationId];
     }
 
@@ -294,6 +683,24 @@ class GearsetComparisonSection extends Component {
 
         const ctxKey = gsNum === 1 ? 'gs1Context' : 'gs2Context';
         const ctx = store.state.gearsets[ctxKey] || {};
+
+        // Ensure the global locations list (with regions) is loaded so
+        // _resolveLocationRegions can fall back to it when the recipe/activity
+        // object isn't populated. Without this the raw location id is used and
+        // region/realm-scoped bonuses (Quickdraw map) don't apply in the
+        // comparison view (bug #2). Cached after first load, so this is a
+        // no-op microtask on subsequent calls.
+        Promise.resolve(this._allLocations ? null : this._getAllLocations())
+            .catch(() => {})
+            .then(() => this._applyActiveSlotLocation(gsNum, css, ctx));
+    }
+
+    /**
+     * Push the active slot's resolved region context into Combined Stats.
+     * Split out of _notifyCombinedStatsForActiveSlot so the region resolution
+     * can await the global locations list (region fallback source).
+     */
+    _applyActiveSlotLocation(gsNum, css, ctx) {
         const regions = this._resolveLocationRegions(ctx.selectedLocation);
 
         // Keep store.state.column3 consistent with the active slot (no notify — that
@@ -341,6 +748,10 @@ class GearsetComparisonSection extends Component {
     }
 
     onGearsetChange() {
+        // Dismiss any optimize-location caption whose gearset the user just
+        // edited (runs before the 200ms debounced render so the slide-up plays
+        // on the live DOM). Report 30c7ea11 follow-up.
+        this._watchComparisonOptimizedRegions();
         if (store.state.gearsets.comparisonMode) {
             // Debounce render to avoid excessive API calls
             if (this._renderTimeout) clearTimeout(this._renderTimeout);
@@ -367,6 +778,20 @@ class GearsetComparisonSection extends Component {
 
         // Build gearset payload from slots
         const gearset = {};
+        // Column-3 per-pet ability decision (bug 93bf0ef0): driven ONLY by the
+        // ephemeral comparison toggle, not the global optimizer setting. Unlock-all
+        // still forces the ability on (everything is unlocked).
+        const _unlockAll = !!(window.isUnlockAllEnabled && window.isUnlockAllEnabled());
+        // The pet's "Use ability" decision comes solely from the column-2
+        // per-pet checkbox: getEffectivePetUseAbility honors the pet's own
+        // `useAbility` flag, falling back to the global default only when unset.
+        // Comparison mode no longer has its own col-3 toggle — a pet ability
+        // (e.g. the Golden Frog's Lucky Day) is a passive quality/stat decision,
+        // not an optimizer control, so column 3 mirrors column 2 per gearset
+        // (user request superseding the independent col-3 toggle from bug 93bf0ef0).
+        const _petUseAbility = window.getEffectivePetUseAbility
+            ? window.getEffectivePetUseAbility(gearsetSlots?.pet)
+            : !!(gearsetSlots && gearsetSlots.pet && gearsetSlots.pet.useAbility);
         for (const [slot, item] of Object.entries(gearsetSlots)) {
             if (!item) continue;
             gearset[slot] = {
@@ -378,17 +803,22 @@ class GearsetComparisonSection extends Component {
                 is_generic: item.is_generic || false,
                 level: item.level || undefined,
                 variant: item.variant || undefined,
-                useAbility: item.useAbility || false,
+                // Apply the pet's active ability (e.g. the Golden Frog's Lucky
+                // Day +20 QO) based on the column-2 per-pet "Use ability"
+                // checkbox for this gearset. Unlock-all forces it on.
+                useAbility: slot === 'pet'
+                    ? (!!_petUseAbility || _unlockAll)
+                    : (item.useAbility || false),
             };
         }
 
         // Build input items payload from per-gearset selections
         const inputItemsForRequest = [];
         const gsInputItems = this._selectedInputItems?.[gsNum] || {};
-        console.log(`[comparison-stats] GS${gsNum} input items:`, JSON.stringify(gsInputItems));
+        window.__walkscapeVerboseDebug && console.log(`[comparison-stats] GS${gsNum} input items:`, JSON.stringify(gsInputItems));
         for (const [idx, item] of Object.entries(gsInputItems)) {
             if (item) {
-                console.log(`[comparison-stats] GS${gsNum} input[${idx}]:`, item.name, 'itemId:', item.itemId, 'id:', item.id, 'uuid:', item.uuid);
+                window.__walkscapeVerboseDebug && console.log(`[comparison-stats] GS${gsNum} input[${idx}]:`, item.name, 'itemId:', item.itemId, 'id:', item.id, 'uuid:', item.uuid);
                 inputItemsForRequest.push({
                     index: parseInt(idx),
                     item_id: item.itemId || item.id,
@@ -398,7 +828,7 @@ class GearsetComparisonSection extends Component {
                 });
             }
         }
-        console.log(`[comparison-stats] GS${gsNum} sending ${inputItemsForRequest.length} input items:`, inputItemsForRequest);
+        window.__walkscapeVerboseDebug && console.log(`[comparison-stats] GS${gsNum} sending ${inputItemsForRequest.length} input items:`, inputItemsForRequest);
 
         try {
             const result = await $.ajax({
@@ -456,7 +886,7 @@ class GearsetComparisonSection extends Component {
         // END of the chain. Applying ceil before the pct multiplier introduces
         // off-by-one errors (e.g. Flowing pocketwatch -5% on Lizard Hunting).
         const cappedWE = Math.min(we, maxEfficiency);
-        const totalEfficiency = 1 + cappedWE;
+        const totalEfficiency = Math.max(1 + cappedWE, 0.01);  // floor total efficiency at 1% (game rule: negative/zero -> 1% min)
         const baseOverEff = baseSteps / totalEfficiency;
         const stepsWithPct = baseOverEff * (1 + pct);
         const stepsPerSingleAction = Math.max(10, Math.ceil(stepsWithPct + flat));
@@ -505,7 +935,7 @@ class GearsetComparisonSection extends Component {
         const pct = (stats.steps_percent || stats.steps_pct || 0) / 100;
 
         const cappedWE = Math.min(we, maxEfficiency);
-        const totalEfficiency = 1 + cappedWE;
+        const totalEfficiency = Math.max(1 + cappedWE, 0.01);  // floor total efficiency at 1% (game rule: negative/zero -> 1% min)
         // Match the game's formula (per KamiTzayig reference): single ceil at the
         // END of the chain. Applying ceil before the pct multiplier introduces
         // off-by-one errors (e.g. Flowing pocketwatch -5%).
@@ -576,6 +1006,39 @@ class GearsetComparisonSection extends Component {
     }
 
     /**
+     * Whether a drop is an owned collectible that should be hidden. Mirrors
+     * DropsSection.filterOwnedCollectibles + the shared column3
+     * .hideOwnedCollectibles state so the comparison drops honor the same
+     * "Hide owned collectibles" filter as the single view.
+     */
+    _isHiddenOwnedCollectible(drop) {
+        const hide = store.state.column3?.hideOwnedCollectibles ?? true;
+        if (!hide) return false;
+        const ref = drop && drop.item_ref;
+        if (!ref || !ref.startsWith('Collectible.')) return false;
+        // isCollectibleOwned honors both the imported set and manual
+        // ui.user_overrides.items[slug].has checks (bug 5d24decc).
+        const name = ref.replace('Collectible.', '');
+        return isCollectibleOwned(name);
+    }
+
+    /**
+     * "Hide owned collectibles" checkbox for the comparison DROPS card —
+     * identical control + shared state as DropsSection.renderFilterCheckboxes.
+     */
+    _renderComparisonDropsFilter() {
+        const hide = store.state.column3?.hideOwnedCollectibles ?? true;
+        return `
+            <div class="drops-filters">
+                <label class="drops-filter-checkbox">
+                    <input type="checkbox" ${hide ? 'checked' : ''} data-filter="hide-owned" />
+                    <span>Hide owned collectibles</span>
+                </label>
+            </div>
+        `;
+    }
+
+    /**
      * Calculate drop rates for a gearset
      */
     calculateDropsForGearset(stats, extraDrops = []) {
@@ -597,7 +1060,7 @@ class GearsetComparisonSection extends Component {
         // Match the game's formula (per KamiTzayig reference): single ceil at the
         // END of the chain.
         const cappedWE = Math.min(we, maxEfficiency);
-        const baseOverEff = baseSteps / (1 + cappedWE);
+        const baseOverEff = baseSteps / Math.max(1 + cappedWE, 0.01);  // floor total efficiency at 1% (game rule)
         const stepsWithPct = baseOverEff * (1 + pct);
         const stepsPerSingleAction = Math.max(10, Math.ceil(stepsWithPct + flat));
         const stepsPerRewardRoll = stepsPerSingleAction / ((1 + dr) * (1 + da));
@@ -766,7 +1229,7 @@ class GearsetComparisonSection extends Component {
         const cappedWE = Math.min(we, this.recipe.max_efficiency);
         // Single ceil at the END (KamiTzayig reference) — prevents off-by-one
         // errors when a pct modifier is applied.
-        const baseOverEff = this.recipe.base_steps / (1 + cappedWE);
+        const baseOverEff = this.recipe.base_steps / Math.max(1 + cappedWE, 0.01);  // floor total efficiency at 1% (game rule)
         const withPct = baseOverEff * (1 + pct);
         const stepsPerAction = Math.max(Math.ceil(withPct + flat), 10);
         const calcMPI = (spi) => {
@@ -923,7 +1386,7 @@ class GearsetComparisonSection extends Component {
             'cooking': 'var(--skill-cooking-color)', 'smithing': 'var(--skill-smithing-color)',
             'crafting': 'var(--skill-crafting-color)', 'trinketry': 'var(--skill-trinketry-color)',
             'tailoring': 'var(--skill-tailoring-color)', 'agility': 'var(--skill-agility-color)',
-            'traveling': '#00BCD4'
+            'traveling': 'var(--skill-agility-color)'
         };
         return colors[(skill || '').toLowerCase()] || 'var(--border-color)';
     }
@@ -942,7 +1405,7 @@ class GearsetComparisonSection extends Component {
         }
 
         const hasContext = this.activity || this.recipe;
-        console.log('[Comparison] render: hasContext=', !!hasContext, 'activity=', this.activity?.name, 'recipe=', this.recipe?.name);
+        window.__walkscapeVerboseDebug && console.log('[Comparison] render: hasContext=', !!hasContext, 'activity=', this.activity?.name, 'recipe=', this.recipe?.name);
         if (!hasContext) {
             this.$element.html(`
                 <div class="comparison-section">
@@ -952,34 +1415,60 @@ class GearsetComparisonSection extends Component {
             return;
         }
 
+        // Traveling is a special activity: it has no per-action metrics, no
+        // location list, and no /api/comparison-stats support. Instead the user
+        // picks a Start and End location (one shared selection for both gearsets)
+        // and we compare each gearset's route stats. Intercept here BEFORE the
+        // normal activity/recipe stats fetch below.
+        if (this.activity && this.activity.is_travel) {
+            await this._renderTravelComparison();
+            return;
+        }
+
         const gs1 = store.state.gearsets.current;
         const gs2 = store.state.gearsets.gearset2;
 
         const ctx1 = store.state.gearsets.gs1Context || {};
         const ctx2 = store.state.gearsets.gs2Context || {};
 
-        // Fetch stats from backend for both gearsets in parallel
-        const [result1, result2] = await Promise.all([
-            this.calculateStatsForGearsetViaAPI(gs1, ctx1, 1),
-            this.calculateStatsForGearsetViaAPI(gs2, ctx2, 2),
-        ]);
+        // Filter-only re-render (Hide-owned-collectibles toggle): the gearset
+        // stats haven't changed, so reuse the cached stats and skip the two
+        // backend stats API calls. Consume the flag so any later render still
+        // recomputes normally.
+        const reuseCache = this._reuseStatsForFilter === true
+            && !!this._cachedStats1 && !!this._cachedStats2;
+        this._reuseStatsForFilter = false;
 
-        // Discard if a newer render started while we were awaiting
-        if (myRenderId !== this._renderId) return;
+        let stats1, stats2;
+        if (reuseCache) {
+            stats1 = this._cachedStats1;
+            stats2 = this._cachedStats2;
+        } else {
+            // Fetch stats from backend for both gearsets in parallel
+            const [result1, result2] = await Promise.all([
+                this.calculateStatsForGearsetViaAPI(gs1, ctx1, 1),
+                this.calculateStatsForGearsetViaAPI(gs2, ctx2, 2),
+            ]);
 
-        if (!result1 || !result2) {
-            this.$element.html(`
-                <div class="comparison-section">
-                    <div class="comparison-empty">Loading stats...</div>
-                </div>
-            `);
-            return;
+            // Discard if a newer render started while we were awaiting
+            if (myRenderId !== this._renderId) return;
+
+            if (!result1 || !result2) {
+                this.$element.html(`
+                    <div class="comparison-section">
+                        <div class="comparison-empty">Loading stats...</div>
+                    </div>
+                `);
+                return;
+            }
+
+            stats1 = result1.stats;
+            stats2 = result2.stats;
+            this._cachedPetEffort1 = result1.pet_effort || null;
+            this._cachedPetEffort2 = result2.pet_effort || null;
         }
 
-        const stats1 = result1.stats;
-        const stats2 = result2.stats;
-
-        // Cache stats for calculator comparison access
+        // Cache stats for calculator comparison access + filter-only re-renders
         this._cachedStats1 = stats1;
         this._cachedStats2 = stats2;
 
@@ -997,16 +1486,23 @@ class GearsetComparisonSection extends Component {
                 // Pass location from each gearset's context
                 m1.location = ctx1.selectedLocation || this.activity.location || '';
                 m2.location = ctx2.selectedLocation || this.activity.location || '';
-                activityInfoHtml = this._renderActivityComparison(m1, m2, gs1Name, gs2Name, stats1, stats2);
+                activityInfoHtml = this._renderActivityComparison(m1, m2, gs1Name, gs2Name, stats1, stats2, this._cachedPetEffort1 || null, this._cachedPetEffort2 || null);
 
                 // Drops comparison — with per-gearset item finding drops
                 const showItemFinding = localStorage.getItem('showItemFindingDrops') === 'true';
                 let ifDrops1 = [], ifDrops2 = [];
                 if (showItemFinding && this.activity) {
-                    const skill = this.activity.primary_skill?.toLowerCase() || 'global';
-                    ifDrops1 = await this._getItemFindingDropsForStats(skill, stats1);
-                    ifDrops2 = await this._getItemFindingDropsForStats(skill, stats2);
+                    if (reuseCache && this._lastIfDrops1 && this._lastIfDrops2) {
+                        ifDrops1 = this._lastIfDrops1;
+                        ifDrops2 = this._lastIfDrops2;
+                    } else {
+                        const skill = this.activity.primary_skill?.toLowerCase() || 'global';
+                        ifDrops1 = await this._getItemFindingDropsForStats(skill, stats1);
+                        ifDrops2 = await this._getItemFindingDropsForStats(skill, stats2);
+                    }
                 }
+                this._lastIfDrops1 = ifDrops1;
+                this._lastIfDrops2 = ifDrops2;
 
                 const drops1 = this.calculateDropsForGearset(stats1, ifDrops1);
                 const drops2 = this.calculateDropsForGearset(stats2, ifDrops2);
@@ -1016,12 +1512,12 @@ class GearsetComparisonSection extends Component {
                 dropsHtml = this._renderDropsComparison(drops1, drops2, m1, m2, gs1Name, gs2Name);
             }
         } else if (this.recipe && stats1 && stats2) {
-            console.log(`[ComparisonDebug] Recipe stats1 QO=${stats1.quality_outcome}, stats2 QO=${stats2.quality_outcome}`);
-            console.log(`[ComparisonDebug] Recipe stats1 WE=${stats1.work_efficiency}, stats2 WE=${stats2.work_efficiency}`);
-            console.log(`[ComparisonDebug] Full stats1:`, JSON.stringify(stats1));
-            console.log(`[ComparisonDebug] Full stats2:`, JSON.stringify(stats2));
-            console.log(`[ComparisonDebug] ctx1:`, JSON.stringify(ctx1));
-            console.log(`[ComparisonDebug] ctx2:`, JSON.stringify(ctx2));
+            window.__walkscapeVerboseDebug && console.log(`[ComparisonDebug] Recipe stats1 QO=${stats1.quality_outcome}, stats2 QO=${stats2.quality_outcome}`);
+            window.__walkscapeVerboseDebug && console.log(`[ComparisonDebug] Recipe stats1 WE=${stats1.work_efficiency}, stats2 WE=${stats2.work_efficiency}`);
+            window.__walkscapeVerboseDebug && console.log(`[ComparisonDebug] Full stats1:`, JSON.stringify(stats1));
+            window.__walkscapeVerboseDebug && console.log(`[ComparisonDebug] Full stats2:`, JSON.stringify(stats2));
+            window.__walkscapeVerboseDebug && console.log(`[ComparisonDebug] ctx1:`, JSON.stringify(ctx1));
+            window.__walkscapeVerboseDebug && console.log(`[ComparisonDebug] ctx2:`, JSON.stringify(ctx2));
             const m1 = this.calculateRecipeMetrics(stats1, ctx1.useFine || false);
             const m2 = this.calculateRecipeMetrics(stats2, ctx2.useFine || false);
 
@@ -1033,9 +1529,17 @@ class GearsetComparisonSection extends Component {
                 const qualityHtml = this._renderQualityComparison(m1, m2, ctx1, ctx2, gs1Name, gs2Name);
 
                 // Recipe drops comparison — include item-finding drops per gearset
-                const skill = (this.recipe.skill || '').toLowerCase();
-                const ifDrops1 = await this._getItemFindingDropsForStats(skill, stats1);
-                const ifDrops2 = await this._getItemFindingDropsForStats(skill, stats2);
+                let ifDrops1, ifDrops2;
+                if (reuseCache && this._lastIfDrops1 && this._lastIfDrops2) {
+                    ifDrops1 = this._lastIfDrops1;
+                    ifDrops2 = this._lastIfDrops2;
+                } else {
+                    const skill = (this.recipe.skill || '').toLowerCase();
+                    ifDrops1 = await this._getItemFindingDropsForStats(skill, stats1);
+                    ifDrops2 = await this._getItemFindingDropsForStats(skill, stats2);
+                }
+                this._lastIfDrops1 = ifDrops1;
+                this._lastIfDrops2 = ifDrops2;
                 const recipeDrops1 = this.calculateRecipeDropsForGearset(stats1, m1, ifDrops1);
                 const recipeDrops2 = this.calculateRecipeDropsForGearset(stats2, m2, ifDrops2);
                 // Cache for CalculatorSection
@@ -1128,7 +1632,7 @@ class GearsetComparisonSection extends Component {
         return { ...petInfo, iconPath, level };
     }
 
-    _renderActivityComparison(m1, m2, name1, name2, stats1, stats2) {
+    _renderActivityComparison(m1, m2, name1, name2, stats1, stats2, petEffort1 = null, petEffort2 = null) {
         const arrowIcon = `<span class="expand-arrow ${this.isExpanded ? 'expanded' : ''}">▼</span>`;
         const skill = m1.primarySkill || '';
         const skillLower = skill.toLowerCase();
@@ -1142,7 +1646,12 @@ class GearsetComparisonSection extends Component {
         const activityName = (this.activity.name || '').toUpperCase();
 
         const fmtWE = (m) => {
-            const v = m.weDisplay;
+            const v = m.weDisplay;  // total efficiency % (offset, 100 = no bonus)
+            // Game rule: floored at 1%. Show floored "1" + raw (uncapped) value in parens.
+            if (v < 1) {
+                const raw = (v % 1 === 0) ? formatFixed(v, 0) : formatFixed(v, 1);
+                return `1 (${raw}%)`;
+            }
             return (v % 1 === 0) ? formatFixed(v, 0) : formatFixed(v, 2);
         };
         const maxWE = (m1.maxWEDisplay % 1 === 0) ? formatFixed(m1.maxWEDisplay, 0) : formatFixed(m1.maxWEDisplay, 1);
@@ -1317,8 +1826,8 @@ class GearsetComparisonSection extends Component {
                 <td class="${cls(m1.stepsPerAction, m2.stepsPerAction, true)}">${m1.stepsPerAction} / ${this.activity.base_steps}</td>
                 <td class="${cls(m2.stepsPerAction, m1.stepsPerAction, true)}">${m2.stepsPerAction} / ${this.activity.base_steps}</td></tr>`;
         rows += `<tr><td><div class="comparison-label">${icon(weIcon)} Work Efficiency</div></td>
-                <td class="${m1.weExceedsMax ? 'comparison-we-maxed' : cls(m1.weDisplay, m2.weDisplay, false)}">${fmtWE(m1)} / ${maxWE}%</td>
-                <td class="${m2.weExceedsMax ? 'comparison-we-maxed' : cls(m2.weDisplay, m1.weDisplay, false)}">${fmtWE(m2)} / ${maxWE}%</td></tr>`;
+                <td class="${m1.weDisplay < 1 ? 'stat-value-negative' : (m1.weExceedsMax ? 'comparison-we-maxed' : cls(m1.weDisplay, m2.weDisplay, false))}">${fmtWE(m1)} / ${maxWE}%</td>
+                <td class="${m2.weDisplay < 1 ? 'stat-value-negative' : (m2.weExceedsMax ? 'comparison-we-maxed' : cls(m2.weDisplay, m1.weDisplay, false))}">${fmtWE(m2)} / ${maxWE}%</td></tr>`;
         rows += `<tr><td><div class="comparison-label">${icon(drIcon)} Steps / Reward</div></td>
                 <td class="${cls(m1.stepsPerRewardRoll, m2.stepsPerRewardRoll, true)}">${formatFixed(m1.stepsPerRewardRoll, 2)}</td>
                 <td class="${cls(m2.stepsPerRewardRoll, m1.stepsPerRewardRoll, true)}">${formatFixed(m2.stepsPerRewardRoll, 2)}</td></tr>`;
@@ -1386,6 +1895,19 @@ class GearsetComparisonSection extends Component {
                     <td class="${cls(s1, s2, false)}">${formatFixed(s1, 3)}</td>
                     <td class="${cls(s2, s1, false)}">${formatFixed(s2, 3)}</td></tr>`;
         }
+
+        // Termite "Terminate" -> Carpentry XP / step (drop-derived, per gearset;
+        // server-computed pet_effort). Shown when either gearset runs a Termite.
+        if (petEffort1 || petEffort2) {
+            const cSkill = (petEffort1?.skill || petEffort2?.skill || 'carpentry');
+            const cName = cSkill.charAt(0).toUpperCase() + cSkill.slice(1);
+            const cIcon = `/assets/icons/text/skill_icons/${cSkill.toLowerCase()}.svg`;
+            const c1 = (petEffort1 && petEffort1.per_step) || 0;
+            const c2 = (petEffort2 && petEffort2.per_step) || 0;
+            rows += `<tr><td><div class="comparison-label">${icon(cIcon)} ${cName} / step</div></td>
+                    <td class="${cls(c1, c2, false)}">${formatFixed(c1, 3)}</td>
+                    <td class="${cls(c2, c1, false)}">${formatFixed(c2, 3)}</td></tr>`;
+        }
         if (hasSecondary) {
             const tPS1 = totalXP1 / m1.expectedStepsPerAction;
             const tPS2 = totalXP2 / m2.expectedStepsPerAction;
@@ -1402,6 +1924,11 @@ class GearsetComparisonSection extends Component {
         let inputRows = '';
         if (validInputs.length > 0) {
             const hasKeywordInput = validInputs.some(ii => ii.type === 'keyword');
+            // Fine inputs only benefit Hunting activities. Fine variants of other skills'
+            // inputs (e.g. Fine Fabric for Tailoring sail repair) have identical stats, so the
+            // "Fine" checkbox must not appear for them in comparison view either. Bug 07da6fa2
+            // (follow-up to 8cb1876f, which fixed the single/column-3 view).
+            const isHuntingActivity = (this.activity.primary_skill || this.activity.skill || '').toLowerCase() === 'hunting';
 
             const renderInputSlot = (gsNum) => {
                 const ctxKey = gsNum === 1 ? 'gs1Context' : 'gs2Context';
@@ -1440,14 +1967,14 @@ class GearsetComparisonSection extends Component {
                         const fineClass = useFine ? ' fine' : '';
                         html += `<div class="material-item${fineClass}" title="${ii.name}" style="display:inline-flex">
                             <img src="${iconPath}" alt="${ii.name}" class="material-icon"
-                                onerror="this.onerror=null;this.style.display='none';this.parentNode.insertAdjacentHTML('afterbegin','<span style=\\'font-size:16px\\'>📥</span>')" />
+                                onerror="this.onerror=null;this.style.display='none';this.parentNode.insertAdjacentHTML('afterbegin','<span style=\\'font-size: max(var(--min-text, 5px), calc(16px * var(--text-scale, 1)))\\'>📥</span>')" />
                             <span class="material-quantity">${ii.quantity}</span>
                         </div>`;
                     }
                 }
-                // Fine checkbox under the slot
-                if (hasKeywordInput) {
-                    html += `<label class="fine-checkbox" style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;font-size:11px">
+                // Fine checkbox under the slot — Hunting activities only (bug 07da6fa2)
+                if (hasKeywordInput && isHuntingActivity) {
+                    html += `<label class="fine-checkbox" style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;font-size: max(var(--min-text, 5px), calc(11px * var(--text-scale, 1)))">
                         <input type="checkbox" class="comparison-fine-inputs-cb" data-gs="${gsNum}" ${useFine ? 'checked' : ''} />
                         <span class="fine-checkbox-label">Fine</span>
                     </label>`;
@@ -1460,10 +1987,10 @@ class GearsetComparisonSection extends Component {
             let labelHtml = '<div class="comparison-label" style="text-align:right;flex-direction:column;align-items:flex-end;white-space:normal"><strong>Inputs</strong>';
             for (const ii of validInputs) {
                 const itemId = ii.name.toLowerCase().replace(/ /g, '_').replace(/[^a-z0-9_]/g, '');
-                labelHtml += `<div style="margin-top:4px;font-size:11px;display:flex;align-items:center;gap:3px">
-                    <img src="/assets/icons/keywords/${itemId}.svg" style="width:14px;height:14px" onerror="this.outerHTML='<span style=\\'font-size:12px\\'>🏷️</span>'" />
+                labelHtml += `<div style="margin-top:4px;font-size: max(var(--min-text, 5px), calc(11px * var(--text-scale, 1)));display:flex;align-items:center;gap:3px">
+                    <img src="/assets/icons/keywords/${itemId}.svg" style="width:14px;height:14px" onerror="this.outerHTML='<span style=\\'font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)))\\'>🏷️</span>'" />
                     <span>${ii.quantity}× ${ii.name}</span>
-                    ${ii.level ? `<span class="input-level-req" style="font-size:10px">Lv.${ii.level}+</span>` : ''}
+                    ${ii.level ? `<span class="input-level-req" style="font-size: max(var(--min-text, 5px), calc(10px * var(--text-scale, 1)))">Lv.${ii.level}+</span>` : ''}
                 </div>`;
             }
             labelHtml += '</div>';
@@ -1519,7 +2046,12 @@ class GearsetComparisonSection extends Component {
         const icon = (src) => `<img src="${src}" alt="" class="comparison-stat-icon" onerror="this.style.display='none'" />`;
 
         const fmtWE = (m) => {
-            const v = m.weDisplay;
+            const v = m.weDisplay;  // total efficiency % (offset, 100 = no bonus)
+            // Game rule: floored at 1%. Show floored "1" + raw (uncapped) value in parens.
+            if (v < 1) {
+                const raw = (v % 1 === 0) ? formatFixed(v, 0) : formatFixed(v, 1);
+                return `1 (${raw}%)`;
+            }
             return (v % 1 === 0) ? formatFixed(v, 0) : formatFixed(v, 2);
         };
         const fmtMaxWE = (m) => {
@@ -1546,7 +2078,7 @@ class GearsetComparisonSection extends Component {
             if (this.recipeServiceType === 'None') {
                 const noSvcSelected = ctx.selectedService === '__none__';
                 html += `<div class="service-item ${noSvcSelected ? 'service-selected' : ''}" data-service-id="__none__" data-gs="${gsNum}">
-                    <span class="service-icon" style="font-size:16px">🚫</span>
+                    <span class="service-icon" style="font-size: max(var(--min-text, 5px), calc(16px * var(--text-scale, 1)))">🚫</span>
                     <span class="service-name">No service</span>
                 </div>`;
             }
@@ -1564,10 +2096,11 @@ class GearsetComparisonSection extends Component {
                     iconName += '_(advanced)';
                 }
                 const svcIcon = `/assets/icons/services/${iconName}.svg`;
+                const reqPanel = isSelected ? this._renderComparisonServiceRequirements(svc, ctx, gsNum) : '';
                 return `<div class="service-item ${isSelected ? 'service-selected' : ''} ${lockedClass}" data-service-id="${svc.id}" data-gs="${gsNum}">
                     <img src="${svcIcon}" alt="${displayName}" class="service-icon" onerror="this.style.display='none'" />
                     <span class="service-name">${displayName}</span>
-                </div>`;
+                </div>${reqPanel}`;
             }).join('');
             return html;
         };
@@ -1575,7 +2108,7 @@ class GearsetComparisonSection extends Component {
         const renderLocationGrid = (ctx, gsNum) => {
             if (ctx.selectedService === '__none__') {
                 // "No service" — render a mount point for LocationDropdown component
-                return `<div class="comparison-loc-dropdown-mount" data-gs="${gsNum}"></div>`;
+                return `<div class="comparison-loc-dropdown-mount" data-gs="${gsNum}"></div>${this._optimizedRegionsCaptionHtml(gsNum)}`;
             }
             const svc = this._findServiceById(ctx.selectedService);
             if (!svc || !svc.locations || svc.locations.length === 0) return '';
@@ -1705,8 +2238,8 @@ class GearsetComparisonSection extends Component {
         </tr>`;
         rows += `<tr>
             <td><div class="comparison-label">${icon(weIcon)} Work Efficiency</div></td>
-            <td class="${m1.weExceedsMax ? 'comparison-we-maxed' : cls(m1.weDisplay, m2.weDisplay, false)}">${fmtWE(m1)} / ${fmtMaxWE(m1)}%</td>
-            <td class="${m2.weExceedsMax ? 'comparison-we-maxed' : cls(m2.weDisplay, m1.weDisplay, false)}">${fmtWE(m2)} / ${fmtMaxWE(m2)}%</td>
+            <td class="${m1.weDisplay < 1 ? 'stat-value-negative' : (m1.weExceedsMax ? 'comparison-we-maxed' : cls(m1.weDisplay, m2.weDisplay, false))}">${fmtWE(m1)} / ${fmtMaxWE(m1)}%</td>
+            <td class="${m2.weDisplay < 1 ? 'stat-value-negative' : (m2.weExceedsMax ? 'comparison-we-maxed' : cls(m2.weDisplay, m1.weDisplay, false))}">${fmtWE(m2)} / ${fmtMaxWE(m2)}%</td>
         </tr>`;
         rows += `<tr>
             <td><div class="comparison-label">${icon(skillIcon)} Level</div></td>
@@ -2050,6 +2583,7 @@ class GearsetComparisonSection extends Component {
             }
         }
 
+        html += rewardSourceGroupsHtml(sources);
         html += '</div>';
         return html;
     }
@@ -2112,11 +2646,11 @@ class GearsetComparisonSection extends Component {
         if (!this._qualityMetric) this._qualityMetric = 'chance';
         const qo1 = m1.qo || 0, qo2 = m2.qo || 0;
         const hasEquipmentInput = this.recipe.has_equipment_input || false;
-        console.log(`[BUG1-COMPARISON] qo1=${qo1}, qo2=${qo2}, recipeLevel=${this.recipe.level}, useFine1=${ctx1.useFine}, useFine2=${ctx2.useFine}, hasEquipmentInput=${hasEquipmentInput}`);
+        window.__walkscapeVerboseDebug && console.log(`[BUG1-COMPARISON] qo1=${qo1}, qo2=${qo2}, recipeLevel=${this.recipe.level}, useFine1=${ctx1.useFine}, useFine2=${ctx2.useFine}, hasEquipmentInput=${hasEquipmentInput}`);
         const result1 = this.calculateQualityWeights(this.recipe.level, qo1, ctx1.useFine || false, hasEquipmentInput);
         const result2 = this.calculateQualityWeights(this.recipe.level, qo2, ctx2.useFine || false, hasEquipmentInput);
-        console.log(`[BUG1-COMPARISON] GS1 Normal%=${result1.percentages['Normal']?.toFixed(4)}, Perfect%=${result1.percentages['Perfect']?.toFixed(4)}`);
-        console.log(`[BUG1-COMPARISON] GS2 Normal%=${result2.percentages['Normal']?.toFixed(4)}, Perfect%=${result2.percentages['Perfect']?.toFixed(4)}`);
+        window.__walkscapeVerboseDebug && console.log(`[BUG1-COMPARISON] GS1 Normal%=${result1.percentages['Normal']?.toFixed(4)}, Perfect%=${result1.percentages['Perfect']?.toFixed(4)}`);
+        window.__walkscapeVerboseDebug && console.log(`[BUG1-COMPARISON] GS2 Normal%=${result2.percentages['Normal']?.toFixed(4)}, Perfect%=${result2.percentages['Perfect']?.toFixed(4)}`);
         const qualities = ['Normal', 'Good', 'Great', 'Excellent', 'Perfect', 'Eternal'];
         const qtr = { 'Normal': 'common', 'Good': 'uncommon', 'Great': 'rare', 'Excellent': 'epic', 'Perfect': 'legendary', 'Eternal': 'ethereal' };
         const cls = (a, b, lb) => (a === b || a === 0 || b === 0) ? '' : (lb ? a < b : a > b) ? 'comparison-better' : 'comparison-worse';
@@ -2280,6 +2814,8 @@ class GearsetComparisonSection extends Component {
         const perItemValue = (v) => (v != null && isFinite(v) && v > 0) ? 1 / v : Infinity;
 
         for (const [itemName, refDrop] of allDropNames) {
+            // Hide owned collectibles (shared filter with the single view).
+            if (this._isHiddenOwnedCollectible(refDrop)) continue;
             const d1 = drops1.find(d => d.item_name === itemName);
             const d2 = drops2.find(d => d.item_name === itemName);
             const iconPath = this._getDropIcon(refDrop);
@@ -2326,7 +2862,7 @@ class GearsetComparisonSection extends Component {
                 const pctStr = effPct ? formatFixed(effPct, 3).replace(/0+$/, '').replace(/\.$/, '') + '%' : '';
                 let html = `<div class="comparison-drop-pct">${pctStr}</div>`;
                 if (qty !== '1') {
-                    html += `<div class="comparison-drop-qty" style="font-size:11px;color:var(--text-secondary)">${qty}</div>`;
+                    html += `<div class="comparison-drop-qty" style="font-size: max(var(--min-text, 5px), calc(11px * var(--text-scale, 1)));color:var(--text-secondary)">${qty}</div>`;
                 }
                 html += `<div class="comparison-drop-steps comparison-steps-fill ${stepsCls}" data-gs="${gsNum}" data-steps-value="${d.steps_per_item}" role="button" tabindex="0" title="Click to fill the calculator (Gear set ${gsNum}) with this step count" style="cursor:pointer;">
                     <img src="/assets/icons/attributes/steps_required.svg" alt="Steps" class="comparison-steps-icon" />
@@ -2433,6 +2969,7 @@ class GearsetComparisonSection extends Component {
                     ${arrowIcon}
                 </div>
                 <div class="comparison-drops-content" style="display: ${this.dropsExpanded ? 'block' : 'none'};">
+                    ${this._renderComparisonDropsFilter()}
                     <table class="comparison-table comparison-drops-table">
                         <thead>
                             <tr>
@@ -2560,6 +3097,9 @@ class GearsetComparisonSection extends Component {
             const _isContainerType = drop.item_type && drop.item_type.toLowerCase() === 'container';
             if (_isContainerRef || _isContainerType) continue;
 
+            // Hide owned collectibles (shared filter with the single view).
+            if (this._isHiddenOwnedCollectible(drop)) continue;
+
             const dropIcon = resolveDropIcon(dropName);
 
             // Expected drops per craft (before DR): use multi-roll when present.
@@ -2660,6 +3200,7 @@ class GearsetComparisonSection extends Component {
                     ${arrowIcon}
                 </div>
                 <div class="comparison-drops-content" style="display: ${this.dropsExpanded ? 'block' : 'none'};">
+                    ${this._renderComparisonDropsFilter()}
                     <table class="comparison-table comparison-drops-table">
                         <thead>
                             <tr>
@@ -2689,6 +3230,17 @@ class GearsetComparisonSection extends Component {
                 this.$element.find('.comparison-quality-content').slideToggle(200);
             }
             $(e.currentTarget).find('.expand-arrow').toggleClass('expanded');
+        });
+
+        // "Hide owned collectibles" filter — writes the SAME store key as the
+        // single-view DropsSection so the two checkboxes stay in sync. Our
+        // column3.hideOwnedCollectibles subscription re-renders this section;
+        // DropsSection reacts to the same notify for the single view.
+        this.$element.on('change', 'input[data-filter="hide-owned"]', (e) => {
+            const hide = !!e.target.checked;
+            if (!store.state.column3) store.state.column3 = {};
+            store.state.column3.hideOwnedCollectibles = hide;
+            store._notifySubscribers('column3.hideOwnedCollectibles');
         });
 
         // Wire drop icon popovers (hover + click for item/container stats) —
@@ -2978,6 +3530,12 @@ class GearsetComparisonSection extends Component {
             }
         });
 
+        // Achievement-reward source → open the Achievements page (scroll + highlight).
+        this.$element.find('.comparison-activity-content').on('click', '.source-item-achievement', (e) => {
+            e.stopPropagation();
+            openAchievementFromSource($(e.currentTarget).data('source-id'));
+        });
+
         this.$element.find('.comparison-loc-dropdown-mount').each((_, el) => {
             const gsNum = $(el).data('gs');
             const ctxKey = gsNum === 1 ? 'gs1Context' : 'gs2Context';
@@ -3039,6 +3597,241 @@ class GearsetComparisonSection extends Component {
             }
             this._locationDropdowns = [];
         }
+    }
+
+    /**
+     * Render the Traveling comparison view.
+     *
+     * Fixes bug d74be782: in comparison mode the normal #activity-recipe-info
+     * panel (which hosts the single-view Start/End dropdowns) is hidden, so the
+     * user previously had no way to pick travel start/end. This renders a
+     * single shared Start/End selection (one each, NOT one per gearset — the
+     * route is gearset-independent) plus a side-by-side comparison of each
+     * gearset's total/per-segment travel stats.
+     */
+    async _renderTravelComparison() {
+        const skillColor = this._getSkillColor('traveling');
+        const shell = `
+            <div class="comparison-section">
+                <div class="comparison-activity-section travel-comparison-section" style="--comparison-skill-color: ${skillColor}">
+                    <div class="activity-info-header">
+                        <span class="activity-info-title">TRAVELING</span>
+                    </div>
+                    <div class="comparison-activity-content" style="display:block; padding: var(--spacing-md);">
+                        <div class="travel-dropdowns">
+                            <div id="travel-cmp-start-dropdown"></div>
+                            <div id="travel-cmp-end-dropdown"></div>
+                        </div>
+                        <div class="travel-comparison-content"></div>
+                    </div>
+                </div>
+                <div class="comparison-drops-section travel-drops-comparison-section" style="--comparison-skill-color: ${skillColor}">
+                    <div class="activity-info-header" data-section="drops">
+                        <span class="activity-info-title">DROPS</span>
+                        <span class="expand-arrow ${this.dropsExpanded ? 'expanded' : ''}">▼</span>
+                    </div>
+                    <div class="comparison-drops-content travel-drops-comparison-content" style="display: ${this.dropsExpanded ? 'block' : 'none'};"></div>
+                </div>
+            </div>
+        `;
+        this.$element.html(shell);
+        // Collapse toggle for the travel DROPS section. Bound directly on the
+        // freshly-rendered header (the normal attachEvents() delegate is skipped
+        // on the travel path), so it never stacks across re-renders.
+        const $dropsHeader = this.$element.find('.travel-drops-comparison-section .activity-info-header[data-section="drops"]');
+        $dropsHeader.on('click', () => {
+            this.dropsExpanded = !this.dropsExpanded;
+            this.$element.find('.travel-drops-comparison-section .comparison-drops-content').slideToggle(200);
+            $dropsHeader.find('.expand-arrow').toggleClass('expanded');
+        });
+        this._mountTravelDropdowns();
+        await this._fetchTravelComparison();
+    }
+
+    /**
+     * Mount the shared Start/End LocationDropdowns for the travel comparison.
+     * Selection is persisted to the same column3.travelStart/travelEnd keys the
+     * single-view TravelInfoSection uses, so it survives toggling comparison
+     * mode and stays in sync between the two views.
+     */
+    _mountTravelDropdowns() {
+        const $section = this.$element.find('.travel-comparison-section');
+        const widthEl = $section.length ? $section[0] : null;
+        const mount = (selector, which, label) => {
+            const el = this.$element.find(selector)[0];
+            if (!el) return;
+            const dd = new LocationDropdown(el, {
+                label,
+                selectedLocation: which === 'start' ? this.travelStart : this.travelEnd,
+                floatingWidthElement: widthEl,
+                onSelect: (loc) => {
+                    const id = loc ? loc.id : null;
+                    if (which === 'start') {
+                        this.travelStart = id;
+                        if (store.state.column3) store.state.column3.travelStart = id;
+                    } else {
+                        this.travelEnd = id;
+                        if (store.state.column3) store.state.column3.travelEnd = id;
+                    }
+                    if (typeof store._saveColumn3Selection === 'function') {
+                        store._saveColumn3Selection();
+                    }
+                    // Update only the content area — a full render() would
+                    // destroy/remount this dropdown mid-interaction.
+                    this._fetchTravelComparison();
+                }
+            });
+            if (!this._locationDropdowns) this._locationDropdowns = [];
+            this._locationDropdowns.push(dd);
+        };
+        mount('#travel-cmp-start-dropdown', 'start', 'Start');
+        mount('#travel-cmp-end-dropdown', 'end', 'End');
+    }
+
+    /**
+     * Fetch the route (once per start/end pair) plus per-gearset travel stats
+     * for both gearsets, then render the comparison into .travel-comparison-content.
+     */
+    async _fetchTravelComparison() {
+        const $content = this.$element.find('.travel-comparison-content');
+        if (!$content.length) return;
+        // Clear drops each fetch; the cache-hit + success paths refill it.
+        this._clearTravelDropsSection();
+
+        const start = this.travelStart;
+        const end = this.travelEnd;
+
+        if (!start || !end) {
+            this._travelStatsKey = null;
+            $content.html('<div class="travel-no-route">Select a start and end location to compare routes.</div>');
+            return;
+        }
+        if (start === end) {
+            this._travelStatsKey = null;
+            $content.html('<div class="travel-no-route">Start and end locations must be different.</div>');
+            return;
+        }
+
+        // Cache guard: the comparison depends only on the route (start/end) and
+        // the two gearsets' CONTENTS — not on which gearset slot is "active".
+        // Toggling the Gear set 1/2 view fires gearsets.current, which would
+        // otherwise re-render + refetch here for no reason. Key on
+        // start+end+both exports and short-circuit to a synchronous re-render
+        // (no loading flash, no network) when nothing relevant changed.
+        const export1 = encodeGearsetForTravel(store.state.gearsets?.current || {});
+        const export2 = encodeGearsetForTravel(store.state.gearsets?.gearset2 || {});
+        const statsKey = `${start}::${end}::${export1}::${export2}`;
+        if (statsKey === this._travelStatsKey && this.travelStats1 && this.travelStats2) {
+            $content.html(this._renderTravelComparisonContent());
+            this._renderTravelDropsSection();
+            return;
+        }
+
+        // Guard against overlapping async fetches (stale responses).
+        const token = ++this._travelFetchToken;
+        $content.html('<div class="travel-loading">Finding route...</div>');
+
+        try {
+            const routeKey = `${start}::${end}`;
+            if (this._travelRouteKey !== routeKey || !this.travelRouteData) {
+                const routeResp = await $.get(
+                    `/api/travel/route?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`
+                );
+                if (token !== this._travelFetchToken) return;
+                if (!routeResp || !routeResp.success) {
+                    $content.html(`<div class="travel-no-route">${(routeResp && routeResp.error) || 'Failed to find route'}</div>`);
+                    return;
+                }
+                this.travelRouteData = routeResp;
+                this._travelRouteKey = routeKey;
+            }
+
+            $content.html('<div class="travel-loading">Calculating stats...</div>');
+
+            const segments = this.travelRouteData.segments || [];
+            const [s1, s2] = await Promise.all([
+                this._fetchTravelStats(segments, export1),
+                this._fetchTravelStats(segments, export2),
+            ]);
+            if (token !== this._travelFetchToken) return;
+
+            this.travelStats1 = s1;
+            this.travelStats2 = s2;
+            this._travelStatsKey = statsKey;
+            $content.html(this._renderTravelComparisonContent());
+            this._renderTravelDropsSection();
+        } catch (err) {
+            if (token !== this._travelFetchToken) return;
+            this._travelStatsKey = null;
+            const msg = (err && err.responseJSON && err.responseJSON.error) || 'No route available between these locations';
+            $content.html(`<div class="travel-no-route">${msg}</div>`);
+        }
+    }
+
+    /**
+     * POST a route + gearset export to /api/travel/stats. Returns the response
+     * object on success, or null on any failure (caller renders a fallback).
+     */
+    async _fetchTravelStats(segments, gearsetExport) {
+        try {
+            const resp = await $.ajax({
+                url: '/api/travel/stats',
+                method: 'POST',
+                contentType: 'application/json',
+                data: JSON.stringify({ segments, gearset_export: gearsetExport })
+            });
+            return resp && resp.success ? resp : null;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    /**
+     * Build the travel comparison table HTML from this.travelStats1/2.
+     * Delegates to the pure, unit-tested renderTravelComparisonTable helper.
+     */
+    _renderTravelComparisonContent() {
+        return renderTravelComparisonTable(this.travelStats1, this.travelStats2);
+    }
+
+    /**
+     * Fill the (separate) DROPS section content from the cached travel stats,
+     * then wire popovers (hover/click) + per-gearset calculator step-fill —
+     * matching activities/recipes. The travel path skips the normal
+     * attachEvents() delegation, so these are wired here.
+     */
+    _renderTravelDropsSection() {
+        const $drops = this.$element.find('.travel-drops-comparison-content');
+        if (!$drops.length) return;
+        const html = renderTravelDropsComparisonTable(this.travelStats1, this.travelStats2);
+        $drops.html(html || '<div class="travel-no-route" style="padding: var(--spacing-sm);">No drops apply on this route.</div>');
+        // Icon/label popovers (idempotent — guarded by dataset.dropWired).
+        this._wireComparisonDropPopovers();
+        // Per-gearset steps → calculator. Bind directly on the freshly-inserted
+        // elements (fresh each fill) so handlers never stack.
+        const el = $drops[0];
+        el.querySelectorAll('.comparison-steps-fill').forEach((cell) => {
+            const fill = (e) => {
+                e.stopPropagation();
+                e.preventDefault();
+                const raw = parseFloat(cell.getAttribute('data-steps-value'));
+                if (!isFinite(raw) || raw <= 0) return;
+                const gs = parseInt(cell.getAttribute('data-gs'), 10) === 2 ? 2 : 1;
+                if (window.calculatorSection && typeof window.calculatorSection.setStepsFromExternal === 'function') {
+                    window.calculatorSection.setStepsFromExternal(Math.round(raw), gs);
+                }
+            };
+            cell.addEventListener('click', fill);
+            cell.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') fill(e);
+            });
+        });
+    }
+
+    /** Empty the travel DROPS section content (invalid/loading route states). */
+    _clearTravelDropsSection() {
+        const $drops = this.$element.find('.travel-drops-comparison-content');
+        if ($drops.length) $drops.html('');
     }
 
     /**

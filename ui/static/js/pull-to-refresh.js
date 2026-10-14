@@ -38,6 +38,49 @@ function log(msg) {
     if (debugLog.length > 200) debugLog.shift();
 }
 
+// Lightweight always-on diagnostic logger. Routed through console.log so it is
+// captured by the bug-report debug log (debug-logger.js) for EVERY session —
+// unlike log()/isDebugSession() above, which only records for one hardcoded
+// debug UUID. Kept terse to avoid spam. Added to diagnose the "can't change
+// away from the data tab, refresh fixes it" report (6a190fb3): the mobile
+// tab-switch + swipe paths were previously silent, so a stuck report showed a
+// blind gap. These lines make the next such report conclusive.
+function diag(msg) {
+    try { console.log(`[TAB-DIAG] ${msg}`); } catch (_e) { /* ignore */ }
+}
+
+// ============================================================================
+// MODAL-OPEN DETECTION (hardened)
+// ============================================================================
+// A modal counts as *open* only when its overlay carries the `.show` class —
+// added on open, removed synchronously in every modal's hide(). We deliberately
+// do NOT treat a lingering inline `display: flex` as "open": hide() removes
+// `.show` immediately but clears `display` only after a 200ms fade timer, and
+// if that timer is ever lost (re-render, backgrounded tab, interrupted close)
+// the overlay is stranded at `display: flex` with no `.show`. That orphaned,
+// invisible overlay used to (a) permanently disable swipe/tab navigation via
+// the old `[style*="display: flex"]` guard and (b) sit over the columns + bottom
+// nav eating every tap — exactly the report-6a190fb3 lockup. Here we detect the
+// orphan and neutralize it (hide + kill pointer capture) so the UI self-heals on
+// the next touch instead of needing a page reload.
+function getBlockingModalOverlay() {
+    // Genuinely-open modal → block gestures as intended.
+    const shown = document.querySelector('.modal-overlay.show');
+    if (shown) return shown;
+
+    // Orphaned overlay: inline display:flex but no `.show` class → stuck-open
+    // leftover. Self-heal it and do NOT treat it as blocking.
+    const overlays = document.querySelectorAll('.modal-overlay');
+    for (const el of overlays) {
+        if (el.style && el.style.display === 'flex') {
+            diag(`neutralized orphaned modal-overlay (display:flex, no .show): ${el.className || '(no class)'}`);
+            el.style.display = 'none';
+            el.style.pointerEvents = 'none';
+        }
+    }
+    return null;
+}
+
 function saveDebugLog() {
     if (!isDebugSession()) return;
     try {
@@ -49,7 +92,7 @@ function showDebugOverlay(text) {
     const overlay = document.createElement('div');
     overlay.style.cssText = `
         position: fixed; top: 65px; left: 8px; right: 8px; bottom: 80px;
-        background: rgba(0,0,0,0.92); color: #0f0; font-size: 11px;
+        background: rgba(0,0,0,0.92); color: #0f0; font-size: max(var(--min-text, 5px), calc(11px * var(--text-scale, 1)));
         font-family: monospace; padding: 10px; border-radius: 8px;
         z-index: 99999; overflow-y: auto; white-space: pre-wrap;
         line-height: 1.4; border: 1px solid #0f0;
@@ -60,7 +103,7 @@ function showDebugOverlay(text) {
     closeBtn.style.cssText = `
         position: sticky; top: 0; float: right;
         background: #333; color: #fff; border: 1px solid #0f0;
-        padding: 4px 10px; border-radius: 4px; font-size: 12px;
+        padding: 4px 10px; border-radius: 4px; font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)));
         cursor: pointer; z-index: 1;
     `;
     closeBtn.addEventListener('click', () => overlay.remove());
@@ -143,20 +186,59 @@ function showRefreshing() {
 // ============================================================================
 
 function getScrollTop() {
-    // Each column scrolls independently — the .column element is the scroll container on mobile
-    const activeCol = document.querySelector('.column.active-mobile-column');
-    if (activeCol && activeCol.scrollHeight > activeCol.clientHeight) {
-        return activeCol.scrollTop;
-    }
-    // Fallback: check .column-content
-    if (activeCol) {
-        const content = activeCol.querySelector('.column-content');
-        if (content && content.scrollHeight > content.clientHeight) {
-            return content.scrollTop;
-        }
-    }
-    // Fallback for desktop
+    // Body-scroll model: on mobile only the active column is in normal flow and
+    // the WINDOW is its scroller (so iOS's native status-bar-tap-to-top works).
+    // Desktop scrolls at the window level too. Either way, read window scroll.
     return window.scrollY || window.pageYOffset || document.documentElement.scrollTop || 0;
+}
+
+// ============================================================================
+// VIEW GUARDS
+// ============================================================================
+
+// Hash-routed full-screen views/overlays where the custom pull-to-refresh
+// gesture must be disabled entirely. Each has its own scrollable content and/or
+// slide-toggling sections that get confused if the gesture refreshes mid-
+// interaction. (Native browser pull-to-refresh is separately suppressed via
+// `overscroll-behavior: none` in CSS on these same views.)
+const PTR_DISABLED_HASHES = new Set([
+    '#travel-config',  // map/divider need raw touch events
+    '#goals-report',   // internal scroll regions + slide-toggling sections
+    '#sell-for-chips', // hash-routed overlay, own scroll + slide sections
+    '#walkdle',        // hash-routed full-screen overlay
+    '#notepad',        // full-screen editor, drag/scroll inside
+    '#bank',           // Bank Layout Simulator — grid DnD + slide sections (bug 2026-08-02)
+    '#crafting-tree',  // Crafting tree full-screen page (bug 2026-08-02)
+]);
+
+/**
+ * Whether the custom pull-to-refresh gesture must be disabled for the current
+ * view. Covers hash-routed overlays plus the crafting tree opened directly
+ * (no hash) from the recipe info panel via `$container.show()`.
+ *
+ * NOTE on the tree backstop: `.crafting-tree-overlay` is `position: fixed`, so
+ * its `offsetParent` is ALWAYS null — the old `offsetParent !== null` check made
+ * that guard dead code and let pull-to-refresh fire on the tree (bug 2026-08-02).
+ * offsetWidth/offsetHeight are non-zero whenever the fixed overlay is visible.
+ */
+export function pullToRefreshDisabledForCurrentView() {
+    // Trading overlay (all its tabs + sub-pages) sets body.trading-open — disable
+    // the pull-to-refresh gesture everywhere inside it.
+    if (typeof document !== 'undefined' && document.body
+            && document.body.classList.contains('trading-open')) {
+        return true;
+    }
+    if (typeof window !== 'undefined' && PTR_DISABLED_HASHES.has(window.location.hash)) {
+        return true;
+    }
+    const treeOverlay = typeof document !== 'undefined'
+        ? document.getElementById('crafting-tree-container')
+        : null;
+    if (treeOverlay && treeOverlay.style && treeOverlay.style.display !== 'none' &&
+        ((treeOverlay.offsetWidth || 0) > 0 || (treeOverlay.offsetHeight || 0) > 0)) {
+        return true;
+    }
+    return false;
 }
 
 // ============================================================================
@@ -166,46 +248,39 @@ function getScrollTop() {
 function onTouchStart(e) {
     if (!isMobile()) return;
 
-    // Don't activate on the travel config page (map/divider need touch events)
-    if (window.location.hash === '#travel-config') return;
-
-    // Don't activate on the stats report page — same reason as the
-    // crafting tree below: the page has its own internal scroll regions
-    // and slide-toggling sections that get confused if the gesture
-    // refreshes mid-interaction (user feedback 2026-05-20).
-    if (window.location.hash === '#goals-report') return;
-
-    // Don't activate on the Sell for Chips overlay — it's a hash-routed
-    // overlay (#sell-for-chips) with its own scrollable content and
-    // slide-toggling sections, same reasoning as the goals report above
-    // (user feedback 2026-06-12).
-    if (window.location.hash === '#sell-for-chips') return;
-
-    // Don't activate on the Walkdle overlay — hash-routed (#walkdle) full-screen
-    // overlay with its own scrollable content, same reasoning as the others.
-    if (window.location.hash === '#walkdle') return;
-
-    // Notepad overlay: a full-screen editor; pull-to-refresh interferes with
-    // dragging/scrolling inside it on mobile.
-    if (window.location.hash === '#notepad') return;
-
-    // Don't activate while the crafting tree overlay is open. The tree is
-    // a full-screen overlay mounted at #crafting-tree-container with class
-    // .crafting-tree-overlay, shown via `$container.show()` and hidden via
-    // `$container.hide()` (display: none) on close. User feedback
-    // 2026-05-19: pull-to-refresh fired on the tree's gear preview slide
-    // when the user dragged finger from the top — disable the gesture
-    // entirely while the tree is mounted+visible.
-    const treeOverlay = document.getElementById('crafting-tree-container');
-    if (treeOverlay && treeOverlay.style.display !== 'none' && treeOverlay.offsetParent !== null) {
-        log('start: crafting tree overlay open, skipping');
+    // Top-bar customization edit mode uses vertical drag (drawer reorder / icon
+    // drag) — don't let that trigger pull-to-refresh.
+    if (document.body.classList.contains('tc-editing')) {
+        log('start: topbar edit mode active, skipping');
         return;
     }
 
-    // Don't activate if a modal/popup is open
-    const openModal = document.querySelector('.modal-overlay[style*="display: flex"], .modal-overlay.show');
-    if (openModal) {
+    // Disable the gesture entirely on hash-routed overlays and the crafting
+    // tree (see pullToRefreshDisabledForCurrentView for the full list + why).
+    if (pullToRefreshDisabledForCurrentView()) {
+        log('start: pull-to-refresh disabled for current view, skipping');
+        return;
+    }
+
+    // Don't activate if a modal/popup is genuinely open. getBlockingModalOverlay()
+    // also self-heals an orphaned (stuck display:flex, no .show) overlay.
+    if (getBlockingModalOverlay()) {
         log('start: modal open, skipping');
+        return;
+    }
+
+    // Don't arm when the gesture starts inside an open selector dropdown list
+    // (activity / recipe / combined). These scroll internally and support
+    // drag-to-reorder of favorites, so a pull-to-refresh there is never
+    // intended (bug: pull-to-refresh fired while scrolling up / dragging in the
+    // dropdowns).
+    if (e.target && e.target.closest && e.target.closest('.activity-dropdown, .recipe-dropdown')) {
+        log('start: inside selector dropdown, skipping');
+        return;
+    }
+    // Also skip while a favorites drag-reorder is mid-flight anywhere.
+    if (document.querySelector('.fav-editable.fav-dragging')) {
+        log('start: favorites drag in progress, skipping');
         return;
     }
 
@@ -320,18 +395,33 @@ function getActiveTabIndex() {
 
 // Scroll positions are handled naturally — each .column-content scrolls independently
 
+// Remembered vertical (window) scroll position per column, so switching tabs
+// restores where you were — the body-scroll equivalent of the old model where
+// each column had its own live inner scroller.
+const columnScrollY = Object.create(null);
+
 function switchToTab(index) {
     if (index < 0 || index >= TAB_ORDER.length) return;
     const columnId = TAB_ORDER[index];
     const currentIdx = getActiveTabIndex();
-    if (index === currentIdx) return;
+    diag(`switchToTab(${index}=${columnId}) from ${currentIdx}=${TAB_ORDER[currentIdx]}`);
+    if (index === currentIdx) {
+        diag('switchToTab no-op (target already active)');
+        return;
+    }
+
+    // Remember the outgoing column's scroll position (body-scroll model).
+    const prevColumnId = TAB_ORDER[currentIdx];
+    if (prevColumnId && prevColumnId !== 'travel-config-page') {
+        columnScrollY[prevColumnId] = window.scrollY || window.pageYOffset || 0;
+    }
 
     // Update tab buttons
     document.querySelectorAll('.mobile-tab').forEach(tab => {
         tab.classList.toggle('active', tab.getAttribute('data-column') === columnId);
     });
 
-    // Update active-mobile-column class (for any code that checks it)
+    // Show only the target column (CSS: .column is display:none, active shown)
     document.querySelectorAll('.column').forEach(col => {
         col.classList.toggle('active-mobile-column', col.id === columnId);
     });
@@ -341,9 +431,14 @@ function switchToTab(index) {
     const travelPage = document.getElementById('travel-config-page');
 
     if (isTravelTab) {
-        // Show travel page, hide main columns strip
+        // Show travel page, hide main columns
         if (mainContent) mainContent.style.display = 'none';
-        if (travelPage) travelPage.style.display = 'flex';
+        // Animated overlay open (matches showTravelConfigPage / item 4)
+        if (travelPage) {
+            travelPage.classList.remove('closing');
+            travelPage.classList.add('opening');
+            travelPage.style.display = 'flex';
+        }
         // Use replaceState to update URL without triggering hashchange
         // (avoids double-navigation race with showTravelConfigPage)
         history.replaceState(null, '', '#travel-config');
@@ -360,15 +455,32 @@ function switchToTab(index) {
         };
         doNavigate();
     } else {
-        // Show main columns strip, hide travel page
+        // Body-scroll model: the active column is shown via the
+        // active-mobile-column class (CSS). There is no fixed sliding strip, so
+        // clear any legacy transform and let the window scroll the column.
         if (mainContent) {
             mainContent.style.display = '';
             mainContent.style.visibility = 'visible';
-            // Slide to the correct column (travel is index 3, so clamp to 0-2)
-            const colIndex = Math.min(index, 2);
-            mainContent.style.transform = `translateX(-${colIndex * 100}vw)`;
+            mainContent.style.transform = '';
         }
-        if (travelPage) travelPage.style.display = 'none';
+        if (travelPage) {
+            travelPage.classList.remove('opening', 'closing');
+            travelPage.style.display = 'none';
+        }
+        // Transient horizontal slide on the newly-active column (keeps the
+        // carousel feel without a persistent strip). Direction follows tab
+        // order. No `forwards` fill + resting transform:none (CSS) so we don't
+        // leave a retained transform that would break iOS touch hit-testing.
+        const activeCol = document.getElementById(columnId);
+        if (activeCol) {
+            const dir = index > currentIdx ? 'ws-slide-right' : 'ws-slide-left';
+            activeCol.classList.remove('ws-slide-right', 'ws-slide-left');
+            void activeCol.offsetWidth; // force reflow so the animation replays
+            activeCol.classList.add(dir);
+        }
+        // Restore the incoming column's remembered scroll position.
+        window.scrollTo(0, columnScrollY[columnId] || 0);
+
         if (window.location.hash === '#travel-config') {
             history.replaceState(null, '', window.location.pathname);
         }
@@ -398,9 +510,13 @@ function onSwipeStart(e) {
         el = el.parentElement;
     }
 
-    // Don't swipe if a modal is open
-    const openModal = document.querySelector('.modal-overlay[style*="display: flex"], .modal-overlay.show');
-    if (openModal) return;
+    // Don't swipe if a modal is genuinely open. getBlockingModalOverlay() also
+    // neutralizes an orphaned (stuck display:flex, no .show) overlay so a leftover
+    // invisible modal can't permanently kill swipe/tab nav (report 6a190fb3).
+    if (getBlockingModalOverlay()) {
+        diag('swipe blocked: modal open');
+        return;
+    }
 
     swipeState.startX = e.touches[0].clientX;
     swipeState.startY = e.touches[0].clientY;
@@ -421,20 +537,22 @@ function onSwipeEnd(e) {
 
     const currentIdx = getActiveTabIndex();
 
-    if (dx < 0) {
-        // Swipe left → next tab
-        switchToTab(currentIdx + 1);
-    } else {
-        // Swipe right → previous tab
-        switchToTab(currentIdx - 1);
-    }
+    // The travel config tab is reachable ONLY via the bottom-nav tab and the
+    // top-header map button — never by swiping (user request). Swiping stays
+    // within the main columns. switchToTab() (used by those buttons) is
+    // unaffected.
+    const travelIdx = TAB_ORDER.indexOf('travel-config-page');
+    if (currentIdx === travelIdx) return;               // don't swipe out of travel
+    const targetIdx = dx < 0 ? currentIdx + 1 : currentIdx - 1;
+    if (targetIdx === travelIdx) return;                // don't swipe into travel
+    switchToTab(targetIdx);
 }
 
 // ============================================================================
 // INIT
 // ============================================================================
 
-export { switchToTab, getActiveTabIndex, TAB_ORDER };
+export { switchToTab, getActiveTabIndex, TAB_ORDER, getBlockingModalOverlay };
 
 export function initPullToRefresh() {
     // Listen on document since the page scrolls at body level on mobile

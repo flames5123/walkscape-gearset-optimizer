@@ -63,9 +63,18 @@ export function selectedFrom(all, deselected) {
  * @param {Object<string,Set<string>>} p.selectedChestsByCat
  * @param {string[]} p.allKinds
  * @param {Set<string>} p.selectedKinds
- * @param {Object} p.flags                 - {notifyOnComplete, includePets, includeConsumables, fast}
+ * @param {Object} p.flags                 - {notifyOnComplete, includePets, includeConsumables, usePetAbility, fast}
  * @returns {Object} the ui_config.goalsReportConfig payload
  */
+/**
+ * Fastest Craft deselections are prefixed chip ids ('gear:rings', 'mat:bar').
+ * Drops anything else, e.g. bare category labels saved before the grouped
+ * taxonomy, which would otherwise never match a chip.
+ */
+export function fastestCraftChipIds(values) {
+    return (values || []).map(String).filter(v => /^(gear|tools|cons|mat):/.test(v));
+}
+
 export function buildGoalsReportConfig(p) {
     const cfg = {
         version: GOALS_REPORT_CONFIG_VERSION,
@@ -77,7 +86,28 @@ export function buildGoalsReportConfig(p) {
             notifyOnComplete: !!(p.flags && p.flags.notifyOnComplete),
             includePets: !!(p.flags && p.flags.includePets),
             includeConsumables: !!(p.flags && p.flags.includeConsumables),
+            usePetAbility: !!(p.flags && p.flags.usePetAbility),
             fast: !!(p.flags && p.flags.fast),
+            // 2026-09-23 (jwbail): report-local Consumable Options. These were
+            // passed in by _persistGoalsReportConfig but NOT serialized here,
+            // so they were silently dropped from the session's goalsReportConfig
+            // (confirmed via a prod bug-report snapshot whose flags lacked every
+            // min-owned field). That broke session-durable persistence of the
+            // "ignore < X owned" filter (and the fine / use-hidden sub-options).
+            includeFineConsumables: (p.flags && p.flags.includeFineConsumables !== undefined)
+                ? !!p.flags.includeFineConsumables : true,
+            consumableMinOwnedEnabled: !!(p.flags && p.flags.consumableMinOwnedEnabled),
+            consumableMinOwned: (p.flags && Number.isFinite(p.flags.consumableMinOwned))
+                ? p.flags.consumableMinOwned : 5,
+            consumableMinOwnedOperator: (p.flags && p.flags.consumableMinOwnedOperator === 'lte')
+                ? 'lte' : 'lt',
+            consumableUseHidden: !!(p.flags && p.flags.consumableUseHidden),
+            consumablesCollapsed: !!(p.flags && p.flags.consumablesCollapsed),
+            petsCollapsed: !!(p.flags && p.flags.petsCollapsed),
+            // Fastest Craft chip-id DESELECTIONS (universe is fetched async,
+            // so deselections keep newly-added chips selected).
+            fastestCraftDeselected: (p.flags && Array.isArray(p.flags.fastestCraftDeselected))
+                ? fastestCraftChipIds(p.flags.fastestCraftDeselected) : [],
         },
     };
     // Only record skill/chest deselections once the universe is known
@@ -132,8 +162,20 @@ export function applyGoalsReportConfig(cfg, u) {
         out.selectedKinds = selectedFrom(u.allKinds, cfg.deselectedKinds);
     }
     const f = cfg.flags || {};
-    for (const k of ['notifyOnComplete', 'includePets', 'includeConsumables', 'fast']) {
+    for (const k of ['notifyOnComplete', 'includePets', 'includeConsumables', 'usePetAbility', 'fast']) {
         if (typeof f[k] === 'boolean') out.flags[k] = f[k];
     }
+    // 2026-09-23 (jwbail): mirror the write side — restore report-local
+    // Consumable Options from the session config. The boolean loop above can't
+    // cover the numeric threshold or the string operator, so copy them
+    // explicitly (same guards _hydrateSelectionsFromSession uses).
+    if (typeof f.includeFineConsumables === 'boolean') out.flags.includeFineConsumables = f.includeFineConsumables;
+    if (typeof f.consumableMinOwnedEnabled === 'boolean') out.flags.consumableMinOwnedEnabled = f.consumableMinOwnedEnabled;
+    if (Number.isFinite(f.consumableMinOwned)) out.flags.consumableMinOwned = f.consumableMinOwned;
+    if (f.consumableMinOwnedOperator === 'lt' || f.consumableMinOwnedOperator === 'lte') out.flags.consumableMinOwnedOperator = f.consumableMinOwnedOperator;
+    if (typeof f.consumableUseHidden === 'boolean') out.flags.consumableUseHidden = f.consumableUseHidden;
+    if (typeof f.consumablesCollapsed === 'boolean') out.flags.consumablesCollapsed = f.consumablesCollapsed;
+    if (typeof f.petsCollapsed === 'boolean') out.flags.petsCollapsed = f.petsCollapsed;
+    if (Array.isArray(f.fastestCraftDeselected)) out.flags.fastestCraftDeselected = fastestCraftChipIds(f.fastestCraftDeselected);
     return out;
 }

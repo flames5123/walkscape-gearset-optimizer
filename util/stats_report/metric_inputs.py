@@ -75,6 +75,20 @@ def _pet_skill_index():
                 if isinstance(st, dict):
                     for sk in st.keys():
                         skills.add(str(sk).lower())
+                # 2026-08-31 (jwbail): also fold in the skills touched by the
+                # pet's ACTIVE ABILITY stats (present only at the ADULT level).
+                # Without this, a pet whose ability applies to a skill its
+                # passive `_stats` never touch (e.g. Pixie: find_collectibles is
+                # ability-only) is NOT associated with that skill's scopes, so a
+                # juvenile->adult level-up that UNLOCKS the ability would not
+                # flip those scopes stale. The (species, level) pet token
+                # already encodes the level, so once the pet is associated with
+                # the scope the level change alone re-hashes it -> input_change.
+                for _ab in (getattr(info, 'abilities', None) or []):
+                    _abst = _ab.get('ability_stats', {}) if isinstance(_ab, dict) else {}
+                    if isinstance(_abst, dict):
+                        for sk in _abst.keys():
+                            skills.add(str(sk).lower())
             idx[str(species).lower()] = skills
     except Exception:
         idx = {}
@@ -204,11 +218,49 @@ def compute_metric_inputs_hash(
         for _csid, _val in sorted(state.custom_stats.items()):
             _skills = _idx.get(_csid)
             if _skills is None:
-                _relevant.append(f"{_csid}={_val}")           # unknown -> include (safe)
-            elif 'global' in _skills or (_pskill and _pskill in _skills):
+                # Unknown custom stat = an UNLOCK/access toggle (e.g.
+                # repair_the_bank, access_syrenthia, *_skiing) that provides NO
+                # gated stat, so it CANNOT change any row's metric inputs — it
+                # only changes which activities/services are ACCESSIBLE. That
+                # accessibility change is already detected by
+                # enumerate_applicable_sources (newly_unlocked), so folding it
+                # into every row's metric hash just produced a spurious
+                # "inputs changed" flag on ALL rows whenever one was toggled
+                # (user: unchecking "Repaired the Bank" flagged every node).
+                # Skip it here; the gated-stats index authoritatively covers
+                # every stat-affecting custom stat. (2026-07-30)
+                continue
+            if 'global' in _skills or (_pskill and _pskill in _skills):
                 _relevant.append(f"{_csid}={_val}")           # gated stat hits this scope's skill
         if _relevant:
             parts.append("cs:" + ",".join(_relevant))
+
+    # 2026-09-23 (jwbail, follow-up to bug 6dcff2e9): explore_realm gates. A
+    # regional tool (Quickdraw map, Globetrotter's backpack) carries its entire
+    # WE/double_action bonus under an explore_realm gate, credited only once the
+    # character has explored the realm (custom stat explored_realm_<realm>) AND
+    # only for activities whose LOCATION is in that realm. The generic
+    # custom-stat handling above indexes ONLY activity_completion gates, so
+    # explored_realm_* looked like an unknown unlock toggle and was dropped --
+    # a stored result computed before the realm was explored (tool uncredited)
+    # then never went stale when it became credited, so new_items / collectible
+    # scopes in that realm stayed fresh forever. Fold in ONLY the realm toggle(s)
+    # matching THIS scope's location, so flipping a realm re-flags exactly its
+    # own scopes -- not every scope (location-precise, unlike the skill-scoped
+    # 'global' custom stats above).
+    if state.custom_stats and location and location != "global":
+        try:
+            from .precompute.build_dominators import _scope_regions
+            _regions = _scope_regions(location)
+        except Exception:
+            _regions = frozenset()
+        _er = []
+        for _rg in sorted(_regions):
+            _csid = f"explored_realm_{str(_rg).lower()}"
+            if _csid in state.custom_stats:
+                _er.append(f"{_csid}={state.custom_stats[_csid]}")
+        if _er:
+            parts.append("er:" + ",".join(_er))
 
     _pskill = (primary_skill or '').lower()
 

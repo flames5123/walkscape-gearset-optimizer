@@ -1,3 +1,4 @@
+import { rewardSourceGroupsHtml, openAchievementFromSource } from '../utils/reward-sources.js';
 /**
  * ItemSelectionPopup Component
  * 
@@ -21,11 +22,36 @@ import api from '../api.js';
 import KeyboardNavigator from '../utils/keyboard-navigation.js';
 import { GearSlotGrid } from './gear-slot-grid.js';
 import { getPetIconPath } from '../utils/pet-utils.js';
+import { abilityExtraLines } from '../utils/ability-detail.js';
 import { renderRequirementsRow } from '../utils/requirements.js';
 import { validateToolKeyword } from '../utils/keyword-validation.js';
 import { wikiDarkModeSuffix } from '../utils/wiki-link.js';
+import { ownedCountLabel } from '../utils/owned-quantity.js';
+import { getOwnedCollectiblesCount } from '../utils/collectibles-ownership.js';
 
 import { formatFixed } from '../utils/number-format.js';
+import { unhideAlt } from '../utils/unhide-item.js';
+import { tradingButtonsHTML } from '../trading-buttons.js';
+import { consumableDurationHtml } from '../utils/consumable-duration.js';
+
+
+// Ordered crafted-quality tiers and their rarity class mapping, used by the
+// equipped-item "temporary crafted quality selection" chip row. Order runs
+// low → high to match the reference layout (Normal … Eternal).
+const CRAFTED_QUALITY_ORDER = ['Normal', 'Good', 'Great', 'Excellent', 'Perfect', 'Eternal'];
+const CRAFTED_QUALITY_TO_RARITY = {
+    'Normal': 'common', 'Good': 'uncommon', 'Great': 'rare',
+    'Excellent': 'epic', 'Perfect': 'legendary', 'Eternal': 'ethereal',
+};
+
+// Global, init-order-safe reader for the "Enable temporary crafted quality
+// selection for equipped items" setting. Reads localStorage directly so it is
+// correct even before SettingsModal has constructed (mirrors the unlock-all
+// helper pattern). Default OFF.
+if (typeof window !== 'undefined' && !window.isCraftedQualitySelectEnabled) {
+    window.isCraftedQualitySelectEnabled = () =>
+        localStorage.getItem('enableCraftedQualitySelect') === 'true';
+}
 
 
 // X-per-Y axis labels for the swap-metric popup. Mirrors AXIS_OPTIONS.label
@@ -78,7 +104,10 @@ function formatCondition(skill, location) {
         } else if (loc === 'underwater') {
             return 'Underwater location';
         } else {
-            return `${capitalize(loc)} location`;
+            // Multi-word regions arrive snake_cased (e.g. 'halfling_rebels');
+            // render as title-cased words ('Halfling Rebels location').
+            const pretty = loc.split('_').map(w => capitalize(w)).join(' ');
+            return `${pretty} location`;
         }
     };
 
@@ -107,6 +136,31 @@ function formatCondition(skill, location) {
     } else {
         return 'Global';
     }
+}
+
+// ---- bulk-wishlist helpers (mirror trading-buttons.js so the POSTed item key
+// matches the per-item "+ Wishlist" button) --------------------------------
+const _WL_CANON_TYPE = {
+    material: 'material', crafted_item: 'crafted', consumable: 'consumable',
+    egg: 'pet_egg', item: 'item', coins: 'coins',
+};
+const _WL_QTOKENS = new Set(['', 'common', 'uncommon', 'rare', 'epic', 'legendary', 'ethereal', 'fine']);
+const _WL_WORD_TO_QTOKEN = {
+    normal: 'common', good: 'uncommon', great: 'rare', excellent: 'epic',
+    perfect: 'legendary', eternal: 'ethereal', fine: 'fine', none: '',
+};
+function wlSlug(name) {
+    return String(name || '').toLowerCase().replace(/ /g, '_')
+        .replace(/[()]/g, '').replace(/-/g, '_').replace(/'/g, '');
+}
+function wlQualityToken(q) {
+    const s = String(q == null ? '' : q).toLowerCase().trim();
+    if (_WL_QTOKENS.has(s)) return s;
+    return Object.prototype.hasOwnProperty.call(_WL_WORD_TO_QTOKEN, s) ? _WL_WORD_TO_QTOKEN[s] : '';
+}
+function wlEsc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => (
+        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
 class ItemSelectionPopup extends Component {
@@ -192,6 +246,13 @@ class ItemSelectionPopup extends Component {
         this.showGenericItems = localStorage.getItem('popupShowGeneric') !== 'false';  // default true
         this.showCommunityItems = localStorage.getItem('popupShowCommunity') === 'true';  // default false
 
+        // Single collapse for the Search + Filter-by-stat group (small-phone
+        // space saver). One arrow (on the search row) hides BOTH the search
+        // box and the filter-by-stat control. Persisted so it sticks across
+        // opens. The Non-owned/Locked/Hidden Upgrades section persists separately
+        // via 'popupAltCollapsed' (see _altCollapsedPref).
+        this.filtersCollapsed = localStorage.getItem('popupFiltersCollapsed') === 'true';
+
         // Keyboard navigation
         this.keyboardNav = null;
 
@@ -240,8 +301,15 @@ class ItemSelectionPopup extends Component {
                 const lockedAlts = isSlot2Active
                     ? store.state.gearsets?.gearset2LockedAlternatives
                     : store.state.gearsets?.lockedAlternatives;
-                if ((alternatives && alternatives[this.slot]?.length > 0) || (lockedAlts && lockedAlts[this.slot]?.length > 0)) {
-                    this._alternativesExpanded = true;
+                const hiddenAlts = isSlot2Active
+                    ? store.state.gearsets?.gearset2HiddenAlternatives
+                    : store.state.gearsets?.hiddenAlternatives;
+                if ((alternatives && alternatives[this.slot]?.length > 0) || (lockedAlts && lockedAlts[this.slot]?.length > 0) || (hiddenAlts && hiddenAlts[this.slot]?.length > 0)) {
+                    // Respect the user's persisted collapse choice — don't
+                    // auto-expand if they explicitly hid the section.
+                    if (!this._altCollapsedPref()) {
+                        this._alternativesExpanded = true;
+                    }
                 }
                 this._rerenderInPlace();
             }
@@ -254,6 +322,20 @@ class ItemSelectionPopup extends Component {
             }
         });
         this.subscribe('gearsets.lockedAlternatives', () => {
+            if (this.visible) {
+                this._rerenderInPlace();
+            }
+        });
+        this.subscribe('gearsets.hiddenAlternatives', () => {
+            if (this.visible) {
+                this._rerenderInPlace();
+            }
+        });
+
+        // Re-render the equipped-item view when the "temporary crafted quality
+        // selection" setting is toggled while a popup is open (shows/hides the
+        // quality chip row without needing to reopen the popup).
+        window.addEventListener('craftedQualitySelectChanged', () => {
             if (this.visible) {
                 this._rerenderInPlace();
             }
@@ -272,7 +354,10 @@ class ItemSelectionPopup extends Component {
         const level = window.calculateCharacterLevel
             ? window.calculateCharacterLevel(store.state.character)
             : 1;
-        const unlockedCount = GearSlotGrid.getUnlockedToolSlots(level);
+        // "Unlock all": treat all 6 tool slots as unlocked for swipe navigation.
+        const unlockedCount = (window.isUnlockAllEnabled && window.isUnlockAllEnabled())
+            ? GearSlotGrid.TOOL_SLOTS.length
+            : GearSlotGrid.getUnlockedToolSlots(level);
 
         const slots = [];
         // Gear slots (row by row, left to right)
@@ -425,6 +510,32 @@ class ItemSelectionPopup extends Component {
                     console.log(`Split consumables: ${this.items.length} items (including fine versions)`);
                 }
 
+                // For input slot, split materials that have a Fine variant into
+                // normal + Fine entries (like consumables) so the user can pick
+                // either. Fine inputs apply a GLOBAL bonus (FINE_INPUT_BONUS in
+                // activity-info-section), not per-item stats, so the Fine entry
+                // carries the SAME stats and just flags is_fine — selecting it
+                // toggles the activity's "Fine Inputs" checkbox (wired in the
+                // input popup's onSelect). Split on has_fine alone since input
+                // materials rarely carry a distinct stats_fine.
+                if (slot === 'input') {
+                    const expanded = [];
+                    for (const item of this.items) {
+                        expanded.push(item);
+                        if (item.has_fine && !item.is_fine) {
+                            expanded.push({
+                                ...item,
+                                id: item.id + '_fine',
+                                name: item.name + ' (Fine)',
+                                is_fine: true,
+                                has_fine: false,
+                                rarity: 'fine',
+                            });
+                        }
+                    }
+                    this.items = expanded;
+                }
+
                 console.log(`Loaded ${this.items.length} items for slot ${slot}`);
 
                 // Append generic items matching this slot (gated behind feature flag)
@@ -524,19 +635,24 @@ class ItemSelectionPopup extends Component {
                     }
                     console.log(`After generic items: ${this.items.length} total`);
 
-                    // Split generic consumables with fine versions (same as wiki consumables above)
-                    if (slot === 'consumable') {
+                    // Split generic consumables/inputs with fine versions (same as wiki items above)
+                    if (slot === 'consumable' || slot === 'input') {
                         const expanded = [];
                         for (const item of this.items) {
                             expanded.push(item);
-                            if (item.is_generic && item.has_fine && item.stats_fine) {
+                            // Consumables need per-quality stats_fine; inputs
+                            // only need a Fine variant (global bonus, same stats).
+                            const canFine = slot === 'consumable'
+                                ? (item.is_generic && item.has_fine && item.stats_fine)
+                                : (item.is_generic && item.has_fine);
+                            if (canFine && !item.is_fine) {
                                 expanded.push({
                                     ...item,
                                     id: item.id + '_fine',
                                     name: item.name + ' (Fine)',
                                     is_fine: true,
                                     has_fine: false,
-                                    stats: item.stats_fine,
+                                    stats: item.stats_fine || item.stats,
                                     stats_fine: null,
                                     rarity: 'fine',
                                 });
@@ -567,7 +683,18 @@ class ItemSelectionPopup extends Component {
         this.searchText = '';
         this.expandedItemId = null;
         this._pendingLock = false;
-        this._alternativesExpanded = false;
+        // Default expanded unless the user has explicitly persisted a collapse
+        // (popupAltCollapsed) — so the Non-owned/Locked/Hidden Upgrades section (incl.
+        // its Find/Re-optimize buttons when not yet populated) can be collapsed
+        // and stays collapsed across opens. Bonez565 feedback.
+        this._alternativesExpanded = !this._altCollapsedPref();
+        // Order in which sections were collapsed (in-session), used to pick the
+        // single merged arrow's expand target ("expand the one last collapsed").
+        // On open with both already collapsed, treat filters as first-collapsed
+        // (its bar stays as the arrow) and alt as last (hidden/merged-away).
+        this._collapseOrder = [];
+        if (this.filtersCollapsed) this._collapseOrder.push('filters');
+        if (this._altSectionPresent() && !this._alternativesExpanded) this._collapseOrder.push('alt');
         this._expandedAltIndex = null;
         this._swapMetricCtx = null;  // Reset swap metric cache for new slot
         this._inputKeywordFilter = options.filterKeyword || null;
@@ -786,7 +913,18 @@ class ItemSelectionPopup extends Component {
 
             const itemState = this.getItemState(item.id);
 
-            // For consumables/materials with fine versions, check both normal and fine
+            // Consumable and input slots split each item into separate normal
+            // + Fine rows (see loadItemsForSlot), so each row represents
+            // exactly ONE variant. The Fine row is handled by the is_fine
+            // branch above; the normal row must require NORMAL ownership only.
+            // Previously this fell through to the has||has_fine branch below
+            // and showed the normal variant even when the user owned only the
+            // Fine version (bug: "fine only owned still shows normal variant").
+            if ((this.slot === 'consumable' || this.slot === 'input') && !item.is_fine) {
+                return itemState.has === true;
+            }
+
+            // For non-split materials with fine versions, check both normal and fine
             if ((item.type === 'consumable' || item.type === 'material') && item.has_fine) {
                 // Show if either normal or fine is owned
                 return itemState.has === true || itemState.has_fine === true;
@@ -855,12 +993,109 @@ class ItemSelectionPopup extends Component {
     }
 
     /**
+     * Whether a pet can gain XP from the currently selected activity/recipe.
+     * Used to surface non-adult (egg/juvenile) pets the player could train here:
+     *   - the "applicable stats" pet filter includes such pets, and
+     *   - the "show owned only" pet gate keeps an owned egg (level 0) that would
+     *     otherwise be hidden, so a checked "gecko egg" shows while mining.
+     *
+     * The XP-gain condition is only exposed as a display string
+     * (requirement_to_gain_xp) on each pet level, so parse it. Patterns emitted
+     * by ui/catalog.py / util/autogenerated/pets.py:
+     *   'While doing <Skill>.'        -> gains XP doing that skill
+     *   'Not doing <Skill>.'          -> gains XP doing anything except that skill
+     *   'While in the <Region> area.' -> gains XP while in that region
+     *   'While in <Region> location.' -> gains XP while in that region
+     *   '' (empty)                    -> no condition; gains XP anywhere (e.g. Pixie)
+     * Context resolution + skill/location matching mirror applyApplicableFilter
+     * (tree-node override, skill groups, component skills, region resolution,
+     * travel) so both callers stay consistent.
+     *
+     * @param {Object} item - a pet catalog item ({levels, ...})
+     * @returns {boolean}
+     */
+    _petGainsXpInCurrentContext(item) {
+        if (!item || item.type !== 'pet') return false;
+
+        const css = window.combinedStatsSection;
+        if (!css) return false;
+
+        // Tree-node popup overrides CSS context (mirrors applyApplicableFilter).
+        const tnc = this._treeNodeContext;
+        const tncSkill = tnc?.skill ? tnc.skill.toLowerCase() : null;
+        const tncIsActivity = tnc?.sourceType === 'activity' || tnc?.sourceType === 'chest';
+        const tncIsRecipe = tnc?.sourceType === 'recipe';
+        const activitySkill = tncIsActivity && tncSkill ? tncSkill : css.currentActivitySkill;
+        const recipeSkill = tncIsRecipe && tncSkill ? tncSkill : css.currentRecipeSkill;
+        const componentSkills = tnc ? null : css.currentActivityComponentSkills;
+        const currentLocation = tnc?.location ? tnc.location : (tnc ? null : css.currentLocation);
+
+        // No activity/recipe context → can't assert XP relevance.
+        if (!activitySkill && !recipeSkill) return false;
+
+        const SKILL_GROUPS = {
+            'gathering': ['fishing', 'foraging', 'hunting', 'mining', 'woodcutting'],
+            'artisan': ['carpentry', 'cooking', 'crafting', 'smithing', 'tailoring', 'trinketry'],
+            'utility': ['agility', 'traveling'],
+        };
+        const skillMatches = (skill) => {
+            const skillLower = skill.toLowerCase();
+            if (skillLower === 'global') return true;
+            if (activitySkill) {
+                const actSkillLower = activitySkill.toLowerCase();
+                if (skillLower === actSkillLower) return true;
+                if (SKILL_GROUPS[skillLower]?.includes(actSkillLower)) return true;
+                if (componentSkills) {
+                    for (const cs of componentSkills) {
+                        const csLower = cs.toLowerCase();
+                        if (skillLower === csLower) return true;
+                        if (SKILL_GROUPS[skillLower]?.includes(csLower)) return true;
+                    }
+                }
+            }
+            if (recipeSkill) {
+                const recSkillLower = recipeSkill.toLowerCase();
+                if (skillLower === recSkillLower) return true;
+                if (SKILL_GROUPS[skillLower]?.includes(recSkillLower)) return true;
+            }
+            return false;
+        };
+        const locationMatches = (location) => {
+            const locationLower = location.toLowerCase();
+            if (locationLower === 'global') return true;
+            if (css.isTravel) return true;
+            if (!currentLocation) return false;
+            const currentLocations = Array.isArray(currentLocation) ? currentLocation : [currentLocation];
+            return currentLocations.some(loc => locationLower === loc.toLowerCase());
+        };
+
+        // The XP-gain requirement is identical across levels; use any level's.
+        const levels = item.levels || {};
+        let req = null;
+        for (const lvl of Object.keys(levels)) {
+            const r = levels[lvl] && levels[lvl].requirement_to_gain_xp;
+            if (r !== undefined && r !== null) { req = String(r).trim(); break; }
+        }
+        if (req === null) return false; // no XP-gain data — can't assert
+        if (req === '') return true;    // unconditional XP gain (e.g. Pixie)
+
+        const lower = req.toLowerCase();
+        let m = lower.match(/^while doing (.+?)\.?$/);
+        if (m) return skillMatches(m[1].trim());
+        m = lower.match(/^not doing (.+?)\.?$/);
+        if (m) return !skillMatches(m[1].trim());
+        m = lower.match(/^while in (?:the )?(.+?) (?:area|location)\.?$/);
+        if (m) return locationMatches(m[1].trim());
+        return false; // unrecognized phrasing — be conservative
+    }
+
+    /**
      * Apply "only show items with applicable stats" filter.
-     * 
+     *
      * An item has applicable stats if ANY of its stats would be "applied" given
      * the current activity/recipe skill + location context. Uses the same
      * skill/location matching logic as CombinedStatsSection.aggregateStatsWithContributors.
-     * 
+     *
      * @param {Array} items - Items to filter
      * @returns {Array} Filtered items
      */
@@ -1084,10 +1319,49 @@ class ItemSelectionPopup extends Component {
             // +inventory_space — does NOT show on a Crafting / Cooking popup.
             // Bug 9ce474f8.
             if (item.type === 'pet') {
-                const level = itemState.level || 0;
-                if (level === 0) return false; // Eggs have no stats
-                const levelData = item.levels && item.levels[String(level)];
-                if (levelData && levelData.stats && hasSkillScopedApplicableStat(levelData.stats)) return true;
+                const level = (window.isUnlockAllEnabled && window.isUnlockAllEnabled()) ? this._petMaxLevel(item) : (itemState.level || 0);
+                // A pet whose CURRENT-level stats are skill-scoped-applicable stays applicable.
+                if (level > 0) {
+                    const levelData = item.levels && item.levels[String(level)];
+                    if (levelData) {
+                        if (levelData.stats && hasSkillScopedApplicableStat(levelData.stats)) return true;
+                        // Gated stats. The Golden Frog's ENTIRE kit is
+                        // total_wealth-gated, so levelData.stats is empty and its
+                        // work_efficiency / chest_finding / etc. live only in
+                        // gated_stats — the pet branch never reached the non-pet
+                        // gated-stats scan below, so it was invisible under the
+                        // "applicable stats" filter (bug 83a55d82). Gate shapes
+                        // vary (single-nest {threshold:{skill...}} for total_wealth,
+                        // double-nest {name:{threshold:{skill...}}} for skill_level);
+                        // hasSkillScopedApplicableStat is shape-tolerant, so probe
+                        // both depths.
+                        const gated = levelData.gated_stats || {};
+                        for (const gateData of Object.values(gated)) {
+                            if (!gateData || typeof gateData !== 'object') continue;
+                            for (const tier of Object.values(gateData)) {
+                                if (!tier || typeof tier !== 'object') continue;
+                                if (hasSkillScopedApplicableStat(tier)) return true;
+                                for (const inner of Object.values(tier)) {
+                                    if (inner && typeof inner === 'object' && hasSkillScopedApplicableStat(inner)) return true;
+                                }
+                            }
+                        }
+                        // Activatable ability stats (e.g. Lucky Day: artisan
+                        // quality_outcome), so the frog shows on artisan recipe
+                        // popups where its ability is the relevant benefit.
+                        for (const ab of (levelData.abilities || [])) {
+                            const as = ab && ab.ability_stats;
+                            if (as && typeof as === 'object' && hasSkillScopedApplicableStat(as)) return true;
+                        }
+                    }
+                }
+                // Non-adult pets (eggs + juveniles below max level) that can gain XP
+                // from the current activity/recipe are also applicable — equip to
+                // train them here. Adults (level === max) are fully grown, so this
+                // inclusion doesn't apply (they'd only show via applicable stats).
+                const maxLevel = item.max_level || 0;
+                const isNonAdult = maxLevel > 0 ? level < maxLevel : level < 3;
+                if (isNonAdult && this._petGainsXpInCurrentContext(item)) return true;
                 return false;
             }
 
@@ -1116,8 +1390,10 @@ class ItemSelectionPopup extends Component {
             for (const [gateType, gateData] of Object.entries(gated)) {
                 if (!gateData || typeof gateData !== 'object') continue;
 
-                if (gateType === 'achievement_points' || gateType === 'total_skill_level' || gateType === 'total_collectibles') {
-                    // Structure: {threshold: {skill: {location: {stat: value}}}}
+                if (gateType === 'achievement_points' || gateType === 'total_skill_level' || gateType === 'total_collectibles'
+                    || gateType === 'explore_realm' || gateType === 'item_ownership' || gateType === 'total_wealth') {
+                    // Structure: {key: {skill: {location: {stat: value}}}}
+                    // (key = threshold / realm_slug / owned-item-id — one level, then stats)
                     for (const thresholdStats of Object.values(gateData)) {
                         if (typeof thresholdStats === 'object' && thresholdStats !== null) {
                             if (hasApplicableStat(thresholdStats)) return true;
@@ -1188,7 +1464,89 @@ class ItemSelectionPopup extends Component {
             }
         }
 
+        // Also check gated stats. Some items provide a stat only when a
+        // condition holds — e.g. Globetrotter's backpack has empty base `stats`
+        // and grants +inventory_space entirely via gated_stats.explore_realm
+        // once a realm is fully explored. The "Filter by stat" dropdown must
+        // include such an item when its gate condition is currently met (the
+        // character-wide custom stat is checked); otherwise the item silently
+        // disappears from the filter even though it does carry the stat. (bug 11e73a69)
+        const gated = item.gated_stats || {};
+        for (const [gateType, gateData] of Object.entries(gated)) {
+            if (gateType === 'requirements') continue;
+            if (!gateData || typeof gateData !== 'object') continue;
+
+            // Two structural shapes (mirrors the applicable-item traversal):
+            //   one-level: {key: {skill: {location: {stat: value}}}}
+            //   two-level: {name: {threshold: {skill: {location: {stat: value}}}}}
+            const oneLevel = (
+                gateType === 'achievement_points' || gateType === 'total_skill_level'
+                || gateType === 'total_collectibles' || gateType === 'explore_realm'
+                || gateType === 'item_ownership' || gateType === 'total_wealth'
+                || gateType === 'keyword_in_inventory'
+            );
+
+            for (const [gateKey, sub] of Object.entries(gateData)) {
+                if (!sub || typeof sub !== 'object') continue;
+                if (!this._gatedStatConditionMet(gateType, gateKey)) continue;
+                const leaves = oneLevel ? [sub] : Object.values(sub);
+                for (const leaf of leaves) {
+                    if (this._statLeafHasStat(leaf, statsToCheck)) return true;
+                }
+            }
+        }
+
         return false;
+    }
+
+    /**
+     * Check a {skill: {location: {stat: value}}} leaf for any of the given
+     * stat names. Shared by the base-stat and gated-stat traversals in
+     * itemHasStat.
+     * @param {Object} leaf - skill -> location -> stat map
+     * @param {string[]} statsToCheck - stat names (already expanded for variants)
+     * @returns {boolean}
+     */
+    _statLeafHasStat(leaf, statsToCheck) {
+        if (!leaf || typeof leaf !== 'object') return false;
+        for (const skill of Object.keys(leaf)) {
+            const locationStats = leaf[skill];
+            if (!locationStats || typeof locationStats !== 'object') continue;
+            for (const location of Object.keys(locationStats)) {
+                const statMap = locationStats[location];
+                if (!statMap || typeof statMap !== 'object') continue;
+                for (const checkStat of statsToCheck) {
+                    if (statMap[checkStat] !== undefined) return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Whether a gated stat's condition is currently satisfied, so the item
+     * should count as providing that stat in the "Filter by stat" dropdown.
+     *
+     * Character-wide custom stats that the user explicitly toggles
+     * (explore_realm) are honoured precisely: the bonus counts only when the
+     * matching custom stat is checked (e.g. `explored_realm_jarvonia`). Other
+     * gate types are character-derived (skill level, achievement points, set
+     * pieces, item ownership, etc.); for stat-presence filtering we treat them
+     * as available — mirroring the applicable-item filter, which includes
+     * gated stats regardless of live character state.
+     *
+     * @param {string} gateType
+     * @param {string} gateKey - realm slug / threshold / owned-item id / etc.
+     * @returns {boolean}
+     */
+    _gatedStatConditionMet(gateType, gateKey) {
+        if (gateType === 'explore_realm') {
+            const customStats = store.state.ui?.custom_stats || {};
+            const overrides = store.state.ui?.user_overrides || {};
+            const allCustomStats = { ...customStats, ...(overrides.custom_stats || {}) };
+            return allCustomStats[`explored_realm_${gateKey}`] === true;
+        }
+        return true;
     }
 
     /**
@@ -1356,7 +1714,7 @@ class ItemSelectionPopup extends Component {
         // live column-2 gear (bug 82bc145e) — keep consistent with
         // filterUnavailableRings so a ring kept in the list also gets its
         // quality picked against the correct (tree) other-ring slot.
-        const currentGear = this._treeGearsetForFilters() || store.state.gearsets?.current || {};
+        const currentGear = this._treeGearsetForFilters() || store.getActiveGearset() || {};
         const otherRingItem = currentGear[otherSlot];
 
         // For crafted rings with dual quality selections (ring1_quality / ring2_quality)
@@ -1500,17 +1858,26 @@ class ItemSelectionPopup extends Component {
         }
 
         // For pet slot, filter based on ownership and level.
-        // When "Show owned only" is ON: require owned (has=true) AND level > 0 (no eggs).
+        // When "Show owned only" is ON: require owned (has=true) AND level > 0 (no eggs)...
+        // ...EXCEPT an owned egg (level 0) that can gain XP from the current
+        // activity/recipe while the "applicable stats" filter is on — surface it
+        // so a checked "gecko egg" shows while mining (it's a pet you can train
+        // here). Non-trainable / out-of-context eggs stay hidden as before.
         // When "Show owned only" is OFF: show all pets so users can browse and discover them.
         // Ownership check for pets is handled here (not in applyOwnedFilter) because
         // pets need the combined has+level check that applyOwnedFilter doesn't provide.
         if (this.slot === 'pet') {
             const showOwnedOnly = store.state.ui.column2?.showOwnedOnly ?? true;
             if (showOwnedOnly) {
+                const showApplicableOnly = store.state.ui.column2?.showApplicableOnly ?? false;
                 filtered = filtered.filter(item => {
                     if (item.type !== 'pet') return true;
                     const petState = this.getItemState(item.id);
-                    return petState.has === true && (petState.level || 0) > 0;
+                    if (petState.has !== true) return false;
+                    if ((petState.level || 0) > 0) return true;
+                    // Owned egg (level 0): keep it only when the applicable filter is
+                    // on and the pet trains in the current context.
+                    return showApplicableOnly && this._petGainsXpInCurrentContext(item);
                 });
             }
             // When !showOwnedOnly, all pets pass through (including eggs for browsing)
@@ -1563,9 +1930,9 @@ class ItemSelectionPopup extends Component {
      * pick takes priority over the optimizer's auto-pick, and a
      * `lockedSlots[slot] === null` is the force-empty sentinel (unequipped).
      * Returns null when NOT in a tree context so each caller falls back to
-     * its own live-gearset source (they differ:
-     * filterDuplicateTools uses getActiveGearset(); the ring helpers use
-     * gearsets.current).
+     * its own live-gearset source. All live-gearset callers use
+     * getActiveGearset() so comparison view resolves gearset 2 correctly
+     * (filterDuplicateTools, filterUnavailableRings, getAvailableRingQuality).
      *
      * @returns {Object|null} Normalized slot→{itemId, quality, ...} map, or null.
      */
@@ -1609,9 +1976,10 @@ class ItemSelectionPopup extends Component {
     filterUnavailableRings(items) {
         const otherSlot = this.slot === 'ring1' ? 'ring2' : 'ring1';
         // Tree-node popups reason about the NODE's previewed gearset, not the
-        // live column-2 gear (bug 82bc145e). Falls back to gearsets.current
-        // outside a tree context.
-        const currentGear = this._treeGearsetForFilters() || store.state.gearsets?.current || {};
+        // live column-2 gear (bug 82bc145e). Falls back to getActiveGearset()
+        // outside a tree context so comparison view checks gearset 2's other
+        // ring slot (not gearset 1's).
+        const currentGear = this._treeGearsetForFilters() || store.getActiveGearset() || {};
         const otherRingItem = currentGear[otherSlot];
 
         if (!otherRingItem) {
@@ -1832,7 +2200,7 @@ class ItemSelectionPopup extends Component {
         // Community checkbox only visible when generic is shown AND owned-only is off
         const showCommunityOption = this.showGenericItems && !showOwnedOnly;
         return `
-            <div class="popup-generic-filters" style="display:flex;gap:12px;align-items:center;padding:4px 0;font-size:12px;color:var(--text-secondary)">
+            <div class="popup-generic-filters" style="display:flex;gap:12px;align-items:center;padding:4px 0;font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)));color:var(--text-secondary)">
                 <label style="display:flex;align-items:center;gap:4px;cursor:pointer">
                     <input type="checkbox" class="popup-show-generic-cb" ${this.showGenericItems ? 'checked' : ''} />
                     Show generic items
@@ -1986,6 +2354,8 @@ class ItemSelectionPopup extends Component {
             return `<option value="${stat}" ${stat === selectedStat ? 'selected' : ''}>${formatted}${suffix}</option>`;
         }).join('');
 
+        // Labeled dropdown. Collapse is handled by the shared Search/Filter
+        // group (renderSearchField) — this control has no arrow of its own.
         return `
             <div class="stat-filter-container">
                 <label for="stat-filter">Filter by stat:</label>
@@ -1995,6 +2365,199 @@ class ItemSelectionPopup extends Component {
                 </select>
             </div>
         `;
+    }
+
+    /**
+     * Render the Search + Filter-by-stat group with a SINGLE inline collapse
+     * arrow (on the search row) that hides BOTH the search box and the
+     * filter-by-stat control. Collapse state is persisted under
+     * 'popupFiltersCollapsed'. Bare-minimum design — just the arrow beside the
+     * search input; collapsing also collapses the group's spacing. Bonez565
+     * feedback.
+     *
+     * @returns {string} HTML for the collapsible search + filter group
+     */
+    renderSearchField() {
+        const collapsed = this.filtersCollapsed;
+        const arrowClass = collapsed ? '' : 'expanded';
+
+        return `
+            <div class="popup-filters-collapsible ${collapsed ? 'collapsed' : ''}" data-collapse-key="filters">
+                <div class="popup-search-row">
+                    <input type="text"
+                           class="popup-search"
+                           placeholder="Search items..."
+                           value="${this.searchText}"${collapsed ? ' style="display:none;"' : ''}>
+                    <button class="popup-inline-toggle" type="button" data-collapse-target="filters" title="Search & filters" aria-label="Toggle search and filters">
+                        <span class="expand-arrow ${arrowClass}">▼</span>
+                    </button>
+                </div>
+                <div class="popup-filters-body"${collapsed ? ' style="display:none;"' : ''}>
+                    ${this._renderVisibilityToggles()}
+                    ${this.renderStatFilter()}
+                </div>
+            </div>
+        `;
+    }
+
+    /**
+     * Whether the user has explicitly collapsed the Non-owned/Locked/Hidden Upgrades
+     * section. Persisted under 'popupAltCollapsed' and only written when the
+     * user manually toggles the header — so the passive auto-expand (when
+     * alternatives arrive) respects a deliberate collapse.
+     * @returns {boolean}
+     */
+    _altCollapsedPref() {
+        try {
+            return localStorage.getItem('popupAltCollapsed') === 'true';
+        } catch (_e) {
+            return false;
+        }
+    }
+
+    /**
+     * Is the Non-owned/Locked/Hidden Upgrades section present for this slot? It's
+     * skipped for input/consumable/pet slots (renderAlternativeItem returns '').
+     */
+    _altSectionPresent() {
+        return !['input', 'consumable', 'pet'].includes(this.slot);
+    }
+
+    _isFiltersCollapsed() { return !!this.filtersCollapsed; }
+    _isAltCollapsed() { return this._altSectionPresent() && !this._alternativesExpanded; }
+
+    /** Both the Search+Filter group AND the Upgrades section are collapsed. */
+    _bothCollapsed() { return this._isFiltersCollapsed() && this._isAltCollapsed(); }
+
+    /**
+     * When both are collapsed we show a SINGLE arrow. The section whose bar is
+     * hidden (slid away / merged) is the one collapsed LAST; its arrow is not
+     * shown. The other (first-collapsed) section keeps the sole visible arrow,
+     * and clicking it expands this hidden one ("expand the one last collapsed").
+     * @returns {'filters'|'alt'|null}
+     */
+    _mergedHiddenSection() {
+        if (!this._bothCollapsed()) return null;
+        const order = this._collapseOrder || [];
+        const last = order[order.length - 1];
+        return last === 'filters' ? 'filters' : 'alt';
+    }
+
+    /** Root class that tells CSS which merged-away bar to hide. */
+    _mergedRootClass() {
+        const hidden = this._mergedHiddenSection();
+        if (hidden === 'filters') return 'merged-hide-filters';
+        if (hidden === 'alt') return 'merged-hide-alt';
+        return '';
+    }
+
+    _recordCollapse(section) {
+        this._collapseOrder = (this._collapseOrder || []).filter(s => s !== section);
+        this._collapseOrder.push(section);
+    }
+    _recordExpand(section) {
+        this._collapseOrder = (this._collapseOrder || []).filter(s => s !== section);
+    }
+
+    /**
+     * Expand whichever section was collapsed LAST (the hidden/merged-away one),
+     * leaving the first-collapsed section still collapsed as its bare arrow.
+     *
+     * Animates as ONE motion: the revealed section (its bar + expanded content)
+     * slides down together from 0, rather than popping both bars in and then
+     * expanding — so the expand-down and the appearance happen at the same
+     * time. No full re-render (which caused the pop). Bonez565 feedback.
+     */
+    _expandLastCollapsed() {
+        const hidden = this._mergedHiddenSection();
+        const $popup = this.$element.find('.item-selection-popup');
+        // Drop the merged root class so CSS no longer force-hides the revealed
+        // container — we drive its appearance with a single slideDown instead.
+        $popup.removeClass('merged-hide-alt merged-hide-filters');
+
+        if (hidden === 'filters') {
+            this.filtersCollapsed = false;
+            try { localStorage.setItem('popupFiltersCollapsed', 'false'); } catch (_e) { /* ignore */ }
+            this._recordExpand('filters');
+
+            const $group = this.$element.find('.popup-filters');
+            const $coll = $group.find('.popup-filters-collapsible[data-collapse-key="filters"]');
+            const $arrow = $coll.find('.popup-inline-toggle .expand-arrow');
+            // Put the group into its expanded shape, then slide the whole group
+            // down from 0 so the bar + revealed controls grow in together.
+            $coll.removeClass('collapsed');
+            $arrow.addClass('expanded');
+            $coll.find('.popup-search').css('display', '');
+            $coll.find('.popup-filters-body').css('display', '');
+            $group.stop(true, false).hide().slideDown(180);
+        } else {
+            this._alternativesExpanded = true;
+            try { localStorage.setItem('popupAltCollapsed', 'false'); } catch (_e) { /* ignore */ }
+            this._recordExpand('alt');
+
+            const $wrap = this.$element.find('.popup-alternatives-wrapper');
+            const $section = $wrap.find('.popup-alternatives-section');
+            const $arrow = $wrap.find('.alternatives-toggle-btn .expand-arrow');
+            // Expanded shape (labeled header + visible list), then slide the whole
+            // wrapper down from 0 in one motion.
+            $section.removeClass('collapsed');
+            $arrow.addClass('expanded');
+            $wrap.find('.popup-alternatives-list').css('display', 'block').removeClass('scroll-collapsed');
+            this._autoCollapseAltActive = false;
+            $wrap.stop(true, false).hide().slideDown(200);
+        }
+    }
+
+    /**
+     * Toggle the persisted Search + Filter-by-stat group: one arrow hides both
+     * the search box and the filter-by-stat control (and the group's spacing).
+     *
+     * Merge behavior (Bonez565): when this collapse makes BOTH the group AND
+     * the Upgrades section collapsed, the whole group slides up in ONE
+     * animation so only a single arrow (the Upgrades bar's) remains. And when
+     * we're already merged, clicking the sole arrow expands the last-collapsed.
+     * @param {'filters'} target
+     */
+    _toggleCollapsible(target) {
+        if (target !== 'filters') return;
+
+        // Already merged → this click is on the single visible arrow: expand
+        // the last-collapsed (hidden) section instead of toggling filters.
+        if (this._bothCollapsed()) { this._expandLastCollapsed(); return; }
+
+        const nowCollapsed = !this.filtersCollapsed;
+        this.filtersCollapsed = nowCollapsed;
+        try { localStorage.setItem('popupFiltersCollapsed', String(nowCollapsed)); } catch (_e) { /* ignore */ }
+        if (nowCollapsed) this._recordCollapse('filters'); else this._recordExpand('filters');
+
+        // Collapsing filters while the Upgrades section is already collapsed
+        // → MERGE: slide the whole filters group up in one motion, leaving the
+        // Upgrades arrow as the single control.
+        if (nowCollapsed && this._isAltCollapsed()) {
+            const $group = this.$element.find('.popup-filters');
+            $group.stop(true, false).slideUp(150, () => {
+                this.$element.find('.item-selection-popup')
+                    .removeClass('merged-hide-alt merged-hide-filters')
+                    .addClass(this._mergedRootClass());
+                $group.css('display', '');
+            });
+            return;
+        }
+
+        const $section = this.$element.find('.popup-filters-collapsible[data-collapse-key="filters"]');
+        const $search = $section.find('.popup-search');
+        const $body = $section.find('.popup-filters-body');
+        const $arrow = $section.find('.popup-inline-toggle .expand-arrow');
+
+        $arrow.toggleClass('expanded', !nowCollapsed);
+        $section.toggleClass('collapsed', nowCollapsed);
+        if (nowCollapsed) {
+            $search.stop(true, false).slideUp(120);
+            $body.stop(true, false).slideUp(120);
+        } else {
+            $search.stop(true, false).slideDown(120);
+            $body.stop(true, false).slideDown(120);
+        }
     }
 
     /**
@@ -2026,7 +2589,7 @@ class ItemSelectionPopup extends Component {
             }
         } else if (item.type === 'pet') {
             const petState = this.getItemState(item.id);
-            const petLevel = petState.level || 0;
+            const petLevel = (window.isUnlockAllEnabled && window.isUnlockAllEnabled()) ? this._petMaxLevel(item) : (petState.level || 0);
             const petVariant = petState.variant || 'normal';
             const petIcon = getPetIconPath(item.name, petLevel, petVariant, item.max_level || 0);
             iconHtml = `<img src="${petIcon}" alt="${item.name}" class="popup-item-icon pet-icon-scaled" loading="lazy"
@@ -2040,7 +2603,7 @@ class ItemSelectionPopup extends Component {
         let displayName = item.name;
         if (item.type === 'pet') {
             const petState = this.getItemState(item.id);
-            const petLevel = petState.level || 0;
+            const petLevel = (window.isUnlockAllEnabled && window.isUnlockAllEnabled()) ? this._petMaxLevel(item) : (petState.level || 0);
             const petName = petState.petName || '';
             if (petName) {
                 displayName = `${petName} (${item.name} Level ${petLevel})`;
@@ -2053,7 +2616,7 @@ class ItemSelectionPopup extends Component {
         const isHidden = !!itemState.hide;
         const dimClass = isHidden ? 'item-row-hidden' : '';
         const hiddenClass = isHidden ? 'is-hidden' : '';
-        const eyeHtml = `<svg class="eye-icon eye-open" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg><svg class="eye-icon eye-closed" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 12c2 5 5.5 8 10 8s8-3 10-8"/><path d="M7 16l-1 2"/><path d="M12 18v2"/><path d="M17 16l1 2"/></svg>`;
+        const eyeHtml = `<svg class="eye-icon eye-open" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg><svg class="eye-icon eye-closed" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 12c2 5 5.5 8 10 8s8-3 10-8"/><path d="M6.5 18.5l-1.5 2.5"/><path d="M12 20.5v3"/><path d="M17.5 18.5l1.5 2.5"/></svg>`;
 
         return `
             <div class="popup-item-row ${rarityClass} ${expandedClass} ${dimClass}" data-item-id="${item.id}">
@@ -2079,6 +2642,20 @@ class ItemSelectionPopup extends Component {
      * @param {Object} item - Item to show stats for
      * @returns {string} HTML for stats preview
      */
+    /**
+     * Max level for a pet — from item.max_level, falling back to the highest
+     * key in item.levels. Used so "unlock all" shows every pet fully leveled
+     * (never egg/level 0) even when max_level isn't set on the popup item.
+     */
+    _petMaxLevel(item) {
+        if (item && item.max_level) return item.max_level;
+        if (item && item.levels) {
+            const ks = Object.keys(item.levels).map(k => parseInt(k, 10) || 0);
+            if (ks.length) return Math.max(0, ...ks);
+        }
+        return 0;
+    }
+
     renderStatsPreview(item) {
         const itemState = this.getItemState(item.id);
         const isExpanded = this.expandedItemId === item.id;
@@ -2103,18 +2680,35 @@ class ItemSelectionPopup extends Component {
 
         // For pets, get stats for the user's selected level
         if (item.type === 'pet' && item.levels) {
-            const petLevel = itemState.level || 0;
+            const petLevel = (window.isUnlockAllEnabled && window.isUnlockAllEnabled())
+                ? (item.max_level || Math.max(0, ...Object.keys(item.levels).map(k => parseInt(k, 10) || 0)))
+                : (itemState.level || 0);
             const levelData = item.levels[String(petLevel)];
             stats = levelData?.stats || {};
         }
 
         const statsHtml = this.renderStatsFromObject(stats);
 
-        // Render gated stats if present
+        // Render gated stats if present. Pets carry gated_stats per level (e.g.
+        // Golden Frog's total_wealth gate), so prefer the selected level's
+        // gated_stats; fall back to item-level for equipment.
         let gatedHtml = '';
-        if (item.gated_stats) {
+        let petGated = null;
+        if (item.type === 'pet' && item.levels) {
+            const petLevel = itemState.level || 0;
+            petGated = item.levels[String(petLevel)]?.gated_stats;
+        }
+        if (petGated && Object.keys(petGated).length > 0) {
+            gatedHtml = this.renderGatedStats(petGated, item);
+        } else if (item.gated_stats) {
             gatedHtml = this.renderGatedStats(item.gated_stats, item);
         }
+
+        // If the item has no always-on stats but DOES have renderable gated
+        // stats (e.g. Map of Arenum's item_ownership per-region DA), drop the
+        // misleading "No stats" placeholder so the gated rows stand alone.
+        const baseStatsEmpty = !stats || Object.keys(stats).length === 0;
+        const statsHtmlDisplay = (baseStatsEmpty && gatedHtml) ? '' : statsHtml;
 
         // Render pet ability info if present
         let abilityHtml = '';
@@ -2123,8 +2717,11 @@ class ItemSelectionPopup extends Component {
             const levelData = item.levels[String(petLevel)];
             if (levelData && levelData.abilities) {
                 for (const ability of levelData.abilities) {
+                    const abIcon = ability.icon
+                        ? `<img src="/assets/icons/abilities/${ability.icon}.svg" width="20" height="20" style="vertical-align:middle;margin-right:6px" alt="" onerror="this.style.display='none'">`
+                        : '';
                     abilityHtml += `<div class="popup-pet-ability">`;
-                    abilityHtml += `<div class="popup-pet-ability-header">Ability: ${ability.name || 'Unknown'}</div>`;
+                    abilityHtml += `<div class="popup-pet-ability-header">${abIcon}Ability: ${ability.name || 'Unknown'}</div>`;
                     if (ability.ability_stats && Object.keys(ability.ability_stats).length > 0) {
                         if (ability.duration) {
                             abilityHtml += `<div class="popup-pet-ability-duration">Lasts ${ability.duration} ${ability.duration_unit || 'actions'}</div>`;
@@ -2137,9 +2734,45 @@ class ItemSelectionPopup extends Component {
                             .replace(/Effect lasts for:\s*(\d+)/g, `Effect lasts for $1 ${ability.duration_unit || 'actions'}`);
                         abilityHtml += `<div class="popup-pet-ability-effect">${cleanEffect}</div>`;
                     }
+                    // Charge/cooldown line (item- or coin-charged), mirroring the
+                    // owned-items row so the popup shows how to charge the ability.
+                    abilityHtml += abilityExtraLines(ability, 'popup-pet-ability-meta');
+                    if (ability.cooldown) {
+                        const cd = ability.cooldown;
+                        if (cd.includes('charged by using items')) {
+                            const cm = cd.match(/requires.*?(\d+)/);
+                            const drIcon = `<img src="/assets/icons/attributes/double_rewards.svg" style="width:13px;height:13px;vertical-align:middle" alt="charge">`;
+                            abilityHtml += `<div class="popup-pet-ability-meta">Charged by items. One full charge requires ${drIcon} <strong>${cm ? cm[1] : '?'}</strong></div>`;
+                            const itemRegex = /(\d+)\s+gained from\s+([A-Z][a-z][\w\s]*?)(?=\s+\d+\s+gained|\s*$)/g;
+                            let m;
+                            while ((m = itemRegex.exec(cd)) !== null) {
+                                abilityHtml += `<div class="popup-pet-ability-meta">${drIcon} <strong>${m[1]}</strong> gained from ${m[2].trim()}</div>`;
+                            }
+                        } else if (cd.includes('charged by spending coins')) {
+                            const cm = cd.match(/requires.*?(\d+)/);
+                            const drIcon = `<img src="/assets/icons/attributes/double_rewards.svg" style="width:13px;height:13px;vertical-align:middle" alt="charge">`;
+                            const coinIcon = `<img src="/assets/icons/items/coins.svg" style="width:13px;height:13px;vertical-align:middle" alt="coins" onerror="this.style.display='none'">`;
+                            abilityHtml += `<div class="popup-pet-ability-meta">Charged by coins. One full charge requires ${drIcon} <strong>${cm ? cm[1] : '?'}</strong></div>`;
+                            const coinRegex = /(\d+)\s+gained from\s+([\d,]+\s+coins)/gi;
+                            let cmm;
+                            while ((cmm = coinRegex.exec(cd)) !== null) {
+                                abilityHtml += `<div class="popup-pet-ability-meta">${drIcon} <strong>${cmm[1]}</strong> gained from ${coinIcon} ${cmm[2]}</div>`;
+                            }
+                        }
+                    }
+                    if (ability.charges) {
+                        abilityHtml += `<div class="popup-pet-ability-meta">Charges: ${ability.charges}</div>`;
+                    }
                     abilityHtml += `</div>`;
                 }
             }
+        } else if (Array.isArray(item.abilities) && item.abilities.length > 0) {
+            // Item-equipped abilities (e.g. Hat of Wisdom's Study Time). Use the
+            // shared renderer so the browse (not-equipped) card matches the
+            // equipped renderCurrentItem view exactly — same effect line AND
+            // Cooldown/Charges meta (bug: "equipped and not equipped are
+            // different").
+            abilityHtml += this.renderPopupItemAbilities(item.abilities);
         }
 
         const wikiAndKeywordsHtml = this.renderPopupWikiAndKeywords(item);
@@ -2159,12 +2792,27 @@ class ItemSelectionPopup extends Component {
         // don't visually collapse a panel the user has open.
         const displayStyle = isExpanded ? '' : 'display: none;';
 
+        // Pet XP-gain requirement (e.g. Golden Frog: "While your total wealth is
+        // at least 100,000 coins."). Shown alongside the stats so the condition
+        // that gates the pet's progression/stats is visible in the popup too.
+        let petReqHtml = '';
+        if (item.type === 'pet' && item.levels) {
+            const petLevel = itemState.level || 0;
+            const lvlData = item.levels[String(petLevel)] || item.levels['1'];
+            const req = lvlData && lvlData.requirement_to_gain_xp;
+            if (req) {
+                petReqHtml = `<div class="popup-pet-requirement pet-requirement" style="text-align:center">${req}</div>`;
+            }
+        }
+
         return `
             <div class="popup-item-stats" style="${displayStyle}">
                 ${swapMetricHtml}
                 ${wikiAndKeywordsHtml}
                 ${renderRequirementsRow(item.requirements)}
-                ${statsHtml}
+                ${petReqHtml}
+                ${statsHtmlDisplay}
+                ${consumableDurationHtml(item, { variant: item.is_fine ? 'fine' : 'normal' })}
                 ${gatedHtml}
                 ${abilityHtml}
             </div>
@@ -2177,7 +2825,12 @@ class ItemSelectionPopup extends Component {
      * @returns {string} HTML for wiki link and keywords
      */
     renderPopupWikiAndKeywords(item) {
-        const wikiName = item.name.replace(/ /g, '_');
+        // Wiki pages are per BASE item — there is no "(Fine)" wiki page. The
+        // split Fine popup row carries a "Xxx (Fine)" name, so strip the
+        // trailing " (Fine)" before building the wiki URL (display name and
+        // keywords below stay unchanged).
+        const wikiBaseName = item.name.replace(/\s*\(Fine\)\s*$/i, '');
+        const wikiName = wikiBaseName.replace(/ /g, '_');
         const wikiUrl = `https://wiki.walkscape.app/wiki/${encodeURIComponent(wikiName).replace(/%2F/g, '/').replace(/%5F/g, '_')}${wikiDarkModeSuffix()}`;
 
         const hiddenKeywords = ['shiny_ring', 'shiny_necklace', 'shiny_bracelet'];
@@ -2185,10 +2838,30 @@ class ItemSelectionPopup extends Component {
         const keywordsHtml = visibleKeywords.map(kw => `<span class="keyword">${kw}</span>`).join('');
 
         const editBtnHtml = item.is_generic
-            ? `<button class="btn-edit-generic-item optimize-btn" data-item-id="${item.generic_id || item.id}" style="font-size:11px;padding:3px 10px;margin-left:6px">🔧 Edit</button>`
+            ? `<button class="btn-edit-generic-item optimize-btn" data-item-id="${item.generic_id || item.id}" style="font-size: max(var(--min-text, 5px), calc(11px * var(--text-scale, 1)));padding:3px 10px;margin-left:6px">🔧 Edit</button>`
             : '';
 
+        // "N owned" line above the Wiki button — consumable/input slots only,
+        // mirroring the column-1 owned-items label (same ownedCountLabel
+        // helper + item-owned-count styling). Non-generic only: generic items
+        // aren't tracked in the character's owned_quantities map, so they'd
+        // always read "0 owned". Fine consumable rows carry a `${baseId}_fine`
+        // id, which is exactly the fine key in owned_quantities, so we strip
+        // the suffix and look up the fine variant explicitly.
+        let ownedHtml = '';
+        if ((this.slot === 'consumable' || this.slot === 'input') && !item.is_generic) {
+            const ownedQuantities = (store.state.character && store.state.character.owned_quantities) || null;
+            const rawId = item.id || '';
+            const isFine = item.is_fine || rawId.endsWith('_fine') || (item.name && item.name.includes('(Fine)'));
+            const baseId = rawId.replace(/_fine$/, '');
+            const ownedText = ownedCountLabel(ownedQuantities, baseId, { fine: isFine });
+            if (ownedText) {
+                ownedHtml = `<div class="item-owned-count pet-xp-info" style="text-align:center">${ownedText}</div>`;
+            }
+        }
+
         return `
+            ${ownedHtml}
             <div class="popup-wiki-keywords">
                 ${editBtnHtml}
                 <a href="${wikiUrl}" target="_blank" rel="noopener noreferrer" class="wiki-link" onclick="event.stopPropagation()">Wiki</a>
@@ -2288,8 +2961,9 @@ class ItemSelectionPopup extends Component {
         // store.state.character.collectibles is the ARRAY of owned collectible
         // IDs, so the owned count is its length.
         if (gatedStats.total_collectibles) {
-            const coll = store.state.character?.collectibles;
-            const ownedCollectibles = Array.isArray(coll) ? coll.length : (coll || 0);
+            // Merge imported collectibles with manual "owned" checks
+            // (ui.user_overrides.items[slug].has) — bug 5d24decc.
+            const ownedCollectibles = getOwnedCollectiblesCount();
 
             for (const [threshold, tcStats] of Object.entries(gatedStats.total_collectibles)) {
                 const tcThreshold = parseInt(threshold, 10);
@@ -2543,7 +3217,183 @@ class ItemSelectionPopup extends Component {
             }
         }
 
+        // Explore-realm gated stats (global bonuses unlocked by fully
+        // exploring a realm, e.g. Globetrotter's backpack / Quickdraw map).
+        // Structure: {'explore_realm': {realm_slug: {skill: {location: {stat: value}}}}}
+        // Gate is the character-wide custom stat `explored_realm_<slug>`.
+        if (gatedStats.explore_realm) {
+            const REALM_LABELS = { jarvonia: 'Jarvonia', gdte: 'Grand Duchy of Trellin-Erdwise', syrenthia: 'Syrenthia', wallisia: 'Wallisia', wrentmark: 'Wrentmark' };
+            const customStats = store.state.ui?.custom_stats || {};
+            const overrides = store.state.ui?.user_overrides || {};
+            const allCustomStats = { ...customStats, ...(overrides.custom_stats || {}) };
+
+            for (const [realmSlug, realmStats] of Object.entries(gatedStats.explore_realm)) {
+                const realmLabel = REALM_LABELS[realmSlug] || realmSlug.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+                const requirement = `Explored: ${realmLabel}`;
+                const isMet = allCustomStats[`explored_realm_${realmSlug}`] === true;
+                const unmetClass = isMet ? '' : 'gated-unmet';
+
+                for (const [skill, locationStats] of Object.entries(realmStats)) {
+                    for (const [location, statsByLocation] of Object.entries(locationStats)) {
+                        for (const [statName, statValue] of Object.entries(statsByLocation)) {
+                            const formatted = this.formatStatName(statName);
+                            const valueStr = this.formatStatValue(statName, statValue);
+                            const valueClass = this.getStatValueClass(statName, statValue);
+                            const condition = formatCondition(skill, location);
+                            statsHtml.push(`
+                                <div class="popup-stat-row popup-stat-gated ${unmetClass}">
+                                    <span class="${valueClass}">${valueStr}</span>
+                                    <span class="popup-stat-name">${formatted}</span>
+                                    <span class="popup-stat-condition">${condition}</span>
+                                </div>
+                                <div class="popup-gated-requirement ${unmetClass}">${requirement}</div>
+                            `);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Keyword-in-inventory gated stats (e.g. quivers: bonus while carrying
+        // an 'arrows' item). Structure: {'keyword_in_inventory': {keyword: {skill: {location: {stat}}}}}
+        // We can't see the full inventory at scoring time, so the optimizer
+        // ASSUMES it's active — render it as applied, with an informational note.
+        if (gatedStats.keyword_in_inventory) {
+            for (const [keyword, kwStats] of Object.entries(gatedStats.keyword_in_inventory)) {
+                const kwLabel = keyword.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+                const requirement = `Requires: ${kwLabel} in inventory`;
+                for (const [skill, locationStats] of Object.entries(kwStats)) {
+                    for (const [location, statsByLocation] of Object.entries(locationStats)) {
+                        for (const [statName, statValue] of Object.entries(statsByLocation)) {
+                            const formatted = this.formatStatName(statName);
+                            const valueStr = this.formatStatValue(statName, statValue);
+                            const valueClass = this.getStatValueClass(statName, statValue);
+                            const condition = formatCondition(skill, location);
+                            statsHtml.push(`
+                                <div class="popup-stat-row popup-stat-gated">
+                                    <span class="${valueClass}">${valueStr}</span>
+                                    <span class="popup-stat-name">${formatted}</span>
+                                    <span class="popup-stat-condition">${condition}</span>
+                                </div>
+                                <div class="popup-gated-requirement">${requirement}</div>
+                            `);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Total-wealth gated stats (e.g. Golden Frog). Met when the character's
+        // total wealth (value of all items — shown in col1/col2) is >= N.
+        // Structure: {'total_wealth': {threshold: {skill: {location: {stat}}}}}
+        if (gatedStats.total_wealth) {
+            const overrides = store.state.ui?.user_overrides || {};
+            const wealth = overrides.inventory_value !== undefined
+                ? overrides.inventory_value
+                : ((store.state.character?.coins || 0) + (store.state.character?.inventory_value || 0));
+            for (const [threshold, twStats] of Object.entries(gatedStats.total_wealth)) {
+                const reqWealth = Number(threshold);
+                const isMet = wealth >= reqWealth;
+                const unmetClass = isMet ? '' : 'gated-unmet';
+                const requirement = `Requires: ${reqWealth.toLocaleString()} Total Wealth`;
+                for (const [skill, locationStats] of Object.entries(twStats)) {
+                    for (const [location, statsByLocation] of Object.entries(locationStats)) {
+                        for (const [statName, statValue] of Object.entries(statsByLocation)) {
+                            const formatted = this.formatStatName(statName);
+                            const valueStr = this.formatStatValue(statName, statValue);
+                            const valueClass = this.getStatValueClass(statName, statValue);
+                            const condition = formatCondition(skill, location);
+                            statsHtml.push(`
+                                <div class="popup-stat-row popup-stat-gated ${unmetClass}">
+                                    <span class="${valueClass}">${valueStr}</span>
+                                    <span class="popup-stat-name">${formatted}</span>
+                                    <span class="popup-stat-condition">${condition}</span>
+                                </div>
+                                <div class="popup-gated-requirement">${requirement}</div>
+                            `);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Item-ownership gated stats (e.g. Map of Arenum: +15% DA while
+        // travelling in each region IF you own that region's map). Structure:
+        // {'item_ownership': {required_item_name: {skill: {location: {stat: value}}}}}
+        // The gate is met when the character OWNS the required item anywhere
+        // (inventory/bank/gear) — mirrors util/stats_mixin.py's item_ownership check.
+        if (gatedStats.item_ownership) {
+            for (const [requiredItemName, ownStats] of Object.entries(gatedStats.item_ownership)) {
+                const isMet = this.ownsItemByName(requiredItemName);
+                const unmetClass = isMet ? '' : 'gated-unmet';
+                const requirement = `Requires: ${this.titleCaseItemName(requiredItemName)}`;
+
+                for (const [skill, locationStats] of Object.entries(ownStats)) {
+                    for (const [location, statsByLocation] of Object.entries(locationStats)) {
+                        for (const [statName, statValue] of Object.entries(statsByLocation)) {
+                            const formatted = this.formatStatName(statName);
+                            const valueStr = this.formatStatValue(statName, statValue);
+                            const valueClass = this.getStatValueClass(statName, statValue);
+
+                            const condition = formatCondition(skill, location);
+
+                            statsHtml.push(`
+                                <div class="popup-stat-row popup-stat-gated ${unmetClass}">
+                                    <span class="${valueClass}">${valueStr}</span>
+                                    <span class="popup-stat-name">${formatted}</span>
+                                    <span class="popup-stat-condition">${condition}</span>
+                                </div>
+                                <div class="popup-gated-requirement ${unmetClass}">${requirement}</div>
+                            `);
+                        }
+                    }
+                }
+            }
+        }
+
         return statsHtml.join('');
+    }
+
+    /**
+     * Slugify an item display name to its store item id (e.g. "Map of Jarvonia"
+     * / "map of jarvonia" -> "map_of_jarvonia") so it can be looked up in
+     * store.state.items. Matches the export-name slug convention.
+     * @param {string} name - Item display name (may be lowercase from gate keys)
+     * @returns {string} slug id
+     */
+    itemNameToSlug(name) {
+        return String(name || '')
+            .toLowerCase()
+            .replace(/['`’]/g, '')
+            .replace(/[\s-]+/g, '_');
+    }
+
+    /**
+     * Title-case an item ownership gate name for display
+     * (e.g. "map of jarvonia" -> "Map of Jarvonia").
+     * @param {string} name - Item name (usually lowercase from gate keys)
+     * @returns {string} display name
+     */
+    titleCaseItemName(name) {
+        const small = new Set(['of', 'the', 'a', 'an', 'and']);
+        return String(name || '').split(/\s+/).map((word, idx) => {
+            if (idx > 0 && small.has(word.toLowerCase())) return word.toLowerCase();
+            return word.charAt(0).toUpperCase() + word.slice(1);
+        }).join(' ');
+    }
+
+    /**
+     * Check whether the character owns an item (anywhere) by its display name,
+     * honoring user overrides. Used for item_ownership gated stats.
+     * @param {string} name - Required item display name
+     * @returns {boolean} true if owned
+     */
+    ownsItemByName(name) {
+        const slug = this.itemNameToSlug(name);
+        const overrides = store.state.ui?.user_overrides?.items || {};
+        const base = store.state.items || {};
+        const ovHas = overrides[slug] ? overrides[slug].has : undefined;
+        return (ovHas !== undefined ? ovHas : (base[slug] && base[slug].has)) === true;
     }
 
     /**
@@ -2567,7 +3417,14 @@ class ItemSelectionPopup extends Component {
      * @returns {number} Count of set items equipped
      */
     countSetItems(setName, excludeSlot = null) {
-        const currentGear = store.state.gearsets?.current || {};
+        // Count from the ACTIVE gearset, not always slot 1. In comparison view
+        // a popup opened on a gearset-2 slot must gray/ungray its set-bonus
+        // ("N {set} Equipped") line from gearset 2's equipped pieces — matching
+        // the combined-stats + drops, which already aggregate the active gearset.
+        // getActiveGearset() returns gearset2 when comparisonMode && slot===2,
+        // else gearsets.current. (bug: set bonus stayed grayed for gearset-2
+        // pieces because this read gearsets.current.)
+        const currentGear = store.getActiveGearset() || {};
         let count = 0;
 
         // Check all slots for items with this set name in keywords
@@ -2671,8 +3528,8 @@ class ItemSelectionPopup extends Component {
             const itemState = this.getItemState(itemId);
             const newHide = !itemState.hide;
             // Update store silently (no subscriber notifications — prevents popup re-render)
-            store._setPath(`ui.user_overrides.items.${itemId}.hide`, newHide);
-            store._syncToBackend(`ui.user_overrides.items.${itemId}.hide`, newHide);
+            store._setPath(['ui', 'user_overrides', 'items', itemId, 'hide'], newHide);
+            store._syncToBackend(['ui', 'user_overrides', 'items', itemId, 'hide'], newHide);
             // Toggle classes — CSS handles crossfade + dim transitions
             const $btn = $(e.currentTarget);
             const $row = $btn.closest('.popup-item-row');
@@ -2745,6 +3602,37 @@ class ItemSelectionPopup extends Component {
                 $itemRow.find('.popup-expand-btn .expand-arrow').removeClass('expanded');
             }
         });
+    }
+
+    /**
+     * Render the "temporary crafted quality selection" chip row for the
+     * equipped-item view. Returns '' unless: the setting is on, we're on the
+     * main popup (not a crafting-tree node context), and the item is a crafted
+     * item exposing per-quality stats. Chips are ordered Normal … Eternal and
+     * colored by rarity; the active quality is highlighted. Clicking a chip is
+     * handled by the delegated '.popup-quality-chip' handler in attachEvents().
+     * @param {Object} fullItem - Catalog item for the equipped slot.
+     * @param {string} currentQuality - Currently-equipped quality.
+     * @returns {string} Chip row HTML, or '' when not applicable.
+     */
+    renderCraftedQualityChips(fullItem, currentQuality) {
+        if (this._treeNodeContext) return '';
+        if (!(window.isCraftedQualitySelectEnabled && window.isCraftedQualitySelectEnabled())) return '';
+        if (!fullItem || fullItem.type !== 'crafted_item' || !fullItem.stats_by_quality) return '';
+
+        // Only offer qualities the item actually defines stats for, in tier order.
+        const qualities = CRAFTED_QUALITY_ORDER.filter(
+            q => Object.prototype.hasOwnProperty.call(fullItem.stats_by_quality, q),
+        );
+        if (qualities.length < 2) return '';
+
+        const chips = qualities.map((q) => {
+            const rarity = CRAFTED_QUALITY_TO_RARITY[q] || 'common';
+            const active = q === currentQuality ? ' active' : '';
+            return `<button type="button" class="popup-quality-chip rarity-${rarity}${active}" data-quality="${q}">${q}</button>`;
+        }).join('');
+
+        return `<div class="popup-quality-chips">${chips}</div>`;
     }
 
     /**
@@ -2911,11 +3799,22 @@ class ItemSelectionPopup extends Component {
 
         const statsHtml = this.renderStatsFromObject(stats);
 
-        // Render gated stats if present
+        // Render gated stats if present. Pets carry gated_stats per level (e.g.
+        // Golden Frog's total_wealth gate), so prefer the selected level's
+        // gated_stats; fall back to item-level for equipment. Without this the
+        // equipped Golden Frog (base stats empty) showed "No stats".
         let gatedHtml = '';
-        if (fullItem.gated_stats) {
+        let petGated = null;
+        if (fullItem.type === 'pet' && fullItem.levels) {
+            petGated = fullItem.levels[String(itemState.level || 0)]?.gated_stats;
+        }
+        if (petGated && Object.keys(petGated).length > 0) {
+            gatedHtml = this.renderGatedStats(petGated, fullItem);
+        } else if (fullItem.gated_stats) {
             gatedHtml = this.renderGatedStats(fullItem.gated_stats, fullItem);
         }
+        const baseStatsEmpty = !stats || Object.keys(stats).length === 0;
+        const statsHtmlDisplay = (baseStatsEmpty && gatedHtml) ? '' : statsHtml;
 
         console.log('Rendering current item with stats, statsHtml length:', statsHtml.length);
 
@@ -2927,6 +3826,12 @@ class ItemSelectionPopup extends Component {
         const fineClass = isFine ? 'fine' : '';
 
         const wikiAndKeywordsHtml = this.renderPopupWikiAndKeywords(fullItem);
+
+        // "Temporary crafted quality selection" chip row — shown at the top of
+        // the expanded stats for a crafted item when the setting is on. Main
+        // popup only (tree-node context resolves gear via its own overlay).
+        const currentQuality = currentSlotItem.quality || itemState.quality || 'Normal';
+        const qualityChipsHtml = this.renderCraftedQualityChips(fullItem, currentQuality);
 
         // Handle generic item emoji icon (or icon_path if set)
         let currentIconHtml;
@@ -2972,17 +3877,60 @@ class ItemSelectionPopup extends Component {
                     <button class="unequip-btn">Unequip</button>
                 </div>
                 <div class="popup-item-stats" style="display: ${this.currentItemExpanded ? 'block' : 'none'};">
+                    ${qualityChipsHtml}
                     ${wikiAndKeywordsHtml}
                     ${renderRequirementsRow(fullItem.requirements)}
-                    ${statsHtml}
+                    ${statsHtmlDisplay}
+                    ${consumableDurationHtml(fullItem, { variant: (currentSlotItem.is_fine || (currentSlotItem.name && currentSlotItem.name.includes('(Fine)'))) ? 'fine' : 'normal' })}
                     ${gatedHtml}
+                    ${this.renderPopupItemAbilities(fullItem.abilities)}
                 </div>
             </div>
         `;
     }
 
     /**
-     * Render the action buttons for the "Non-owned/Locked Upgrades" header:
+     * Render item-equipped abilities (e.g. Hat of Wisdom's Study Time) for the
+     * equipped-item view in the slot popup. Mirrors the `item.abilities` branch
+     * used in the column-2 item-detail render so the ability shows both when
+     * browsing AND when the item is the currently-equipped one (bug: "Ability:
+     * Study Time doesn't show in the slot popup if it's an equipped item").
+     * Pets carry abilities per level (via `levels[].abilities`) and are handled
+     * elsewhere — this only renders top-level `item.abilities`.
+     * @param {Array} abilities
+     * @returns {string} HTML (empty when the item has no top-level abilities)
+     */
+    renderPopupItemAbilities(abilities) {
+        if (!Array.isArray(abilities) || abilities.length === 0) return '';
+        let html = '';
+        for (const ability of abilities) {
+            const iconImg = ability.icon
+                ? `<img src="/assets/icons/abilities/${ability.icon}.svg" width="20" height="20" style="vertical-align:middle;margin-right:6px" alt="" onerror="this.style.display='none'">`
+                : '';
+            html += `<div class="popup-pet-ability">`;
+            html += `<div class="popup-pet-ability-header">${iconImg}Ability: ${ability.name || 'Unknown'}</div>`;
+            if (ability.ability_stats && Object.keys(ability.ability_stats).length > 0) {
+                if (ability.duration) {
+                    html += `<div class="popup-pet-ability-duration">Lasts ${ability.duration} actions</div>`;
+                }
+                html += this.renderStatsFromObject(ability.ability_stats);
+            } else if (ability.effect) {
+                html += `<div class="popup-pet-ability-effect">${ability.effect}</div>`;
+            }
+            html += abilityExtraLines(ability, 'popup-pet-ability-meta');
+            if (ability.cooldown) {
+                html += `<div class="popup-pet-ability-meta">Cooldown: ${ability.cooldown}</div>`;
+            }
+            if (ability.charges) {
+                html += `<div class="popup-pet-ability-meta">Charges: ${ability.charges}</div>`;
+            }
+            html += `</div>`;
+        }
+        return html;
+    }
+
+    /**
+     * Render the action buttons for the "Non-owned/Locked/Hidden Upgrades" header:
      *   • "Find alternatives" — run the selected optimization for THIS slot to
      *     discover non-owned/locked upgrades and list them, WITHOUT changing any
      *     equipped gear (discovery only, no full re-optimize).
@@ -2999,7 +3947,7 @@ class ItemSelectionPopup extends Component {
         const dis = optimizing ? ' disabled' : '';
         // flex:1 1 0 splits the row ~50/50; min-width:max-content + nowrap lets a
         // button grow past its half so its full label always fits.
-        const btnStyle = 'font-size:11px;padding:3px 10px;flex:1 1 0;min-width:max-content;white-space:nowrap;';
+        const btnStyle = 'font-size: max(var(--min-text, 5px), calc(11px * var(--text-scale, 1)));padding:3px 10px;flex:1 1 0;min-width:max-content;white-space:nowrap;';
         const findLabel = optimizing
             ? '<span class="spinner">⏳</span> Finding…'
             : 'Find alternatives';
@@ -3015,7 +3963,7 @@ class ItemSelectionPopup extends Component {
     }
 
     /**
-     * Render the "Non-owned/Locked Upgrades" collapsible section.
+     * Render the "Non-owned/Locked/Hidden Upgrades" collapsible section.
      * Shows all non-owned items that improve this slot, ranked smallest→biggest improvement.
      * Also shows owned-but-locked items with their missing requirements.
      */
@@ -3032,10 +3980,11 @@ class ItemSelectionPopup extends Component {
         // handler attaches these as treeNodeContext.alternatives /
         // .lockedAlternatives on every popup open.
         const ctx = this._treeNodeContext;
-        let alternatives, lockedAlternatives;
+        let alternatives, lockedAlternatives, hiddenAlternatives;
         if (ctx) {
             alternatives = ctx.alternatives || {};
             lockedAlternatives = ctx.lockedAlternatives || {};
+            hiddenAlternatives = ctx.hiddenAlternatives || {};
         } else {
             const isSlot2Active = store.state.gearsets?.comparisonMode && store.state.gearsets?.activeGearsetSlot === 2;
             alternatives = isSlot2Active
@@ -3044,6 +3993,9 @@ class ItemSelectionPopup extends Component {
             lockedAlternatives = isSlot2Active
                 ? store.state.gearsets?.gearset2LockedAlternatives
                 : store.state.gearsets?.lockedAlternatives;
+            hiddenAlternatives = isSlot2Active
+                ? store.state.gearsets?.gearset2HiddenAlternatives
+                : store.state.gearsets?.hiddenAlternatives;
         }
 
         // 2026-06-05 (jwbail): while the stats-report slot-alternatives
@@ -3053,10 +4005,19 @@ class ItemSelectionPopup extends Component {
         // loading affordance until the fetch resolves (the stats-report
         // page clears alternativesLoading + re-renders on resolve).
         if (ctx && ctx.alternativesLoading) {
+            const expanded = this._alternativesExpanded;
+            const arrowClass = expanded ? 'expanded' : '';
             return `
-                <div class="popup-alternatives-section">
-                    <div class="popup-alternatives-header" style="cursor: default;">
-                        <span class="popup-alternatives-label">Non-owned/Locked Upgrades</span>
+                <div class="popup-alternatives-section ${expanded ? '' : 'collapsed'}">
+                    <div class="popup-alternatives-header">
+                        <span class="popup-alternatives-label">Non-owned/Locked/Hidden Upgrades</span>
+                        <div class="popup-expand-btn-area alternatives-toggle-btn">
+                            <button class="popup-expand-btn">
+                                <span class="expand-arrow ${arrowClass}">▼</span>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="popup-alternatives-list" style="display: ${expanded ? 'block' : 'none'};">
                         <span class="popup-alternatives-hint"><span class="spinner">⏳</span> Finding upgrades…</span>
                     </div>
                 </div>
@@ -3064,19 +4025,58 @@ class ItemSelectionPopup extends Component {
         }
 
         // No alternatives data at all — show buttons to find/optimize
-        if (!alternatives && !lockedAlternatives) {
+        // Store-driven (column-2) equivalent of the ctx loading affordance:
+        // while a goals-report equip's background alternatives fetch is in
+        // flight, store.state.gearsets.alternativesComputing is true and the
+        // alternatives are momentarily null. Show "Finding upgrades…" instead
+        // of the Find/Re-optimize buttons (which imply nothing is running).
+        // Cleared when the fetch resolves (stats-report-page equip .then/.catch
+        // notifies gearsets.alternatives, re-rendering this popup in place).
+        if (!ctx && store.state.gearsets?.alternativesComputing
+                && !alternatives && !lockedAlternatives && !hiddenAlternatives) {
+            const expanded = this._alternativesExpanded;
+            const arrowClass = expanded ? 'expanded' : '';
             return `
-                <div class="popup-alternatives-section">
-                    <div class="popup-alternatives-header" style="cursor: default;">
-                        <span class="popup-alternatives-label">Non-owned/Locked Upgrades</span>
+                <div class="popup-alternatives-section ${expanded ? '' : 'collapsed'}">
+                    <div class="popup-alternatives-header">
+                        <span class="popup-alternatives-label">Non-owned/Locked/Hidden Upgrades</span>
+                        <div class="popup-expand-btn-area alternatives-toggle-btn">
+                            <button class="popup-expand-btn">
+                                <span class="expand-arrow ${arrowClass}">▼</span>
+                            </button>
+                        </div>
                     </div>
-                    ${this._renderAltActionButtons()}
+                    <div class="popup-alternatives-list" style="display: ${expanded ? 'block' : 'none'};">
+                        <span class="popup-alternatives-hint"><span class="spinner">⏳</span> Finding upgrades…</span>
+                    </div>
+                </div>
+            `;
+        }
+
+        // No alternatives data at all — show buttons to find/optimize
+        if (!alternatives && !lockedAlternatives && !hiddenAlternatives) {
+            const expanded = this._alternativesExpanded;
+            const arrowClass = expanded ? 'expanded' : '';
+            return `
+                <div class="popup-alternatives-section ${expanded ? '' : 'collapsed'}">
+                    <div class="popup-alternatives-header">
+                        <span class="popup-alternatives-label">Non-owned/Locked/Hidden Upgrades</span>
+                        <div class="popup-expand-btn-area alternatives-toggle-btn">
+                            <button class="popup-expand-btn">
+                                <span class="expand-arrow ${arrowClass}">▼</span>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="popup-alternatives-list" style="display: ${expanded ? 'block' : 'none'};">
+                        ${this._renderAltActionButtons()}
+                    </div>
                 </div>
             `;
         }
 
         const slotAlts = alternatives?.[this.slot] || [];
         const slotLocked = lockedAlternatives?.[this.slot] || [];
+        const slotHidden = hiddenAlternatives?.[this.slot] || [];
 
         // 2026-06-29 (jwbail): defensive display-order sort. The backend now
         // returns alternatives smallest->biggest improvement, but rows whose
@@ -3098,14 +4098,24 @@ class ItemSelectionPopup extends Component {
         };
         slotAlts.sort(_byImprovementAsc);
         slotLocked.sort(_byImprovementAsc);
-        const totalCount = slotAlts.length + slotLocked.length;
+        slotHidden.sort(_byImprovementAsc);
+        const totalCount = slotAlts.length + slotLocked.length + slotHidden.length;
 
         // Alternatives were computed but none found for this slot
         if (totalCount === 0) {
+            const expanded = this._alternativesExpanded;
+            const arrowClass = expanded ? 'expanded' : '';
             return `
-                <div class="popup-alternatives-section">
-                    <div class="popup-alternatives-header" style="cursor: default;">
-                        <span class="popup-alternatives-label">Non-owned/Locked Upgrades</span>
+                <div class="popup-alternatives-section ${expanded ? '' : 'collapsed'}">
+                    <div class="popup-alternatives-header">
+                        <span class="popup-alternatives-label">Non-owned/Locked/Hidden Upgrades</span>
+                        <div class="popup-expand-btn-area alternatives-toggle-btn">
+                            <button class="popup-expand-btn">
+                                <span class="expand-arrow ${arrowClass}">▼</span>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="popup-alternatives-list" style="display: ${expanded ? 'block' : 'none'};">
                         <span class="popup-alternatives-hint">No better alternatives</span>
                     </div>
                 </div>
@@ -3126,6 +4136,13 @@ class ItemSelectionPopup extends Component {
             return this._renderAltItemRow(alt, idx, 'locked');
         }).join('');
 
+        // Build the list of hidden alternative items (items the user hid via
+        // the column-1 eye icon that would still be upgrades). Each row offers
+        // an Unhide action in its expanded detail.
+        const hiddenItemsHtml = slotHidden.map((alt, idx) => {
+            return this._renderAltItemRow(alt, idx, 'hidden');
+        }).join('');
+
         // Build subsections
         let listHtml = '';
         if (slotAlts.length > 0) {
@@ -3136,11 +4153,15 @@ class ItemSelectionPopup extends Component {
             listHtml += `<div class="popup-alt-subheader locked-subheader">Owned but locked <span class="popup-alternatives-count">${slotLocked.length}</span></div>`;
             listHtml += lockedItemsHtml;
         }
+        if (slotHidden.length > 0) {
+            listHtml += `<div class="popup-alt-subheader hidden-subheader">Hidden <span class="popup-alternatives-count">${slotHidden.length}</span></div>`;
+            listHtml += hiddenItemsHtml;
+        }
 
         return `
-            <div class="popup-alternatives-section">
+            <div class="popup-alternatives-section ${expanded ? '' : 'collapsed'}">
                 <div class="popup-alternatives-header">
-                    <span class="popup-alternatives-label">Non-owned/Locked Upgrades ${countBadge}</span>
+                    <span class="popup-alternatives-label">Non-owned/Locked/Hidden Upgrades ${countBadge}</span>
                     <div class="popup-expand-btn-area alternatives-toggle-btn">
                         <button class="popup-expand-btn">
                             <span class="expand-arrow ${arrowClass}">▼</span>
@@ -3148,10 +4169,61 @@ class ItemSelectionPopup extends Component {
                     </div>
                 </div>
                 <div class="popup-alternatives-list" style="display: ${expanded ? 'block' : 'none'};">
+                    ${this._altWishBarHtml(slotAlts.length + slotHidden.filter((a) => !(a && a.is_owned)).length)}
                     ${listHtml}
                 </div>
             </div>
         `;
+    }
+
+    /** Toolbar for bulk-adding non-owned alternatives to the trading wishlist. */
+    _altWishBarHtml(eligible) {
+        if (!eligible) return '';
+        const bs = 'padding:4px 10px;border-radius:6px;border:1px solid #3fa65a;background:#3fa65a;color:#fff;cursor:pointer;font-size:12px;';
+        const bs2 = 'padding:4px 10px;border-radius:6px;border:1px solid var(--border-color);background:var(--bg-tertiary);color:var(--text-primary);cursor:pointer;font-size:12px;';
+        return `<div class="popup-alt-wishbar" style="display:flex;gap:8px;align-items:center;margin:0 0 8px;flex-wrap:wrap;">`
+            + `<button type="button" class="popup-alt-wish-start" style="${bs}">+ Add to wishlist…</button>`
+            + `<button type="button" class="popup-alt-wish-commit" style="display:none;${bs}">Add selected (0)</button>`
+            + `<button type="button" class="popup-alt-wish-cancel" style="display:none;${bs2}">Cancel</button>`
+            + `</div>`;
+    }
+
+    _updateAltWishCount() {
+        const n = this.$element.find('.popup-alt-wish-check:checked').length;
+        this.$element.find('.popup-alt-wish-commit').text(`Add selected (${n})`);
+    }
+
+    _exitAltWishMode() {
+        this.$element.find('.popup-alt-wish-check').prop('checked', false).hide();
+        this.$element.find('.popup-alt-wish-commit, .popup-alt-wish-cancel').hide();
+        this.$element.find('.popup-alt-wish-start').show();
+        this._updateAltWishCount();
+    }
+
+    async _commitAltWishlist($btn) {
+        const checks = this.$element.find('.popup-alt-wish-check:checked').toArray();
+        if (!checks.length) { this._exitAltWishMode(); return; }
+        $btn.prop('disabled', true);
+        let ok = 0; let fail = 0;
+        for (const el of checks) {
+            const slug = el.getAttribute('data-slug');
+            const type = el.getAttribute('data-type');
+            const quality = el.getAttribute('data-quality') || '';
+            try {
+                const resp = await fetch('/api/trading/wishlist', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ item: { slug, type }, quality_rule: 'exact', quality_floor: quality }),
+                });
+                if (!resp.ok) throw new Error();
+                ok += 1;
+            } catch (_e) { fail += 1; }
+        }
+        $btn.prop('disabled', false);
+        this._exitAltWishMode();
+        const msg = fail
+            ? `Added ${ok} to wishlist · ${fail} failed`
+            : `Added ${ok} ${ok === 1 ? 'item' : 'items'} to wishlist`;
+        try { api.showInfo(msg); } catch (_e) { /* best-effort */ }
     }
 
     /**
@@ -3225,9 +4297,25 @@ class ItemSelectionPopup extends Component {
         // Locked badge — removed, the "Owned but locked" subheader is sufficient
         const lockedBadge = '';
 
+        // Bulk-wishlist checkbox (hidden until "Add to wishlist…" mode is on).
+        // Eligible only for items you don't own (non-owned, or hidden-not-owned);
+        // owned-but-locked rows get none.
+        const notOwned = (group === 'nonowned') || (group === 'hidden' && !alt.is_owned);
+        const catItem = (this.items || []).find((i) => (alt.uuid && i.uuid === alt.uuid)
+            || i.name === alt.name || i.name === baseName);
+        const wlTradable = catItem ? (catItem.tradable !== false) : true;
+        const checkHtml = (notOwned && wlTradable)
+            ? `<input type="checkbox" class="popup-alt-wish-check" title="Select for wishlist"`
+                + ` data-slug="${wlEsc(wlSlug(baseName))}"`
+                + ` data-type="${wlEsc(_WL_CANON_TYPE[catItem && catItem.type] || (catItem && catItem.type) || 'item')}"`
+                + ` data-quality="${wlEsc(wlQualityToken(alt.quality))}"`
+                + ` style="display:none;margin-right:6px;flex-shrink:0;cursor:pointer;" onclick="event.stopPropagation();">`
+            : '';
+
         return `
-            <div class="popup-alt-item ${rarityClass} ${group === 'locked' ? 'alt-item-locked' : ''}" data-alt-idx="${dataIdx}" data-alt-group="${group}" data-alt-group-idx="${idx}">
+            <div class="popup-alt-item ${rarityClass} ${group === 'locked' ? 'alt-item-locked' : ''}${group === 'hidden' ? ' alt-item-hidden' : ''}" data-alt-idx="${dataIdx}" data-alt-group="${group}" data-alt-group-idx="${idx}">
                 <div class="popup-alt-item-main">
+                    ${checkHtml}
                     <img src="${iconPath}" alt="${alt.name}" class="popup-item-icon"
                          onerror="this.style.display='none'">
                     <span class="popup-item-name">${alt.name}</span>
@@ -3682,7 +4770,7 @@ class ItemSelectionPopup extends Component {
 
         if (catalogItem.type === 'pet' && catalogItem.levels) {
             const petState = this.getItemState(catalogItem.id);
-            const petLevel = petState.level || 0;
+            const petLevel = (window.isUnlockAllEnabled && window.isUnlockAllEnabled()) ? this._petMaxLevel(item) : (petState.level || 0);
             const levelData = catalogItem.levels[String(petLevel)];
             itemStats = levelData?.stats || {};
         }
@@ -3858,6 +4946,16 @@ class ItemSelectionPopup extends Component {
                 const customStatId = `${itemNameNormalized}_travel_steps_${threshold}`;
                 if (customStats[customStatId]) {
                     this._aggregateAppliedStats(result, travelStats);
+                }
+            }
+        }
+
+        // Item ownership — apply each block whose required item is owned
+        // (e.g. Map of Arenum's per-region DA gated on owning that region's map).
+        if (gatedStats.item_ownership) {
+            for (const [requiredItemName, ownStats] of Object.entries(gatedStats.item_ownership)) {
+                if (this.ownsItemByName(requiredItemName)) {
+                    this._aggregateAppliedStats(result, ownStats);
                 }
             }
         }
@@ -4184,10 +5282,11 @@ class ItemSelectionPopup extends Component {
             `;
         }
 
+        const mergedRootClass = this._mergedRootClass();
         const html = `
             <div class="modal-overlay item-selection-modal-overlay" style="display: none;">
                 ${navArrows}
-                <div class="modal item-selection-popup">
+                <div class="modal item-selection-popup ${mergedRootClass}">
                     <div class="modal-header">
                         ${this._renderLockIcon()}
                         <h2>${slotName}</h2>
@@ -4202,18 +5301,11 @@ class ItemSelectionPopup extends Component {
                         </div>
                         <div class="popup-bottom-section">
                             <div class="popup-filters">
-                                <div class="search-container">
-                                    <input type="text" 
-                                           class="popup-search" 
-                                           placeholder="Search items..." 
-                                           value="${this.searchText}">
-                                </div>
-                                ${this._renderVisibilityToggles()}
-                                ${this.renderStatFilter()}
+                                ${this.renderSearchField()}
                             </div>
                             ${window._featureFlags?.generic ? `
                             ${this._renderGenericFilters()}
-                            <div class="popup-create-generic"><button class="btn-create-generic-in-popup optimize-btn" style="font-size:12px;padding:4px 12px;width:auto">🔧 Create Generic Item</button></div>
+                            <div class="popup-create-generic"><button class="btn-create-generic-in-popup optimize-btn" style="font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)));padding:4px 12px;width:auto">🔧 Create Generic Item</button></div>
                             ` : ''}
                             <div class="popup-item-list">
                                 ${itemsHtml}
@@ -4236,6 +5328,7 @@ class ItemSelectionPopup extends Component {
         this.$element.off('click', '.modal-overlay');
         this.$element.off('input', '.popup-search');
         this.$element.off('change', '.stat-filter-dropdown');
+        this.$element.off('click', '.popup-inline-toggle');
         this.$element.off('change', '.popup-toggle-non-owned');
         this.$element.off('change', '.popup-toggle-hidden');
         this.$element.off('change', '.popup-toggle-non-applicable');
@@ -4250,8 +5343,56 @@ class ItemSelectionPopup extends Component {
         this.$element.off('click', '.alt-expand-btn-area');
         this.$element.off('click', '.alt-sources-btn');
         this.$element.off('click', '.alt-equip-btn');
+        this.$element.off('click', '.alt-unhide-btn');
         this.$element.off('click', '.popup-run-optimizer-btn');
         this.$element.off('click', '.popup-find-alternatives-btn');
+        // These handlers were bound in attachEvents() but never removed here.
+        // Because attachEvents() runs on every _rerenderInPlace(), each leaked
+        // handler accumulated one more copy per re-render. The '.popup-quality-chip'
+        // handler is the dangerous one: clicking a quality chip calls
+        // store.updateGearSlot(), which notifies 'gearsets.current', whose
+        // subscription re-renders the popup in place (render() + attachEvents()),
+        // binding yet another chip handler. Each chip click then fired every
+        // accumulated handler, each triggering another full re-render — a
+        // multiplicative storm that froze the tab and crashed mobile Chrome
+        // (bug 24d2030c: "Changing the quality of equipped gear ... completely
+        // freezes the site and/or crashes chrome"). Removing the stale bindings
+        // first keeps exactly one handler per selector across re-renders.
+        this.$element.off('click', '.popup-quality-chip');
+        this.$element.off('click', '.btn-create-generic-in-popup');
+        this.$element.off('click', '.btn-edit-generic-item');
+        this.$element.off('focus', '.popup-search');
+        this.$element.off('change', '.popup-show-generic-cb');
+        this.$element.off('change', '.popup-show-community-cb');
+        this.$element.off('click', '.popup-alternatives-header');
+        this.$element.off('click', '.popup-alt-item-main');
+        this.$element.off('click', '.alt-equip-compare-btn');
+        this.$element.off('click', '.alt-sources-container .source-item:not(.source-item-no-click)');
+
+        // Bulk wishlist: start → reveal checkboxes, swap to Add selected/Cancel.
+        this.$element.off('click', '.popup-alt-wish-start');
+        this.$element.on('click', '.popup-alt-wish-start', (e) => {
+            e.preventDefault(); e.stopPropagation();
+            this.$element.find('.popup-alt-wish-check').show();
+            this.$element.find('.popup-alt-wish-start').hide();
+            this.$element.find('.popup-alt-wish-commit, .popup-alt-wish-cancel').show();
+            this._updateAltWishCount();
+        });
+        this.$element.off('change', '.popup-alt-wish-check');
+        this.$element.on('change', '.popup-alt-wish-check', (e) => {
+            e.stopPropagation();
+            this._updateAltWishCount();
+        });
+        this.$element.off('click', '.popup-alt-wish-cancel');
+        this.$element.on('click', '.popup-alt-wish-cancel', (e) => {
+            e.preventDefault(); e.stopPropagation();
+            this._exitAltWishMode();
+        });
+        this.$element.off('click', '.popup-alt-wish-commit');
+        this.$element.on('click', '.popup-alt-wish-commit', (e) => {
+            e.preventDefault(); e.stopPropagation();
+            this._commitAltWishlist($(e.currentTarget));
+        });
 
         // Lock icon click handler
         this.$element.off('click', '.popup-lock-icon');
@@ -4446,9 +5587,12 @@ class ItemSelectionPopup extends Component {
                     // tree-node-card._renderGearPreview treats null
                     // as "force empty" and the slot renders with the
                     // family icon. Backend overlay (crafting_tree.py
-                    // _decode_gearset_stats) already skips null
-                    // entries via `if not slot_info: continue`, so
-                    // stats reflect the empty slot.
+                    // _decode_gearset_stats) CLEARS the matching slot
+                    // on a null entry (setattr(gearset, _<slot>, None))
+                    // so the stats reflect the empty slot. (It used to
+                    // `continue` past null entries, which left the
+                    // optimizer's packed item in place — unequip then
+                    // had no effect on the displayed stats.)
                     const ctx = self._treeNodeContext;
                     const newLocks = { ...(ctx.lockedSlots || {}) };
                     newLocks[slot] = null;
@@ -4469,6 +5613,30 @@ class ItemSelectionPopup extends Component {
                 self.hide();
             };
             btn.addEventListener('click', btn._unequipHandler, true);
+        });
+
+        // Temporary crafted quality selection — pick a quality chip in the
+        // equipped-item view. Writes ONLY the gearset slot's quality (never
+        // owned items). updateGearSlot auto-saves + notifies 'gearsets.current',
+        // whose subscription re-renders this popup in place so the stats and
+        // the active chip update live. If the slot is locked, updateGearSlot
+        // re-snapshots the lock with the new quality, so backend optimization
+        // uses the chosen item + quality.
+        this.$element.on('click', '.popup-quality-chip', (e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            const $chip = $(e.currentTarget);
+            if ($chip.hasClass('active')) return;
+            const newQuality = $chip.attr('data-quality');
+            if (!newQuality) return;
+            const gs = store.getActiveGearset();
+            const cur = gs && gs[this.slot];
+            if (!cur) return;
+            // Also update the slot item's `rarity` so the gear-slot-grid tile
+            // (which colors by item.rarity, not quality) recolors to match the
+            // chosen quality. The grid already re-renders on 'gearsets.current'.
+            const rarity = CRAFTED_QUALITY_TO_RARITY[newQuality] || cur.rarity;
+            store.updateGearSlot(this.slot, { ...cur, quality: newQuality, rarity });
         });
 
         // Current item expand/collapse — click anywhere on the row except unequip
@@ -4538,6 +5706,15 @@ class ItemSelectionPopup extends Component {
             // Only re-render the item list, not the whole popup
             this.renderItemList();
             console.log('Item list re-rendered with new filter');
+        });
+
+        // Inline Search / Filter-by-stat collapse arrows (bare-minimum design:
+        // just an arrow beside the control). Toggles + persists collapsed state.
+        this.$element.on('click', '.popup-inline-toggle', (e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            const target = $(e.currentTarget).data('collapse-target');
+            if (target) this._toggleCollapsible(target);
         });
 
         // Visibility toggles inside the popup (Bonez565 bug 424b34f7).
@@ -4741,7 +5918,10 @@ class ItemSelectionPopup extends Component {
                 if (this.visible) {
                     const alternatives = store.state.gearsets?.alternatives;
                     const lockedAlts = store.state.gearsets?.lockedAlternatives;
-                    if ((alternatives && alternatives[this.slot]?.length > 0) || (lockedAlts && lockedAlts[this.slot]?.length > 0)) {
+                    // Respect the user's persisted collapse choice — don't
+                    // auto-expand if they explicitly hid the section (bug
+                    // 019399d9: the group "routinely uncollapses itself").
+                    if (!this._altCollapsedPref() && ((alternatives && alternatives[this.slot]?.length > 0) || (lockedAlts && lockedAlts[this.slot]?.length > 0))) {
                         this._alternativesExpanded = true;
                     }
                     this._rerenderInPlace();
@@ -4812,23 +5992,32 @@ class ItemSelectionPopup extends Component {
                 const slots = (gs && (gs.slots_json || gs.slots)) || {};
                 const alts = slots._alternatives || {};
                 const lockedAlts = slots._locked_alternatives || {};
+                const hiddenAlts = slots._hidden_alternatives || {};
                 if (isSlot2) {
                     store.state.gearsets.gearset2Alternatives = alts;
                     store.state.gearsets.gearset2LockedAlternatives = lockedAlts;
+                    store.state.gearsets.gearset2HiddenAlternatives = hiddenAlts;
                     store._notifySubscribers('gearsets.gearset2');
                 } else {
                     store.state.gearsets.alternatives = alts;
                     store.state.gearsets.lockedAlternatives = lockedAlts;
+                    store.state.gearsets.hiddenAlternatives = hiddenAlts;
                     if (typeof store._syncToBackend === 'function') {
                         store._syncToBackend('ui.alternatives', alts);
                         store._syncToBackend('ui.locked_alternatives', lockedAlts);
+                        store._syncToBackend('ui.hidden_alternatives', hiddenAlts);
                     }
                 }
                 store._notifySubscribers('gearsets.alternatives');
                 store._notifySubscribers('gearsets.lockedAlternatives');
+                store._notifySubscribers('gearsets.hiddenAlternatives');
 
-                // Auto-expand so the user immediately sees what was found.
-                this._alternativesExpanded = true;
+                // Auto-expand so the user immediately sees what was found —
+                // unless they've explicitly collapsed the section (bug
+                // 019399d9: keep it shut for spoiler prevention).
+                if (!this._altCollapsedPref()) {
+                    this._alternativesExpanded = true;
+                }
                 if (this.visible) this._rerenderInPlace();
             };
             window.addEventListener('optimization-complete', onComplete);
@@ -4843,9 +6032,36 @@ class ItemSelectionPopup extends Component {
             this._altToggleDebounce = true;
             setTimeout(() => { this._altToggleDebounce = false; }, 300);
 
+            // Already merged → this click is on the single visible arrow (the
+            // Upgrades bar): expand the last-collapsed (hidden) section.
+            if (this._bothCollapsed()) { this._expandLastCollapsed(); return; }
+
             this._alternativesExpanded = !this._alternativesExpanded;
+            // Persist the user's explicit choice so it sticks across popups
+            // and survives the passive auto-expand when alternatives arrive.
+            try { localStorage.setItem('popupAltCollapsed', String(!this._alternativesExpanded)); } catch (_e) { /* ignore */ }
+            if (!this._alternativesExpanded) this._recordCollapse('alt'); else this._recordExpand('alt');
+
+            // Collapsing Upgrades while the filters group is already collapsed
+            // → MERGE: slide the whole Upgrades wrapper up in one motion,
+            // leaving the filters arrow as the single control.
+            if (!this._alternativesExpanded && this._isFiltersCollapsed()) {
+                this.$element.find('.popup-alternatives-section').toggleClass('collapsed', true);
+                const $wrap = this.$element.find('.popup-alternatives-wrapper');
+                $wrap.stop(true, false).slideUp(150, () => {
+                    this.$element.find('.item-selection-popup')
+                        .removeClass('merged-hide-alt merged-hide-filters')
+                        .addClass(this._mergedRootClass());
+                    $wrap.css('display', '');
+                });
+                return;
+            }
+
             const $list = this.$element.find('.popup-alternatives-list');
             const $arrow = this.$element.find('.alternatives-toggle-btn .expand-arrow');
+            // Toggle the section's collapsed class so CSS can tighten the
+            // header/side padding when collapsed (Bonez565 feedback).
+            this.$element.find('.popup-alternatives-section').toggleClass('collapsed', !this._alternativesExpanded);
             if (this._alternativesExpanded) {
                 $arrow.addClass('expanded');
                 $list.slideDown(200);
@@ -4908,12 +6124,17 @@ class ItemSelectionPopup extends Component {
                 if (ctx) {
                     if (group === 'locked') {
                         alt = ctx.lockedAlternatives?.[this.slot]?.[groupIdx];
+                    } else if (group === 'hidden') {
+                        alt = ctx.hiddenAlternatives?.[this.slot]?.[groupIdx];
                     } else {
                         alt = ctx.alternatives?.[this.slot]?.[groupIdx];
                     }
                 } else if (group === 'locked') {
                     const _lockedAlts = _isSlot2Active ? store.state.gearsets?.gearset2LockedAlternatives : store.state.gearsets?.lockedAlternatives;
                     alt = _lockedAlts?.[this.slot]?.[groupIdx];
+                } else if (group === 'hidden') {
+                    const _hiddenAlts = _isSlot2Active ? store.state.gearsets?.gearset2HiddenAlternatives : store.state.gearsets?.hiddenAlternatives;
+                    alt = _hiddenAlts?.[this.slot]?.[groupIdx];
                 } else {
                     const _alts = _isSlot2Active ? store.state.gearsets?.gearset2Alternatives : store.state.gearsets?.alternatives;
                     alt = _alts?.[this.slot]?.[groupIdx];
@@ -5062,15 +6283,21 @@ class ItemSelectionPopup extends Component {
                     }
                 }
 
+                const _tradeNotOwned = (group === 'nonowned') || (group === 'hidden' && !alt.is_owned);
+                const tradeHtml = tradingButtonsHTML(
+                    { name: baseName, type: (fullItem && fullItem.type) || 'item', quality: alt.quality, tradable: fullItem ? fullItem.tradable : undefined },
+                    { owned: !_tradeNotOwned });
                 const detailsHtml = `
                     ${metricHtml}
                     <div class="alt-action-links">
                         <a href="${wikiUrl}" target="_blank" rel="noopener noreferrer" class="wiki-link" onclick="event.stopPropagation()">Wiki</a>
                         <a href="#" class="wiki-link alt-sources-btn" data-alt-idx="${idx}" data-item-name="${baseName}" onclick="event.preventDefault();">Sources <span class="source-arrow">▼</span></a>
-                        ${group !== 'locked' ? `<a href="#" class="wiki-link alt-equip-btn" data-alt-idx="${idx}" data-item-name="${alt.name}" data-item-uuid="${alt.uuid || ''}" data-item-quality="${alt.quality || ''}" onclick="event.preventDefault();">Equip</a>` : ''}
-                        ${group !== 'locked' ? `<a href="#" class="wiki-link alt-equip-compare-btn" data-alt-idx="${idx}" data-item-name="${alt.name}" data-item-uuid="${alt.uuid || ''}" data-item-quality="${alt.quality || ''}" data-slot="${this.slot}" onclick="event.preventDefault();">Equip &amp; Compare</a>` : ''}
+                        ${(group === 'nonowned' || (group === 'hidden' && alt.is_owned)) ? `<a href="#" class="wiki-link alt-equip-btn" data-alt-idx="${idx}" data-item-name="${alt.name}" data-item-uuid="${alt.uuid || ''}" data-item-quality="${alt.quality || ''}" onclick="event.preventDefault();">Equip</a>` : ''}
+                        ${(group === 'nonowned' || (group === 'hidden' && alt.is_owned)) ? `<a href="#" class="wiki-link alt-equip-compare-btn" data-alt-idx="${idx}" data-item-name="${alt.name}" data-item-uuid="${alt.uuid || ''}" data-item-quality="${alt.quality || ''}" data-slot="${this.slot}" onclick="event.preventDefault();">Equip &amp; Compare</a>` : ''}
+                        ${group === 'hidden' ? `<a href="#" class="wiki-link alt-unhide-btn" data-item-name="${alt.name}" data-item-uuid="${alt.uuid || ''}" onclick="event.preventDefault();">Unhide</a>` : ''}
                     </div>
                     <div class="alt-sources-container" data-alt-idx="${idx}" style="display: none;"></div>
+                    ${tradeHtml}
                     ${keywordsHtml}
                     ${requirementsHtml}
                     ${statsHtml}
@@ -5173,6 +6400,7 @@ class ItemSelectionPopup extends Component {
                         html += `<div class="source-item source-item-no-click source-item-chest"><div class="source-item-main"><span class="source-name">${src.name}</span><span class="source-badge source-badge-chest ${rarityClass}">${rarityLabel}</span></div><div class="source-item-details"><span>Chance per chest: ${dropRate}</span>${qty ? `<span>${qty}</span>` : ''}</div></div>`;
                     }
                 }
+                html += rewardSourceGroupsHtml(sources);
                 html += '</div>';
                 $container.html(html);
             } catch (err) {
@@ -5181,6 +6409,29 @@ class ItemSelectionPopup extends Component {
         });
 
         // Alternative equip button — equip with correct quality
+        this.$element.on('click', '.alt-unhide-btn', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const $btn = $(e.currentTarget);
+            const name = $btn.data('item-name');
+            const uuid = $btn.data('item-uuid');
+            const ctx = this._treeNodeContext;
+            // Tree-node popups carry their hidden bucket on the context, not the
+            // store — prune it there and re-render so the row leaves the list.
+            unhideAlt({ name, uuid, quality: '' }, { pruneStore: !ctx });
+            if (ctx && ctx.hiddenAlternatives) {
+                for (const slot of Object.keys(ctx.hiddenAlternatives)) {
+                    const list = ctx.hiddenAlternatives[slot];
+                    if (Array.isArray(list)) {
+                        ctx.hiddenAlternatives[slot] = list.filter(a =>
+                            (uuid && a.uuid) ? a.uuid !== uuid : a.name !== name);
+                    }
+                }
+                this._expandedAltIndex = null;
+                if (this.visible) this._rerenderInPlace();
+            }
+        });
+
         this.$element.on('click', '.alt-equip-btn', (e) => {
             e.stopPropagation();
             const $btn = $(e.currentTarget);
@@ -5425,6 +6676,7 @@ class ItemSelectionPopup extends Component {
                         store.state.gearsets.gearset2[_slotName] = _slotItem;
                         store.state.gearsets.gearset2Alternatives = null;
                         store.state.gearsets.gearset2LockedAlternatives = null;
+                        store.state.gearsets.gearset2HiddenAlternatives = null;
                         store._notifySubscribers('gearsets.gearset2');
                         try { store._saveGearset2(); } catch (_) {}
                         api.showInfo(`Equipped tree gearset to GS1 and ${_itemDisplayName}${_qualityLabel} to ${_displayName} in GS2 for comparison`);
@@ -5443,6 +6695,7 @@ class ItemSelectionPopup extends Component {
             // Clear stale GS2 alternatives
             store.state.gearsets.gearset2Alternatives = null;
             store.state.gearsets.gearset2LockedAlternatives = null;
+            store.state.gearsets.gearset2HiddenAlternatives = null;
 
             store._notifySubscribers('gearsets.gearset2');
             store._saveGearset2();
@@ -5484,6 +6737,12 @@ class ItemSelectionPopup extends Component {
                 store.update('column3.selectedActivity', null);
                 this.hide();
                 _closeTreeIfCtx();
+            } else if (sourceType === 'achievement_reward' && sourceId) {
+                // Open the Achievements page to this achievement. Routing
+                // through the #achievements hash mutually closes the crafting
+                // tree overlay, so no explicit _closeTreeIfCtx() is needed.
+                this.hide();
+                openAchievementFromSource(sourceId);
             }
         });
 

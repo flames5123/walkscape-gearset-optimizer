@@ -327,6 +327,47 @@ function exactCompare(guessVal, targetVal) {
     return { state: guessVal === targetVal ? 'green' : 'red' };
 }
 
+// Skill-category grouping (mirrors utils/requirements.js and
+// components/item-selection-popup.js). The Skills column set can carry specific
+// skills (cooking, fishing, ...), the category pseudo-skills (gathering /
+// artisan / utility) an item's stats are scoped to, and the 'global' token
+// (applies to all skills). Two Skills sets that share no exact token can still
+// be RELATED when one side names a skill and the other its parent category
+// (e.g. cooking is an artisan skill), or when either side is 'global'.
+const SKILL_CATEGORY_MEMBERS = {
+    gathering: ['fishing', 'foraging', 'hunting', 'mining', 'woodcutting'],
+    artisan: ['carpentry', 'cooking', 'crafting', 'smithing', 'tailoring', 'trinketry'],
+    utility: ['agility'],
+};
+
+/** True iff skill tokens a and b are category-related (parent<->member) or either is 'global'. */
+function skillsRelated(a, b) {
+    if (a === b) return true;
+    if (a === 'global' || b === 'global') return true;   // global applies to all skills
+    if ((SKILL_CATEGORY_MEMBERS[a] || []).includes(b)) return true;  // a is the parent category of b
+    if ((SKILL_CATEGORY_MEMBERS[b] || []).includes(a)) return true;  // b is the parent category of a
+    return false;
+}
+
+// Category-aware set comparison for the Skills column. Identical set -> green;
+// any exact shared token -> yellow; otherwise yellow (flagged `related`) when a
+// category/global relationship links the two sets; else gray. `related` marks a
+// yellow that came ONLY from a category/global link (no exact shared token) so
+// downstream consumers (e.g. buildSmartFilter) don't treat the guessed token as
+// confirmed-present on the answer. Never downgrades green or a direct overlap.
+function skillsCompare(guessArr, targetArr) {
+    const g = new Set(guessArr || []);
+    const t = new Set(targetArr || []);
+    if (g.size === t.size && [...g].every((x) => t.has(x))) {
+        return { state: 'green' };
+    }
+    if ([...g].some((x) => t.has(x))) {
+        return { state: 'yellow' };   // direct shared token
+    }
+    const related = [...g].some((x) => [...t].some((y) => skillsRelated(x, y)));
+    return related ? { state: 'yellow', related: true } : { state: 'red' };
+}
+
 /**
  * Column definitions, in display order. Each column knows how to extract its
  * value from an item and how to compare. `kind` drives rendering:
@@ -350,7 +391,7 @@ export const WALKDLE_COLUMNS = [
     { key: 'tier', label: 'Rarity/Quality', kind: 'ordinal', ordKey: 'tier_index', display: (it) => tierLabel(it) },
     { key: 'slot', label: 'Slot', kind: 'exact', display: (it) => it.slot || '—' },
     { key: 'sources', label: 'Source', kind: 'set', display: (it) => (it.sources || []).join(', ') || '—' },
-    { key: 'skills', label: 'Skills', kind: 'set', display: (it) => (it.skills || []).join(', ') || '—' },
+    { key: 'skills', label: 'Skills', kind: 'set', catAware: true, display: (it) => (it.skills || []).join(', ') || '—' },
     { key: 'stat_count', label: 'Stats', kind: 'ordinal', ordKey: 'stat_count', display: (it) => String(it.stat_count) },
     { key: 'level_req', label: 'Level', kind: 'ordinal', ordKey: 'level_req', kindKey: 'level_kind', display: (it) => it.level_display || String(it.level_req) },
     { key: 'value', label: 'Value', kind: 'ordinal', ordKey: 'value', display: (it) => String(it.value) },
@@ -395,7 +436,9 @@ export function compareGuess(guess, target) {
                 result = { state: 'yellow', dir: null };
             }
         } else if (col.kind === 'set') {
-            result = setCompare(guess[col.key], target[col.key]);
+            result = col.catAware
+                ? skillsCompare(guess[col.key], target[col.key])
+                : setCompare(guess[col.key], target[col.key]);
         } else {
             result = exactCompare(guess[col.key], target[col.key]);
         }
@@ -406,6 +449,7 @@ export function compareGuess(guess, target) {
             display: col.display(guess),
             state: result.state,
             dir: result.dir || null,
+            related: result.related || false,
         };
     });
     return { id: guess.id, name: displayName(guess), icon: guess.icon, cells, solved: guess.id === target.id };
@@ -554,7 +598,11 @@ export function buildSmartFilter(guessResults, itemsById) {
                 if (cell.state === 'green') {
                     members.forEach((m) => setPos.add(m));
                 } else if (cell.state === 'yellow') {
-                    if (members.length === 1) setPos.add(members[0]); // unambiguous overlap
+                    // A category/global-related yellow (cell.related, Skills
+                    // column only) is NOT a confirmed shared token, so don't
+                    // assert the guessed skill is present. Only a direct
+                    // single-member overlap is unambiguous.
+                    if (members.length === 1 && !cell.related) setPos.add(members[0]);
                 } else if (cell.state === 'red') { // disjoint
                     members.forEach((m) => setNeg.add(m));
                 }

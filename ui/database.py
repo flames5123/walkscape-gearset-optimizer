@@ -11,6 +11,7 @@ Each session is identified by a UUID and stores:
 import json
 import math
 import sqlite3
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -38,6 +39,19 @@ def _sanitize_for_json(obj):
     elif isinstance(obj, (list, tuple)):
         return [_sanitize_for_json(v) for v in obj]
     return obj
+
+
+def _coin_num(x):
+    """Normalize a coin value for price signals / aggregation while supporting
+    decimals (partner may federate fractional coin prices). Rounds to 2 decimal
+    places; returns an int when the result is integral so whole-coin prices stay
+    ints (no 5 -> 5.0 noise), else a float. Non-numeric input passes through.
+    """
+    try:
+        v = round(float(x), 2)
+    except (TypeError, ValueError):
+        return x
+    return int(v) if v == int(v) else v
 
 
 class DatabaseManager:
@@ -96,7 +110,32 @@ class DatabaseManager:
                 UNIQUE(session_uuid, name)
             )
         """)
-        
+
+        # Fastest Craft results (.kiro/specs/fastest-craft/, R6). One row per
+        # (session, crafted item, material variant, quality). See the migration
+        # ui/migrations/*_create_fastest_craft_results.sql for the authoritative
+        # DDL; created inline too so in-memory/test DBs always have it.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS fastest_craft_results (
+                session_uuid TEXT NOT NULL,
+                item_ref TEXT NOT NULL,
+                variant TEXT NOT NULL,
+                quality TEXT NOT NULL,
+                base_gearset_export TEXT,
+                total_steps_per_craft REAL,
+                with_banked_steps REAL,
+                root_self_steps REAL,
+                child_quantities_json TEXT,
+                material_offsets_json TEXT,
+                needed_owned_counts_json TEXT,
+                subtree_scope_keys_json TEXT,
+                base_dominance_bitmap TEXT,
+                base_scope_json TEXT,
+                last_computed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (session_uuid, item_ref, variant, quality)
+            )
+        """)
+
         # Add columns if they don't exist (migrations)
         try:
             cursor.execute("ALTER TABLE gear_sets ADD COLUMN is_optimized INTEGER DEFAULT 0")
@@ -105,6 +144,11 @@ class DatabaseManager:
         
         try:
             cursor.execute("ALTER TABLE gear_sets ADD COLUMN export_string TEXT")
+        except:
+            pass  # Column already exists
+        
+        try:
+            cursor.execute("ALTER TABLE gear_sets ADD COLUMN suggest_dismissed INTEGER DEFAULT 0")
         except:
             pass  # Column already exists
         
@@ -266,6 +310,296 @@ class DatabaseManager:
                 PRIMARY KEY (session_uuid, feature)
             )
         """)
+
+        # ── Trading feature (FAC-gated: trading) — shared multi-user marketplace. ──
+        # Ownership is keyed on the PRIVATE session_uuid (read only from the caller's
+        # cookie, never emitted). Only in_game_name + display_name are exposed to other
+        # users/partners. object_id = "{origin_site}:{local_id}"; txn_id = unix-epoch ms.
+        # identity (game export key, not a name-slug), quality (game variant tokens),
+        # and added per-row versioning + a monotonic txn counter. The feature was still
+        # behind the FAC with only throwaway test data, so we WIPE the trading tables
+        # once (bump TRADING_SCHEMA_VERSION) instead of migrating.
+        TRADING_SCHEMA_VERSION = "2"
+        cursor.execute("CREATE TABLE IF NOT EXISTS trading_meta (key TEXT PRIMARY KEY, value TEXT)")
+        cursor.execute("SELECT value FROM trading_meta WHERE key = 'schema_version'")
+        _tsv = cursor.fetchone()
+        if (_tsv[0] if _tsv else None) != TRADING_SCHEMA_VERSION:
+            for _t in ("listings", "wishlist_entries", "trade_messages",
+                       "wishlist_match_alerts", "trade_blocks", "entry_links",
+                       "trade_history", "ignored_bank_warnings", "federation_cursor",
+                       "federation_peers", "federation_inbox", "federation_objects",
+                       "traders", "trading_seq"):
+                cursor.execute(f"DROP TABLE IF EXISTS {_t}")
+            cursor.execute(
+                "INSERT OR REPLACE INTO trading_meta (key, value) VALUES ('schema_version', ?)",
+                (TRADING_SCHEMA_VERSION,))
+        # Monotonic per-site transaction counter — replaces the ms-timestamp txn_id
+        # (two writes in the same ms collided; a late commit got skipped by since=).
+        cursor.execute("CREATE TABLE IF NOT EXISTS trading_seq (name TEXT PRIMARY KEY, value INTEGER NOT NULL)")
+        cursor.execute("INSERT OR IGNORE INTO trading_seq (name, value) VALUES ('txn', 0)")
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS traders (
+                session_uuid       TEXT PRIMARY KEY,
+                in_game_name       TEXT NOT NULL,
+                display_name       TEXT NOT NULL,
+                contact_prefs_json TEXT NOT NULL DEFAULT '[]',
+                auto_renew INTEGER NOT NULL DEFAULT 0,
+                share_inventory INTEGER NOT NULL DEFAULT 0,
+                created_at REAL, updated_at REAL
+            )
+        """)
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_traders_name ON traders(in_game_name, updated_at DESC)"
+        )
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS listings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                origin_site TEXT NOT NULL DEFAULT 'flames',
+                trader_uuid TEXT NOT NULL,
+                item_slug TEXT NOT NULL, item_type TEXT NOT NULL, item_quality TEXT NOT NULL,
+                qty INTEGER NOT NULL DEFAULT 1,
+                price_coins NUMERIC,
+                trade_for_json TEXT,
+                status TEXT NOT NULL DEFAULT 'open',
+                closed_for_json TEXT,
+                notify INTEGER NOT NULL DEFAULT 0,
+                obo INTEGER NOT NULL DEFAULT 0,
+                accept_wishlist INTEGER NOT NULL DEFAULT 0,
+                note TEXT,
+                expires_at REAL,
+                version INTEGER NOT NULL DEFAULT 1,
+                txn_id INTEGER NOT NULL, created_at REAL, updated_at REAL
+            )
+        """)
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_listings_item ON listings(item_slug, item_type, status)"
+        )
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_listings_txn ON listings(txn_id)")
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS wishlist_entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                origin_site TEXT NOT NULL DEFAULT 'flames',
+                trader_uuid TEXT NOT NULL,
+                item_slug TEXT NOT NULL, item_type TEXT NOT NULL,
+                quality_rule TEXT NOT NULL DEFAULT 'exact',
+                quality_floor TEXT NOT NULL DEFAULT '',
+                max_coins NUMERIC, trade_for_json TEXT,
+                notify_match INTEGER NOT NULL DEFAULT 0,
+                qty INTEGER NOT NULL DEFAULT 1,
+                note TEXT,
+                expires_at REAL,
+                version INTEGER NOT NULL DEFAULT 1,
+                txn_id INTEGER NOT NULL, created_at REAL, updated_at REAL
+            )
+        """)
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_wishlist_item ON wishlist_entries(item_slug)"
+        )
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_wishlist_txn ON wishlist_entries(txn_id)")
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS trade_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                origin_site TEXT NOT NULL DEFAULT 'flames',
+                thread_key TEXT NOT NULL,
+                from_name TEXT NOT NULL, to_name TEXT NOT NULL,
+                from_uuid TEXT, to_uuid TEXT,
+                about_object_id TEXT,
+                body TEXT NOT NULL,
+                txn_id INTEGER NOT NULL, read_at REAL, created_at REAL
+            )
+        """)
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_messages_to ON trade_messages(to_uuid, read_at)"
+        )
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_messages_txn ON trade_messages(txn_id)")
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS wishlist_match_alerts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trader_uuid TEXT NOT NULL, wishlist_id INTEGER NOT NULL,
+                matched_object_id TEXT NOT NULL,
+                txn_id INTEGER NOT NULL, read_at REAL, created_at REAL
+            )
+        """)
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_alerts_trader ON wishlist_match_alerts(trader_uuid, read_at)"
+        )
+        cursor.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_alerts_dedupe "
+            "ON wishlist_match_alerts(wishlist_id, matched_object_id)"
+        )
+        # Reverse direction: a LISTING owner is alerted when a new matching wishlist
+        # is posted. Surfaced on My Listings (not the inbox).
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS listing_match_alerts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trader_uuid TEXT NOT NULL, listing_id INTEGER NOT NULL,
+                matched_object_id TEXT NOT NULL,
+                txn_id INTEGER NOT NULL, read_at REAL, created_at REAL
+            )
+        """)
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_listing_alerts_trader ON listing_match_alerts(trader_uuid, read_at)"
+        )
+        cursor.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_listing_alerts_dedupe "
+            "ON listing_match_alerts(listing_id, matched_object_id)"
+        )
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS trade_blocks (
+                blocker_uuid TEXT NOT NULL,
+                blocked_name TEXT NOT NULL,
+                created_at REAL,
+                PRIMARY KEY (blocker_uuid, blocked_name)
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS entry_links (
+                listing_object_id TEXT NOT NULL, wishlist_object_id TEXT NOT NULL,
+                created_by_uuid TEXT NOT NULL, created_at REAL,
+                PRIMARY KEY (listing_object_id, wishlist_object_id)
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS trade_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                origin_site TEXT NOT NULL DEFAULT 'flames',
+                items_json TEXT NOT NULL,
+                sold_for_json TEXT NOT NULL,
+                party_a_name TEXT NOT NULL, party_b_name TEXT NOT NULL,
+                linked_object_ids_json TEXT,
+                txn_id INTEGER NOT NULL, created_at REAL
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_history_txn ON trade_history(txn_id)")
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS ignored_bank_warnings (
+                session_uuid TEXT NOT NULL, item_slug TEXT NOT NULL,
+                PRIMARY KEY (session_uuid, item_slug)
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS federation_cursor (
+                partner_site TEXT PRIMARY KEY,
+                last_txn_id INTEGER NOT NULL DEFAULT 0,
+                pushed_txn_id INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        # `out_token`/`base_url` are what we present/where we push (push TBD).
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS federation_peers (
+                site TEXT PRIMARY KEY,
+                token TEXT NOT NULL,
+                out_token TEXT,
+                base_url TEXT,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at REAL
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_fedpeers_token ON federation_peers(token)")
+        # UNIQUE(source_site, object_id, version) dedupes replays (contract point 3).
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS federation_inbox (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_site TEXT NOT NULL,
+                object_id TEXT,
+                version INTEGER,
+                txn_id INTEGER,
+                kind TEXT,
+                payload_json TEXT NOT NULL,
+                applied INTEGER NOT NULL DEFAULT 0,
+                received_at REAL,
+                UNIQUE(source_site, object_id, version)
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_fedinbox_src ON federation_inbox(source_site, received_at)")
+        # ((object_id, version) dedupe); a 'deleted'/'removed'/'closed' status drops it.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS federation_objects (
+                object_id TEXT PRIMARY KEY,
+                source_site TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                version INTEGER NOT NULL DEFAULT 1,
+                txn_id INTEGER,
+                trader_id TEXT, trader_name TEXT, display_name TEXT,
+                item_slug TEXT, item_type TEXT, item_quality TEXT,
+                qty INTEGER, price_coins NUMERIC, trade_for_json TEXT, note TEXT,
+                quality_rule TEXT, quality_floor TEXT, max_coins NUMERIC,
+                status TEXT NOT NULL DEFAULT 'open', expires_at REAL,
+                raw_json TEXT, updated_at REAL
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_fedobj_kind ON federation_objects(kind, status, item_slug)")
+        # timestamps, OK/Error status, and the clickable failures list. Pruned to
+        # the most recent rows per site on insert so it never grows unbounded.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS federation_sync_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                site TEXT NOT NULL,
+                phase TEXT NOT NULL,            -- 'push' | 'pull'
+                ok INTEGER NOT NULL,            -- 1 success, 0 failure
+                count INTEGER NOT NULL DEFAULT 0,  -- rows pushed/pulled
+                detail TEXT,                    -- error text (failures only)
+                created_at REAL NOT NULL
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_fedsynclog_site ON federation_sync_log(site, created_at DESC)")
+        # Trading migrations — idempotent ALTERs for DBs created before these
+        # columns existed (SQLite raises if the column is already present).
+        for _alter in (
+            "ALTER TABLE listings ADD COLUMN obo INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE listings ADD COLUMN accept_wishlist INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE listings ADD COLUMN note TEXT",
+            "ALTER TABLE listings ADD COLUMN expires_at REAL",
+            "ALTER TABLE wishlist_entries ADD COLUMN expires_at REAL",
+            "ALTER TABLE wishlist_entries ADD COLUMN qty INTEGER NOT NULL DEFAULT 1",
+            "ALTER TABLE wishlist_entries ADD COLUMN note TEXT",
+            "ALTER TABLE wishlist_entries ADD COLUMN status TEXT NOT NULL DEFAULT 'open'",
+            "ALTER TABLE traders ADD COLUMN auto_renew INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE traders ADD COLUMN share_inventory INTEGER NOT NULL DEFAULT 0",
+            # to_trader_id  = recipient's "site:account" (routes outbound to the
+            "ALTER TABLE trade_messages ADD COLUMN fed_object_id TEXT",
+            "ALTER TABLE trade_messages ADD COLUMN to_trader_id TEXT",
+            "ALTER TABLE trade_messages ADD COLUMN from_trader_id TEXT",
+            "ALTER TABLE federation_objects ADD COLUMN negotiable INTEGER NOT NULL DEFAULT 0",
+            # row per site carries inbound token, outbound token, base_url, and
+            # the pull/push txn cursors used as the `since` value, plus a
+            # human-visible last-synced timestamp.
+            "ALTER TABLE federation_peers ADD COLUMN last_pull_txn INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE federation_peers ADD COLUMN last_push_txn INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE federation_peers ADD COLUMN last_synced_at REAL",
+            # Fastest Craft base-node dominance recompute (Phase 4 gap): store the
+            # base/final-craft gearset dominance bitmap + its exact scope so a
+            # base-node-only gear change (not reflected in any gather-leaf
+            # target_items scope) still flags the row stale. Scope is stored and
+            # reused verbatim on recompute so only the character's gear can move
+            # the bitmap (no false-positive badge storm).
+            "ALTER TABLE fastest_craft_results ADD COLUMN base_dominance_bitmap TEXT",
+            "ALTER TABLE fastest_craft_results ADD COLUMN base_scope_json TEXT",
+        ):
+            try:
+                cursor.execute(_alter)
+            except Exception:
+                pass
+        try:
+            cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_fedobj "
+                           "ON trade_messages(origin_site, fed_object_id)")
+        except Exception:
+            pass
+        # Backfill expiry for pre-existing listings (created_at + 7 days).
+        try:
+            cursor.execute(
+                "UPDATE listings SET expires_at = created_at + 604800 "
+                "WHERE expires_at IS NULL AND created_at IS NOT NULL"
+            )
+        except Exception:
+            pass
+        try:
+            cursor.execute(
+                "UPDATE wishlist_entries SET expires_at = created_at + 604800 "
+                "WHERE expires_at IS NULL AND created_at IS NOT NULL"
+            )
+        except Exception:
+            pass
 
         # Walkdle daily-puzzle attempts (see ui/migrations/*_create_daily_puzzle_attempts.sql).
         # One row per (session_uuid, puzzle_date, mode); state_json holds guesses + solved flag.
@@ -441,11 +775,22 @@ class DatabaseManager:
         conn = self._get_connection()
         cursor = conn.cursor()
         
-        cursor.execute("""
-            SELECT uuid, character_config, ui_config, last_updated, all_items_raw, inventory_value
-            FROM sessions
-            WHERE uuid = ?
-        """, (session_uuid,))
+        # all_items_raw / inventory_value are added by migrations that may not
+        # have run yet (e.g. a fresh or in-memory DB). Fall back to the base
+        # columns if they're absent; the row[4]/row[5] guards below then omit
+        # them from the result.
+        try:
+            cursor.execute("""
+                SELECT uuid, character_config, ui_config, last_updated, all_items_raw, inventory_value
+                FROM sessions
+                WHERE uuid = ?
+            """, (session_uuid,))
+        except sqlite3.OperationalError:
+            cursor.execute("""
+                SELECT uuid, character_config, ui_config, last_updated
+                FROM sessions
+                WHERE uuid = ?
+            """, (session_uuid,))
         
         row = cursor.fetchone()
         
@@ -590,7 +935,7 @@ class DatabaseManager:
         if not self._persistent_conn:
             conn.close()
     
-    def update_config_path(self, session_uuid: str, path: str, value: Any):
+    def update_config_path(self, session_uuid: str, path: Any, value: Any):
         """Update a specific path in the configuration.
         
         Supports nested paths like "items.TRAVELERS_KIT.has" or "skills.mining".
@@ -611,7 +956,7 @@ class DatabaseManager:
         # ui_config paths: ui.*, items.*.hide, quality_overrides.*
         # character_config paths: skills.*, reputation.*, items.*.has, achievement_points, coins
         
-        parts = path.split('.')
+        parts = list(path) if isinstance(path, list) else path.split('.')
         
         # Determine target config and adjust path
         if parts[0] == 'ui':
@@ -672,7 +1017,7 @@ class DatabaseManager:
 
         if limit is not None and limit > 0:
             cursor.execute("""
-                SELECT id, session_uuid, name, slots_json, export_string, is_optimized, created_at, updated_at
+                SELECT id, session_uuid, name, slots_json, export_string, is_optimized, created_at, updated_at, suggest_dismissed
                 FROM gear_sets
                 WHERE session_uuid = ?
                 ORDER BY updated_at DESC
@@ -680,7 +1025,7 @@ class DatabaseManager:
             """, (session_uuid, limit, offset))
         else:
             cursor.execute("""
-                SELECT id, session_uuid, name, slots_json, export_string, is_optimized, created_at, updated_at
+                SELECT id, session_uuid, name, slots_json, export_string, is_optimized, created_at, updated_at, suggest_dismissed
                 FROM gear_sets
                 WHERE session_uuid = ?
                 ORDER BY updated_at DESC
@@ -703,7 +1048,8 @@ class DatabaseManager:
                 'export_string': row[4],
                 'is_optimized': bool(row[5]),
                 'created_at': row[6],
-                'updated_at': row[7]
+                'updated_at': row[7],
+                'suggest_dismissed': bool(row[8]) if len(row) > 8 else False
             })
         
         return gear_sets
@@ -922,6 +1268,25 @@ class DatabaseManager:
         
         # Return updated gear set
         return self.get_gear_set(session_uuid, gear_set_id)
+
+    def set_gear_set_suggest_dismissed(self, session_uuid: str, gear_set_id: str, dismissed: int):
+        """Set the suggest_dismissed flag for a gear set.
+        
+        Args:
+            session_uuid: Session UUID (for validation)
+            gear_set_id: Gear set ID to update
+            dismissed: 1 to dismiss, 0 to un-dismiss
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE gear_sets
+            SET suggest_dismissed = ?
+            WHERE id = ? AND session_uuid = ?
+        """, (dismissed, gear_set_id, session_uuid))
+        conn.commit()
+        if not self._persistent_conn:
+            conn.close()
 
     def save_gear_set(self, session_uuid: str, name: str, slots_json: Dict[str, Any], 
                       gear_set_id: Optional[str] = None, is_optimized: bool = False, export_string: str = None) -> Dict[str, Any]:
@@ -2324,7 +2689,7 @@ class DatabaseManager:
 
     # Categories that own per-scope rows in the three category-scoped
     # stats_report tables. Used to validate a per-category reset request.
-    STATS_REPORT_CATEGORIES = ('xp', 'new_items', 'chests', 'chests_recipes', 'coins')
+    STATS_REPORT_CATEGORIES = ('xp', 'new_items', 'chests', 'chests_recipes', 'coins', 'target_items')
 
     def reset_stats_report_category(self, session_uuid: str, category: str) -> dict:
         """Reset the saved goals-report data for a SINGLE category.
@@ -2374,6 +2739,198 @@ class DatabaseManager:
         if not self._persistent_conn:
             conn.close()
         return counts
+
+    def reset_stats_report_subcategory(self, session_uuid: str, category: str,
+                                       scopes) -> dict:
+        """Reset saved goals-report data for one or more SUBcategories within a
+        category — a single skill ("Mining"), a chest ("Mining chest"), a
+        new_items kind, a target-item group ("ore"), or a single target item
+        ("copper ore") inside a group.
+
+        Finer-grained sibling of reset_stats_report_category: where that clears
+        an entire top-level section, this clears only the rows belonging to the
+        given subgroup(s), leaving every other subgroup's cached results (and
+        every other category) intact. Re-running recomputes just the cleared
+        subgroup(s) fresh.
+
+        ``scopes`` is a list of ``{'subcategory': str, 'leaf': Optional[str]}``:
+          - ``subcategory``: the normalized subcategory key, matching how the
+            worker derives it — skill/kind lowercased; chest name lowercased
+            with spaces -> underscores; target-item group_slug.
+          - ``leaf``: for target_items, the item_slug to narrow to a single item
+            within the group; omit/None to clear the whole group.
+
+        Deletes matching rows from all three category-scoped tables so both the
+        display (stats_report_gearsets) and the stale detector
+        (stats_report_results / stats_report_stale_scopes) forget the subgroup:
+
+          * stats_report_gearsets     — display source. Matched category-aware
+            on the OVERLOADED columns: skill_name for xp/coins/new_items and the
+            target_items group, chest_name for chests/chests_recipes and the
+            target_items item leaf.
+          * stats_report_results      — stale-detector store. Matched on
+            (category, subcategory[, source_name=leaf]).
+          * stats_report_stale_scopes — stale-detector cache. Same key.
+
+        Does NOT touch character_state_snapshot_cache or stats_report_runs (a
+        run/snapshot spans the whole session), mirroring
+        reset_stats_report_category.
+
+        Returns a per-table counts dict for logging. Raises ValueError for an
+        unknown category.
+        """
+        if category not in self.STATS_REPORT_CATEGORIES:
+            raise ValueError(f'unknown stats_report category: {category!r}')
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        counts = {
+            'stats_report_results': 0,
+            'stats_report_gearsets': 0,
+            'stats_report_stale_scopes': 0,
+        }
+        for scope in (scopes or []):
+            sub = str((scope or {}).get('subcategory') or '').strip().lower()
+            if not sub:
+                continue
+            leaf = (scope or {}).get('leaf')
+            leaf = leaf.strip().lower() if isinstance(leaf, str) and leaf.strip() else None
+
+            # --- stale-detector store + cache: keyed (category, subcategory
+            #     [, source_name=leaf]) ---
+            res_where = "session_uuid = ? AND category = ? AND lower(subcategory) = ?"
+            res_params = [session_uuid, category, sub]
+            if leaf is not None:
+                res_where += " AND lower(source_name) = ?"
+                res_params.append(leaf)
+            for tbl in ('stats_report_results', 'stats_report_stale_scopes'):
+                cursor.execute(f"DELETE FROM {tbl} WHERE {res_where}", tuple(res_params))
+                counts[tbl] += cursor.rowcount
+
+            # --- display source (stats_report_gearsets): category-aware match
+            #     on the overloaded skill_name / chest_name columns ---
+            if category in ('chests', 'chests_recipes'):
+                gs_where = ("session_uuid = ? AND category = ? "
+                            "AND lower(replace(chest_name, ' ', '_')) = ?")
+                gs_params = [session_uuid, category, sub]
+            elif category == 'target_items':
+                gs_where = "session_uuid = ? AND category = ? AND lower(skill_name) = ?"
+                gs_params = [session_uuid, category, sub]
+                if leaf is not None:
+                    gs_where += " AND lower(chest_name) = ?"
+                    gs_params.append(leaf)
+            else:  # xp / coins / new_items -> subcategory lives in skill_name
+                gs_where = "session_uuid = ? AND category = ? AND lower(skill_name) = ?"
+                gs_params = [session_uuid, category, sub]
+            cursor.execute(
+                f"DELETE FROM stats_report_gearsets WHERE {gs_where}",
+                tuple(gs_params),
+            )
+            counts['stats_report_gearsets'] += cursor.rowcount
+        conn.commit()
+        if not self._persistent_conn:
+            conn.close()
+        return counts
+
+    def prune_orphaned_stats_report_scopes(self, session_uuid: str, applicable_keys) -> dict:
+        """Delete stored goals-report rows whose scope is no longer in the
+        character's current applicable-source set.
+
+        This is the symmetric complement of the stale-detector's
+        "newly_unlocked" pass (applicable-but-not-stored). Nothing previously
+        handled the inverse — stored-but-not-applicable — so a stored row
+        whose scope key drifted OUT of the applicable set lingered forever.
+        Two ways that happens, both observed in bug report 29d4b8ce:
+          * a game-data LOCATION RENAME (e.g. blackspell_port ->
+            blackspell_harbour): the source is still optimizable, but under a
+            new location slug, so the old-slug row is orphaned; and
+          * a scope the enumerator deliberately stopped emitting (the
+            Bird nest / Coin pouch / Gem pouch "container" chests, and
+            one-time exploration activities like "Venture into the hideout").
+
+        Such an orphan still carries its OLD optimization_version, so
+        detect_stale_scopes flags it `version_bump` on every check, painting a
+        permanent red (!) the incremental run can NEVER clear: the rebuilt job
+        derives the CURRENT scope key (the new location), which never matches
+        the orphan's stored key, so the orphan is neither overwritten
+        (INSERT OR REPLACE keys on the new location) nor deleted. Before this
+        method the only escape was a full Emergency reset.
+
+        `applicable_keys` is the set of (category, subcategory, source_name,
+        location, service) tuples from
+        util.stats_report.applicable_sources.enumerate_applicable_sources for
+        the CURRENT character state (the SAME source of truth the stale
+        detector uses for newly_unlocked). Any stored row whose key is absent
+        from it is pruned from both scope-keyed tables:
+        stats_report_results and stats_report_stale_scopes.
+
+        SAFETY:
+          - No-op when applicable_keys is empty/None. An empty applicable set
+            almost always means the enumerator failed (import mid-flight,
+            transient error) rather than "the character can optimize nothing";
+            pruning against it would wipe every stored row. We refuse to act
+            on an empty set.
+          - Biases toward NOT deleting: a prune miss just leaves a stale
+            badge, whereas an over-eager prune churns a valid row. Both
+            self-correct anyway — a pruned-but-still-valid scope reappears via
+            newly_unlocked and re-runs on the next optimize — but we prefer the
+            quieter failure. Callers additionally wrap this in try/except.
+          - stats_report_gearsets is NOT scope-keyed (it keys on
+            run_id/activity/chest/skill), so it is intentionally left alone:
+            a gearset row with no matching result row is never surfaced
+            (results-v2 drives display) and is swept by a full reset.
+
+        Returns a counts dict for logging.
+        """
+        if not applicable_keys:
+            return {'pruned_results': 0, 'pruned_stale_scopes': 0,
+                    'skipped_empty_applicable': True}
+        applicable = set(applicable_keys)
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        # 2026-08-14 (jwbail): EXCLUDE target_items from this generic prune.
+        # enumerate_applicable_sources emits target_items keys with
+        # location="NONE" (the old v2 one-scope-per-item scheme), but the v3
+        # write path stores target_items rows with location=<activity_slug>
+        # (one row per (item, activity)). Those keys can NEVER be in
+        # `applicable`, so this prune deleted EVERY target_items row on every
+        # Optimize start -- wiping the just-completed rows before the resume
+        # filter could read them, so resume always rebuilt all 818 as "new"
+        # and never subtracted (TI-RESUME-DIAG showed stored=0 on re-Optimize).
+        # target_items has its OWN correct v3 reconciliation
+        # (prune_orphaned_target_items_results, called inside
+        # _filter_target_items_jobs_to_stale), so it must not be touched here.
+        cursor.execute(
+            "SELECT category, subcategory, source_name, location, service "
+            "FROM stats_report_results WHERE session_uuid = ? "
+            "AND category != 'target_items'",
+            (session_uuid,),
+        )
+        orphan_keys = [
+            (c, s, src, loc, svc)
+            for (c, s, src, loc, svc) in cursor.fetchall()
+            if (c, s, src, loc, svc) not in applicable
+        ]
+        if not orphan_keys:
+            if not self._persistent_conn:
+                conn.close()
+            return {'pruned_results': 0, 'pruned_stale_scopes': 0}
+        where = ("session_uuid = ? AND category = ? AND subcategory = ? "
+                 "AND source_name = ? AND location = ? AND service = ?")
+        pruned_results = pruned_stale = 0
+        for (c, s, src, loc, svc) in orphan_keys:
+            params = (session_uuid, c, s, src, loc, svc)
+            cursor.execute(f"DELETE FROM stats_report_stale_scopes WHERE {where}", params)
+            pruned_stale += cursor.rowcount
+            cursor.execute(f"DELETE FROM stats_report_results WHERE {where}", params)
+            pruned_results += cursor.rowcount
+        conn.commit()
+        if not self._persistent_conn:
+            conn.close()
+        return {
+            'pruned_results': pruned_results,
+            'pruned_stale_scopes': pruned_stale,
+            'orphan_sample': orphan_keys[:8],
+        }
 
     def get_degenerate_result_scopes(self, session_uuid: str):
         """Return the set of (category, source_name) scopes whose stored
@@ -3116,6 +3673,2065 @@ class DatabaseManager:
     # Sessions gated for the EXACT XP/step optimizer experiment (goals report)
     _EXACT_XP_OPTIMIZER_ENABLED = {'00000000-0000-0000-0000-000000000000'}
 
+    # Sessions gated for the NEW (meet-in-the-middle) optimizer. Add tester
+    # session UUIDs here to let them try the new optimizer in prod. NOTE: the
+    # local/Pyodide path CANNOT read this DB, so the bundle-safe allowlist in
+    # stats_report_worker._NEW_OPTIMIZER_SESSIONS is what actually enables it in
+    # the browser -- keep the two sets in sync.
+    _NEW_OPTIMIZER_ALWAYS_ENABLED = {'00000000-0000-0000-0000-000000000000'}
+
+    # Achievement Tracker (FAC-gated; not released to all sessions yet).
+    _ACHIEVEMENTS_ALWAYS_ENABLED = {'00000000-0000-0000-0000-000000000000'}
+
+    # Item Upgrades Tracker (FAC-gated; not released to all sessions yet).
+    _UPGRADES_TRACKER_ALWAYS_ENABLED = {'00000000-0000-0000-0000-000000000000'}
+
+    # Fastest Craft optimized-goals-report category (FAC-gated during
+    # development; not released to all sessions yet). See
+    # .kiro/specs/fastest-craft/.
+    _FASTEST_CRAFT_GOALS_ALWAYS_ENABLED = {'00000000-0000-0000-0000-000000000000'}
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Trading feature (FAC-gated: trading). Shared multi-user marketplace.
+    # Ownership keyed on PRIVATE session_uuid (never emitted); outward identity
+    # is in_game_name + display_name. object_id = "walkscape-opt:{prefix}{id}";
+    # txn_id = unix-epoch ms. See .kiro/specs/trading/.
+    # ──────────────────────────────────────────────────────────────────────
+
+    _TRADING_ORIGIN = "flames"
+
+    def _txn_id(self, cur) -> int:
+        """Monotonic per-site transaction id. Increments the trading_seq counter
+        on the caller's cursor so it shares that write's atomic commit — strictly
+        increasing, collision-free (unlike the old ms timestamp), so a late commit
+        can't be skipped by a `since=<txn_id>` federation backfill."""
+        cur.execute("UPDATE trading_seq SET value = value + 1 WHERE name = 'txn'")
+        cur.execute("SELECT value FROM trading_seq WHERE name = 'txn'")
+        row = cur.fetchone()
+        return int(row[0]) if row else int(time.time() * 1000)
+
+    def get_or_create_trader(self, session_uuid: str, in_game_name: str = "", create: bool = True) -> Dict[str, Any]:
+        """Return the caller's Trader, creating it on first use.
+
+        display_name defaults to in_game_name on creation and is never
+        overwritten by later imports; in_game_name is refreshed from the
+        latest import. Keyed on the private session_uuid.
+        """
+        conn = self._get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT session_uuid, in_game_name, display_name, contact_prefs_json, auto_renew, "
+            "share_inventory FROM traders WHERE session_uuid = ?", (session_uuid,))
+        row = cur.fetchone()
+        now = time.time()
+        if row is None:
+            name = in_game_name or ""
+            if not create and not name:
+                # Read-only caller with no identity yet — do NOT persist an
+                # identity-less trader. Those seed blank, unclickable Browse
+                # rows (and duplicate records). Return a transient identity.
+                result = {"session_uuid": session_uuid, "in_game_name": "",
+                          "display_name": "", "contact_prefs": [], "auto_renew": False,
+                          "share_inventory": False}
+            else:
+                cur.execute(
+                    "INSERT INTO traders (session_uuid, in_game_name, display_name, "
+                    "contact_prefs_json, created_at, updated_at) VALUES (?, ?, ?, '[]', ?, ?)",
+                    (session_uuid, name, name, now, now))
+                conn.commit()
+                result = {"session_uuid": session_uuid, "in_game_name": name,
+                          "display_name": name, "contact_prefs": [], "auto_renew": False,
+                          "share_inventory": False}
+        else:
+            result = {"session_uuid": row[0], "in_game_name": row[1],
+                      "display_name": row[2], "contact_prefs": json.loads(row[3] or "[]"),
+                      "auto_renew": bool(row[4]), "share_inventory": bool(row[5])}
+            # Refresh in_game_name + bump recency (used by name->session resolution).
+            new_name = in_game_name or row[1]
+            # Back-fill an EMPTY display_name once a name is known (a user who
+            # opened trading before importing a named character got a blank
+            # display_name; heal it). A non-empty custom display_name is kept.
+            new_disp = row[2] if (row[2] or "").strip() else new_name
+            cur.execute("UPDATE traders SET in_game_name = ?, display_name = ?, updated_at = ? WHERE session_uuid = ?",
+                        (new_name, new_disp, now, session_uuid))
+            conn.commit()
+            result["in_game_name"] = new_name
+            result["display_name"] = new_disp
+        # trader_id = "{origin}:{account_id}". in_game_name stays a display label.
+        result["account_id"] = session_uuid
+        result["trader_id"] = f"{self._TRADING_ORIGIN}:{session_uuid}"
+        if not self._persistent_conn:
+            conn.close()
+        return result
+
+    def update_trader(self, session_uuid: str, display_name: Optional[str] = None,
+                      contact_prefs: Optional[list] = None, auto_renew: Optional[bool] = None,
+                      share_inventory: Optional[bool] = None) -> bool:
+        sets, params = [], []
+        if display_name is not None:
+            sets.append("display_name = ?"); params.append(display_name)
+        if contact_prefs is not None:
+            sets.append("contact_prefs_json = ?"); params.append(json.dumps(contact_prefs))
+        if auto_renew is not None:
+            sets.append("auto_renew = ?"); params.append(1 if auto_renew else 0)
+        if share_inventory is not None:
+            sets.append("share_inventory = ?"); params.append(1 if share_inventory else 0)
+        if not sets:
+            return False
+        sets.append("updated_at = ?"); params.append(time.time())
+        params.append(session_uuid)
+        conn = self._get_connection(); cur = conn.cursor()
+        cur.execute(f"UPDATE traders SET {', '.join(sets)} WHERE session_uuid = ?", params)
+        changed = cur.rowcount > 0
+        conn.commit()
+        if not self._persistent_conn:
+            conn.close()
+        return changed
+
+    def resolve_trader_by_name(self, in_game_name: str) -> Optional[str]:
+        """Resolve an in_game_name to the most-recently-accessed session_uuid.
+
+        Context-based disambiguation (thread / sell history) is layered on in
+        ui/trading.py (task 5); this is the most-recent-session baseline.
+        """
+        conn = self._get_connection(); cur = conn.cursor()
+        cur.execute("SELECT session_uuid FROM traders WHERE in_game_name = ? "
+                    "ORDER BY updated_at DESC LIMIT 1", (in_game_name,))
+        row = cur.fetchone()
+        if not self._persistent_conn:
+            conn.close()
+        return row[0] if row else None
+
+    def resolve_trader_by_handle(self, handle: str) -> Optional[str]:
+        """Resolve a PUBLIC HANDLE (the /u/<handle> slug) to a session_uuid.
+
+        A handle is a trader's display_name when they set a unique one, else
+        their in_game_name. Match display_name first (case-insensitive; handles
+        are enforced unique at save time), then fall back to in_game_name."""
+        if not handle or not handle.strip():
+            return None
+        h = handle.strip().lower()
+        conn = self._get_connection(); cur = conn.cursor()
+        cur.execute("SELECT session_uuid FROM traders WHERE lower(display_name) = ? "
+                    "ORDER BY updated_at DESC LIMIT 1", (h,))
+        row = cur.fetchone()
+        if row is None:
+            cur.execute("SELECT session_uuid FROM traders WHERE lower(in_game_name) = ? "
+                        "ORDER BY updated_at DESC LIMIT 1", (h,))
+            row = cur.fetchone()
+        if not self._persistent_conn:
+            conn.close()
+        return row[0] if row else None
+
+    def display_name_available(self, name: str, exclude_uuid: Optional[str] = None) -> bool:
+        """Is ``name`` free to use as a public display-name handle? Taken when
+        ANOTHER trader already uses it as their display_name OR in_game_name
+        (case-insensitive) — so a handle never collides with someone else's
+        character-name handle. Empty/blank is always 'available' (clears the
+        handle; the public profile then falls back to the character name)."""
+        if not name or not name.strip():
+            return True
+        n = name.strip().lower()
+        conn = self._get_connection(); cur = conn.cursor()
+        cur.execute("SELECT 1 FROM traders WHERE (lower(display_name) = ? OR lower(in_game_name) = ?) "
+                    "AND session_uuid != ? LIMIT 1", (n, n, exclude_uuid or ""))
+        row = cur.fetchone()
+        if not self._persistent_conn:
+            conn.close()
+        return row is None
+
+    # recognize as a quality). Only these item types carry a quality dimension;
+    # everything else is always base ('').
+    _FED_QUALITY_TYPES = ("crafted", "material", "consumable", "pet_egg", "egg")
+    _FED_QUAL_TOKENS = {"common", "uncommon", "rare", "epic", "legendary", "ethereal", "fine"}
+    _FED_WORD_TO_TOKEN = {"normal": "common", "good": "uncommon", "great": "rare",
+                          "excellent": "epic", "perfect": "legendary", "eternal": "ethereal",
+                          "fine": "fine"}
+
+    def _fed_quality_token(self, quality, item_type) -> str:
+        """Normalize a quality / wishlist-floor to the federation contract token.
+
+        - An item type with no quality dimension is always base -> ''.
+        - '', 'none', 'any' -> '' (base / no floor).
+        - A display WORD ('normal','good',…) maps to its variant TOKEN
+          ('common','uncommon',…); 'normal' is the first tier -> 'common'.
+        - An already-canonical token passes through.
+        This guarantees we never put the literal 'normal' on the wire."""
+        q = str(quality or "").strip().lower()
+        if (item_type or "") not in self._FED_QUALITY_TYPES:
+            return ""
+        if q in ("", "none", "any"):
+            return ""
+        if q in self._FED_QUAL_TOKENS:
+            return q
+        return self._FED_WORD_TO_TOKEN.get(q, "")
+
+    def create_listing(self, session_uuid: str, item: Dict[str, str], qty: int = 1,
+                       price_coins: Optional[int] = None, trade_for: Optional[list] = None,
+                       notify: bool = False, obo: bool = False,
+                       accept_wishlist: bool = False, note: Optional[str] = None) -> Dict[str, Any]:
+        conn = self._get_connection(); cur = conn.cursor()
+        now = time.time(); txn = self._txn_id(cur)
+        expires = now + 604800  # listings expire after 7 days unless renewed
+        cur.execute(
+            "INSERT INTO listings (origin_site, trader_uuid, item_slug, item_type, item_quality, "
+            "qty, price_coins, trade_for_json, status, notify, obo, accept_wishlist, note, expires_at, txn_id, "
+            "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?)",
+            (self._TRADING_ORIGIN, session_uuid, item["slug"], item["type"],
+             self._fed_quality_token(item.get("quality"), item.get("type")), qty, price_coins,
+             json.dumps(trade_for) if trade_for else None, 1 if notify else 0,
+             1 if obo else 0, 1 if accept_wishlist else 0,
+             (note or None), expires, txn, now, now))
+        listing_id = cur.lastrowid
+        conn.commit()
+        if not self._persistent_conn:
+            conn.close()
+        object_id = f"{self._TRADING_ORIGIN}:L{listing_id}"
+        # Fan out wishlist match-alerts to opted-in wishlisters (not the seller).
+        self.generate_wishlist_alerts(item, price_coins, object_id, seller_uuid=session_uuid)
+        return {"id": listing_id, "object_id": object_id, "txn_id": txn}
+
+    def create_listings_batch(self, session_uuid: str, entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Create many listings in a SINGLE transaction (fast bulk add).
+
+        ``entries`` is a list of dicts, each with: item ({slug,type,quality}),
+        qty, price_coins, trade_for, notify, obo, accept_wishlist, note. Every
+        insert and its wishlist match-alerts share one connection + one commit,
+        so a bulk duplicate-gear listing is one round trip instead of N."""
+        conn = self._get_connection(); cur = conn.cursor()
+        now = time.time()
+        expires = now + 604800
+        out: List[Dict[str, Any]] = []
+        for e in entries:
+            item = e["item"]
+            txn = self._txn_id(cur)
+            cur.execute(
+                "INSERT INTO listings (origin_site, trader_uuid, item_slug, item_type, item_quality, "
+                "qty, price_coins, trade_for_json, status, notify, obo, accept_wishlist, note, expires_at, txn_id, "
+                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?)",
+                (self._TRADING_ORIGIN, session_uuid, item["slug"], item["type"],
+                 self._fed_quality_token(item.get("quality"), item.get("type")), int(e.get("qty") or 1), e.get("price_coins"),
+                 json.dumps(e.get("trade_for")) if e.get("trade_for") else None,
+                 1 if e.get("notify") else 0, 1 if e.get("obo") else 0,
+                 1 if e.get("accept_wishlist") else 0, (e.get("note") or None), expires, txn, now, now))
+            listing_id = cur.lastrowid
+            object_id = f"{self._TRADING_ORIGIN}:L{listing_id}"
+            # Reuse the open cursor so alerts share this one atomic commit.
+            self.generate_wishlist_alerts(item, e.get("price_coins"), object_id,
+                                          seller_uuid=session_uuid, cur=cur)
+            out.append({"id": listing_id, "object_id": object_id, "txn_id": txn})
+        conn.commit()
+        if not self._persistent_conn:
+            conn.close()
+        return out
+
+    def _queue_push(self, session_uuid, title, body, thread=None):
+        """Queue a per-user push notification (DM / wishlist match). Drained by the
+        app layer after the request so DB code stays transport-agnostic."""
+        if not session_uuid:
+            return
+        if not hasattr(self, "_push_queue") or self._push_queue is None:
+            self._push_queue = []
+        self._push_queue.append({"session_uuid": session_uuid, "title": title, "body": body, "thread": thread})
+
+    def drain_push_queue(self):
+        """Return and clear queued push notifications."""
+        q = getattr(self, "_push_queue", None) or []
+        self._push_queue = []
+        return q
+
+    def generate_wishlist_alerts(self, item: Dict[str, Any], price_coins: Optional[int],
+                                 matched_object_id: str, seller_uuid: Optional[str] = None,
+                                 cur=None) -> int:
+        """Create inbox match-alerts for every opted-in wishlist entry a (newly
+        open) listing satisfies. A wishlist matches when: same item slug, the
+        quality rule is satisfied (exact / this-or-better within the item's
+        ladder), and — if the wishlist set a max_coins — the listing has a coin
+        price within that cap. The wishlist owner's own listings never alert
+        them. Deduped by (wishlist_id, matched_object_id), so one listing raises
+        at most one alert per wishlist. Returns the number of alerts created.
+
+        Pass ``cur`` to reuse an open transaction (the federation-apply path does
+        this so it doesn't contend with its own uncommitted write); otherwise a
+        private connection is opened and committed."""
+        from ui.trading import quality_matches
+        slug = item.get("slug")
+        if not slug:
+            return 0
+        listing_quality = item.get("quality") or ""
+        listing_type = item.get("type") or ""
+        own_conn = cur is None
+        if own_conn:
+            conn = self._get_connection(); cur = conn.cursor()
+        now = time.time()
+        cur.execute(
+            "SELECT id, trader_uuid, quality_rule, quality_floor, max_coins, item_type "
+            "FROM wishlist_entries WHERE item_slug = ? AND notify_match = 1 "
+            "AND (expires_at IS NULL OR expires_at > ?)", (slug, now))
+        rows = cur.fetchall()
+        created = 0
+        for (wid, wuuid, rule, floor, max_coins, witype) in rows:
+            if seller_uuid and wuuid == seller_uuid:
+                continue  # don't alert someone about their own listing
+            ctype = witype or listing_type
+            if not quality_matches(listing_quality, rule or "exact", floor or "", ctype):
+                continue
+            if max_coins is not None and (price_coins is None or price_coins > max_coins):
+                continue
+            txn = self._txn_id(cur)
+            try:
+                cur.execute(
+                    "INSERT OR IGNORE INTO wishlist_match_alerts (trader_uuid, wishlist_id, "
+                    "matched_object_id, txn_id, created_at) VALUES (?, ?, ?, ?, ?)",
+                    (wuuid, wid, matched_object_id, txn, now))
+                if cur.rowcount > 0:
+                    created += 1
+                    self._queue_push(wuuid, 'Wishlist match',
+                                     f"A matching {str(slug).replace('_', ' ').title()} was just listed.")
+            except Exception:
+                pass
+        if own_conn:
+            conn.commit()
+            if not self._persistent_conn:
+                conn.close()
+        return created
+
+    def generate_listing_match_alerts(self, item: Dict[str, Any], max_coins: Optional[int],
+                                      quality_rule: str, quality_floor: str,
+                                      wisher_uuid: Optional[str] = None, cur=None,
+                                      matched_object_id: Optional[str] = None) -> int:
+        """Reverse of generate_wishlist_alerts: when a NEW wishlist entry is
+        posted, notify every opted-in (notify=1) OPEN listing owner whose listing
+        would satisfy that wishlist (same item, quality rule satisfied, and —
+        if the wishlist set a max_coins — the listing's price within it). The
+        wishlist owner's own listings never alert them. Persists an in-app
+        listing-match alert per matching listing (surfaced on My Listings, NOT the
+        inbox) and queues one push per owner. Returns matches found."""
+        from ui.trading import quality_matches
+        slug = item.get("slug")
+        if not slug:
+            return 0
+        witype = item.get("type") or ""
+        own_conn = cur is None
+        if own_conn:
+            conn = self._get_connection(); cur = conn.cursor()
+        now = time.time()
+        cur.execute(
+            "SELECT id, trader_uuid, item_quality, price_coins, item_type FROM listings "
+            "WHERE item_slug = ? AND status = 'open' AND notify = 1 "
+            "AND (expires_at IS NULL OR expires_at > ?)", (slug, now))
+        rows = cur.fetchall()
+        created = 0
+        seen = set()
+        for (lid, luuid, lq, lprice, ltype) in rows:
+            if wisher_uuid and luuid == wisher_uuid:
+                continue  # don't alert someone about their own listing
+            ctype = ltype or witype
+            if not quality_matches(lq or "", quality_rule or "exact", quality_floor or "", ctype):
+                continue
+            if max_coins is not None and (lprice is not None and lprice > max_coins):
+                continue
+            # Persist an in-app alert on this matching listing (deduped by
+            # (listing_id, matched_object_id)).
+            if matched_object_id:
+                atxn = self._txn_id(cur)
+                cur.execute(
+                    "INSERT OR IGNORE INTO listing_match_alerts (trader_uuid, listing_id, "
+                    "matched_object_id, txn_id, created_at) VALUES (?, ?, ?, ?, ?)",
+                    (luuid, lid, matched_object_id, atxn, now))
+            if luuid not in seen:  # at most one push per owner per wishlist
+                seen.add(luuid)
+                self._queue_push(luuid, 'Someone wants your listing',
+                                 f"A buyer just wishlisted {str(slug).replace('_', ' ').title()} that you have listed.")
+            created += 1
+        if own_conn:
+            conn.commit()
+            if not self._persistent_conn:
+                conn.close()
+        return created
+
+    def update_listing(self, session_uuid: str, listing_id: int, fields: Dict[str, Any]) -> bool:
+        """Update an owned listing. Allowed: qty, price_coins, trade_for, notify, note,
+        obo, accept_wishlist, item_quality."""
+        allowed = {"qty", "price_coins", "notify", "obo", "accept_wishlist", "item_quality", "note"}
+        sets, params = [], []
+        for k in allowed:
+            if k in fields:
+                v = fields[k]
+                if k in ("notify", "obo", "accept_wishlist"):
+                    v = 1 if v else 0
+                if k == "note":
+                    v = (str(v) if v else None)
+                sets.append(f"{k} = ?"); params.append(v)
+        if "trade_for" in fields:
+            sets.append("trade_for_json = ?")
+            params.append(json.dumps(fields["trade_for"]) if fields["trade_for"] else None)
+        if not sets:
+            return False
+        sets.append("updated_at = ?"); params.append(time.time())
+        sets.append("version = version + 1")
+        params.extend([listing_id, session_uuid])
+        conn = self._get_connection(); cur = conn.cursor()
+        cur.execute(f"UPDATE listings SET {', '.join(sets)} WHERE id = ? AND trader_uuid = ?", params)
+        changed = cur.rowcount > 0; conn.commit()
+        if not self._persistent_conn:
+            conn.close()
+        return changed
+
+    def update_wishlist_entry(self, session_uuid: str, wid: int, fields: Dict[str, Any]) -> bool:
+        """Update an owned wishlist entry. Allowed: quality_rule, quality_floor,
+        max_coins, qty, note, notify_match. Bumps version/txn so the change
+        federates."""
+        allowed = {"quality_rule", "quality_floor", "max_coins", "qty", "note", "notify_match"}
+        sets, params = [], []
+        for k in allowed:
+            if k in fields:
+                v = fields[k]
+                if k == "notify_match":
+                    v = 1 if v else 0
+                if k == "note":
+                    v = (str(v) if v else None)
+                sets.append(f"{k} = ?"); params.append(v)
+        if "trade_for" in fields:
+            sets.append("trade_for_json = ?")
+            params.append(json.dumps(fields["trade_for"]) if fields["trade_for"] else None)
+        if not sets:
+            return False
+        conn = self._get_connection(); cur = conn.cursor()
+        txn = self._txn_id(cur)
+        sets.append("updated_at = ?"); params.append(time.time())
+        sets.append("txn_id = ?"); params.append(txn)
+        sets.append("version = version + 1")
+        params.extend([wid, session_uuid])
+        cur.execute(f"UPDATE wishlist_entries SET {', '.join(sets)} WHERE id = ? AND trader_uuid = ?", params)
+        changed = cur.rowcount > 0; conn.commit()
+        if not self._persistent_conn:
+            conn.close()
+        return changed
+
+    def renew_listing(self, session_uuid: str, listing_id: int) -> bool:
+        """Reset an owned listing's expiry to 7 days out (and reopen if expired)."""
+        conn = self._get_connection(); cur = conn.cursor()
+        now = time.time()
+        cur.execute(
+            "UPDATE listings SET expires_at = ?, status = 'open', updated_at = ?, version = version + 1 "
+            "WHERE id = ? AND trader_uuid = ?",
+            (now + 604800, now, listing_id, session_uuid))
+        changed = cur.rowcount > 0; conn.commit()
+        if not self._persistent_conn:
+            conn.close()
+        return changed
+
+    def renew_all_listings(self, session_uuid: str) -> int:
+        """Reset expiry to 7 days out for ALL of the caller's open listings. Returns
+        the number renewed."""
+        conn = self._get_connection(); cur = conn.cursor()
+        now = time.time()
+        cur.execute(
+            "UPDATE listings SET expires_at = ?, updated_at = ?, version = version + 1 "
+            "WHERE trader_uuid = ? AND (status = 'open' OR status IS NULL)",
+            (now + 604800, now, session_uuid))
+        n = cur.rowcount; conn.commit()
+        if not self._persistent_conn:
+            conn.close()
+        return n
+
+    def close_listing(self, session_uuid: str, listing_id: int,
+                      sold_for: Optional[Dict[str, Any]] = None, sold_to: str = "",
+                      status: str = "sold", qty_sold: Optional[int] = None) -> Optional[Dict[str, Any]]:
+        """Close out an owned listing: mark it ``status`` (default 'sold'), stamp
+        what it closed for, bump version/txn, and — when sold — append a
+        trade_history row. The row is RETAINED (soft close), so the terminal
+        change also federates to peers via local_changes_since.
+
+        ``sold_for`` is {coins?: int, items?: [{slug,type,quality,qty}]} (coins
+        and/or a trade; a no-coins trade is fine).
+
+        ``qty_sold`` enables a PARTIAL sale: when it is < the listing's qty (and
+        status is 'sold'), the listing's qty is reduced IN PLACE and left open
+        instead of being closed — so the seller sells part of a stack without
+        re-listing (which would re-fire wishlist match-alerts). A trade_history
+        row is still recorded for the sold units. ``qty_sold`` is clamped to
+        [1, qty]; None (or >= qty) means a full close. Returns the close summary
+        (with ``partial``/``qty_sold``/``qty_remaining``), or None if the listing
+        isn't owned by the caller / already closed."""
+        status = (status or "sold").lower()
+        conn = self._get_connection(); cur = conn.cursor()
+        cur.execute("SELECT item_slug, item_type, item_quality, qty FROM listings "
+                    "WHERE id = ? AND trader_uuid = ? AND status = 'open'",
+                    (listing_id, session_uuid))
+        row = cur.fetchone()
+        if row is None:
+            if not self._persistent_conn:
+                conn.close()
+            return None
+        slug, itype, quality, qty = row
+        now = time.time(); txn = self._txn_id(cur)
+        # Partial sale: selling only part of a multi-qty listing. Reduce the
+        # listing's qty IN PLACE (the row stays 'open') instead of closing + re-
+        # listing, so wishlist watchers aren't re-alerted — create_listing is the
+        # only local alert trigger, and a bare qty UPDATE never fans out match-
+        # alerts. Only applies to a 'sold' close with qty_sold < qty.
+        sold_qty = qty
+        if status == "sold" and qty_sold is not None:
+            try:
+                sold_qty = max(1, min(int(qty_sold), qty))
+            except (TypeError, ValueError):
+                sold_qty = qty
+        partial = status == "sold" and sold_qty < qty
+        if partial:
+            cur.execute(
+                "UPDATE listings SET qty = ?, updated_at = ?, txn_id = ?, "
+                "version = version + 1 WHERE id = ? AND trader_uuid = ?",
+                (qty - sold_qty, now, txn, listing_id, session_uuid))
+        else:
+            cur.execute(
+                "UPDATE listings SET status = ?, closed_for_json = ?, updated_at = ?, "
+                "txn_id = ?, version = version + 1 WHERE id = ? AND trader_uuid = ?",
+                (status, json.dumps(sold_for) if sold_for else None, now, txn,
+                 listing_id, session_uuid))
+        object_id = f"{self._TRADING_ORIGIN}:L{listing_id}"
+        # Resolve any linked wishlist entries: record them on the history row so a
+        # trade isn't double-counted, and fulfill the LOCAL ones so the buyer's
+        # wishlist clears. (Remote linked wishlists just ride the history link.) A
+        # PARTIAL sale leaves the listing open, so linked wishlists are NOT
+        # fulfilled (the stack is still being sold).
+        linked = self.links_for_object(object_id)
+        linked_wishlists = [lk["wishlist_object_id"] for lk in linked]
+        hid = None
+        if status == "sold":
+            if not partial:
+                for woid in linked_wishlists:
+                    self.fulfill_wishlist_entry(woid)
+            seller = self.get_trader(session_uuid) or {}
+            seller_name = seller.get("display_name") or seller.get("in_game_name") or ""
+            items = [{"slug": slug, "type": itype, "quality": quality, "qty": sold_qty}]
+            hist_links = [object_id] + ([] if partial else linked_wishlists)
+            cur.execute("INSERT INTO trade_history (origin_site, items_json, sold_for_json, "
+                        "party_a_name, party_b_name, linked_object_ids_json, txn_id, created_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (self._TRADING_ORIGIN, json.dumps(items), json.dumps(sold_for or {}),
+                         seller_name, (sold_to or ""),
+                         json.dumps(hist_links), txn, now))
+            hid = cur.lastrowid
+        conn.commit()
+        if not self._persistent_conn:
+            conn.close()
+        return {"id": listing_id, "object_id": object_id,
+                "status": ("open" if partial else status), "closed_for": sold_for,
+                "history_id": hid, "txn_id": txn, "partial": partial,
+                "qty_sold": sold_qty, "qty_remaining": (qty - sold_qty) if partial else 0,
+                "linked_wishlists": linked_wishlists}
+
+    def close_wishlist_entry(self, session_uuid: str, wid: int,
+                             bought_for: Optional[Dict[str, Any]] = None,
+                             bought_from: str = "", status: str = "bought",
+                             qty_bought: Optional[int] = None) -> Optional[Dict[str, Any]]:
+        """Close out an owned WISHLIST entry when the buyer actually bought the
+        item. Mirrors ``close_listing`` but records the trade in the OTHER
+        direction: the caller is the BUYER, so the history row is
+        party_a = seller (``bought_from``), party_b = me (buyer).
+
+        ``bought_for`` is {coins?: int, items?: [{slug,type,quality,qty}]} — what
+        the buyer gave up. ``qty_bought`` enables a PARTIAL buy (qty reduced in
+        place, entry stays open) exactly like a partial sale. Returns the close
+        summary, or None if the entry isn't owned by the caller / already closed.
+        """
+        status = (status or "bought").lower()
+        conn = self._get_connection(); cur = conn.cursor()
+        cur.execute("SELECT item_slug, item_type, quality_floor, qty FROM wishlist_entries "
+                    "WHERE id = ? AND trader_uuid = ? AND status = 'open'",
+                    (wid, session_uuid))
+        row = cur.fetchone()
+        if row is None:
+            if not self._persistent_conn:
+                conn.close()
+            return None
+        slug, itype, quality, qty = row
+        qty = qty if qty is not None else 1
+        now = time.time(); txn = self._txn_id(cur)
+        bought_qty = qty
+        if status == "bought" and qty_bought is not None:
+            try:
+                bought_qty = max(1, min(int(qty_bought), qty))
+            except (TypeError, ValueError):
+                bought_qty = qty
+        partial = status == "bought" and bought_qty < qty
+        if partial:
+            cur.execute(
+                "UPDATE wishlist_entries SET qty = ?, updated_at = ?, txn_id = ?, "
+                "version = version + 1 WHERE id = ? AND trader_uuid = ?",
+                (qty - bought_qty, now, txn, wid, session_uuid))
+        else:
+            cur.execute(
+                "UPDATE wishlist_entries SET status = ?, updated_at = ?, txn_id = ?, "
+                "version = version + 1 WHERE id = ? AND trader_uuid = ?",
+                (status, now, txn, wid, session_uuid))
+        object_id = f"{self._TRADING_ORIGIN}:W{wid}"
+        hid = None
+        if status == "bought":
+            buyer = self.get_trader(session_uuid) or {}
+            buyer_name = buyer.get("display_name") or buyer.get("in_game_name") or ""
+            items = [{"slug": slug, "type": itype, "quality": quality or "", "qty": bought_qty}]
+            # OTHER direction: party_a = seller we bought from, party_b = me (buyer).
+            cur.execute("INSERT INTO trade_history (origin_site, items_json, sold_for_json, "
+                        "party_a_name, party_b_name, linked_object_ids_json, txn_id, created_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (self._TRADING_ORIGIN, json.dumps(items), json.dumps(bought_for or {}),
+                         (bought_from or ""), buyer_name,
+                         json.dumps([object_id]), txn, now))
+            hid = cur.lastrowid
+        conn.commit()
+        if not self._persistent_conn:
+            conn.close()
+        return {"id": wid, "object_id": object_id,
+                "status": ("open" if partial else status), "bought_for": bought_for,
+                "history_id": hid, "txn_id": txn, "partial": partial,
+                "qty_bought": bought_qty, "qty_remaining": (qty - bought_qty) if partial else 0}
+
+    def listings_for_item(self, item_slug: str) -> List[Dict[str, Any]]:
+        """Open listings for an item across all traders (for the item detail view)."""
+        conn = self._get_connection(); cur = conn.cursor()
+        now = time.time()
+        cur.execute("SELECT l.id, l.item_slug, l.item_type, l.item_quality, l.qty, l.price_coins, "
+                    "l.trade_for_json, l.obo, l.accept_wishlist, l.txn_id, t.in_game_name, t.display_name, "
+                    "l.note, l.expires_at, l.trader_uuid, l.version, l.created_at "
+                    "FROM listings l JOIN traders t ON l.trader_uuid = t.session_uuid "
+                    "WHERE l.item_slug = ? AND l.status = 'open' "
+                    "AND (l.expires_at IS NULL OR l.expires_at > ?) "
+                    "ORDER BY l.txn_id DESC", (item_slug, now))
+        rows = cur.fetchall()
+        if not self._persistent_conn:
+            conn.close()
+        return [{"object_id": f"{self._TRADING_ORIGIN}:L{r[0]}", "side": "selling",
+                 "item": {"slug": r[1], "type": r[2], "quality": r[3]}, "qty": r[4],
+                 "price_coins": r[5], "trade_for": json.loads(r[6]) if r[6] else None,
+                 "obo": bool(r[7]), "accept_wishlist": bool(r[8]), "txn_id": r[9],
+                 "trader": r[10] or r[11], "display_name": r[11], "note": r[12], "expires_at": r[13],
+                 "trader_id": f"{self._TRADING_ORIGIN}:{r[14]}", "version": r[15],
+                 "created_at": r[16],
+                 "is_expired": bool(r[13] is not None and r[13] <= now)} for r in rows]
+
+    def wishlists_for_item(self, item_slug: str) -> List[Dict[str, Any]]:
+        """Wishlist entries for an item across all traders."""
+        conn = self._get_connection(); cur = conn.cursor()
+        now = time.time()
+        cur.execute("SELECT w.id, w.item_slug, w.item_type, w.quality_rule, w.quality_floor, "
+                    "w.max_coins, w.trade_for_json, w.txn_id, t.in_game_name, t.display_name, w.qty, w.note, "
+                    "w.expires_at, w.trader_uuid, w.version, w.created_at "
+                    "FROM wishlist_entries w JOIN traders t ON w.trader_uuid = t.session_uuid "
+                    "WHERE w.item_slug = ? AND w.status = 'open' AND (w.expires_at IS NULL OR w.expires_at > ?) "
+                    "ORDER BY w.txn_id DESC", (item_slug, now))
+        rows = cur.fetchall()
+        if not self._persistent_conn:
+            conn.close()
+        return [{"object_id": f"{self._TRADING_ORIGIN}:W{r[0]}", "side": "buying",
+                 "item": {"slug": r[1], "type": r[2]},
+                 "quality_rule": r[3], "quality_floor": r[4], "max_coins": r[5],
+                 "trade_for": json.loads(r[6]) if r[6] else None, "txn_id": r[7],
+                 "trader": r[8] or r[9], "display_name": r[9], "qty": r[10], "note": r[11],
+                 "expires_at": r[12], "trader_id": f"{self._TRADING_ORIGIN}:{r[13]}",
+                 "version": r[14], "created_at": r[15],
+                 "is_expired": bool(r[12] is not None and r[12] <= now)} for r in rows]
+
+    def recent_history(self, limit: int = 25) -> List[Dict[str, Any]]:
+        """Recent confirmed sales (global), newest first."""
+        conn = self._get_connection(); cur = conn.cursor()
+        cur.execute("SELECT items_json, sold_for_json, party_a_name, party_b_name, txn_id, created_at, "
+                    "linked_object_ids_json FROM trade_history ORDER BY txn_id DESC LIMIT ?", (int(limit),))
+        rows = cur.fetchall()
+        if not self._persistent_conn:
+            conn.close()
+        return [{"items": json.loads(r[0]), "sold_for": json.loads(r[1]), "party_a": r[2],
+                 "party_b": r[3], "txn_id": r[4], "created_at": r[5],
+                 "linked_object_ids": json.loads(r[6]) if r[6] else []} for r in rows]
+
+    def historical_average_prices(self) -> Dict[str, int]:
+        """Average sold-for coin price per item slug across ALL trade history
+        (local + federated). Only sales with a coin price count; trade-only
+        sales are ignored. Returns {slug: avg_coins_rounded}."""
+        conn = self._get_connection(); cur = conn.cursor()
+        cur.execute("SELECT items_json, sold_for_json FROM trade_history")
+        rows = cur.fetchall()
+        if not self._persistent_conn:
+            conn.close()
+        totals: Dict[str, list] = {}
+        for items_json, sold_json in rows:
+            try:
+                items = json.loads(items_json) or []
+                sold = json.loads(sold_json) or {}
+            except (json.JSONDecodeError, TypeError):
+                continue
+            coins = sold.get("coins")
+            if coins is None:
+                continue
+            # coins is the TOTAL for the sale; average PER-ITEM prices, so divide
+            # by the units sold (matches the per-item ask/bid price domain).
+            total_units = 0
+            for it in items:
+                try:
+                    total_units += int((it or {}).get("qty") or 1)
+                except (TypeError, ValueError):
+                    total_units += 1
+            if total_units < 1:
+                total_units = 1
+            per_unit = float(coins) / total_units
+            for it in items:
+                slug = (it or {}).get("slug")
+                if not slug:
+                    continue
+                totals.setdefault(slug, []).append(per_unit)
+        return {slug: _coin_num(sum(vals) / len(vals)) for slug, vals in totals.items() if vals}
+
+    def trading_prices(self, slugs=None, by_rarity: bool = True) -> List[Dict[str, Any]]:
+        """Market price aggregates across the whole marketplace (local + federated).
+          - listings    = count of open sell listings
+          - lowest_ask  = min open-listing coin price
+          - highest_bid = max open-wishlist coin budget
+          - last_traded = coins of the most recent confirmed sale (+ its time)
+          - estimate / range / n_prices — only once the item has at least one
+            confirmed trade (an unsold listing alone shouldn't fabricate a value).
+            Signals = ask prices + bid prices + trade coins; estimate = median,
+            range = min..max, n_prices = signal count, n_traded = trade count.
+        When ``by_rarity`` (default), each (slug, quality-token) is a SEPARATE row
+        so a Perfect sale isn't mixed with a Normal one (the Prices board). When
+        False, everything for a slug collapses into one row (the item-detail card).
+        Pass ``slugs`` to restrict to specific items. Sorted by listings desc."""
+        import statistics
+        want = set(slugs) if slugs else None
+        agg: Dict[tuple, Dict[str, Any]] = {}
+
+        def _qtok(raw):
+            return (raw or "") if by_rarity else ""
+
+        def _row(slug, qtok, itype=None):
+            k = (slug, qtok)
+            a = agg.get(k)
+            if a is None:
+                a = agg[k] = {"slug": slug, "quality": qtok, "asks": [], "bids": [],
+                              "listings": 0, "buy_listings": 0, "trades": [],
+                              "traders": set(), "type": itype}
+            if itype and not a.get("type"):
+                a["type"] = itype
+            return a
+
+        conn = self._get_connection(); cur = conn.cursor()
+        for l in (self.all_open_listings() + self.remote_objects("listing")):
+            it = l.get("item") or {}; slug = it.get("slug")
+            if not slug or (want and slug not in want):
+                continue
+            a = _row(slug, _qtok(it.get("quality")), it.get("type")); a["listings"] += 1
+            if l.get("trader"):
+                a["traders"].add(str(l.get("trader")))
+            p = l.get("price_coins")
+            if p is not None and p > 0:
+                a["asks"].append(_coin_num(p))
+        for w in (self.all_wishlist_entries() + self.remote_objects("wishlist")):
+            it = w.get("item") or {}; slug = it.get("slug")
+            if not slug or (want and slug not in want):
+                continue
+            qtok = _qtok(w.get("quality_floor") or it.get("quality"))
+            a = _row(slug, qtok, it.get("type")); a["buy_listings"] += 1
+            if w.get("trader"):
+                a["traders"].add(str(w.get("trader")))
+            b = w.get("max_coins")
+            if b is not None and b > 0:
+                a["bids"].append(_coin_num(b))
+        # Trades newest-first (txn_id DESC) so trades[0] is the most recent.
+        cur.execute("SELECT items_json, sold_for_json, created_at, party_a_name, party_b_name "
+                    "FROM trade_history ORDER BY txn_id DESC")
+        for items_json, sold_json, created_at, party_a, party_b in cur.fetchall():
+            try:
+                items = json.loads(items_json) or []; sold = json.loads(sold_json) or {}
+            except (json.JSONDecodeError, TypeError):
+                continue
+            coins = sold.get("coins")
+            if coins is None or coins <= 0:
+                continue
+            # sold_for.coins is the TOTAL paid for the whole sale; price signals
+            # (asks/bids) are PER ITEM, so convert to a per-unit price by dividing
+            # by the units sold. A single-line bulk sale (e.g. 5555 bones for
+            # 27,775) becomes 5/unit instead of polluting the estimate with the
+            # lump total.
+            total_units = 0
+            for it in items:
+                try:
+                    total_units += int((it or {}).get("qty") or 1)
+                except (TypeError, ValueError):
+                    total_units += 1
+            if total_units < 1:
+                total_units = 1
+            per_unit = _coin_num(coins / total_units)
+            if per_unit <= 0:
+                per_unit = _coin_num(coins) if coins and coins > 0 else 0  # keep fractional sub-coin signal
+            for it in items:
+                slug = (it or {}).get("slug")
+                if not slug or (want and slug not in want):
+                    continue
+                a = _row(slug, _qtok((it or {}).get("quality")), (it or {}).get("type"))
+                a["trades"].append((per_unit, created_at))
+                for pname in (party_a, party_b):
+                    if pname:
+                        a["traders"].add(str(pname))
+        if not self._persistent_conn:
+            conn.close()
+
+        out = []
+        cutoff_30d = time.time() - 30 * 86400
+        for a in agg.values():
+            asks, bids, trades = a["asks"], a["bids"], a["trades"]
+            n_traded = len(trades)
+            estimate = range_min = range_max = None
+            n_prices = 0
+            if n_traded >= 1:
+                signals = asks + bids + [c for c, _ in trades]
+                if signals:
+                    n_prices = len(signals)
+                    estimate = _coin_num(statistics.median(signals))
+                    range_min, range_max = min(signals), max(signals)
+            recent = [c for c, at in trades if at is not None and float(at) >= cutoff_30d]
+            trades_30d = len(recent)
+            avg_30d = _coin_num(sum(recent) / len(recent)) if recent else None
+            out.append({
+                "slug": a["slug"], "quality": (a["quality"] if by_rarity else None),
+                "type": a.get("type"),
+                "estimate": estimate, "n_prices": n_prices, "n_traded": n_traded,
+                "n_traders": len(a["traders"]),
+                "range_min": range_min, "range_max": range_max,
+                "lowest_ask": (min(asks) if asks else None),
+                "highest_bid": (max(bids) if bids else None),
+                "listings": a["listings"], "buy_listings": a["buy_listings"],
+                "last_traded": (trades[0][0] if trades else None),
+                "last_traded_at": (trades[0][1] if trades else None),
+                "trades_30d": trades_30d, "avg_30d": avg_30d,
+            })
+        out.sort(key=lambda r: (-r["listings"], r["slug"], r.get("quality") or ""))
+        return out
+
+    def wipe_trading_data_for_launch(self) -> int:
+        """One-time, idempotent LAUNCH wipe of local trading test data.
+
+        Deletes every local trading row (listings, wishlists, messages, match
+        alerts, blocks, entry links, sale history, bank warnings, traders +
+        their settings, and the mirrored/queued federation objects). KEEPS the
+        federation peer(s) + tokens, the inbound sync cursor, and the txn
+        counter — so cross-site stays connected, old remote test data isn't
+        re-pulled, and outbound txn ids stay monotonic.
+
+        Guarded by a `trading_meta` flag so it runs at most once no matter how
+        many workers/restarts call it. Returns rows deleted (0 if already done).
+        """
+        conn = self._get_connection(); cur = conn.cursor()
+        cur.execute("CREATE TABLE IF NOT EXISTS trading_meta (key TEXT PRIMARY KEY, value TEXT)")
+        cur.execute("SELECT value FROM trading_meta WHERE key = 'launch_wiped'")
+        row = cur.fetchone()
+        if row and row[0]:
+            if not self._persistent_conn:
+                conn.close()
+            return 0
+        # Local trading content only. NOT in this list (intentionally kept):
+        # trading_seq (monotonic txn counter), trading_meta (guard).
+        wipe_tables = [
+            "listings", "wishlist_entries", "trade_messages",
+            "wishlist_match_alerts", "trade_blocks", "entry_links",
+            "trade_history", "ignored_bank_warnings", "traders",
+            "federation_objects", "federation_inbox",
+        ]
+        deleted = 0
+        for t in wipe_tables:
+            try:
+                cur.execute(f"DELETE FROM {t}")
+                if cur.rowcount and cur.rowcount > 0:
+                    deleted += cur.rowcount
+            except Exception:
+                pass  # table may not exist in this schema revision
+        cur.execute("INSERT OR REPLACE INTO trading_meta (key, value) VALUES ('launch_wiped', ?)",
+                    (str(int(time.time())),))
+        conn.commit()
+        if not self._persistent_conn:
+            conn.close()
+        return deleted
+
+    def trading_launch_wiped(self) -> bool:
+        """True once the one-time launch wipe has run (trading_meta guard set)."""
+        conn = self._get_connection(); cur = conn.cursor()
+        try:
+            cur.execute("SELECT value FROM trading_meta WHERE key = 'launch_wiped'")
+            row = cur.fetchone()
+        except Exception:
+            row = None
+        if not self._persistent_conn:
+            conn.close()
+        return bool(row and row[0])
+
+    def get_trading_meta(self, key: str) -> Optional[str]:
+        """Read a trading_meta kv value (None if unset). Used for one-off deploy
+        guards (e.g. the equipment-type federation backfill)."""
+        conn = self._get_connection(); cur = conn.cursor()
+        try:
+            cur.execute("CREATE TABLE IF NOT EXISTS trading_meta (key TEXT PRIMARY KEY, value TEXT)")
+            cur.execute("SELECT value FROM trading_meta WHERE key = ?", (key,))
+            row = cur.fetchone()
+        except Exception:
+            row = None
+        if not self._persistent_conn:
+            conn.close()
+        return (row[0] if row else None)
+
+    def set_trading_meta(self, key: str, value: str) -> None:
+        """Set a trading_meta kv value (idempotent one-off guard marker)."""
+        conn = self._get_connection(); cur = conn.cursor()
+        cur.execute("CREATE TABLE IF NOT EXISTS trading_meta (key TEXT PRIMARY KEY, value TEXT)")
+        cur.execute("INSERT OR REPLACE INTO trading_meta (key, value) VALUES (?, ?)", (key, value))
+        conn.commit()
+        if not self._persistent_conn:
+            conn.close()
+
+    def get_listings(self, session_uuid: str) -> List[Dict[str, Any]]:
+        conn = self._get_connection(); cur = conn.cursor()
+        cur.execute("SELECT id, item_slug, item_type, item_quality, qty, price_coins, "
+                    "trade_for_json, status, closed_for_json, notify, obo, accept_wishlist, txn_id, "
+                    "note, expires_at, version, created_at FROM listings "
+                    "WHERE trader_uuid = ? ORDER BY updated_at DESC", (session_uuid,))
+        rows = cur.fetchall()
+        if not self._persistent_conn:
+            conn.close()
+        now = time.time()
+        return [{"id": r[0], "object_id": f"{self._TRADING_ORIGIN}:L{r[0]}",
+                 "side": "selling",
+                 "item": {"slug": r[1], "type": r[2], "quality": r[3]}, "qty": r[4],
+                 "price_coins": r[5], "trade_for": json.loads(r[6]) if r[6] else None,
+                 "status": r[7], "closed_for": json.loads(r[8]) if r[8] else None,
+                 "notify": bool(r[9]), "obo": bool(r[10]), "accept_wishlist": bool(r[11]),
+                 "txn_id": r[12], "note": r[13], "expires_at": r[14], "version": r[15],
+                 "created_at": r[16],
+                 "is_expired": bool(r[14] is not None and r[14] <= now)} for r in rows]
+
+    def delete_listing(self, session_uuid: str, listing_id: int) -> bool:
+        conn = self._get_connection(); cur = conn.cursor()
+        now = time.time(); txn = self._txn_id(cur)
+        cur.execute("UPDATE listings SET status = 'deleted', updated_at = ?, txn_id = ?, "
+                    "version = version + 1 WHERE id = ? AND trader_uuid = ? "
+                    "AND (status = 'open' OR status IS NULL)", (now, txn, listing_id, session_uuid))
+        changed = cur.rowcount > 0; conn.commit()
+        if not self._persistent_conn:
+            conn.close()
+        return changed
+
+    def delete_all_listings(self, session_uuid: str) -> int:
+        """Soft-delete all of the caller's open listings (status='deleted', row
+        retained) so each terminal change federates to peers. Each row gets its
+        own monotonic txn_id so the batched push can't skip rows past the batch
+        size. Returns the number affected."""
+        conn = self._get_connection(); cur = conn.cursor()
+        now = time.time()
+        cur.execute("SELECT id FROM listings WHERE trader_uuid = ? AND (status = 'open' OR status IS NULL)",
+                    (session_uuid,))
+        ids = [r[0] for r in cur.fetchall()]
+        for _lid in ids:
+            cur.execute("UPDATE listings SET status = 'deleted', updated_at = ?, txn_id = ?, "
+                        "version = version + 1 WHERE id = ?", (now, self._txn_id(cur), _lid))
+        n = len(ids); conn.commit()
+        if not self._persistent_conn:
+            conn.close()
+        return n
+
+    def create_wishlist_entry(self, session_uuid: str, item: Dict[str, str],
+                              quality_rule: str = "exact", quality_floor: str = "",
+                              max_coins: Optional[int] = None, trade_for: Optional[list] = None,
+                              notify_match: bool = False, qty: int = 1,
+                              note: Optional[str] = None) -> Dict[str, Any]:
+        conn = self._get_connection(); cur = conn.cursor()
+        now = time.time(); txn = self._txn_id(cur)
+        expires = now + 604800  # wishlist entries expire after 7 days unless renewed
+        quality_floor = self._fed_quality_token(quality_floor, item.get("type"))
+        cur.execute(
+            "INSERT INTO wishlist_entries (origin_site, trader_uuid, item_slug, item_type, "
+            "quality_rule, quality_floor, max_coins, trade_for_json, notify_match, qty, note, expires_at, txn_id, "
+            "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (self._TRADING_ORIGIN, session_uuid, item["slug"], item["type"], quality_rule,
+             quality_floor, max_coins, json.dumps(trade_for) if trade_for else None,
+             1 if notify_match else 0, int(qty or 1), (note or None), expires, txn, now, now))
+        wid = cur.lastrowid; conn.commit()
+        if not self._persistent_conn:
+            conn.close()
+        # Notify opted-in listing owners whose open listing satisfies this new
+        # wishlist (reverse of the wishlist-match alert; seller must have notify=1).
+        self.generate_listing_match_alerts(item, max_coins, quality_rule, quality_floor,
+                                           wisher_uuid=session_uuid,
+                                           matched_object_id=f"{self._TRADING_ORIGIN}:W{wid}")
+        return {"id": wid, "object_id": f"{self._TRADING_ORIGIN}:W{wid}", "txn_id": txn}
+
+    def get_wishlist(self, session_uuid: str) -> List[Dict[str, Any]]:
+        conn = self._get_connection(); cur = conn.cursor()
+        cur.execute("SELECT id, item_slug, item_type, quality_rule, quality_floor, max_coins, "
+                    "trade_for_json, notify_match, txn_id, expires_at, qty, note, version, status, created_at FROM wishlist_entries "
+                    "WHERE trader_uuid = ? AND (status IS NULL OR status != 'deleted') ORDER BY updated_at DESC", (session_uuid,))
+        rows = cur.fetchall()
+        if not self._persistent_conn:
+            conn.close()
+        now = time.time()
+        return [{"id": r[0], "object_id": f"{self._TRADING_ORIGIN}:W{r[0]}",
+                 "side": "buying",
+                 "item": {"slug": r[1], "type": r[2]}, "quality_rule": r[3], "quality_floor": r[4],
+                 "max_coins": r[5], "trade_for": json.loads(r[6]) if r[6] else None,
+                 "notify_match": bool(r[7]), "txn_id": r[8], "expires_at": r[9],
+                 "qty": r[10], "note": r[11], "version": r[12], "status": r[13],
+                 "created_at": r[14],
+                 "is_expired": bool(r[9] is not None and r[9] <= now)} for r in rows]
+
+    def renew_wishlist_entry(self, session_uuid: str, wid: int) -> bool:
+        """Reset an owned wishlist entry's expiry to 7 days out."""
+        conn = self._get_connection(); cur = conn.cursor()
+        now = time.time()
+        cur.execute("UPDATE wishlist_entries SET expires_at = ?, updated_at = ?, version = version + 1 "
+                    "WHERE id = ? AND trader_uuid = ?", (now + 604800, now, wid, session_uuid))
+        changed = cur.rowcount > 0; conn.commit()
+        if not self._persistent_conn:
+            conn.close()
+        return changed
+
+    def renew_all_wishlist_entries(self, session_uuid: str) -> int:
+        """Reset expiry to 7 days out for ALL of the caller's open wishlist entries.
+        Returns the number renewed."""
+        conn = self._get_connection(); cur = conn.cursor()
+        now = time.time()
+        cur.execute("UPDATE wishlist_entries SET expires_at = ?, updated_at = ?, version = version + 1 "
+                    "WHERE trader_uuid = ? AND (status = 'open' OR status IS NULL)",
+                    (now + 604800, now, session_uuid))
+        n = cur.rowcount; conn.commit()
+        if not self._persistent_conn:
+            conn.close()
+        return n
+
+    def auto_renew_entries(self, session_uuid: str, threshold_days: int = 4) -> int:
+        """Renew (expires_at = now + 7d) all of this trader's listings AND wishlist
+        entries that have fewer than `threshold_days` days left (expired ones
+        included). Returns the number of rows renewed. Used by the opt-in
+        'auto-renew on site open' preference."""
+        conn = self._get_connection(); cur = conn.cursor()
+        now = time.time()
+        cutoff = now + threshold_days * 86400  # rows expiring before this are renewed
+        new_exp = now + 604800
+        total = 0
+        for table, extra in (("listings", "AND status = 'open'"), ("wishlist_entries", "")):
+            cur.execute(
+                f"UPDATE {table} SET expires_at = ?, updated_at = ?, version = version + 1 "
+                f"WHERE trader_uuid = ? AND expires_at IS NOT NULL AND expires_at < ? {extra}",
+                (new_exp, now, session_uuid, cutoff))
+            total += cur.rowcount
+        conn.commit()
+        if not self._persistent_conn:
+            conn.close()
+        return total
+
+    def delete_wishlist_entry(self, session_uuid: str, wid: int) -> bool:
+        conn = self._get_connection(); cur = conn.cursor()
+        now = time.time(); txn = self._txn_id(cur)
+        cur.execute("UPDATE wishlist_entries SET status = 'deleted', updated_at = ?, txn_id = ?, "
+                    "version = version + 1 WHERE id = ? AND trader_uuid = ? "
+                    "AND (status = 'open' OR status IS NULL)", (now, txn, wid, session_uuid))
+        changed = cur.rowcount > 0; conn.commit()
+        if not self._persistent_conn:
+            conn.close()
+        return changed
+
+    def delete_all_wishlist_entries(self, session_uuid: str) -> int:
+        """Soft-delete all of the caller's open wishlist entries (status='deleted',
+        row retained) so each terminal change federates to peers. Each row gets
+        its own monotonic txn_id so the batched push can't skip rows past the
+        batch size. Returns the number affected."""
+        conn = self._get_connection(); cur = conn.cursor()
+        now = time.time()
+        cur.execute("SELECT id FROM wishlist_entries WHERE trader_uuid = ? AND (status = 'open' OR status IS NULL)",
+                    (session_uuid,))
+        ids = [r[0] for r in cur.fetchall()]
+        for _wid in ids:
+            cur.execute("UPDATE wishlist_entries SET status = 'deleted', updated_at = ?, txn_id = ?, "
+                        "version = version + 1 WHERE id = ?", (now, self._txn_id(cur), _wid))
+        n = len(ids); conn.commit()
+        if not self._persistent_conn:
+            conn.close()
+        return n
+
+    def add_block(self, blocker_uuid: str, blocked_name: str) -> bool:
+        conn = self._get_connection(); cur = conn.cursor()
+        cur.execute("INSERT OR IGNORE INTO trade_blocks (blocker_uuid, blocked_name, created_at) "
+                    "VALUES (?, ?, ?)", (blocker_uuid, blocked_name, time.time()))
+        conn.commit()
+        if not self._persistent_conn:
+            conn.close()
+        return True
+
+    def remove_block(self, blocker_uuid: str, blocked_name: str) -> bool:
+        conn = self._get_connection(); cur = conn.cursor()
+        cur.execute("DELETE FROM trade_blocks WHERE blocker_uuid = ? AND blocked_name = ?",
+                    (blocker_uuid, blocked_name))
+        changed = cur.rowcount > 0; conn.commit()
+        if not self._persistent_conn:
+            conn.close()
+        return changed
+
+    def list_blocks(self, blocker_uuid: str) -> List[str]:
+        conn = self._get_connection(); cur = conn.cursor()
+        cur.execute("SELECT blocked_name FROM trade_blocks WHERE blocker_uuid = ?", (blocker_uuid,))
+        rows = cur.fetchall()
+        if not self._persistent_conn:
+            conn.close()
+        return [r[0] for r in rows]
+
+    def is_blocked(self, blocker_uuid: str, blocked_name: str) -> bool:
+        conn = self._get_connection(); cur = conn.cursor()
+        cur.execute("SELECT 1 FROM trade_blocks WHERE blocker_uuid = ? AND blocked_name = ?",
+                    (blocker_uuid, blocked_name))
+        hit = cur.fetchone() is not None
+        if not self._persistent_conn:
+            conn.close()
+        return hit
+
+    def link_entries(self, listing_object_id: str, wishlist_object_id: str,
+                     created_by_uuid: str) -> bool:
+        """Link a listing + wishlist so a trade is not double-counted. Idempotent."""
+        conn = self._get_connection(); cur = conn.cursor()
+        cur.execute("INSERT OR IGNORE INTO entry_links (listing_object_id, wishlist_object_id, "
+                    "created_by_uuid, created_at) VALUES (?, ?, ?, ?)",
+                    (listing_object_id, wishlist_object_id, created_by_uuid, time.time()))
+        created = cur.rowcount > 0; conn.commit()
+        if not self._persistent_conn:
+            conn.close()
+        return created
+
+    def unlink_entries(self, listing_object_id: str, wishlist_object_id: str) -> bool:
+        conn = self._get_connection(); cur = conn.cursor()
+        cur.execute("DELETE FROM entry_links WHERE listing_object_id = ? AND wishlist_object_id = ?",
+                    (listing_object_id, wishlist_object_id))
+        changed = cur.rowcount > 0; conn.commit()
+        if not self._persistent_conn:
+            conn.close()
+        return changed
+
+    def links_for_object(self, object_id: str) -> List[Dict[str, str]]:
+        """All links that involve this object (as listing OR wishlist). Returns
+        [{listing_object_id, wishlist_object_id}]."""
+        conn = self._get_connection(); cur = conn.cursor()
+        cur.execute("SELECT listing_object_id, wishlist_object_id FROM entry_links "
+                    "WHERE listing_object_id = ? OR wishlist_object_id = ?", (object_id, object_id))
+        rows = cur.fetchall()
+        if not self._persistent_conn:
+            conn.close()
+        return [{"listing_object_id": r[0], "wishlist_object_id": r[1]} for r in rows]
+
+    def fulfill_wishlist_entry(self, wishlist_object_id: str) -> bool:
+        """Mark a LOCAL wishlist entry fulfilled (drops from active wishlists +
+        federates the terminal change). No-op for a non-local object_id."""
+        prefix = f"{self._TRADING_ORIGIN}:W"
+        if not wishlist_object_id.startswith(prefix):
+            return False
+        try:
+            wid = int(wishlist_object_id[len(prefix):])
+        except ValueError:
+            return False
+        conn = self._get_connection(); cur = conn.cursor()
+        now = time.time(); txn = self._txn_id(cur)
+        cur.execute("UPDATE wishlist_entries SET status = 'fulfilled', updated_at = ?, "
+                    "txn_id = ?, version = version + 1 WHERE id = ? AND status = 'open'",
+                    (now, txn, wid))
+        changed = cur.rowcount > 0; conn.commit()
+        if not self._persistent_conn:
+            conn.close()
+        return changed
+
+    def append_history(self, items: list, sold_for: dict, party_a_name: str, party_b_name: str,
+                       linked_object_ids: Optional[list] = None) -> int:
+        conn = self._get_connection(); cur = conn.cursor()
+        now = time.time(); txn = self._txn_id(cur)
+        cur.execute("INSERT INTO trade_history (origin_site, items_json, sold_for_json, "
+                    "party_a_name, party_b_name, linked_object_ids_json, txn_id, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (self._TRADING_ORIGIN, json.dumps(items), json.dumps(sold_for),
+                     party_a_name, party_b_name,
+                     json.dumps(linked_object_ids) if linked_object_ids else None, txn, now))
+        hid = cur.lastrowid; conn.commit()
+        if not self._persistent_conn:
+            conn.close()
+        return hid
+
+    # Terminal statuses that take a remote object OUT of the active marketplace.
+    # None of these hard-delete the row — the mirror keeps full state so history
+    # and audit survive. 'sold' additionally records a trade_history entry.
+    _FED_SOLD = {"sold"}
+    _FED_CLOSED = {"deleted", "removed", "closed", "cancelled", "canceled", "expired", "fulfilled"}
+
+    # {open, sold, closed, deleted}; our local lifecycle has richer terminal
+    # states (e.g. a wishlist goes 'bought', a listing 'cancelled'). Map each
+    # does not reject the change with "unknown status". 'open' and any already-
+    # valid token pass through unchanged.
+    _FED_OUT_STATUS = {
+        "bought": "sold", "fulfilled": "sold",
+        "removed": "deleted", "expired": "deleted",
+        "cancelled": "closed", "canceled": "closed",
+    }
+    _FED_OUT_STATUS_OK = {"open", "sold", "closed", "deleted"}
+
+
+    def remote_objects(self, kind: str, include_expired: bool = False) -> List[Dict[str, Any]]:
+        """Remote (peer) listings or wishlists for Browse/Search, shaped like the
+        local all_open_listings / all_wishlist_entries rows."""
+        conn = self._get_connection(); cur = conn.cursor()
+        now = time.time()
+        where = "WHERE kind = ? AND status = 'open'"
+        params = [kind]
+        if not include_expired:
+            where += " AND (expires_at IS NULL OR expires_at > ?)"
+            params.append(now)
+        cur.execute(
+            "SELECT object_id, source_site, version, txn_id, trader_id, trader_name, display_name, "
+            "item_slug, item_type, item_quality, qty, price_coins, trade_for_json, note, "
+            "quality_rule, quality_floor, max_coins, expires_at, negotiable, raw_json FROM federation_objects "
+            f"{where} ORDER BY txn_id DESC", params)
+        rows = cur.fetchall()
+        if not self._persistent_conn:
+            conn.close()
+        out = []
+        for r in rows:
+            created = None
+            if r[19]:
+                try:
+                    raw = json.loads(r[19]) or {}
+                    # Prefer the contract's canonical `listed`; accept `created_at`
+                    # as a backward-compatible alias.
+                    created = raw.get("listed") if raw.get("listed") is not None else raw.get("created_at")
+                except (json.JSONDecodeError, TypeError):
+                    created = None
+            base = {"object_id": r[0], "source_site": r[1], "version": r[2], "txn_id": r[3],
+                    "trader_id": r[4], "trader": r[5] or r[6], "display_name": r[6],
+                    "item": {"slug": r[7], "type": r[8], "quality": r[9]},
+                    "trade_for": json.loads(r[12]) if r[12] else None, "note": r[13],
+                    "expires_at": r[17], "is_expired": bool(r[17] is not None and r[17] <= now),
+                    "created_at": created,
+                    "remote": True}
+            if kind == "listing":
+                base.update({"side": "selling", "qty": r[10], "price_coins": r[11],
+                             "negotiable": bool(r[18]), "obo": bool(r[18])})
+            else:
+                base.update({"side": "buying", "qty": r[10], "quality_rule": r[14],
+                             "quality_floor": r[15], "max_coins": r[16]})
+            out.append(base)
+        return out
+
+    def trading_tx_series(self, days: int = 30, bucket_secs: int = 600) -> Dict[str, Any]:
+        """Bucketed transaction counts over the last ``days`` for the admin graphs.
+        Two scopes: ``us`` (origin_site='flames') and ``combined`` (us + federated
+        peers). Local listings/wishlists are soft-closed (bucketed by created_at
+        for creation, updated_at for sold/closed); DELETED rows are hard-removed so
+        they can't be shown historically. Remote (federation_objects) events are
+        bucketed by updated_at (their only timestamp) and classified by status."""
+        now = time.time()
+        start = now - days * 86400
+        nb = int((now - start) // bucket_secs) + 1
+        buckets = [int(start + i * bucket_secs) for i in range(nb)]
+        keys = ["listing_created", "listing_sold", "listing_closed",
+                "wishlist_created", "wishlist_fulfilled", "trade_confirmed", "message"]
+        us = {k: [0] * nb for k in keys}
+        combined = {k: [0] * nb for k in keys}
+        us_coins = [0] * nb
+        comb_coins = [0] * nb
+
+        def _idx(ts):
+            if ts is None:
+                return None
+            i = int((float(ts) - start) // bucket_secs)
+            return i if 0 <= i < nb else None
+
+        def _bump(scope, key, ts):
+            i = _idx(ts)
+            if i is not None:
+                scope[key][i] += 1
+
+        def _both(key, ts):
+            i = _idx(ts)
+            if i is not None:
+                us[key][i] += 1
+                combined[key][i] += 1
+
+        conn = self._get_connection(); cur = conn.cursor()
+        # Local listings (all local = 'us' and part of 'combined').
+        cur.execute("SELECT created_at, updated_at, status FROM listings")
+        for created_at, updated_at, status in cur.fetchall():
+            _both("listing_created", created_at)
+            s = (status or "open").lower()
+            if s == "sold":
+                _both("listing_sold", updated_at)
+            elif s != "open":
+                _both("listing_closed", updated_at)
+        # Local wishlist entries.
+        cur.execute("SELECT created_at, updated_at, status FROM wishlist_entries")
+        for created_at, updated_at, status in cur.fetchall():
+            _both("wishlist_created", created_at)
+            s = (status or "open").lower()
+            if s != "open":
+                _both("wishlist_fulfilled", updated_at)
+        # Remote mirror objects (combined only; one timestamp, classify by status).
+        cur.execute("SELECT kind, status, updated_at FROM federation_objects")
+        for kind, status, updated_at in cur.fetchall():
+            k = (kind or "").lower(); s = (status or "open").lower()
+            if k == "listing":
+                if s == "open":
+                    _bump(combined, "listing_created", updated_at)
+                elif s == "sold":
+                    _bump(combined, "listing_sold", updated_at)
+                else:
+                    _bump(combined, "listing_closed", updated_at)
+            elif k == "wishlist":
+                if s == "open":
+                    _bump(combined, "wishlist_created", updated_at)
+                else:
+                    _bump(combined, "wishlist_fulfilled", updated_at)
+        cur.execute("SELECT created_at, origin_site, sold_for_json FROM trade_history WHERE created_at >= ?", (start,))
+        for created_at, origin, sold_for_json in cur.fetchall():
+            i = _idx(created_at)
+            _bump(combined, "trade_confirmed", created_at)
+            mine = (origin or self._TRADING_ORIGIN) == self._TRADING_ORIGIN
+            if mine:
+                _bump(us, "trade_confirmed", created_at)
+            # Coins volume: sum the 'coins' leg of each confirmed trade.
+            if i is not None and sold_for_json:
+                try:
+                    coins = _coin_num((json.loads(sold_for_json) or {}).get("coins") or 0)
+                except (ValueError, TypeError):
+                    coins = 0
+                if coins:
+                    comb_coins[i] += coins
+                    if mine:
+                        us_coins[i] += coins
+        cur.execute("SELECT created_at, origin_site FROM trade_messages WHERE created_at >= ?", (start,))
+        for created_at, origin in cur.fetchall():
+            _bump(combined, "message", created_at)
+            if (origin or self._TRADING_ORIGIN) == self._TRADING_ORIGIN:
+                _bump(us, "message", created_at)
+        if not self._persistent_conn:
+            conn.close()
+        return {"bucket_secs": bucket_secs, "start": int(start), "end": int(now),
+                "days": days, "buckets": buckets, "keys": keys,
+                "us": us, "combined": combined,
+                "coins": {"us": us_coins, "combined": comb_coins}}
+
+    def trading_leaderboards(self, days: int = 30, limit: int = 20) -> Dict[str, Any]:
+        """Top-N tables for the admin trading page: current open listings per
+        trader, current open wishlist items per trader, confirmed trades (last
+        ``days``, both parties), and messages sent / received (last ``days``).
+        Includes federated peers where the data carries a name."""
+        from collections import defaultdict
+        now = time.time(); start = now - days * 86400
+        conn = self._get_connection(); cur = conn.cursor()
+
+        def _top(counter):
+            return [{"name": n, "count": c} for n, c in
+                    sorted(counter.items(), key=lambda kv: (-kv[1], kv[0].lower()))[:limit]]
+
+        listed = defaultdict(int)
+        cur.execute("SELECT t.in_game_name, COUNT(*) FROM listings l "
+                    "JOIN traders t ON t.session_uuid = l.trader_uuid "
+                    "WHERE l.status = 'open' GROUP BY t.in_game_name")
+        for name, c in cur.fetchall():
+            listed[name or "(unknown)"] += c
+        cur.execute("SELECT COALESCE(NULLIF(display_name,''), trader_name), COUNT(*) "
+                    "FROM federation_objects WHERE kind='listing' AND status='open' "
+                    "GROUP BY COALESCE(NULLIF(display_name,''), trader_name)")
+        for name, c in cur.fetchall():
+            listed[name or "(unknown)"] += c
+
+        wish = defaultdict(int)
+        cur.execute("SELECT t.in_game_name, COUNT(*) FROM wishlist_entries w "
+                    "JOIN traders t ON t.session_uuid = w.trader_uuid "
+                    "WHERE (w.status = 'open' OR w.status IS NULL) GROUP BY t.in_game_name")
+        for name, c in cur.fetchall():
+            wish[name or "(unknown)"] += c
+        cur.execute("SELECT COALESCE(NULLIF(display_name,''), trader_name), COUNT(*) "
+                    "FROM federation_objects WHERE kind='wishlist' AND status='open' "
+                    "GROUP BY COALESCE(NULLIF(display_name,''), trader_name)")
+        for name, c in cur.fetchall():
+            wish[name or "(unknown)"] += c
+
+        trades = defaultdict(int)
+        cur.execute("SELECT party_a_name, party_b_name FROM trade_history WHERE created_at >= ?", (start,))
+        for a, b in cur.fetchall():
+            if a:
+                trades[a] += 1
+            if b:
+                trades[b] += 1
+
+        sent = defaultdict(int); recv = defaultdict(int)
+        cur.execute("SELECT from_name, COUNT(*) FROM trade_messages WHERE created_at >= ? GROUP BY from_name", (start,))
+        for name, c in cur.fetchall():
+            sent[name or "(unknown)"] += c
+        cur.execute("SELECT to_name, COUNT(*) FROM trade_messages WHERE created_at >= ? GROUP BY to_name", (start,))
+        for name, c in cur.fetchall():
+            recv[name or "(unknown)"] += c
+
+        if not self._persistent_conn:
+            conn.close()
+        return {"days": days, "limit": limit,
+                "listings": _top(listed), "wishlist": _top(wish),
+                "trades": _top(trades), "messages_sent": _top(sent),
+                "messages_received": _top(recv)}
+
+    def trading_inventory_snapshot(self) -> Dict[str, Any]:
+        """Point-in-time active-vs-expired counts for our (local) open listings and
+        wishlist entries. 'Expired' = still status='open' but past expires_at."""
+        now = time.time()
+        conn = self._get_connection(); cur = conn.cursor()
+
+        def _counts(table, open_clause):
+            cur.execute(f"SELECT COUNT(*) FROM {table} WHERE {open_clause} "
+                        "AND (expires_at IS NULL OR expires_at > ?)", (now,))
+            active = cur.fetchone()[0]
+            cur.execute(f"SELECT COUNT(*) FROM {table} WHERE {open_clause} "
+                        "AND expires_at IS NOT NULL AND expires_at <= ?", (now,))
+            expired = cur.fetchone()[0]
+            return {"active": active, "expired": expired}
+
+        listings = _counts("listings", "status = 'open'")
+        wishlist = _counts("wishlist_entries", "(status = 'open' OR status IS NULL)")
+        if not self._persistent_conn:
+            conn.close()
+        return {"listings": listings, "wishlist": wishlist}
+
+    def local_changes_since(self, since: int = 0, peer_site: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Our own listings + wishlist entries (public), plus any locally-authored
+        messages addressed to ``peer_site``, with txn_id > since (ascending). This
+        is the payload for both GET /changes and the push client. Messages are
+        scoped to the destination peer so private local-to-local chat is never
+        leaked to a peer; listings/wishlists are the public marketplace and go to
+        every peer. Uses the monotonic txn_id as the backfill cursor."""
+        rows = []
+        for r in self.all_open_listings(include_expired=True):
+            if (r.get("txn_id") or 0) > since:
+                rows.append({**r, "kind": "listing", "negotiable": bool(r.get("obo")),
+                             "listed": r.get("created_at")})
+        for r in self.all_wishlist_entries(include_expired=True):
+            if (r.get("txn_id") or 0) > since:
+                rows.append({**r, "kind": "wishlist", "listed": r.get("created_at")})
+        # Terminal (sold/closed/etc.) listings that changed since the cursor — so
+        # excluded from all_open_listings once it leaves 'open').
+        for r in self._local_terminal_listings_since(since):
+            rows.append(r)
+        for r in self._local_terminal_wishlists_since(since):
+            rows.append(r)
+        # Partial-fill sales: the sold portion of a still-OPEN listing. Emitted as
+        # closing their mirror of the listing (which stays open at its reduced qty).
+        for r in self._local_partial_sales_since(since):
+            rows.append(r)
+        if peer_site:
+            for r in self._local_messages_for_peer(peer_site, since):
+                rows.append(r)
+        # normalization existed): never emit the literal 'normal' quality, base is
+        # '', and item.type is always a non-null string.
+        # Outbound equipment TYPE is also normalized to the shared 'item' vocab:
+        # locally we split equipment into gear/tool/loot (by slot), but the
+        # gear/tool/loot listing never surfaces on their side. We keep the split
+        # type in OUR storage (Browse derives category from the slug, not the wire
+        # type) and only collapse it to 'item' on the way out.
+        _EQUIP = {"gear", "tool", "loot"}
+        for ch in rows:
+            k = ch.get("kind")
+            if k not in ("listing", "wishlist", "sale"):
+                continue
+            it = ch.get("item") if isinstance(ch.get("item"), dict) else None
+            itype = (it.get("type") if it else None)
+            if k == "wishlist":
+                ch["quality_floor"] = self._fed_quality_token(ch.get("quality_floor"), itype)
+            # {open, sold, closed, deleted} so a terminal change (e.g. a 'bought'
+            # wishlist) is not rejected with "unknown status".
+            st = str(ch.get("status") or "open").lower()
+            if st not in self._FED_OUT_STATUS_OK:
+                ch["status"] = self._FED_OUT_STATUS.get(st, "closed")
+            if it is not None:
+                if "quality" in it:
+                    it["quality"] = self._fed_quality_token(it.get("quality"), itype)
+                if it.get("type") in _EQUIP:
+                    it["type"] = "item"       # collapse gear/tool/loot -> item (peer vocab)
+                elif it.get("type") is None:
+                    it["type"] = ""
+            # 'sale' records carry items[] (plural) rather than a single item.
+            for sit in (ch.get("items") or []):
+                if isinstance(sit, dict) and sit.get("type") in _EQUIP:
+                    sit["type"] = "item"
+        rows.sort(key=lambda x: x.get("txn_id") or 0)
+        return rows
+
+    def _local_partial_sales_since(self, since: int) -> List[Dict[str, Any]]:
+        """Our own trade_history rows whose linked listing is STILL OPEN — i.e. a
+        partial sale that reduced the listing's qty rather than closing it — with
+        txn_id > since, shaped as kind:'sale' changes. A FULL sale's listing goes
+        terminal and already federates via _local_terminal_listings_since (status
+        + sold_for), so it is excluded here (no double-count). This lets a peer
+        record the sold units in its own history without touching its still-open
+        mirror of the listing. Deduped peer-side by object_id ('<origin>:S<id>')."""
+        conn = self._get_connection(); cur = conn.cursor()
+        cur.execute(
+            "SELECT id, items_json, sold_for_json, party_a_name, party_b_name, "
+            "linked_object_ids_json, txn_id FROM trade_history "
+            "WHERE origin_site = ? AND txn_id > ? ORDER BY txn_id ASC",
+            (self._TRADING_ORIGIN, int(since)))
+        hrows = cur.fetchall()
+        out = []
+        for (hid, items_json, sold_for_json, party_a, party_b, linked_json, txn) in hrows:
+            try:
+                linked = json.loads(linked_json or "[]")
+            except (json.JSONDecodeError, TypeError):
+                linked = []
+            listing_oid = next((o for o in linked if ":L" in str(o)), None)
+            if not listing_oid:
+                continue
+            try:
+                lid = int(str(listing_oid).split(":L", 1)[1])
+            except (ValueError, IndexError):
+                continue
+            # Only emit if the listing is still open locally (partial sale). A
+            # closed/sold listing already federates its terminal status + sold_for.
+            cur.execute("SELECT status FROM listings WHERE id = ? AND origin_site = ?",
+                        (lid, self._TRADING_ORIGIN))
+            lr = cur.fetchone()
+            if not lr or (lr[0] or "open") != "open":
+                continue
+            try:
+                items = json.loads(items_json or "[]")
+            except (json.JSONDecodeError, TypeError):
+                items = []
+            first = items[0] if items else {}
+            try:
+                sold_for = json.loads(sold_for_json or "{}")
+            except (json.JSONDecodeError, TypeError):
+                sold_for = {}
+            out.append({
+                "kind": "sale",
+                "object_id": f"{self._TRADING_ORIGIN}:S{hid}",
+                "sold_object_id": listing_oid,
+                "version": hid, "txn_id": txn,
+                "item": {"slug": first.get("slug"), "type": first.get("type"),
+                         "quality": first.get("quality")},
+                "qty": first.get("qty"),
+                "sold_for": sold_for,
+                "trader": party_a, "display_name": party_a, "sold_to": party_b,
+            })
+        if not self._persistent_conn:
+            conn.close()
+        return out
+
+    def _local_terminal_wishlists_since(self, since: int) -> List[Dict[str, Any]]:
+        """Our own non-open wishlists (fulfilled/…) with txn_id > since, as terminal
+        wishlist changes so peers drop them from their mirror."""
+        conn = self._get_connection(); cur = conn.cursor()
+        cur.execute(
+            "SELECT w.id, w.item_slug, w.item_type, w.status, w.txn_id, w.version, "
+            "t.in_game_name, t.display_name, w.trader_uuid FROM wishlist_entries w "
+            "JOIN traders t ON w.trader_uuid = t.session_uuid "
+            "WHERE w.status != 'open' AND w.txn_id > ? ORDER BY w.txn_id ASC", (int(since),))
+        rows = cur.fetchall()
+        if not self._persistent_conn:
+            conn.close()
+        out = []
+        for (wid, slug, itype, status, txn, ver, iname, dname, tuuid) in rows:
+            out.append({
+                "kind": "wishlist", "object_id": f"{self._TRADING_ORIGIN}:W{wid}",
+                "version": ver, "txn_id": txn, "status": status,
+                "item": {"slug": slug, "type": itype},
+                "trader": iname, "display_name": dname,
+                "trader_id": f"{self._TRADING_ORIGIN}:{tuuid}",
+            })
+        return out
+
+    def _local_terminal_listings_since(self, since: int) -> List[Dict[str, Any]]:
+        """Our own non-open listings (sold/closed/cancelled/…) with txn_id > since,
+        shaped as terminal listing changes so peers learn the status flip. Carries
+        the item + closed_for so a peer's history can record the sale."""
+        conn = self._get_connection(); cur = conn.cursor()
+        cur.execute(
+            "SELECT l.id, l.item_slug, l.item_type, l.item_quality, l.qty, l.price_coins, "
+            "l.trade_for_json, l.status, l.closed_for_json, l.txn_id, l.version, t.in_game_name, "
+            "t.display_name, l.trader_uuid FROM listings l JOIN traders t ON l.trader_uuid = t.session_uuid "
+            "WHERE l.status != 'open' AND l.txn_id > ? ORDER BY l.txn_id ASC", (int(since),))
+        rows = cur.fetchall()
+        if not self._persistent_conn:
+            conn.close()
+        out = []
+        for (lid, slug, itype, quality, qty, price, tf, status, closed_for, txn, ver, iname, dname, tuuid) in rows:
+            change = {
+                "kind": "listing", "object_id": f"{self._TRADING_ORIGIN}:L{lid}",
+                "version": ver, "txn_id": txn, "status": status,
+                "item": {"slug": slug, "type": itype, "quality": quality},
+                "qty": qty, "price_coins": price,
+                "trade_for": json.loads(tf) if tf else None,
+                "trader": iname, "display_name": dname,
+                "trader_id": f"{self._TRADING_ORIGIN}:{tuuid}",
+            }
+            if status == "sold" and closed_for:
+                try:
+                    change["sold_for"] = json.loads(closed_for)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            out.append(change)
+        return out
+
+    def _local_messages_for_peer(self, peer_site: str, since: int) -> List[Dict[str, Any]]:
+        """Locally-authored messages (origin = us) addressed to a trader on
+        ``peer_site`` with txn_id > since — shaped as kind:'message' wire changes."""
+        conn = self._get_connection(); cur = conn.cursor()
+        cur.execute(
+            "SELECT id, thread_key, from_name, to_name, from_uuid, from_trader_id, to_trader_id, "
+            "about_object_id, body, txn_id FROM trade_messages "
+            "WHERE origin_site = ? AND txn_id > ? AND to_trader_id LIKE ? ORDER BY txn_id ASC",
+            (self._TRADING_ORIGIN, since, peer_site + ":%"))
+        rows = cur.fetchall()
+        if not self._persistent_conn:
+            conn.close()
+        out = []
+        for (mid, tkey, fname, tname, fuuid, from_tid, to_tid, about, body, txn) in rows:
+            out.append({
+                "kind": "message",
+                "object_id": f"{self._TRADING_ORIGIN}:M{mid}",
+                "version": 1, "txn_id": txn,
+                "from_trader_id": from_tid or (f"{self._TRADING_ORIGIN}:{fuuid}" if fuuid else None),
+                "from_name": fname, "to_trader_id": to_tid, "to_name": tname,
+                "about_object_id": about, "body": body,
+            })
+        return out
+
+    def post_message(self, from_uuid: Optional[str], from_name: str, to_name: str,
+                     to_uuid: Optional[str], body: str,
+                     about_object_id: Optional[str] = None,
+                     to_trader_id: Optional[str] = None,
+                     from_trader_id: Optional[str] = None,
+                     origin_site: Optional[str] = None,
+                     fed_object_id: Optional[str] = None,
+                     txn_id: Optional[int] = None,
+                     created_at: Optional[float] = None) -> Dict[str, Any]:
+        """Insert a message. Local sends pass only the first args; inbound
+        federated messages pass origin_site/fed_object_id (+ pre-resolved
+        to_uuid) so they land in the recipient's inbox and dedupe by peer id."""
+        key_parts = sorted([from_name, to_name])
+        thread_key = f"{key_parts[0]}|{key_parts[1]}" + (f":{about_object_id}" if about_object_id else "")
+        # Default a local sender's trader_id from their uuid when not supplied.
+        if from_trader_id is None and from_uuid:
+            from_trader_id = f"{self._TRADING_ORIGIN}:{from_uuid}"
+        conn = self._get_connection(); cur = conn.cursor()
+        now = created_at or time.time()
+        txn = txn_id if txn_id is not None else self._txn_id(cur)
+        cur.execute("INSERT INTO trade_messages (origin_site, thread_key, from_name, to_name, "
+                    "from_uuid, to_uuid, to_trader_id, from_trader_id, about_object_id, body, "
+                    "fed_object_id, txn_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (origin_site or self._TRADING_ORIGIN, thread_key, from_name, to_name,
+                     from_uuid, to_uuid, to_trader_id, from_trader_id, about_object_id, body,
+                     fed_object_id, txn, now))
+        mid = cur.lastrowid; conn.commit()
+        if not self._persistent_conn:
+            conn.close()
+        return {"id": mid, "thread_key": thread_key, "txn_id": txn}
+
+    def mark_messages_read(self, session_uuid: str) -> int:
+        conn = self._get_connection(); cur = conn.cursor()
+        cur.execute("UPDATE trade_messages SET read_at = ? WHERE to_uuid = ? AND read_at IS NULL",
+                    (time.time(), session_uuid))
+        cur.execute("UPDATE wishlist_match_alerts SET read_at = ? WHERE trader_uuid = ? AND read_at IS NULL",
+                    (time.time(), session_uuid))
+        n = cur.rowcount; conn.commit()
+        if not self._persistent_conn:
+            conn.close()
+        return n
+
+    def unread_count(self, session_uuid: str) -> int:
+        conn = self._get_connection(); cur = conn.cursor()
+        # Exclude messages from blocked senders so the badge matches the visible
+        # (blocked-filtered) inbox.
+        cur.execute(
+            "SELECT COUNT(*) FROM trade_messages WHERE to_uuid = ? AND read_at IS NULL "
+            "AND from_name NOT IN (SELECT blocked_name FROM trade_blocks WHERE blocker_uuid = ?)",
+            (session_uuid, session_uuid))
+        msgs = cur.fetchone()[0]
+        if not self._persistent_conn:
+            conn.close()
+        # Match alerts are NO LONGER counted here — they surface on My Wishlist /
+        # My Listings (and clear on visiting those tabs), not the inbox badge.
+        return int(msgs)
+
+    def list_threads(self, session_uuid: str, in_game_name: str = "") -> List[Dict[str, Any]]:
+        """Inbox view: one row per conversation thread the caller participates in.
+
+        A caller participates when their site-keyed session_uuid is the
+        from_uuid/to_uuid of a message in the thread. Participation is keyed
+        STRICTLY on the uuid, never the display name — two sessions that imported
+        the same in-game character have distinct uuids and MUST NOT see each
+        other's messages. Inbound/federated messages carry a resolved to_uuid
+        (from to_trader_id), so they still match their real recipient by uuid.
+        Each row carries the counterpart's name, the latest message body/time, the
+        thread's about_object_id, total message count, and the caller's unread count
+        (inbound messages to them not yet read)."""
+        conn = self._get_connection(); cur = conn.cursor()
+        cur.execute(
+            "SELECT thread_key, from_name, to_name, from_uuid, to_uuid, about_object_id, "
+            "body, read_at, created_at, txn_id, from_trader_id, to_trader_id FROM trade_messages "
+            "WHERE from_uuid = ? OR to_uuid = ? "
+            "ORDER BY created_at ASC",
+            (session_uuid, session_uuid))
+        rows = cur.fetchall()
+        if not self._persistent_conn:
+            conn.close()
+        threads: Dict[str, Dict[str, Any]] = {}
+        for (tkey, fname, tname, fuuid, tuuid, about, body, read_at, created, txn, from_tid, to_tid) in rows:
+            # Counterpart = the party that isn't the caller, decided by the
+            # name match as "caller is sender" wrongly flipped the counterpart to
+            # ourselves (profile opened "me"). Caller is the sender only when
+            # from_uuid is literally our session_uuid.
+            if fuuid == session_uuid:
+                counterpart = tname
+                counterpart_trader_id = to_tid
+            else:
+                counterpart = fname
+                counterpart_trader_id = from_tid
+            th = threads.get(tkey)
+            if th is None:
+                th = {"thread_key": tkey, "counterpart": counterpart,
+                      "counterpart_trader_id": counterpart_trader_id,
+                      "about_object_id": about, "messages": 0, "unread": 0,
+                      "last_body": body, "last_at": created, "last_txn_id": txn}
+                threads[tkey] = th
+            th["messages"] += 1
+            th["last_body"] = body
+            th["last_at"] = created
+            th["last_txn_id"] = txn
+            th["counterpart"] = counterpart
+            if counterpart_trader_id:
+                th["counterpart_trader_id"] = counterpart_trader_id
+            if tuuid == session_uuid and read_at is None:
+                th["unread"] += 1
+        out = list(threads.values())
+        out.sort(key=lambda t: t.get("last_at") or 0, reverse=True)
+        for th in out:
+            if th.get("about_object_id"):
+                th["about_item"] = self.object_item(th["about_object_id"])
+        return out
+
+    def get_thread_messages(self, session_uuid: str, in_game_name: str,
+                            thread_key: str) -> Optional[List[Dict[str, Any]]]:
+        """Ordered messages for one thread, oldest first. Returns None when the
+        caller is not a participant in that thread (prevents reading others'
+        conversations). Participation and per-message visibility are keyed on the
+        caller's site-keyed uuid, NOT the display name: a thread_key is derived
+        from the two display NAMES, so two sessions that imported the same
+        character could collide on one thread_key — scoping to the uuid ensures
+        each session only ever sees the messages it actually sent or received.
+        Each message flags ``mine`` from the caller's perspective."""
+        conn = self._get_connection(); cur = conn.cursor()
+        cur.execute(
+            "SELECT id, from_name, to_name, from_uuid, to_uuid, about_object_id, body, "
+            "read_at, created_at, txn_id, origin_site FROM trade_messages "
+            "WHERE thread_key = ? ORDER BY created_at ASC", (thread_key,))
+        rows = cur.fetchall()
+        if not self._persistent_conn:
+            conn.close()
+        if not rows:
+            return None
+        msgs: List[Dict[str, Any]] = []
+        participant = False
+        for (mid, fname, tname, fuuid, tuuid, about, body, read_at, created, txn, origin) in rows:
+            # Identity is the site-keyed uuid, not the name. Only surface messages
+            # where the caller is literally the sender or recipient — this both
+            # proves participation and isolates two same-named sessions that
+            # happen to share a (name-derived) thread_key.
+            if session_uuid not in (fuuid, tuuid):
+                continue
+            participant = True
+            mine = (fuuid == session_uuid)
+            msgs.append({"id": mid, "from_name": fname, "to_name": tname,
+                         "about_object_id": about, "body": body, "mine": mine,
+                         "read": read_at is not None, "created_at": created,
+                         "txn_id": txn, "origin_site": origin})
+        if not participant:
+            return None
+        return msgs
+
+    def object_item(self, object_id: str) -> Optional[Dict[str, Any]]:
+        """Resolve a listing/wishlist object_id ("{origin}:L{id}" / ":W{id}") to its
+        item {slug, type, quality}. Checks local tables for our own origin, else the
+        federated-objects mirror. Returns None if it can't be resolved."""
+        if not object_id or ":" not in object_id:
+            return None
+        origin, rest = object_id.split(":", 1)
+        conn = self._get_connection(); cur = conn.cursor()
+        item = None
+        if origin == self._TRADING_ORIGIN and rest and rest[0] in ("L", "W"):
+            try:
+                rid = int(rest[1:])
+            except ValueError:
+                rid = None
+            if rid is not None:
+                if rest[0] == "L":
+                    cur.execute("SELECT item_slug, item_type, item_quality FROM listings WHERE id = ?", (rid,))
+                else:
+                    cur.execute("SELECT item_slug, item_type FROM wishlist_entries WHERE id = ?", (rid,))
+                row = cur.fetchone()
+                if row:
+                    item = {"slug": row[0], "type": row[1], "quality": (row[2] if len(row) > 2 else "")}
+        if item is None:
+            cur.execute("SELECT item_slug, item_type, item_quality FROM federation_objects WHERE object_id = ?", (object_id,))
+            row = cur.fetchone()
+            if row:
+                item = {"slug": row[0], "type": row[1], "quality": row[2]}
+        if not self._persistent_conn:
+            conn.close()
+        return item
+
+    def object_detail(self, object_id: str) -> Optional[Dict[str, Any]]:
+        """Full detail for a listing/wishlist object_id — everything the thread
+        banner needs: kind, side, item, qty, price/max, quality rule+floor, note,
+        listed time, status, and owner identity. Resolves local tables for our own
+        origin, else the federated-objects mirror."""
+        if not object_id or ":" not in object_id:
+            return None
+        origin, rest = object_id.split(":", 1)
+        conn = self._get_connection(); cur = conn.cursor()
+        d = None
+        if origin == self._TRADING_ORIGIN and rest and rest[0] in ("L", "W"):
+            try:
+                rid = int(rest[1:])
+            except ValueError:
+                rid = None
+            if rid is not None and rest[0] == "L":
+                cur.execute("SELECT item_slug, item_type, item_quality, qty, price_coins, note, "
+                            "created_at, status, trader_uuid FROM listings WHERE id = ?", (rid,))
+                r = cur.fetchone()
+                if r:
+                    owner = self.get_trader(r[8]) or {}
+                    d = {"kind": "listing", "side": "selling",
+                         "item": {"slug": r[0], "type": r[1], "quality": r[2]},
+                         "qty": r[3], "price_coins": r[4], "note": r[5],
+                         "listed": r[6], "status": r[7],
+                         "owner": owner.get("display_name") or owner.get("in_game_name")}
+            elif rid is not None and rest[0] == "W":
+                cur.execute("SELECT item_slug, item_type, quality_rule, quality_floor, max_coins, qty, "
+                            "note, created_at, status, trader_uuid FROM wishlist_entries WHERE id = ?", (rid,))
+                r = cur.fetchone()
+                if r:
+                    owner = self.get_trader(r[9]) or {}
+                    d = {"kind": "wishlist", "side": "buying",
+                         "item": {"slug": r[0], "type": r[1]},
+                         "quality_rule": r[2], "quality_floor": r[3], "max_coins": r[4],
+                         "qty": r[5], "note": r[6], "listed": r[7], "status": r[8],
+                         "owner": owner.get("display_name") or owner.get("in_game_name")}
+        if d is None:
+            cur.execute("SELECT kind, item_slug, item_type, item_quality, qty, price_coins, note, "
+                        "quality_rule, quality_floor, max_coins, status, trader_name, display_name, raw_json "
+                        "FROM federation_objects WHERE object_id = ?", (object_id,))
+            r = cur.fetchone()
+            if r:
+                listed = None
+                if r[13]:
+                    try:
+                        raw = json.loads(r[13]) or {}
+                        listed = raw.get("listed") if raw.get("listed") is not None else raw.get("created_at")
+                    except (json.JSONDecodeError, TypeError):
+                        listed = None
+                kind = r[0] or ("wishlist" if ":W" in object_id else "listing")
+                d = {"kind": kind, "side": ("buying" if kind == "wishlist" else "selling"),
+                     "item": {"slug": r[1], "type": r[2], "quality": r[3]},
+                     "qty": r[4], "price_coins": r[5], "note": r[6],
+                     "quality_rule": r[7], "quality_floor": r[8], "max_coins": r[9],
+                     "status": r[10], "owner": r[12] or r[11], "listed": listed, "remote": True}
+        if not self._persistent_conn:
+            conn.close()
+        return d
+
+    def mark_thread_read(self, session_uuid: str, thread_key: str) -> int:
+        """Mark only the caller's inbound unread messages in ONE thread as read."""
+        conn = self._get_connection(); cur = conn.cursor()
+        cur.execute("UPDATE trade_messages SET read_at = ? "
+                    "WHERE thread_key = ? AND to_uuid = ? AND read_at IS NULL",
+                    (time.time(), thread_key, session_uuid))
+        n = cur.rowcount; conn.commit()
+        if not self._persistent_conn:
+            conn.close()
+        return n
+
+    def list_match_alerts(self, trader_uuid: str, unread_only: bool = False,
+                          limit: int = 50) -> List[Dict[str, Any]]:
+        """Wishlist match alerts for a trader (newest first), joined to the
+        originating wishlist entry's item for display."""
+        conn = self._get_connection(); cur = conn.cursor()
+        where = "WHERE a.trader_uuid = ?"
+        params: tuple = (trader_uuid,)
+        if unread_only:
+            where += " AND a.read_at IS NULL"
+        cur.execute(
+            "SELECT a.id, a.wishlist_id, a.matched_object_id, a.read_at, a.created_at, "
+            "a.txn_id, w.item_slug, w.item_type, w.quality_floor, w.quality_rule "
+            "FROM wishlist_match_alerts a "
+            "LEFT JOIN wishlist_entries w ON a.wishlist_id = w.id "
+            f"{where} ORDER BY a.created_at DESC LIMIT ?", params + (int(limit),))
+        rows = cur.fetchall()
+        if not self._persistent_conn:
+            conn.close()
+        out = []
+        for (aid, wid, obj, read_at, created, txn, slug, itype, qfloor, qrule) in rows:
+            out.append({"id": aid, "wishlist_id": wid, "matched_object_id": obj,
+                        "read": read_at is not None, "created_at": created, "txn_id": txn,
+                        "item": ({"slug": slug, "type": itype, "quality": qfloor or "",
+                                  "quality_rule": qrule} if slug else None)})
+        return out
+
+    def list_listing_match_alerts(self, trader_uuid: str, unread_only: bool = False,
+                                  limit: int = 50) -> List[Dict[str, Any]]:
+        """Listing match alerts for a trader (newest first), joined to the owned
+        listing's item for display — surfaced on My Listings."""
+        conn = self._get_connection(); cur = conn.cursor()
+        where = "WHERE a.trader_uuid = ?"
+        params: tuple = (trader_uuid,)
+        if unread_only:
+            where += " AND a.read_at IS NULL"
+        cur.execute(
+            "SELECT a.id, a.listing_id, a.matched_object_id, a.read_at, a.created_at, a.txn_id, "
+            "l.item_slug, l.item_type, l.item_quality "
+            "FROM listing_match_alerts a LEFT JOIN listings l ON a.listing_id = l.id "
+            f"{where} ORDER BY a.created_at DESC LIMIT ?", params + (int(limit),))
+        rows = cur.fetchall()
+        if not self._persistent_conn:
+            conn.close()
+        out = []
+        for (aid, lid, obj, read_at, created, txn, slug, itype, qual) in rows:
+            out.append({"id": aid, "listing_id": lid, "matched_object_id": obj,
+                        "read": read_at is not None, "created_at": created, "txn_id": txn,
+                        "item": ({"slug": slug, "type": itype, "quality": qual or ""} if slug else None)})
+        return out
+
+    def match_alert_summary(self, session_uuid: str) -> Dict[str, Any]:
+        """Unread match-alert counts + the owned object ids with a pending match,
+        for the My Wishlist / My Listings tab badges and top-of-page surfacing."""
+        wl = [a for a in self.list_match_alerts(session_uuid, unread_only=True) if a.get("item")]
+        li = [a for a in self.list_listing_match_alerts(session_uuid, unread_only=True) if a.get("item")]
+        return {
+            "wishlist": {"count": len(wl),
+                         "ids": sorted({a["wishlist_id"] for a in wl}),
+                         "items": wl},
+            "listing": {"count": len(li),
+                        "ids": sorted({a["listing_id"] for a in li}),
+                        "items": li},
+        }
+
+    def mark_wishlist_matches_read(self, session_uuid: str) -> int:
+        conn = self._get_connection(); cur = conn.cursor()
+        cur.execute("UPDATE wishlist_match_alerts SET read_at = ? WHERE trader_uuid = ? AND read_at IS NULL",
+                    (time.time(), session_uuid))
+        n = cur.rowcount; conn.commit()
+        if not self._persistent_conn:
+            conn.close()
+        return n
+
+    def mark_listing_matches_read(self, session_uuid: str) -> int:
+        conn = self._get_connection(); cur = conn.cursor()
+        cur.execute("UPDATE listing_match_alerts SET read_at = ? WHERE trader_uuid = ? AND read_at IS NULL",
+                    (time.time(), session_uuid))
+        n = cur.rowcount; conn.commit()
+        if not self._persistent_conn:
+            conn.close()
+        return n
+
+    def add_match_alert(self, trader_uuid: str, wishlist_id: int, matched_object_id: str) -> int:
+        conn = self._get_connection(); cur = conn.cursor()
+        now = time.time(); txn = self._txn_id(cur)
+        cur.execute("INSERT INTO wishlist_match_alerts (trader_uuid, wishlist_id, "
+                    "matched_object_id, txn_id, created_at) VALUES (?, ?, ?, ?, ?)",
+                    (trader_uuid, wishlist_id, matched_object_id, txn, now))
+        aid = cur.lastrowid; conn.commit()
+        if not self._persistent_conn:
+            conn.close()
+        return aid
+
+    def set_bank_ignore(self, session_uuid: str, item_slug: str) -> bool:
+        conn = self._get_connection(); cur = conn.cursor()
+        cur.execute("INSERT OR IGNORE INTO ignored_bank_warnings (session_uuid, item_slug) "
+                    "VALUES (?, ?)", (session_uuid, item_slug))
+        conn.commit()
+        if not self._persistent_conn:
+            conn.close()
+        return True
+
+    def is_bank_ignored(self, session_uuid: str, item_slug: str) -> bool:
+        conn = self._get_connection(); cur = conn.cursor()
+        cur.execute("SELECT 1 FROM ignored_bank_warnings WHERE session_uuid = ? AND item_slug = ?",
+                    (session_uuid, item_slug))
+        hit = cur.fetchone() is not None
+        if not self._persistent_conn:
+            conn.close()
+        return hit
+
+    def get_trader(self, session_uuid: str) -> Optional[Dict[str, Any]]:
+        """Read-only trader lookup (does NOT create). Returns None if absent."""
+        conn = self._get_connection(); cur = conn.cursor()
+        cur.execute("SELECT session_uuid, in_game_name, display_name, contact_prefs_json, auto_renew, "
+                    "share_inventory FROM traders WHERE session_uuid = ?", (session_uuid,))
+        row = cur.fetchone()
+        if not self._persistent_conn:
+            conn.close()
+        if not row:
+            return None
+        return {"session_uuid": row[0], "in_game_name": row[1], "display_name": row[2],
+                "contact_prefs": json.loads(row[3] or "[]"), "auto_renew": bool(row[4]),
+                "share_inventory": bool(row[5]),
+                "account_id": row[0], "trader_id": f"{self._TRADING_ORIGIN}:{row[0]}"}
+
+    def all_open_listings(self, include_expired: bool = False) -> List[Dict[str, Any]]:
+        """All open listings joined with the owning trader's display identity.
+        Expired listings (expires_at <= now) are excluded unless include_expired."""
+        conn = self._get_connection(); cur = conn.cursor()
+        now = time.time()
+        where = "WHERE l.status = 'open'"
+        params: tuple = ()
+        if not include_expired:
+            where += " AND (l.expires_at IS NULL OR l.expires_at > ?)"
+            params = (now,)
+        cur.execute("SELECT l.id, l.item_slug, l.item_type, l.item_quality, l.qty, l.price_coins, "
+                    "l.trade_for_json, l.obo, l.accept_wishlist, l.txn_id, t.in_game_name, t.display_name, "
+                    "l.note, l.expires_at, l.trader_uuid, l.version, l.created_at "
+                    "FROM listings l JOIN traders t ON l.trader_uuid = t.session_uuid "
+                    f"{where} ORDER BY l.txn_id DESC", params)
+        rows = cur.fetchall()
+        if not self._persistent_conn:
+            conn.close()
+        return [{"object_id": f"{self._TRADING_ORIGIN}:L{r[0]}", "side": "selling",
+                 "item": {"slug": r[1], "type": r[2], "quality": r[3]}, "qty": r[4],
+                 "price_coins": r[5], "trade_for": json.loads(r[6]) if r[6] else None,
+                 "obo": bool(r[7]), "accept_wishlist": bool(r[8]), "txn_id": r[9],
+                 "trader": r[10] or r[11], "display_name": r[11], "note": r[12], "expires_at": r[13],
+                 "trader_id": f"{self._TRADING_ORIGIN}:{r[14]}", "version": r[15],
+                 "created_at": r[16],
+                 "is_expired": bool(r[13] is not None and r[13] <= now)} for r in rows]
+
+    def all_wishlist_entries(self, include_expired: bool = False) -> List[Dict[str, Any]]:
+        """All wishlist entries joined with the owning trader's display identity.
+        Expired entries excluded unless include_expired."""
+        conn = self._get_connection(); cur = conn.cursor()
+        now = time.time()
+        where = "WHERE w.status = 'open'"
+        params: tuple = ()
+        if not include_expired:
+            where += " AND (w.expires_at IS NULL OR w.expires_at > ?)"
+            params = (now,)
+        cur.execute("SELECT w.id, w.item_slug, w.item_type, w.quality_rule, w.quality_floor, "
+                    "w.max_coins, w.trade_for_json, w.txn_id, t.in_game_name, t.display_name, w.expires_at, w.qty, w.note, "
+                    "w.trader_uuid, w.version, w.created_at "
+                    "FROM wishlist_entries w JOIN traders t ON w.trader_uuid = t.session_uuid "
+                    f"{where} ORDER BY w.txn_id DESC", params)
+        rows = cur.fetchall()
+        if not self._persistent_conn:
+            conn.close()
+        return [{"object_id": f"{self._TRADING_ORIGIN}:W{r[0]}", "side": "buying",
+                 "item": {"slug": r[1], "type": r[2]}, "quality_rule": r[3], "quality_floor": r[4],
+                 "max_coins": r[5], "trade_for": json.loads(r[6]) if r[6] else None,
+                 "txn_id": r[7], "trader": r[8] or r[9], "display_name": r[9], "expires_at": r[10],
+                 "qty": r[11], "note": r[12], "trader_id": f"{self._TRADING_ORIGIN}:{r[13]}", "version": r[14],
+                 "created_at": r[15],
+                 "is_expired": bool(r[10] is not None and r[10] <= now)} for r in rows]
+
     def enable_feature(self, session_uuid: str, feature: str, enabled_by: str) -> bool:
         """Enable a feature flag for a session."""
         conn = self._get_connection()
@@ -3143,6 +5759,121 @@ class DatabaseManager:
             conn.close()
         return deleted
 
+    # ── Fastest Craft results (.kiro/specs/fastest-craft/, R6) ──────────────
+    def upsert_fastest_craft_result(self, session_uuid, item_ref, variant, quality, *,
+                                    base_gearset_export=None, total_steps=None,
+                                    with_banked_steps=None, root_self_steps=None,
+                                    child_quantities=None, material_offsets=None,
+                                    needed_owned_counts=None, subtree_scope_keys=None,
+                                    base_dominance_bitmap=None, base_scope=None):
+        """Insert/replace one (session, item, variant, quality) Fastest Craft row.
+        JSON fields are serialized here; callers pass plain dicts/lists."""
+        import json as _json
+        conn = self._get_connection(); cur = conn.cursor()
+        cur.execute("""
+            INSERT OR REPLACE INTO fastest_craft_results
+                (session_uuid, item_ref, variant, quality, base_gearset_export,
+                 total_steps_per_craft, with_banked_steps, root_self_steps,
+                 child_quantities_json, material_offsets_json,
+                 needed_owned_counts_json, subtree_scope_keys_json,
+                 base_dominance_bitmap, base_scope_json, last_computed_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?, CURRENT_TIMESTAMP)
+        """, (session_uuid, item_ref, variant, quality, base_gearset_export,
+              total_steps, with_banked_steps, root_self_steps,
+              _json.dumps(child_quantities or {}), _json.dumps(material_offsets or {}),
+              _json.dumps(needed_owned_counts or {}), _json.dumps(subtree_scope_keys or []),
+              base_dominance_bitmap, _json.dumps(base_scope) if base_scope is not None else None))
+        conn.commit()
+        if not self._persistent_conn:
+            conn.close()
+        return True
+
+    def get_fastest_craft_results(self, session_uuid, item_refs=None):
+        """Return Fastest Craft rows for a session (optionally restricted to
+        item_refs). JSON fields are parsed back into dicts/lists."""
+        import json as _json
+        conn = self._get_connection(); cur = conn.cursor()
+        if item_refs:
+            qs = ",".join("?" * len(item_refs))
+            cur.execute(
+                "SELECT session_uuid,item_ref,variant,quality,base_gearset_export,"
+                "total_steps_per_craft,with_banked_steps,root_self_steps,"
+                "child_quantities_json,material_offsets_json,needed_owned_counts_json,"
+                "subtree_scope_keys_json,base_dominance_bitmap,base_scope_json,"
+                "last_computed_at FROM fastest_craft_results "
+                f"WHERE session_uuid=? AND item_ref IN ({qs})",
+                (session_uuid, *item_refs))
+        else:
+            cur.execute(
+                "SELECT session_uuid,item_ref,variant,quality,base_gearset_export,"
+                "total_steps_per_craft,with_banked_steps,root_self_steps,"
+                "child_quantities_json,material_offsets_json,needed_owned_counts_json,"
+                "subtree_scope_keys_json,base_dominance_bitmap,base_scope_json,"
+                "last_computed_at FROM fastest_craft_results "
+                "WHERE session_uuid=?", (session_uuid,))
+        cols = ("session_uuid", "item_ref", "variant", "quality", "base_gearset_export",
+                "total_steps_per_craft", "with_banked_steps", "root_self_steps",
+                "child_quantities", "material_offsets", "needed_owned_counts",
+                "subtree_scope_keys", "base_dominance_bitmap", "base_scope",
+                "last_computed_at")
+
+        def _loads(v, default):
+            try:
+                return _json.loads(v) if v is not None else default
+            except (TypeError, ValueError):
+                return default
+        rows = []
+        for r in cur.fetchall():
+            d = dict(zip(cols, r))
+            d["child_quantities"] = _loads(d["child_quantities"], {})
+            d["material_offsets"] = _loads(d["material_offsets"], {})
+            d["needed_owned_counts"] = _loads(d["needed_owned_counts"], {})
+            d["subtree_scope_keys"] = _loads(d["subtree_scope_keys"], [])
+            d["base_scope"] = _loads(d["base_scope"], None)
+            rows.append(d)
+        if not self._persistent_conn:
+            conn.close()
+        return rows
+
+    def delete_fastest_craft_results(self, session_uuid, item_refs=None, quality=None):
+        """Delete stored Fastest Craft rows for a session so they recompute on
+        the next run. item_refs=None deletes ALL rows for the session; otherwise
+        only the given items. quality (optional) narrows the delete to a single
+        quality tier. Returns the number of rows deleted."""
+        conn = self._get_connection(); cur = conn.cursor()
+        where = ["session_uuid=?"]
+        params = [session_uuid]
+        if item_refs:
+            where.append("item_ref IN (%s)" % ",".join("?" * len(item_refs)))
+            params.extend(item_refs)
+        if quality:
+            where.append("quality=?")
+            params.append(quality)
+        cur.execute("DELETE FROM fastest_craft_results WHERE " + " AND ".join(where),
+                    tuple(params))
+        n = cur.rowcount
+        conn.commit()
+        if not self._persistent_conn:
+            conn.close()
+        return n
+
+    def update_fastest_craft_banked(self, session_uuid, item_ref, variant, quality,
+                                    with_banked_steps, needed_owned_counts):
+        """Update ONLY the banked step count + owned-count snapshot for one row
+        (the cheap page-load recompute; no re-solve)."""
+        import json as _json
+        conn = self._get_connection(); cur = conn.cursor()
+        cur.execute(
+            "UPDATE fastest_craft_results SET with_banked_steps=?, needed_owned_counts_json=? "
+            "WHERE session_uuid=? AND item_ref=? AND variant=? AND quality=?",
+            (with_banked_steps, _json.dumps(needed_owned_counts or {}),
+             session_uuid, item_ref, variant, quality))
+        updated = cur.rowcount > 0
+        conn.commit()
+        if not self._persistent_conn:
+            conn.close()
+        return updated
+
     def has_feature(self, session_uuid: str, feature: str) -> bool:
         """Check if a session has a feature enabled (including hardcoded list)."""
         if feature == 'travel' and session_uuid in self._TRAVEL_ALWAYS_ENABLED:
@@ -3154,6 +5885,12 @@ class DatabaseManager:
         # explaining that things may change and saved configurations may
         # be deleted before the final release.
         if feature == 'crafting_tree':
+            return True
+        # 2026-08-14: Exact crafting-tree optimizer released to ALL sessions so
+        # we can collect bug reports before removing the checkbox entirely. The
+        # server-side gate in app.py (/api/crafting-tree/optimize) reads this,
+        # and the client checkbox is ungated in crafting-tree-settings.js.
+        if feature == 'crafting_tree_exact':
             return True
         # Holistic LP mode also enabled for ALL sessions (2026-05-15
         # release). User decision: 'We should show holistic/LP view
@@ -3186,6 +5923,14 @@ class DatabaseManager:
         if feature == 'walkdle' and session_uuid in self._WALKDLE_ALWAYS_ENABLED:
             return True
         if feature == 'exact_xp_optimizer' and session_uuid in self._EXACT_XP_OPTIMIZER_ENABLED:
+            return True
+        if feature == 'new_optimizer' and session_uuid in self._NEW_OPTIMIZER_ALWAYS_ENABLED:
+            return True
+        if feature == 'achievements' and session_uuid in self._ACHIEVEMENTS_ALWAYS_ENABLED:
+            return True
+        if feature == 'upgrades_tracker' and session_uuid in self._UPGRADES_TRACKER_ALWAYS_ENABLED:
+            return True
+        if feature == 'fastest_craft_goals' and session_uuid in self._FASTEST_CRAFT_GOALS_ALWAYS_ENABLED:
             return True
         conn = self._get_connection()
         cursor = conn.cursor()
@@ -3241,6 +5986,9 @@ class DatabaseManager:
             'crafting_tree_lp': self._CRAFTING_TREE_LP_ALWAYS_ENABLED,
             'pin_item': self._PIN_ITEM_ALWAYS_ENABLED,
             'walkdle': self._WALKDLE_ALWAYS_ENABLED,
+            'new_optimizer': self._NEW_OPTIMIZER_ALWAYS_ENABLED,
+            'achievements': self._ACHIEVEMENTS_ALWAYS_ENABLED,
+            'upgrades_tracker': self._UPGRADES_TRACKER_ALWAYS_ENABLED,
         }
         hardcoded_uuids = hardcoded_map.get(feature, set())
         for hc_uuid in hardcoded_uuids:
@@ -3456,6 +6204,31 @@ class DatabaseManager:
         d['skills'] = json.loads(d['skills'])
         return d
 
+    def get_stats_report_run_by_id(self, session_uuid: str, run_id: str) -> dict:
+        """Get ONE stats report run by id, scoped to the session (so a run_id
+        from another session can never be read). Returns None if not found.
+        Used by the status poll so a run is tracked by its OWN id rather than
+        'latest run for session' — a stale prior run must never drive a new
+        run's UI (bug: a days-old failed run hijacked a fresh local FC run)."""
+        import json
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT * FROM stats_report_runs
+            WHERE id = ? AND session_uuid = ?
+            LIMIT 1
+        """, (run_id, session_uuid))
+        row = cursor.fetchone()
+        desc = cursor.description
+        if not self._persistent_conn:
+            conn.close()
+        if not row:
+            return None
+        d = {desc[i][0]: row[i] for i in range(len(row))}
+        d['categories'] = json.loads(d['categories'])
+        d['skills'] = json.loads(d['skills'])
+        return d
+
     def get_stats_report_results_v2(self, session_uuid: str) -> dict:
         """Read stats_report_results (new schema) grouped by category and subcategory."""
         conn = self._get_connection()
@@ -3595,6 +6368,54 @@ class DatabaseManager:
         if not row:
             return None
         return {desc[i][0]: row[i] for i in range(len(row))}
+
+    def update_stats_report_gearset_alternatives(self, result_id: str,
+                                                  alternatives=None,
+                                                  locked_alternatives=None,
+                                                  hidden_alternatives=None) -> bool:
+        """Merge on-demand-computed slot alternatives into a goals-report
+        gearset row's metrics_json, so the report serves them from the DB on
+        reload (via _storedRowAlternatives) instead of recomputing on every
+        popup open.
+
+        The worker no longer precomputes alternatives, so the slot-alternatives
+        endpoint is the sole source; this caches its output. In-place UPDATE by
+        id, merging only the three `_slot_*alternatives` keys and preserving the
+        rest of metrics_json. No-op (returns False) when the row is gone.
+
+        Note: goals-report rows are not user-editable, so the endpoint always
+        scores against the row's stored optimized gearset — the cached
+        alternatives therefore stay consistent with the row on reload.
+        """
+        import json as _json
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT metrics_json FROM stats_report_gearsets WHERE id = ?",
+            (result_id,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            if not self._persistent_conn:
+                conn.close()
+            return False
+        try:
+            mj = _json.loads(row[0]) if row[0] else {}
+            if not isinstance(mj, dict):
+                mj = {}
+        except Exception:
+            mj = {}
+        mj['_slot_alternatives'] = alternatives or {}
+        mj['_slot_locked_alternatives'] = locked_alternatives or {}
+        mj['_slot_hidden_alternatives'] = hidden_alternatives or {}
+        cursor.execute(
+            "UPDATE stats_report_gearsets SET metrics_json = ? WHERE id = ?",
+            (_json.dumps(mj), result_id),
+        )
+        conn.commit()
+        if not self._persistent_conn:
+            conn.close()
+        return True
 
     def create_stats_report_gearset(self, result_id: str, run_id: str, session_uuid: str,
                                      category: str, activity_name: str, skill_name: str,
@@ -3750,6 +6571,95 @@ class DatabaseManager:
         gearset_orphans = [
             rowid for (rowid, act, kind) in cursor.fetchall()
             if ((act or ''), (kind or '').lower()) not in valid
+        ]
+        if gearset_orphans:
+            cursor.executemany(
+                "DELETE FROM stats_report_gearsets WHERE rowid = ?",
+                [(rid,) for rid in gearset_orphans],
+            )
+            deleted += len(gearset_orphans)
+
+        if deleted:
+            conn.commit()
+        if not self._persistent_conn:
+            conn.close()
+        return deleted
+
+    def prune_orphaned_target_items_results(self, session_uuid: str,
+                                            built_groups, valid_result,
+                                            valid_gearset) -> int:
+        """Delete orphaned target_items rows whose (item, activity) scope is no
+        longer produced by build_target_items_jobs.
+
+        Like the new_items report, target_items is stored additively (INSERT OR
+        REPLACE per scope) and read additively (latest-per-scope), so once an
+        activity stops yielding an item's drop (item obtained, activity renamed/
+        removed, or a fine variant no longer built because "include fine" was
+        turned off) the previously-written row is never overwritten and never
+        deleted -- it lingers forever. This reconciles the stored rows against
+        the freshly-built valid scope set.
+
+        Pruning is RESTRICTED to `built_groups` (the group_slugs actually built
+        this run), so a group the user did NOT select this run keeps its rows
+        (mirrors prune_orphaned_new_items_results' kind-restriction).
+
+        Reconciles BOTH backing tables:
+          * stats_report_results  -- scope = (subcategory=group_slug,
+            source_name=item_slug, location=activity_slug). Read by the
+            stale-detection layer / get_stats_report_results_v2.
+          * stats_report_gearsets -- scope = (skill_name=group_slug,
+            chest_name=item_slug, activity_name). Read by
+            get_stats_report_results_latest_per_scope, which is what the goals
+            report display actually returns.
+
+        Args:
+            built_groups: iterable of group_slugs built this run (restriction set).
+            valid_result: set of (group_slug, item_slug, activity_slug) tuples
+                valid for stats_report_results this run.
+            valid_gearset: set of (group_slug, item_slug, activity_name) tuples
+                valid for stats_report_gearsets this run.
+
+        Returns the number of rows deleted across both tables.
+        """
+        groups = {(g or '') for g in (built_groups or set()) if g}
+        if not groups:
+            return 0
+        valid_result = {tuple((x or '') for x in t) for t in (valid_result or set())}
+        valid_gearset = {tuple((x or '') for x in t) for t in (valid_gearset or set())}
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        placeholders = ','.join('?' for _ in groups)
+        sorted_groups = sorted(groups)
+        deleted = 0
+
+        # stats_report_results: scope = (subcategory, source_name, location)
+        cursor.execute(
+            "SELECT rowid, subcategory, source_name, location FROM stats_report_results "
+            "WHERE session_uuid = ? AND category = 'target_items' "
+            "AND subcategory IN (" + placeholders + ")",
+            (session_uuid, *sorted_groups),
+        )
+        results_orphans = [
+            rowid for (rowid, sub, src, loc) in cursor.fetchall()
+            if ((sub or ''), (src or ''), (loc or '')) not in valid_result
+        ]
+        if results_orphans:
+            cursor.executemany(
+                "DELETE FROM stats_report_results WHERE rowid = ?",
+                [(rid,) for rid in results_orphans],
+            )
+            deleted += len(results_orphans)
+
+        # stats_report_gearsets: scope = (skill_name, chest_name, activity_name)
+        cursor.execute(
+            "SELECT rowid, skill_name, chest_name, activity_name FROM stats_report_gearsets "
+            "WHERE session_uuid = ? AND category = 'target_items' "
+            "AND skill_name IN (" + placeholders + ")",
+            (session_uuid, *sorted_groups),
+        )
+        gearset_orphans = [
+            rowid for (rowid, grp, itm, act) in cursor.fetchall()
+            if ((grp or ''), (itm or ''), (act or '')) not in valid_gearset
         ]
         if gearset_orphans:
             cursor.executemany(
@@ -5853,25 +8763,29 @@ class DatabaseManager:
     # NOTIFICATION PREFERENCES CRUD METHODS
     # ========================================================================
 
-    def upsert_notification_preferences(self, session_uuid: str, global_announcements: bool, targeted_announcements: bool) -> None:
+    def upsert_notification_preferences(self, session_uuid: str, global_announcements: bool, targeted_announcements: bool, trading: Optional[bool] = None) -> None:
         """Insert or update notification preferences for a session.
 
         Args:
             session_uuid: Session UUID
             global_announcements: Whether to receive global broadcast push notifications
             targeted_announcements: Whether to receive targeted push notifications
+            trading: Explicit trading-notification choice. None leaves the stored
+                value untouched (unset → follows targeted_announcements).
         """
         conn = self._get_connection()
         cursor = conn.cursor()
         now = _utc_now()
+        trading_val = None if trading is None else (1 if trading else 0)
         cursor.execute("""
-            INSERT INTO notification_preferences (session_uuid, global_announcements, targeted_announcements, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO notification_preferences (session_uuid, global_announcements, targeted_announcements, trading, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(session_uuid) DO UPDATE SET
                 global_announcements = excluded.global_announcements,
                 targeted_announcements = excluded.targeted_announcements,
+                trading = COALESCE(excluded.trading, notification_preferences.trading),
                 updated_at = excluded.updated_at
-        """, (session_uuid, 1 if global_announcements else 0, 1 if targeted_announcements else 0, now, now))
+        """, (session_uuid, 1 if global_announcements else 0, 1 if targeted_announcements else 0, trading_val, now, now))
         conn.commit()
         if not self._persistent_conn:
             conn.close()
@@ -5889,7 +8803,7 @@ class DatabaseManager:
         conn = self._get_connection()
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT global_announcements, targeted_announcements
+            SELECT global_announcements, targeted_announcements, trading
             FROM notification_preferences
             WHERE session_uuid = ?
         """, (session_uuid,))
@@ -5897,10 +8811,14 @@ class DatabaseManager:
         if not self._persistent_conn:
             conn.close()
         if row is None:
-            return {'global_announcements': False, 'targeted_announcements': False}
+            return {'global_announcements': False, 'targeted_announcements': False, 'trading': False}
+        targeted = bool(row[1])
+        # trading NULL = unset → follow Personal notifications (targeted).
+        trading = targeted if row[2] is None else bool(row[2])
         return {
             'global_announcements': bool(row[0]),
-            'targeted_announcements': bool(row[1]),
+            'targeted_announcements': targeted,
+            'trading': trading,
         }
 
     # ========================================================================
@@ -6141,6 +9059,45 @@ class DatabaseManager:
         return True
 
     # ========================================================================
+    # ACHIEVEMENT TRACKER PROGRESS
+    # ========================================================================
+
+    def get_achievement_progress(self, session_uuid: str) -> dict:
+        """Return the session's achievement-tracker progress blob (manual
+        check-offs + reward reveals). Empty dict when none saved."""
+        import json
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT data FROM achievement_progress WHERE session_uuid = ?",
+            (session_uuid,),
+        )
+        row = cursor.fetchone()
+        if not self._persistent_conn:
+            conn.close()
+        if not row or not row[0]:
+            return {}
+        try:
+            return json.loads(row[0])
+        except (ValueError, TypeError):
+            return {}
+
+    def set_achievement_progress(self, session_uuid: str, data: dict) -> bool:
+        """Upsert the session's achievement-tracker progress blob."""
+        import json
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT OR REPLACE INTO achievement_progress (session_uuid, data, updated_at) "
+            "VALUES (?, ?, CURRENT_TIMESTAMP)",
+            (session_uuid, json.dumps(data or {})),
+        )
+        conn.commit()
+        if not self._persistent_conn:
+            conn.close()
+        return True
+
+    # ========================================================================
     # SAVED CRAFTING TREES
     # ========================================================================
 
@@ -6196,6 +9153,435 @@ class DatabaseManager:
         if not self._persistent_conn:
             conn.close()
         return deleted
+
+    # ========================================================================
+    # ITEM UPGRADES TRACKER (FAC: upgrades_tracker; spec .kiro/specs/item-upgrades-tracker/)
+    # ========================================================================
+
+    def get_working_tracker(self, session_uuid: str) -> dict:
+        """Return the session's working-draft tracker {entries:[...]}. Empty if none."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT entries_json FROM upgrades_trackers WHERE session_uuid = ? AND is_working = 1",
+            (session_uuid,)
+        )
+        row = cursor.fetchone()
+        if not self._persistent_conn:
+            conn.close()
+        entries = json.loads(row[0]) if row and row[0] else []
+        return {"entries": entries}
+
+    def save_working_tracker(self, session_uuid: str, entries: list) -> bool:
+        """Upsert the session's working-draft row (is_working=1)."""
+        import uuid as _uuid
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id FROM upgrades_trackers WHERE session_uuid = ? AND is_working = 1",
+            (session_uuid,)
+        )
+        row = cursor.fetchone()
+        payload = json.dumps(entries or [])
+        if row:
+            conn.execute(
+                "UPDATE upgrades_trackers SET entries_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (payload, row[0])
+            )
+        else:
+            conn.execute(
+                "INSERT INTO upgrades_trackers (id, session_uuid, name, entries_json, is_working) VALUES (?, ?, NULL, ?, 1)",
+                (str(_uuid.uuid4()), session_uuid, payload)
+            )
+        conn.commit()
+        if not self._persistent_conn:
+            conn.close()
+        return True
+
+    def list_trackers(self, session_uuid: str) -> list:
+        """List saved (named) trackers for a session, newest first."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, name, entries_json, updated_at FROM upgrades_trackers "
+            "WHERE session_uuid = ? AND is_working = 0 ORDER BY updated_at DESC",
+            (session_uuid,)
+        )
+        rows = cursor.fetchall()
+        if not self._persistent_conn:
+            conn.close()
+        out = []
+        for r in rows:
+            try:
+                count = len(json.loads(r[2]) if r[2] else [])
+            except Exception:
+                count = 0
+            out.append({'id': r[0], 'name': r[1], 'entry_count': count, 'updated_at': r[3]})
+        return out
+
+    def save_tracker(self, session_uuid: str, name: str, entries: list, tracker_id: str = None) -> str:
+        """Create a new named tracker, or overwrite an existing one (by id) the session owns."""
+        import uuid as _uuid
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        payload = json.dumps(entries or [])
+        if tracker_id:
+            cursor.execute(
+                "SELECT id FROM upgrades_trackers WHERE id = ? AND session_uuid = ? AND is_working = 0",
+                (tracker_id, session_uuid)
+            )
+            if cursor.fetchone():
+                conn.execute(
+                    "UPDATE upgrades_trackers SET name = ?, entries_json = ?, updated_at = CURRENT_TIMESTAMP "
+                    "WHERE id = ? AND session_uuid = ?",
+                    (name, payload, tracker_id, session_uuid)
+                )
+                conn.commit()
+                if not self._persistent_conn:
+                    conn.close()
+                return tracker_id
+        new_id = str(_uuid.uuid4())
+        conn.execute(
+            "INSERT INTO upgrades_trackers (id, session_uuid, name, entries_json, is_working) VALUES (?, ?, ?, ?, 0)",
+            (new_id, session_uuid, name, payload)
+        )
+        conn.commit()
+        if not self._persistent_conn:
+            conn.close()
+        return new_id
+
+    def load_tracker(self, tracker_id: str, session_uuid: str) -> Optional[dict]:
+        """Load a saved tracker by id (session-scoped)."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, name, entries_json, updated_at FROM upgrades_trackers "
+            "WHERE id = ? AND session_uuid = ? AND is_working = 0",
+            (tracker_id, session_uuid)
+        )
+        row = cursor.fetchone()
+        if not self._persistent_conn:
+            conn.close()
+        if not row:
+            return None
+        try:
+            entries = json.loads(row[2]) if row[2] else []
+        except Exception:
+            entries = []
+        return {'id': row[0], 'name': row[1], 'entries': entries, 'updated_at': row[3]}
+
+    def delete_tracker(self, tracker_id: str, session_uuid: str) -> bool:
+        """Delete a saved tracker (session-scoped)."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM upgrades_trackers WHERE id = ? AND session_uuid = ? AND is_working = 0",
+            (tracker_id, session_uuid)
+        )
+        conn.commit()
+        deleted = cursor.rowcount > 0
+        if not self._persistent_conn:
+            conn.close()
+        return deleted
+
+    # ========================================================================
+    # BANK LAYOUT SIMULATOR (spec: .kiro/BANK_LAYOUT_SPEC.md)
+    # ========================================================================
+
+    def create_bank_layout(self, session_uuid: str, name: str, tabs: list,
+                           settings: dict, source: str = 'user',
+                           schema_version: int = 1) -> str:
+        """Create a new bank layout for a session. Returns the new layout id."""
+        import uuid as _uuid
+        layout_id = str(_uuid.uuid4())
+        conn = self._get_connection()
+        conn.execute(
+            "INSERT INTO bank_layouts (id, session_uuid, name, source, schema_version, "
+            "settings_json, layout_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (layout_id, session_uuid, name, source, schema_version,
+             json.dumps(settings or {}), json.dumps({'tabs': tabs or []}))
+        )
+        conn.commit()
+        if not self._persistent_conn:
+            conn.close()
+        return layout_id
+
+    def update_bank_layout(self, layout_id: str, session_uuid: str, name: str,
+                           tabs: list, settings: dict) -> bool:
+        """Update an owned ('user' source) layout. Community/default are read-only."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE bank_layouts SET name = ?, layout_json = ?, settings_json = ?, "
+            "updated_at = CURRENT_TIMESTAMP WHERE id = ? AND session_uuid = ? AND source = 'user'",
+            (name, json.dumps({'tabs': tabs or []}), json.dumps(settings or {}),
+             layout_id, session_uuid)
+        )
+        conn.commit()
+        updated = cursor.rowcount > 0
+        if not self._persistent_conn:
+            conn.close()
+        return updated
+
+    def list_bank_layouts(self, session_uuid: str) -> list:
+        """List a session's own layouts (newest first)."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, name, source, is_shared, share_id, updated_at FROM bank_layouts "
+            "WHERE session_uuid = ? ORDER BY updated_at DESC",
+            (session_uuid,)
+        )
+        rows = cursor.fetchall()
+        if not self._persistent_conn:
+            conn.close()
+        return [{'id': r[0], 'name': r[1], 'source': r[2], 'is_shared': bool(r[3]),
+                 'share_id': r[4], 'updated_at': r[5]} for r in rows]
+
+    def load_bank_layout(self, layout_id: str, session_uuid: str) -> Optional[dict]:
+        """Load one of the session's own layouts by id."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, name, source, schema_version, settings_json, layout_json, "
+            "is_shared, share_id FROM bank_layouts WHERE id = ? AND session_uuid = ?",
+            (layout_id, session_uuid)
+        )
+        row = cursor.fetchone()
+        if not self._persistent_conn:
+            conn.close()
+        if not row:
+            return None
+        return {'id': row[0], 'name': row[1], 'source': row[2], 'schemaVersion': row[3],
+                'settings': json.loads(row[4] or '{}'),
+                'tabs': (json.loads(row[5] or '{}') or {}).get('tabs', []),
+                'is_shared': bool(row[6]), 'share_id': row[7], 'readOnly': False}
+
+    def delete_bank_layout(self, layout_id: str, session_uuid: str) -> bool:
+        """Delete one of the session's own layouts."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM bank_layouts WHERE id = ? AND session_uuid = ?",
+                       (layout_id, session_uuid))
+        conn.commit()
+        deleted = cursor.rowcount > 0
+        if not self._persistent_conn:
+            conn.close()
+        return deleted
+
+    def set_bank_share(self, layout_id: str, session_uuid: str, shared: bool,
+                       search_text: str = '') -> Optional[str]:
+        """Publish/unpublish an owned layout to the community. Returns share_id
+        when shared, None when unshared or not found."""
+        import uuid as _uuid
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        if shared:
+            share_id = _uuid.uuid4().hex
+            cursor.execute(
+                "UPDATE bank_layouts SET is_shared = 1, share_id = ?, search_text = ?, "
+                "updated_at = CURRENT_TIMESTAMP WHERE id = ? AND session_uuid = ? AND source = 'user'",
+                (share_id, search_text or '', layout_id, session_uuid)
+            )
+            result = share_id if cursor.rowcount > 0 else None
+        else:
+            cursor.execute(
+                "UPDATE bank_layouts SET is_shared = 0, share_id = NULL, "
+                "updated_at = CURRENT_TIMESTAMP WHERE id = ? AND session_uuid = ?",
+                (layout_id, session_uuid)
+            )
+            result = None
+        conn.commit()
+        if not self._persistent_conn:
+            conn.close()
+        return result
+
+    def list_community_bank_layouts(self, query: str = '', limit: int = 100) -> list:
+        """Search shared community layouts. ANONYMOUS: never exposes session_uuid or
+        character name — only share_id, name, and created_at."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        if query:
+            like = f"%{query.strip()}%"
+            cursor.execute(
+                "SELECT share_id, name, created_at FROM bank_layouts WHERE is_shared = 1 "
+                "AND (name LIKE ? OR search_text LIKE ?) ORDER BY updated_at DESC LIMIT ?",
+                (like, like, limit)
+            )
+        else:
+            cursor.execute(
+                "SELECT share_id, name, created_at FROM bank_layouts WHERE is_shared = 1 "
+                "ORDER BY updated_at DESC LIMIT ?",
+                (limit,)
+            )
+        rows = cursor.fetchall()
+        if not self._persistent_conn:
+            conn.close()
+        return [{'share_id': r[0], 'name': r[1], 'created_at': r[2]} for r in rows]
+
+    def load_community_bank_layout(self, share_id: str) -> Optional[dict]:
+        """Load a shared layout read-only and ANONYMOUS (no author identity)."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT name, schema_version, settings_json, layout_json FROM bank_layouts "
+            "WHERE share_id = ? AND is_shared = 1",
+            (share_id,)
+        )
+        row = cursor.fetchone()
+        if not self._persistent_conn:
+            conn.close()
+        if not row:
+            return None
+        return {'share_id': share_id, 'name': row[0], 'source': 'community',
+                'schemaVersion': row[1], 'settings': json.loads(row[2] or '{}'),
+                'tabs': (json.loads(row[3] or '{}') or {}).get('tabs', []),
+                'readOnly': True}
+
+    def copy_community_bank_layout(self, share_id: str, session_uuid: str,
+                                   name: str) -> Optional[str]:
+        """Fork a shared layout into a new editable 'user' layout for the session."""
+        src = self.load_community_bank_layout(share_id)
+        if not src:
+            return None
+        return self.create_bank_layout(
+            session_uuid, name or src['name'], src.get('tabs', []),
+            src.get('settings', {}), source='user',
+            schema_version=src.get('schemaVersion', 1)
+        )
+
+    def get_bank_item_history(self, session_uuid: str) -> dict:
+        """Return {item_id: {tab_id, cat_id, order}} — the self-tracking placeholder
+        store for this session."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT item_id, tab_id, cat_id, order_index FROM bank_item_history "
+            "WHERE session_uuid = ?",
+            (session_uuid,)
+        )
+        rows = cursor.fetchall()
+        if not self._persistent_conn:
+            conn.close()
+        return {r[0]: {'tab_id': r[1], 'cat_id': r[2], 'order': r[3]} for r in rows}
+
+    def set_bank_item_history(self, session_uuid: str, placements: list) -> None:
+        """Upsert placement history. `placements` = [{item_id, tab_id, cat_id, order}]."""
+        conn = self._get_connection()
+        for p in (placements or []):
+            conn.execute(
+                "INSERT INTO bank_item_history (session_uuid, item_id, tab_id, cat_id, "
+                "order_index, updated_at) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP) "
+                "ON CONFLICT(session_uuid, item_id) DO UPDATE SET tab_id = excluded.tab_id, "
+                "cat_id = excluded.cat_id, order_index = excluded.order_index, "
+                "updated_at = CURRENT_TIMESTAMP",
+                (session_uuid, p.get('item_id'), p.get('tab_id'), p.get('cat_id'),
+                 int(p.get('order', 0)))
+            )
+        conn.commit()
+        if not self._persistent_conn:
+            conn.close()
+
+    def get_bank_working_layout(self, session_uuid: str):
+        """Return {'layout': dict, 'current_id': str|None} for the session's in-progress
+        (unsaved) bank layout, or None if there isn't one / it's corrupt."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT layout_json, current_id FROM bank_working_layout WHERE session_uuid = ?",
+            (session_uuid,)
+        )
+        row = cursor.fetchone()
+        if not self._persistent_conn:
+            conn.close()
+        if not row:
+            return None
+        try:
+            layout = json.loads(row[0])
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(layout, dict):
+            return None
+        return {'layout': layout, 'current_id': row[1]}
+
+    def set_bank_working_layout(self, session_uuid: str, layout: dict, current_id=None) -> None:
+        """Upsert the session's in-progress working layout (one row per session)."""
+        conn = self._get_connection()
+        conn.execute(
+            "INSERT INTO bank_working_layout (session_uuid, layout_json, current_id, updated_at) "
+            "VALUES (?, ?, ?, CURRENT_TIMESTAMP) "
+            "ON CONFLICT(session_uuid) DO UPDATE SET layout_json = excluded.layout_json, "
+            "current_id = excluded.current_id, updated_at = CURRENT_TIMESTAMP",
+            (session_uuid, json.dumps(layout), current_id)
+        )
+        conn.commit()
+        if not self._persistent_conn:
+            conn.close()
+
+    def get_topbar_layout(self, session_uuid: str):
+        """Return the session's saved top-bar customization layout dict, or None.
+        Shape: { topbar: {left:[...], right:[...]}, hidden:[...], drawer:[...],
+                 title: {enabled: bool, text: str} }. FAC: topbar_customization."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT layout_json FROM topbar_layout WHERE session_uuid = ?",
+            (session_uuid,)
+        )
+        row = cursor.fetchone()
+        if not self._persistent_conn:
+            conn.close()
+        if not row:
+            return None
+        try:
+            layout = json.loads(row[0])
+        except (TypeError, ValueError):
+            return None
+        return layout if isinstance(layout, dict) else None
+
+    def set_topbar_layout(self, session_uuid: str, layout: dict) -> None:
+        """Upsert the session's top-bar customization layout (one row per session)."""
+        conn = self._get_connection()
+        conn.execute(
+            "INSERT INTO topbar_layout (session_uuid, layout_json, updated_at) "
+            "VALUES (?, ?, CURRENT_TIMESTAMP) "
+            "ON CONFLICT(session_uuid) DO UPDATE SET layout_json = excluded.layout_json, "
+            "updated_at = CURRENT_TIMESTAMP",
+            (session_uuid, json.dumps(layout))
+        )
+        conn.commit()
+        if not self._persistent_conn:
+            conn.close()
+
+    def delete_topbar_layout(self, session_uuid: str) -> None:
+        """Remove the session's saved top-bar layout (reset-to-default)."""
+        conn = self._get_connection()
+        conn.execute("DELETE FROM topbar_layout WHERE session_uuid = ?", (session_uuid,))
+        conn.commit()
+        if not self._persistent_conn:
+            conn.close()
+
+    def get_bank_config(self, key: str, default=None):
+        """Read a global bank config value (e.g. the community-search kill switch)."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT value FROM bank_config WHERE key = ?", (key,))
+        row = cursor.fetchone()
+        if not self._persistent_conn:
+            conn.close()
+        return row[0] if row else default
+
+    def set_bank_config(self, key: str, value: str) -> None:
+        """Write a global bank config value."""
+        conn = self._get_connection()
+        conn.execute(
+            "INSERT INTO bank_config (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value)
+        )
+        conn.commit()
+        if not self._persistent_conn:
+            conn.close()
 
     # ========================================================================
     # OPTIMIZATION SETTINGS MIGRATION LOG

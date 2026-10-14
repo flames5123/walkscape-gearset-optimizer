@@ -35,7 +35,7 @@ const STAT_TYPES = [
     { value: 'ItemFindingCategory.FISHING_BAIT', label: 'Fishing Bait', svg: '/assets/icons/attributes/find_fishing_bait.svg', group: 'item_finding' },
     { value: 'ItemFindingCategory.GOLD_NUGGET', label: 'Gold Nugget', svg: '/assets/icons/attributes/find_gold_nugget.svg', group: 'item_finding' },
     { value: 'ItemFindingCategory.GOLD_PIECES', label: 'Gold Pieces', svg: '/assets/icons/attributes/find_gold_pieces.svg', group: 'item_finding' },
-    { value: 'ItemFindingCategory.RANDOM_GEM', label: 'Random Gem', svg: '/assets/icons/attributes/find_random_gem.svg', group: 'item_finding' },
+    { value: 'ItemFindingCategory.RANDOM_GEM', label: 'Rough Gem', svg: '/assets/icons/attributes/find_random_gem.svg', group: 'item_finding' },
     { value: 'ItemFindingCategory.RANDOM_PIECE_OF_JUNK', label: 'Random Piece of Junk', svg: '/assets/icons/attributes/find_random_piece_of_junk.svg', group: 'item_finding' },
     { value: 'ItemFindingCategory.SEA_SHELLS', label: 'Sea Shells', svg: '/assets/icons/attributes/find_sea_shells.svg', group: 'item_finding' },
     { value: 'ItemFindingCategory.FIBROUS_PLANT', label: 'Fibrous Plant', svg: '/assets/icons/attributes/find_fibrous_plant.svg', group: 'item_finding' },
@@ -127,7 +127,6 @@ const KNOWN_KEYWORDS = [
     { value: 'Basket', icon: '🧺' },
     { value: 'Bellows', icon: '💨' },
     { value: 'Beverage', icon: '🥤' },
-    { value: 'Birdhouse', icon: '🏠' },
     { value: 'Bug catching net', icon: '🪲' },
     { value: 'Carpentry tool', icon: '🪚' },
     { value: 'Chisel', icon: '🪨' },
@@ -165,7 +164,6 @@ const KNOWN_KEYWORDS = [
     { value: 'Gem', icon: '💎' },
     { value: 'Gold pan', icon: '🥘' },
     { value: 'Hatchet', icon: '🪓' },
-    { value: 'Heat resistant', icon: '🔥' },
     { value: 'Heavy', icon: '⚖️' },
     { value: 'Hunting bow', icon: '🏹' },
     { value: 'Hunting net', icon: '🥅' },
@@ -945,30 +943,30 @@ class GenericItemForm {
                 }).join('') : '';
             gateFields = `<div class="gi-dd-button gi-gated-kw-btn" data-row="${i}" style="flex:1;min-width:0"><div class="gi-dd-value">${kwDisplay}</div><span class="expand-arrow">▼</span></div>
                 <div class="gi-dd-dropdown gi-gated-kw-dd" style="display:none">
-                    <input type="text" class="gi-gated-kw-search" placeholder="Search or type new keyword..." style="width:100%;box-sizing:border-box;margin-bottom:4px;padding:4px;font-size:12px" />
+                    <input type="text" class="gi-gated-kw-search" placeholder="Search or type new keyword..." style="width:100%;box-sizing:border-box;margin-bottom:4px;padding:4px;font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)))" />
                     ${kwItems}${customKwHtml}
                     <div class="gi-kw-new-form gi-kw-custom-entry gi-gated-kw-custom-entry" style="border-top:1px solid var(--border-color);margin-top:4px;padding-top:4px">
                         <div class="gi-kw-new-row">
                             <span>🏷️</span>
                             <input type="text" class="gi-gated-kw-custom-name" placeholder="New keyword name..." style="flex:1;min-width:0" />
-                            <button class="gi-gated-kw-custom-add optimize-btn" data-row="${i}" style="width:auto;padding:2px 10px;font-size:11px">Add</button>
+                            <button class="gi-gated-kw-custom-add optimize-btn" data-row="${i}" style="width:auto;padding:2px 10px;font-size: max(var(--min-text, 5px), calc(11px * var(--text-scale, 1)))">Add</button>
                         </div>
                     </div>
                 </div>
                 <input type="hidden" class="gi-gated-keyword-val" value="${r.keyword || ''}" />
-                <span style="font-size:0.75rem;color:var(--text-muted)">×</span>
+                <span style="font-size: max(var(--min-text, 5px), calc(0.75rem * var(--text-scale, 1)));color:var(--text-muted)">×</span>
                 <input type="number" class="gi-gated-count" value="${r.count || 1}" min="1" max="10" style="width:44px">`;
         } else if (r.gateType === 'skill_level') {
             gateFields = `<div class="gi-dd-button gi-gated-gate-skill-btn" data-row="${i}" style="flex:1;min-width:0"><div class="gi-dd-value">${this._skillDisplay(r.gateSkill || 'global')}</div><span class="expand-arrow">▼</span></div>
                 <div class="gi-dd-dropdown gi-gated-gate-skill-dd" style="display:none">${this._skillDropdownHtml(r.gateSkill || 'global')}</div>
                 <input type="hidden" class="gi-gated-gate-skill-val" value="${r.gateSkill || 'global'}" />
-                <span style="font-size:0.75rem;color:var(--text-muted)">≥</span>
+                <span style="font-size: max(var(--min-text, 5px), calc(0.75rem * var(--text-scale, 1)));color:var(--text-muted)">≥</span>
                 <input type="number" class="gi-gated-threshold" value="${r.threshold || 1}" min="1" style="width:50px">`;
         } else if (r.gateType === 'item_ownership') {
             gateFields = `<input type="text" class="gi-gated-item-name" value="${r.itemName || ''}" placeholder="item name" style="flex:1">`;
         } else if (r.gateType === 'activity_completion') {
             gateFields = `<input type="text" class="gi-gated-activity-name" value="${r.activityName || ''}" placeholder="activity" style="flex:1">
-                <span style="font-size:0.75rem;color:var(--text-muted)">×</span>
+                <span style="font-size: max(var(--min-text, 5px), calc(0.75rem * var(--text-scale, 1)));color:var(--text-muted)">×</span>
                 <input type="number" class="gi-gated-threshold" value="${r.threshold || 1}" min="1" style="width:50px">`;
         } else if (r.gateType === 'activity') {
             gateFields = `<input type="text" class="gi-gated-activity-name" value="${r.activityName || ''}" placeholder="activity" style="flex:1">`;
@@ -993,7 +991,7 @@ class GenericItemForm {
                     <input type="hidden" class="gi-gated-loc-val" value="${r.location || 'global'}" />
                 </div>
                 <div class="gi-stat-cell gi-stat-type-cell" style="flex:1.5">
-                    <div class="gi-dd-button gi-gated-stat-btn" data-row="${i}" style="padding:4px 6px;font-size:12px">
+                    <div class="gi-dd-button gi-gated-stat-btn" data-row="${i}" style="padding:4px 6px;font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)))">
                         <div class="gi-dd-value">${this._statTypeDisplay(r.stat || 'work_efficiency')}</div>
                         <span class="expand-arrow">▼</span>
                     </div>
@@ -1004,7 +1002,7 @@ class GenericItemForm {
                 <button class="gi-stat-remove gi-gated-remove" title="Remove">✕</button>
             </div>
             <div class="gi-gated-gate-line" style="display:flex;gap:4px;align-items:center">
-                <span style="font-size:0.7rem;color:var(--text-muted);min-width:36px">Gate:</span>
+                <span style="font-size: max(var(--min-text, 5px), calc(0.7rem * var(--text-scale, 1)));color:var(--text-muted);min-width:36px">Gate:</span>
                 <div class="gi-dd-button gi-gated-type-btn" data-row="${i}" style="flex:0 0 auto;min-width:180px"><div class="gi-dd-value">${gateLabel}</div><span class="expand-arrow">▼</span></div>
                 <div class="gi-dd-dropdown gi-gated-type-dd" style="display:none">${gateTypeItems}</div>
                 ${gateFields}
@@ -1112,7 +1110,7 @@ class GenericItemForm {
                     return `<div class="gi-dd-item gi-req-skill-item" data-value="${val}" data-row="${i}">${skillIcon(s)} <span>${s}</span></div>`;
                 }).join('');
                 fields = `<div class="gi-req-skill-cell" style="position:relative;flex:1">
-                    <div class="gi-dd-button gi-req-skill-btn" data-row="${i}" style="padding:4px 6px;font-size:12px"><div class="gi-dd-value">${skillDisplay}</div><span class="expand-arrow">▼</span></div>
+                    <div class="gi-dd-button gi-req-skill-btn" data-row="${i}" style="padding:4px 6px;font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)))"><div class="gi-dd-value">${skillDisplay}</div><span class="expand-arrow">▼</span></div>
                     <div class="gi-dd-dropdown gi-req-skill-dd" style="display:none">${skillItems}</div>
                     <input type="hidden" class="gi-req-skill" value="${r.skill || ''}" />
                 </div>
@@ -1124,7 +1122,7 @@ class GenericItemForm {
                     return `<div class="gi-dd-item gi-req-faction-item" data-value="${f}">${label}</div>`;
                 }).join('');
                 fields = `<div class="gi-req-faction-cell" style="position:relative;flex:1">
-                    <div class="gi-dd-button gi-req-faction-btn" data-row="${i}" style="padding:4px 6px;font-size:12px"><div class="gi-dd-value">${factionDisplay}</div><span class="expand-arrow">▼</span></div>
+                    <div class="gi-dd-button gi-req-faction-btn" data-row="${i}" style="padding:4px 6px;font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)))"><div class="gi-dd-value">${factionDisplay}</div><span class="expand-arrow">▼</span></div>
                     <div class="gi-dd-dropdown gi-req-faction-dd" style="display:none">${factionItems}</div>
                     <input type="hidden" class="gi-req-faction" value="${r.faction || ''}" />
                 </div>
@@ -1147,7 +1145,7 @@ class GenericItemForm {
                     `<div class="gi-dd-item gi-req-cat-item" data-value="${o.value}" data-row="${i}">${o.label}</div>`
                 ).join('');
                 fields = `<div class="gi-req-cat-cell" style="position:relative;flex:1">
-                    <div class="gi-dd-button gi-req-cat-btn" data-row="${i}" style="padding:4px 6px;font-size:12px"><div class="gi-dd-value">${catDisplay}</div><span class="expand-arrow">▼</span></div>
+                    <div class="gi-dd-button gi-req-cat-btn" data-row="${i}" style="padding:4px 6px;font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)))"><div class="gi-dd-value">${catDisplay}</div><span class="expand-arrow">▼</span></div>
                     <div class="gi-dd-dropdown gi-req-cat-dd" style="display:none">${catItems}</div>
                     <input type="hidden" class="gi-req-category" value="${r.category || ''}" />
                 </div>
@@ -1168,7 +1166,7 @@ class GenericItemForm {
             ).join('');
             return `<div class="gi-req-row" data-index="${i}">
                 <div class="gi-req-type-cell" style="position:relative;min-width:140px">
-                    <div class="gi-dd-button gi-req-type-btn" data-row="${i}" style="padding:4px 6px;font-size:12px"><div class="gi-dd-value">${typeDisplay}</div><span class="expand-arrow">▼</span></div>
+                    <div class="gi-dd-button gi-req-type-btn" data-row="${i}" style="padding:4px 6px;font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)))"><div class="gi-dd-value">${typeDisplay}</div><span class="expand-arrow">▼</span></div>
                     <div class="gi-dd-dropdown gi-req-type-dd" style="display:none">${typeItems}</div>
                     <input type="hidden" class="gi-req-type" value="${r.type || ''}" />
                 </div>
@@ -1197,16 +1195,16 @@ class GenericItemForm {
                     return `<div class="gi-dd-group-label">${g.group}</div>${items}`;
                 }).join('');
                 fields = `<div class="gi-req-skill-cell" style="position:relative;flex:1">
-                        <div class="gi-dd-button gi-pet-xp-loc-btn" data-row="${i}" style="padding:4px 6px;font-size:12px"><div class="gi-dd-value">${locDisplay}</div><span class="expand-arrow">▼</span></div>
+                        <div class="gi-dd-button gi-pet-xp-loc-btn" data-row="${i}" style="padding:4px 6px;font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)))"><div class="gi-dd-value">${locDisplay}</div><span class="expand-arrow">▼</span></div>
                         <div class="gi-dd-dropdown gi-pet-xp-loc-dd" style="display:none;max-height:200px;overflow-y:auto">${locItems}</div>
                     </div>`;
             } else if (r.type === 'skill') {
                 const notChecked = r.not ? 'checked' : '';
                 const skillDropdownHtml = this._skillDropdownHtml(r.value || '').replace(/gi-skill-item/g, 'gi-pet-xp-skill-item');
                 const skillDisplay = r.value ? this._skillDisplay(r.value) : 'Select...';
-                fields = `<label class="gi-checkbox-label" style="font-size:12px;white-space:nowrap"><input type="checkbox" class="gi-pet-xp-not" data-row="${i}" ${notChecked} /> NOT</label>
+                fields = `<label class="gi-checkbox-label" style="font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)));white-space:nowrap"><input type="checkbox" class="gi-pet-xp-not" data-row="${i}" ${notChecked} /> NOT</label>
                     <div class="gi-req-skill-cell" style="position:relative;flex:1">
-                        <div class="gi-dd-button gi-pet-xp-skill-btn" data-row="${i}" style="padding:4px 6px;font-size:12px"><div class="gi-dd-value">${skillDisplay}</div><span class="expand-arrow">▼</span></div>
+                        <div class="gi-dd-button gi-pet-xp-skill-btn" data-row="${i}" style="padding:4px 6px;font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)))"><div class="gi-dd-value">${skillDisplay}</div><span class="expand-arrow">▼</span></div>
                         <div class="gi-dd-dropdown gi-pet-xp-skill-dd" style="display:none;max-height:250px;overflow-y:auto">${skillDropdownHtml}</div>
                     </div>`;
             }
@@ -1216,7 +1214,7 @@ class GenericItemForm {
             ).join('');
             return `<div class="gi-req-row gi-pet-xp-req-row" data-index="${i}">
                     <div class="gi-req-type-cell" style="position:relative;min-width:110px">
-                        <div class="gi-dd-button gi-pet-xp-type-btn" data-row="${i}" style="padding:4px 6px;font-size:12px"><div class="gi-dd-value">${typeDisplay}</div><span class="expand-arrow">▼</span></div>
+                        <div class="gi-dd-button gi-pet-xp-type-btn" data-row="${i}" style="padding:4px 6px;font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)))"><div class="gi-dd-value">${typeDisplay}</div><span class="expand-arrow">▼</span></div>
                         <div class="gi-dd-dropdown gi-pet-xp-type-dd" style="display:none">${typeItems}</div>
                     </div>
                     ${fields}
@@ -1253,7 +1251,7 @@ class GenericItemForm {
                     <input type="hidden" class="gi-stat-location" value="${row.location || 'global'}" />
                 </div>
                 <div class="gi-stat-cell gi-stat-type-cell" style="flex:1.5">
-                    <div class="gi-dd-button gi-stat-type-btn" data-index="${i}" style="padding:4px 6px;font-size:12px"><div class="gi-dd-value">${this._statTypeDisplay(row.type)}</div><span class="expand-arrow">▼</span></div>
+                    <div class="gi-dd-button gi-stat-type-btn" data-index="${i}" style="padding:4px 6px;font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)))"><div class="gi-dd-value">${this._statTypeDisplay(row.type)}</div><span class="expand-arrow">▼</span></div>
                     <div class="gi-dd-dropdown gi-stat-type-dd" style="display:none">${this._statTypeDropdownHtml(row.type)}</div>
                     <input type="hidden" class="gi-stat-type" value="${row.type || 'work_efficiency'}" />
                 </div>
@@ -1326,7 +1324,7 @@ class GenericItemForm {
             (!q || ck.name.toLowerCase().includes(q))
         );
         if (customKws.length > 0) {
-            html += `<div style="font-size:0.7rem;color:var(--text-muted);padding:6px 8px 2px;border-top:1px solid var(--border-color);margin-top:4px">Custom Keywords</div>`;
+            html += `<div style="font-size: max(var(--min-text, 5px), calc(0.7rem * var(--text-scale, 1)));color:var(--text-muted);padding:6px 8px 2px;border-top:1px solid var(--border-color);margin-top:4px">Custom Keywords</div>`;
             for (const ck of customKws) {
                 const colorStyle = ck.icon_color ? `${window.emojiTintStyle(ck.icon_color)}` : '';
                 html += `<div class="gi-dd-item gi-kw-item" data-value="${ck.name}"><span class="gi-kw-custom-emoji" style="${colorStyle}">${ck.icon || '🏷️'}</span> ${ck.name}</div>`;
@@ -1345,11 +1343,11 @@ class GenericItemForm {
                     <div class="gi-kw-new-row">
                         <button class="gi-kw-new-emoji-btn" title="Pick emoji">🏷️</button>
                         <span class="gi-kw-new-name">${search.trim()}</span>
-                        <button class="gi-kw-new-add optimize-btn" data-value="${search.trim()}" style="width:auto;padding:2px 10px;font-size:11px">Add</button>
+                        <button class="gi-kw-new-add optimize-btn" data-value="${search.trim()}" style="width:auto;padding:2px 10px;font-size: max(var(--min-text, 5px), calc(11px * var(--text-scale, 1)))">Add</button>
                     </div>
                     <div class="gi-kw-new-emoji-picker" style="display:none">
                         <div class="gi-icon-defaults">${EMOJI_OPTIONS.map(e => `<span class="gi-kw-emoji-option" data-emoji="${e}">${e}</span>`).join('')}</div>
-                        <div style="margin-top:4px"><label style="font-size:0.7rem;color:var(--text-muted)">Color tint:</label> <input type="color" class="gi-kw-color-input" value="#ffffff" style="width:24px;height:20px;border:none;background:none;cursor:pointer"> <button class="gi-kw-color-clear" style="font-size:0.65rem;border:none;background:none;color:var(--text-muted);cursor:pointer">Clear</button></div>
+                        <div style="margin-top:4px"><label style="font-size: max(var(--min-text, 5px), calc(0.7rem * var(--text-scale, 1)));color:var(--text-muted)">Color tint:</label> <input type="color" class="gi-kw-color-input" value="#ffffff" style="width:24px;height:20px;border:none;background:none;cursor:pointer"> <button class="gi-kw-color-clear" style="font-size: max(var(--min-text, 5px), calc(0.65rem * var(--text-scale, 1)));border:none;background:none;color:var(--text-muted);cursor:pointer">Clear</button></div>
                         <emoji-picker class="gi-kw-full-picker"></emoji-picker>
                     </div>
                 </div>`;
@@ -1360,11 +1358,11 @@ class GenericItemForm {
             <div class="gi-kw-new-row">
                 <button class="gi-kw-custom-emoji-btn" title="Pick emoji">🏷️</button>
                 <input type="text" class="gi-kw-custom-name" placeholder="New keyword name..." style="flex:1" />
-                <button class="gi-kw-custom-add optimize-btn" style="width:auto;padding:2px 10px;font-size:11px">Add</button>
+                <button class="gi-kw-custom-add optimize-btn" style="width:auto;padding:2px 10px;font-size: max(var(--min-text, 5px), calc(11px * var(--text-scale, 1)))">Add</button>
             </div>
             <div class="gi-kw-custom-emoji-picker" style="display:none">
                 <div class="gi-icon-defaults">${EMOJI_OPTIONS.map(e => `<span class="gi-kw-custom-emoji-option" data-emoji="${e}">${e}</span>`).join('')}</div>
-                <div style="margin-top:4px"><label style="font-size:0.7rem;color:var(--text-muted)">Color tint:</label> <input type="color" class="gi-kw-color-input" value="#ffffff" style="width:24px;height:20px;border:none;background:none;cursor:pointer"> <button class="gi-kw-color-clear" style="font-size:0.65rem;border:none;background:none;color:var(--text-muted);cursor:pointer">Clear</button></div>
+                <div style="margin-top:4px"><label style="font-size: max(var(--min-text, 5px), calc(0.7rem * var(--text-scale, 1)));color:var(--text-muted)">Color tint:</label> <input type="color" class="gi-kw-color-input" value="#ffffff" style="width:24px;height:20px;border:none;background:none;cursor:pointer"> <button class="gi-kw-color-clear" style="font-size: max(var(--min-text, 5px), calc(0.65rem * var(--text-scale, 1)));border:none;background:none;color:var(--text-muted);cursor:pointer">Clear</button></div>
                 <emoji-picker class="gi-kw-custom-full-picker"></emoji-picker>
             </div>
         </div>`;
@@ -1454,7 +1452,7 @@ class GenericItemForm {
             const bc = isPet ? '#fff' : rarityBorderColor(r);
             const active = q === this.activeQualityTab;
             return `<button class="gi-quality-tab ${active ? 'active' : ''}" data-quality="${q}" style="background:${c};color:#fff;border:2px solid ${active ? bc : 'transparent'}">${q}</button>`;
-        }).join('')}${isPet && !this.petHasLevel4 ? '<button class="gi-add-level4-btn optimize-btn" style="padding:4px 10px;font-size:12px;margin-left:4px">+ Level 4</button>' : ''}</div>` : '';
+        }).join('')}${isPet && !this.petHasLevel4 ? '<button class="gi-add-level4-btn optimize-btn" style="padding:4px 10px;font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)));margin-left:4px">+ Level 4</button>' : ''}</div>` : '';
 
         const hideKw = (isCollectible || isPet) ? 'style="display:none"' : '';
         const hideCrafted = (isCollectible || isConsumable || isInput || isPet) ? 'style="display:none"' : '';
@@ -1473,8 +1471,8 @@ class GenericItemForm {
                 const active = q === this.activeQualityTab;
                 return `<button class="gi-quality-tab ${active ? 'active' : ''}" data-quality="${q}" style="background:${c};color:#fff;border:2px solid ${active ? '#fff' : 'transparent'}">${q}</button>`;
             }).join('')}${!this.petHasLevel4
-                ? '<button class="gi-add-level4-btn optimize-btn" style="padding:4px 10px;font-size:12px;margin-left:4px">+ Lv 4</button>'
-                : '<button class="gi-remove-level4-btn optimize-btn" style="padding:4px 10px;font-size:12px;margin-left:4px;background:#e53935">- Lv 4</button>'
+                ? '<button class="gi-add-level4-btn optimize-btn" style="padding:4px 10px;font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)));margin-left:4px">+ Lv 4</button>'
+                : '<button class="gi-remove-level4-btn optimize-btn" style="padding:4px 10px;font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)));margin-left:4px;background:#e53935">- Lv 4</button>'
                 }</div>`;
         }
 
@@ -1520,12 +1518,12 @@ class GenericItemForm {
                         <div class="gi-dd-button gi-rarity-btn" style="background:${rarBg};color:#fff"><div class="gi-dd-value">${this._rarityDisplay()}</div><span class="expand-arrow">▼</span></div>
                         <div class="gi-dd-dropdown gi-rarity-dropdown" style="display:none">${this._rarityDropdownHtml()}</div>
                     </div>
-                    <div class="gi-row gi-req-section gi-req-above" ${hideReqsAbove}><label>Requirements</label><div class="gi-req-rows">${isInput ? this._reqRowsHtml() : ''}</div><button class="gi-add-req optimize-btn" style="width:auto;padding:6px 16px;font-size:13px;margin-top:var(--spacing-xs)">+ Add Requirement</button></div>
-                    <div class="gi-row gi-req-section gi-req-below" ${hideReqsBelow}><label>Requirements</label><div class="gi-req-rows">${!isInput ? this._reqRowsHtml() : ''}</div><button class="gi-add-req optimize-btn" style="width:auto;padding:6px 16px;font-size:13px;margin-top:var(--spacing-xs)">+ Add Requirement</button></div>
+                    <div class="gi-row gi-req-section gi-req-above" ${hideReqsAbove}><label>Requirements</label><div class="gi-req-rows">${isInput ? this._reqRowsHtml() : ''}</div><button class="gi-add-req optimize-btn" style="width:auto;padding:6px 16px;font-size: max(var(--min-text, 5px), calc(13px * var(--text-scale, 1)));margin-top:var(--spacing-xs)">+ Add Requirement</button></div>
+                    <div class="gi-row gi-req-section gi-req-below" ${hideReqsBelow}><label>Requirements</label><div class="gi-req-rows">${!isInput ? this._reqRowsHtml() : ''}</div><button class="gi-add-req optimize-btn" style="width:auto;padding:6px 16px;font-size: max(var(--min-text, 5px), calc(13px * var(--text-scale, 1)));margin-top:var(--spacing-xs)">+ Add Requirement</button></div>
                     <div class="gi-row gi-pet-xp-req-section" ${isPet ? '' : 'style="display:none"'}>
                         <label>Requirement To Gain XP</label>
                         <div class="gi-pet-xp-req-rows">${isPet ? this._petXpReqRowsHtml() : ''}</div>
-                        <button class="gi-add-pet-xp-req optimize-btn" style="width:auto;padding:6px 16px;font-size:13px;margin-top:var(--spacing-xs)">+ Add Requirement</button>
+                        <button class="gi-add-pet-xp-req optimize-btn" style="width:auto;padding:6px 16px;font-size: max(var(--min-text, 5px), calc(13px * var(--text-scale, 1)));margin-top:var(--spacing-xs)">+ Add Requirement</button>
                     </div>
                     <div class="gi-row gi-duration-row" ${isConsumable ? '' : 'style="display:none"'}>
                         <label>Step Duration</label>
@@ -1556,11 +1554,11 @@ class GenericItemForm {
                         <label>XP to next level</label>
                         <input type="number" id="gi-pet-xp" min="0" value="${this.petXpRequirements[this.activeQualityTab] || 0}" class="gi-pet-xp-input" />
                     </div>
-                    <div class="gi-row gi-stats-section" ${isPet && this.activeQualityTab === 'Egg' ? 'style="display:none"' : ''}><label>Stats</label><div class="gi-stat-rows">${this._statRowsHtml(activeRows)}</div><button class="gi-add-stat optimize-btn" style="width:auto;padding:6px 16px;font-size:13px;margin-top:var(--spacing-xs)">+ Add Stat</button></div>
+                    <div class="gi-row gi-stats-section" ${isPet && this.activeQualityTab === 'Egg' ? 'style="display:none"' : ''}><label>Stats</label><div class="gi-stat-rows">${this._statRowsHtml(activeRows)}</div><button class="gi-add-stat optimize-btn" style="width:auto;padding:6px 16px;font-size: max(var(--min-text, 5px), calc(13px * var(--text-scale, 1)));margin-top:var(--spacing-xs)">+ Add Stat</button></div>
                     <div class="gi-row gi-gated-section" ${isPet ? 'style="display:none"' : ''}>
-                        <label>Gated Stats <span style="font-size:0.7rem;color:var(--text-muted)">(conditional, like Omni-Tool AP or set bonuses)</span></label>
+                        <label>Gated Stats <span style="font-size: max(var(--min-text, 5px), calc(0.7rem * var(--text-scale, 1)));color:var(--text-muted)">(conditional, like Omni-Tool AP or set bonuses)</span></label>
                         <div class="gi-gated-entries">${this._gatedStatsHtml()}</div>
-                        <button class="gi-add-gated optimize-btn" style="width:auto;padding:6px 16px;font-size:13px;margin-top:var(--spacing-xs)">+ Add Gated Stat</button>
+                        <button class="gi-add-gated optimize-btn" style="width:auto;padding:6px 16px;font-size: max(var(--min-text, 5px), calc(13px * var(--text-scale, 1)));margin-top:var(--spacing-xs)">+ Add Gated Stat</button>
                     </div>
                     <div class="gi-row"><label class="gi-checkbox-label"><input type="checkbox" id="gi-share" checked /> Share with community</label></div>
                     <div class="gi-advanced-section">
@@ -1580,8 +1578,8 @@ class GenericItemForm {
                     </div>
                 </div>
                 <div class="gi-actions">
-                    <button class="btn-save-item optimize-btn" style="font-size:14px">${this._isCommunityEdit ? '✏️ Update Community Item' : '💾 Save'}</button>
-                    ${this.currentDefId && !this._isCommunityEdit ? '<button class="btn-delete-item optimize-btn" style="font-size:14px;background:#e53935">🗑 Delete</button>' : ''}
+                    <button class="btn-save-item optimize-btn" style="font-size: max(var(--min-text, 5px), calc(14px * var(--text-scale, 1)))">${this._isCommunityEdit ? '✏️ Update Community Item' : '💾 Save'}</button>
+                    ${this.currentDefId && !this._isCommunityEdit ? '<button class="btn-delete-item optimize-btn" style="font-size: max(var(--min-text, 5px), calc(14px * var(--text-scale, 1)));background:#e53935">🗑 Delete</button>' : ''}
                 </div>
             </div>
         </div>`;
@@ -1907,11 +1905,11 @@ class GenericItemForm {
                         <div class="gi-kw-new-row">
                             <button class="gi-kw-new-emoji-btn" title="Pick emoji">🏷️</button>
                             <span class="gi-kw-new-name">${name}</span>
-                            <button class="gi-kw-new-add optimize-btn" data-value="${name}" style="width:auto;padding:2px 10px;font-size:11px">Add</button>
+                            <button class="gi-kw-new-add optimize-btn" data-value="${name}" style="width:auto;padding:2px 10px;font-size: max(var(--min-text, 5px), calc(11px * var(--text-scale, 1)))">Add</button>
                         </div>
                         <div class="gi-kw-new-emoji-picker" style="display:none">
                             <div class="gi-icon-defaults">${EMOJI_OPTIONS.map(em => `<span class="gi-kw-emoji-option" data-emoji="${em}">${em}</span>`).join('')}</div>
-                            <div style="margin-top:4px"><label style="font-size:0.7rem;color:var(--text-muted)">Color tint:</label> <input type="color" class="gi-kw-color-input" value="#ffffff" style="width:24px;height:20px;border:none;background:none;cursor:pointer"> <button class="gi-kw-color-clear" style="font-size:0.65rem;border:none;background:none;color:var(--text-muted);cursor:pointer">Clear</button></div>
+                            <div style="margin-top:4px"><label style="font-size: max(var(--min-text, 5px), calc(0.7rem * var(--text-scale, 1)));color:var(--text-muted)">Color tint:</label> <input type="color" class="gi-kw-color-input" value="#ffffff" style="width:24px;height:20px;border:none;background:none;cursor:pointer"> <button class="gi-kw-color-clear" style="font-size: max(var(--min-text, 5px), calc(0.65rem * var(--text-scale, 1)));border:none;background:none;color:var(--text-muted);cursor:pointer">Clear</button></div>
                             <emoji-picker class="gi-kw-full-picker"></emoji-picker>
                         </div>
                     </div>`;
@@ -2917,9 +2915,9 @@ class GenericItemForm {
             return `<div class="gi-dd-item gi-copy-from-item" data-value="${q}" style="background:${c};color:#fff">${q}</div>`;
         }).filter(Boolean).join('');
         const html = `<div class="gi-copy-from-row">
-            <button class="gi-copy-from-btn optimize-btn" style="width:auto;padding:4px 14px;font-size:12px">📋 Copy from…</button>
+            <button class="gi-copy-from-btn optimize-btn" style="width:auto;padding:4px 14px;font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)))">📋 Copy from…</button>
             <div class="gi-copy-from-dd gi-dd-dropdown" style="display:none">${opts}</div>
-            <button class="gi-copy-to-all-btn optimize-btn" style="width:auto;padding:4px 14px;font-size:12px">📋 Copy to all</button>
+            <button class="gi-copy-to-all-btn optimize-btn" style="width:auto;padding:4px 14px;font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)))">📋 Copy to all</button>
         </div>`;
         // Insert after quality tabs, before quality value row
         const $tabs = this.$overlay.find('.gi-quality-tabs');
@@ -2944,8 +2942,8 @@ class GenericItemForm {
                     const active = q === this.activeQualityTab;
                     return `<button class="gi-quality-tab ${active ? 'active' : ''}" data-quality="${q}" style="background:${c};color:#fff;border:2px solid ${active ? '#fff' : 'transparent'}">${q}</button>`;
                 }).join('')}${!this.petHasLevel4
-                    ? '<button class="gi-add-level4-btn optimize-btn" style="padding:4px 10px;font-size:12px;margin-left:4px">+ Lv 4</button>'
-                    : '<button class="gi-remove-level4-btn optimize-btn" style="padding:4px 10px;font-size:12px;margin-left:4px;background:#e53935">- Lv 4</button>'
+                    ? '<button class="gi-add-level4-btn optimize-btn" style="padding:4px 10px;font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)));margin-left:4px">+ Lv 4</button>'
+                    : '<button class="gi-remove-level4-btn optimize-btn" style="padding:4px 10px;font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)));margin-left:4px;background:#e53935">- Lv 4</button>'
                     }</div>`;
             } else {
                 html = `<div class="gi-quality-tabs">${qualityNames.map(q => {

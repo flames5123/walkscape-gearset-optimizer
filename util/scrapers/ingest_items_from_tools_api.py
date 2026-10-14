@@ -66,6 +66,27 @@ SHARDS = [
 def run(client: ToolsAPIClient, *, use_cache: bool = True) -> int:
     items = client.list('items', use_cache=use_cache)
     print(f'  [items              ] hydrating {len(items)} items …')
+
+    # Auto-migrate renamed items. A rename gives an item a NEW id; the OLD id's
+    # cache file lingers on disk. old_shape_emitters reads the WHOLE items cache
+    # dir (load_all_details), so a stale old-id file is re-emitted as a phantom
+    # duplicate. Purge any cache/items/<id>.json whose id is not in the freshly
+    # fetched live list. Guarded on a non-empty list so a failed/empty fetch
+    # never wipes the cache. Filenames are quote(id, safe='') (see _cache_path).
+    from urllib.parse import quote as _quote
+    live_ids = {it.get('id') for it in items if it.get('id')}
+    if live_ids:
+        live_files = {f'{_quote(iid, safe="")}.json' for iid in live_ids}
+        items_cache_dir = client.cache_dir / 'items'
+        removed = 0
+        if items_cache_dir.is_dir():
+            for f in items_cache_dir.glob('*.json'):
+                if f.name not in live_files:
+                    f.unlink()
+                    removed += 1
+        if removed:
+            print(f'  [items              ] purged {removed} stale (renamed/removed) cache file(s)')
+
     detail: Dict[str, Dict[str, Any]] = {}
     for it in items:
         iid = it.get('id')

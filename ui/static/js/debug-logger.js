@@ -154,7 +154,7 @@ class DebugLogger {
 window.debugLogger = new DebugLogger();
 
 // Add helpful message
-console.log('%c🔧 Debug Logger Available', 'color: cyan; font-weight: bold; font-size: 14px');
+console.log('%c🔧 Debug Logger Available', 'color: cyan; font-weight: bold; font-size: max(var(--min-text, 5px), calc(14px * var(--text-scale, 1)))');
 console.log('Commands:');
 console.log('  window.debugLogger.start()           - Start capturing logs');
 console.log('  window.debugLogger.stop()            - Stop capturing');

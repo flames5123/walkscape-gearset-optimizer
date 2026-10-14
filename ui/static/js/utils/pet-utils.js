@@ -11,7 +11,7 @@ export const PET_VARIANTS = ['normal', 'light', 'dark', 'rare'];
  * owned-items row shows no colour-variant dropdown. Add a species here if a
  * future pet is likewise single-colour.
  */
-export const SINGLE_VARIANT_SPECIES = new Set(['pixie']);
+export const SINGLE_VARIANT_SPECIES = new Set(['pixie', 'golden_frog']);
 
 /**
  * Colour variants available for a given pet. Single-colour species (see
@@ -66,7 +66,14 @@ export const SMELTING_RECIPE_NAMES = new Set([
  * @returns {string} Icon path
  */
 export function getPetIconPath(petName, level, variant = 'normal', maxLevel = 0) {
-    const base = petName.toLowerCase();
+    // Icon files are named by species slug (underscored), e.g.
+    // `golden_frog_adult_normal.svg`. Callers pass either the underscored
+    // species ("golden_frog") or the display name ("Golden Frog"), so
+    // normalise spaces to underscores. Single-word pets (mummy, pixie…) and
+    // already-underscored species are unaffected. Without this, two-word pet
+    // names 404 and the <img> onerror falls back to the egg icon at every
+    // stage (bug: Golden Frog / Pet Rock showed the egg for juvenile/adult).
+    const base = petName.toLowerCase().replace(/\s+/g, '_');
     const v = (variant || 'normal').toLowerCase();
     if (level === 0) return `/assets/icons/items/pet_eggs/${base}_egg.svg`;
     const isAdult = maxLevel > 0 ? level >= maxLevel : level >= 3;
@@ -160,6 +167,10 @@ export function getInstantActionsPet(skillType, ownedItems, petCatalog, userOver
                     effect: ability.effect || '',
                     cooldown: ability.cooldown || null,
                     charges: ability.charges || null,
+                    duration: ability.duration || null,
+                    duration_unit: ability.duration_unit || null,
+                    fine_recipe_outcome: ability.fine_recipe_outcome || null,
+                    requirements: ability.requirements || null,
                     requiredLevel,
                     count: ability.instant_actions_count || 5,
                     petId,
@@ -238,6 +249,10 @@ export function getAbilityStatsPet(skillType, ownedItems, petCatalog, userOverri
                     durationUnit: ability.duration_unit || null,
                     cooldown: ability.cooldown || null,
                     charges: ability.charges || null,
+                    duration: ability.duration || null,
+                    duration_unit: ability.duration_unit || null,
+                    fine_recipe_outcome: ability.fine_recipe_outcome || null,
+                    requirements: ability.requirements || null,
                     requiredLevel,
                     petId,
                     abilityStats,

@@ -445,7 +445,11 @@ class ActivityInfo:
                     # DA and DR are already factored into steps_per_reward_roll
                     # CF (find_bonus) boosts the per-roll chance
                     per_roll_chance = drop.base_roll_chance  # chance_percent / 100 (per-roll, from row_weight/table_weight)
-                    boosted_chance = per_roll_chance * (1 + find_bonus)
+                    # A per-roll drop probability cannot exceed 100%. A finding
+                    # stat (find_collectibles / chest_finding / find_gems / ...)
+                    # that boosts an already-100% roll past 1.0 saves ZERO real
+                    # steps, so cap before use (bug 3cdeede6).
+                    boosted_chance = min(per_roll_chance * (1 + find_bonus), 1.0)
                     # Formula: steps_per_item = steps_per_reward_roll / (N * boosted_chance * avg_qty)
                     denominator = drop.multi_roll_count * boosted_chance * avg_qty
                     if denominator > 0:
@@ -453,9 +457,20 @@ class ActivityInfo:
                     else:
                         steps_per_item = float("inf")
                 else:
-                    # Normal drop: steps_per_item = (1/drop_rate) * steps_per_single_action / ((1 + find_bonus) * rewards_per_completion * avg_qty)
-                    drop_rate_inverse = 1.0 / base_chance
-                    steps_per_item = drop_rate_inverse * steps_per_single_action / ((1 + find_bonus) * rewards_per_completion * avg_qty)
+                    # Normal drop. The finding-stat bonus multiplies the
+                    # per-reward-roll drop CHANCE, but a per-roll probability
+                    # cannot exceed 100%. A drop already at (or boosted past)
+                    # 100% per roll is guaranteed, so find_collectibles /
+                    # chest_finding / find_gems / find_bird_nests save ZERO
+                    # additional steps there (bug 3cdeede6: find-collectibles
+                    # gear shown as a step saving on 100%-drop collectibles
+                    # such as Essence of the swamp). Cap the boosted chance at
+                    # 1.0 before inverting.
+                    effective_chance = min(base_chance * (1 + find_bonus), 1.0)
+                    if effective_chance > 0:
+                        steps_per_item = steps_per_single_action / (effective_chance * rewards_per_completion * avg_qty)
+                    else:
+                        steps_per_item = float("inf")
                 
                 # Add bonus XP from this drop to primary XP per step
                 if drop.bonus_xp and drop.bonus_xp > 0:
@@ -699,6 +714,51 @@ class ActivityInfo:
 class Activity:
     """Enum-like class for all activities."""
 
+    CONTROLLED_BURNING = ActivityInfo(
+        name='Controlled burning',
+        primary_skill='Cooking',
+        locations=[Location.STONE_SLINGERS_CAMP],
+        skill_requirements={'Cooking': 65, 'Woodcutting': 60},
+        requirements={},
+        drop_table=[
+            DropEntry(item_name='Crystallized flame', item_ref="Material.CRYSTALLIZED_FLAME", quantity=Quantity(min_qty=1, max_qty=3), no_drop_chance=0.93, row_weight=10, table_weight=10),
+        ],
+        secondary_drop_table=[
+            DropEntry(item_name='Cooking chest', item_ref="Container.COOKING_CHEST", quantity=Quantity(min_qty=1, max_qty=1), no_drop_chance=0.996, row_weight=10, table_weight=10),
+            DropEntry(item_name='Woodcutting chest', item_ref="Container.WOODCUTTING_CHEST", quantity=Quantity(min_qty=1, max_qty=1), no_drop_chance=0.996, row_weight=10, table_weight=10),
+            DropEntry(item_name='Living flame egg', item_ref="Egg.LIVING_FLAME_EGG", quantity=Quantity(min_qty=1, max_qty=1), no_drop_chance=0.9979, row_weight=10, table_weight=10),
+        ],
+        base_steps=451,
+        base_xp=388,
+        secondary_xp={'Woodcutting': 140},
+        max_efficiency=1.7,
+    )
+
+    ADOBE_JUMPING = ActivityInfo(
+        name='Adobe jumping',
+        primary_skill='Agility',
+        locations=[Location.MYRIADIAN_ARC],
+        skill_requirements={'Agility': 65},
+        requirements={},
+        drop_table=[
+            DropEntry(item_name='Coins', item_ref="Currency.COIN", quantity=Quantity(min_qty=5, max_qty=10), no_drop_chance=0, row_weight=300, table_weight=825.8),
+            DropEntry(item_name='Coins', item_ref="Currency.COIN", quantity=Quantity(min_qty=15, max_qty=25), no_drop_chance=0, row_weight=300, table_weight=825.8),
+            DropEntry(item_name='Rough wrentmarine', item_ref="Material.ROUGH_WRENTMARINE", quantity=Quantity(min_qty=1, max_qty=1), no_drop_chance=0, row_weight=105, table_weight=825.8),
+            DropEntry(item_name='Rough topaz', item_ref="Material.ROUGH_TOPAZ", quantity=Quantity(min_qty=1, max_qty=1), no_drop_chance=0, row_weight=50, table_weight=825.8),
+            DropEntry(item_name='Rough jade', item_ref="Material.ROUGH_JADE", quantity=Quantity(min_qty=1, max_qty=1), no_drop_chance=0, row_weight=40, table_weight=825.8),
+            DropEntry(item_name='Rough ruby', item_ref="Material.ROUGH_RUBY", quantity=Quantity(min_qty=1, max_qty=1), no_drop_chance=0, row_weight=30, table_weight=825.8),
+            DropEntry(item_name='Rough sun stone', item_ref="Material.ROUGH_SUN_STONE", quantity=Quantity(min_qty=1, max_qty=1), no_drop_chance=0, row_weight=0.7, table_weight=825.8),
+            DropEntry(item_name='Rough ethernite', item_ref="Material.ROUGH_ETHERNITE", quantity=Quantity(min_qty=1, max_qty=1), no_drop_chance=0, row_weight=0.05, table_weight=825.8),
+            DropEntry(item_name='Fireball wine', item_ref="Consumable.FIREBALL_WINE", quantity=Quantity(min_qty=1, max_qty=1), no_drop_chance=0, row_weight=0.05, table_weight=825.8),
+        ],
+        secondary_drop_table=[
+            DropEntry(item_name='Agility chest', item_ref="Container.AGILITY_CHEST", quantity=Quantity(min_qty=1, max_qty=1), no_drop_chance=0.996, row_weight=10, table_weight=10),
+        ],
+        base_steps=140,
+        base_xp=126,
+        max_efficiency=1.5,
+    )
+
     ALLIGATOR_HUNTING = ActivityInfo(
         name='Alligator hunting',
         description='You go through the swamp, armed with your bow and arrows. Ready to turn gators into your newest accessories and maybe even get some cool scars out of it.',
@@ -744,6 +804,7 @@ class Activity:
             DropEntry(item_name='Trinketry chest', item_ref="Container.TRINKETRY_CHEST", quantity=Quantity(min_qty=1, max_qty=1), no_drop_chance=0.996, row_weight=10, table_weight=10),
             DropEntry(item_name='Coin pouch', item_ref="Container.COIN_POUCH", quantity=Quantity(min_qty=1, max_qty=1), no_drop_chance=0.996, row_weight=10, table_weight=10),
             DropEntry(item_name='Gem pouch', item_ref="Container.GEM_POUCH", quantity=Quantity(min_qty=1, max_qty=1), no_drop_chance=0.996, row_weight=10, table_weight=10),
+            DropEntry(item_name='Pet rock egg', item_ref="Egg.PET_ROCK_EGG", quantity=Quantity(min_qty=1, max_qty=1), no_drop_chance=0.99554, row_weight=10, table_weight=10),
         ],
         base_steps=600,
         base_xp=225,
@@ -1197,6 +1258,24 @@ class Activity:
         max_efficiency=1.5,
     )
 
+    CUT_MAHOGANY_TREES = ActivityInfo(
+        name='Cut mahogany trees',
+        primary_skill='Woodcutting',
+        locations=[Location.BLACKWATER_LAKE],
+        skill_requirements={'Woodcutting': 70},
+        requirements={'keyword_counts': {'hatchet': 1}, 'achievement_points': 0, 'reputation': {}, 'activity_completions': {}, 'item_requirements': [], 'keyword_level_requirements': [{'keyword': 'hatchet', 'skill': 'Woodcutting', 'level': 60}]},
+        drop_table=[
+            DropEntry(item_name='Mahogany logs', item_ref="Material.MAHOGANY_LOGS", quantity=Quantity(min_qty=1, max_qty=1), no_drop_chance=0, row_weight=1000, table_weight=1000),
+        ],
+        secondary_drop_table=[
+            DropEntry(item_name='Woodcutting chest', item_ref="Container.WOODCUTTING_CHEST", quantity=Quantity(min_qty=1, max_qty=1), no_drop_chance=0.996, row_weight=10, table_weight=10),
+            DropEntry(item_name='Bird nest', item_ref="Container.BIRD_NEST", quantity=Quantity(min_qty=1, max_qty=1), no_drop_chance=0.996, row_weight=10, table_weight=10),
+        ],
+        base_steps=201,
+        base_xp=155,
+        max_efficiency=2.5,
+    )
+
     CUT_MANGROVE_TREES = ActivityInfo(
         name='Cut mangrove trees',
         description='While being careful not to trip over their entangling roots, you are working hard to get some logs of these fascinatingly shaped trees.',
@@ -1231,6 +1310,7 @@ class Activity:
         secondary_drop_table=[
             DropEntry(item_name='Woodcutting chest', item_ref="Container.WOODCUTTING_CHEST", quantity=Quantity(min_qty=1, max_qty=1), no_drop_chance=0.996, row_weight=10, table_weight=10),
             DropEntry(item_name='Bird nest', item_ref="Container.BIRD_NEST", quantity=Quantity(min_qty=1, max_qty=1), no_drop_chance=0.996, row_weight=10, table_weight=10),
+            DropEntry(item_name='Termite egg', item_ref="Egg.TERMITE_EGG", quantity=Quantity(min_qty=1, max_qty=1), no_drop_chance=0.99955, row_weight=10, table_weight=10),
         ],
         base_steps=65,
         base_xp=46,
@@ -1492,7 +1572,7 @@ class Activity:
         one_time=True,
         description="You've lost your camel and will soon succumb to the desert elements. You will have to wander out from the harsh environment however possible.",
         primary_skill='Agility',
-        locations=[Location.CROWN_OF_CINDERS, Location.MYRIADIAN_ARC],
+        locations=[Location.CACTUS_CANYON, Location.CROWN_OF_CINDERS, Location.MYRIADIAN_ARC],
         skill_requirements={'Agility': 1},
         requirements={},
         drop_table=[],
@@ -1941,6 +2021,7 @@ class Activity:
             DropEntry(item_name='Carpentry chest', item_ref="Container.CARPENTRY_CHEST", quantity=Quantity(min_qty=1, max_qty=1), no_drop_chance=0.996, row_weight=10, table_weight=10),
             DropEntry(item_name='Smithing chest', item_ref="Container.SMITHING_CHEST", quantity=Quantity(min_qty=1, max_qty=1), no_drop_chance=0.996, row_weight=10, table_weight=10),
             DropEntry(item_name='Gem pouch', item_ref="Container.GEM_POUCH", quantity=Quantity(min_qty=1, max_qty=1), no_drop_chance=0.996, row_weight=10, table_weight=10),
+            DropEntry(item_name='Sawmantis egg', item_ref="Egg.SAWMANTIS_EGG", quantity=Quantity(min_qty=1, max_qty=1), no_drop_chance=0.99898, row_weight=10, table_weight=10),
         ],
         base_steps=147,
         base_xp=97,
@@ -2804,13 +2885,12 @@ class Activity:
         skill_requirements={'Fishing': 30},
         requirements={'keyword_counts': {'diving gear': 3, 'fishing spear': 1}, 'achievement_points': 0, 'reputation': {}, 'activity_completions': {}, 'item_requirements': [], 'keyword_level_requirements': []},
         drop_table=[
-            DropEntry(item_name='Nothing', item_ref=None, quantity=Quantity(is_na=True), chance_percent=10.0),
-            DropEntry(item_name='Raw salmon', item_ref="Material.RAW_SALMON", quantity=Quantity(min_qty=1, max_qty=1), no_drop_chance=0.1, row_weight=10, table_weight=32.08, initial_level=30, max_chance_level=30, final_chance=28.055),
-            DropEntry(item_name='Raw trout', item_ref="Material.RAW_TROUT", quantity=Quantity(min_qty=1, max_qty=1), no_drop_chance=0.1, row_weight=2, table_weight=32.08, initial_level=30, max_chance_level=30, final_chance=5.611),
-            DropEntry(item_name='Raw stingray', item_ref="Material.RAW_STINGRAY", quantity=Quantity(min_qty=1, max_qty=1), no_drop_chance=0.1, row_weight=10, table_weight=32.08, initial_level=45, max_chance_level=45, final_chance=28.055),
-            DropEntry(item_name='Raw swordfish', item_ref="Material.RAW_SWORDFISH", quantity=Quantity(min_qty=1, max_qty=1), no_drop_chance=0.1, row_weight=10, table_weight=32.08, initial_level=40, max_chance_level=40, final_chance=28.055),
-            DropEntry(item_name='Eye patch', item_ref="Item.EYE_PATCH", quantity=Quantity(min_qty=1, max_qty=1), no_drop_chance=0.1, row_weight=0.04, table_weight=32.08, initial_level=30, max_chance_level=30, final_chance=0.112),
-            DropEntry(item_name='Heron trinket', item_ref="Material.HERON_TRINKET", quantity=Quantity(min_qty=1, max_qty=1), no_drop_chance=0.1, row_weight=0.04, table_weight=32.08, initial_level=30, max_chance_level=30, final_chance=0.112),
+            DropEntry(item_name='Raw salmon', item_ref="Material.RAW_SALMON", quantity=Quantity(min_qty=1, max_qty=1), no_drop_chance=0.1, row_weight=10, table_weight=32.08),
+            DropEntry(item_name='Raw trout', item_ref="Material.RAW_TROUT", quantity=Quantity(min_qty=1, max_qty=1), no_drop_chance=0.1, row_weight=2, table_weight=32.08),
+            DropEntry(item_name='Raw stingray', item_ref="Material.RAW_STINGRAY", quantity=Quantity(min_qty=1, max_qty=1), no_drop_chance=0.1, row_weight=10, table_weight=32.08),
+            DropEntry(item_name='Raw swordfish', item_ref="Material.RAW_SWORDFISH", quantity=Quantity(min_qty=1, max_qty=1), no_drop_chance=0.1, row_weight=10, table_weight=32.08),
+            DropEntry(item_name='Eye patch', item_ref="Item.EYE_PATCH", quantity=Quantity(min_qty=1, max_qty=1), no_drop_chance=0.1, row_weight=0.04, table_weight=32.08),
+            DropEntry(item_name='Heron trinket', item_ref="Material.HERON_TRINKET", quantity=Quantity(min_qty=1, max_qty=1), no_drop_chance=0.1, row_weight=0.04, table_weight=32.08),
             DropEntry(item_name='Sea shell', item_ref="Material.SEA_SHELL", quantity=Quantity(min_qty=1, max_qty=1), no_drop_chance=0.9, row_weight=10, table_weight=10),
         ],
         secondary_drop_table=[
@@ -3068,6 +3148,7 @@ class Activity:
         ],
         secondary_drop_table=[
             DropEntry(item_name='Mining chest', item_ref="Container.MINING_CHEST", quantity=Quantity(min_qty=1, max_qty=1), no_drop_chance=0.996, row_weight=10, table_weight=10),
+            DropEntry(item_name='Pet rock egg', item_ref="Egg.PET_ROCK_EGG", quantity=Quantity(min_qty=1, max_qty=1), no_drop_chance=0.9994, row_weight=10, table_weight=10),
         ],
         base_steps=39,
         base_xp=8,
@@ -3090,6 +3171,7 @@ class Activity:
         ],
         secondary_drop_table=[
             DropEntry(item_name='Foraging chest', item_ref="Container.FORAGING_CHEST", quantity=Quantity(min_qty=1, max_qty=1), no_drop_chance=0.996, row_weight=10, table_weight=10),
+            DropEntry(item_name='Termite egg', item_ref="Egg.TERMITE_EGG", quantity=Quantity(min_qty=1, max_qty=1), no_drop_chance=0.9967, row_weight=10, table_weight=10),
         ],
         base_steps=400,
         base_xp=400,
@@ -3198,6 +3280,7 @@ class Activity:
         ],
         secondary_drop_table=[
             DropEntry(item_name='Foraging chest', item_ref="Container.FORAGING_CHEST", quantity=Quantity(min_qty=1, max_qty=1), no_drop_chance=0.996, row_weight=10, table_weight=10),
+            DropEntry(item_name='Sawmantis egg', item_ref="Egg.SAWMANTIS_EGG", quantity=Quantity(min_qty=1, max_qty=1), no_drop_chance=0.99875, row_weight=10, table_weight=10),
         ],
         base_steps=200,
         base_xp=200,
@@ -3281,6 +3364,30 @@ class Activity:
         base_xp=173,
         secondary_xp={'Agility': 62},
         max_efficiency=1.0,
+    )
+
+    TWOPHOINTOH_HUNT = ActivityInfo(
+        name='Twophointoh hunt',
+        primary_skill='Hunting',
+        locations=[Location.CACTUS_CANYON],
+        skill_requirements={'Hunting': 65},
+        requirements={},
+        drop_table=[
+            DropEntry(item_name='Strange fur', item_ref="Material.STRANGE_FUR", quantity=Quantity(min_qty=1, max_qty=1), no_drop_chance=0.950848, row_weight=415, table_weight=484),
+            DropEntry(item_name='Mysterious chitin', item_ref="Material.MYSTERIOUS_CHITIN", quantity=Quantity(min_qty=1, max_qty=1), no_drop_chance=0.950848, row_weight=69, table_weight=484),
+        ],
+        secondary_drop_table=[
+            DropEntry(item_name='Hunting chest', item_ref="Container.HUNTING_CHEST", quantity=Quantity(min_qty=1, max_qty=1), no_drop_chance=0.996, row_weight=10, table_weight=10),
+            DropEntry(item_name='Petrified desert flower', item_ref="Collectible.PETRIFIED_DESERT_FLOWER", quantity=Quantity(min_qty=1, max_qty=1), no_drop_chance=0.999621, row_weight=1, table_weight=1),
+            DropEntry(item_name='Fractured compass', item_ref="Collectible.FRACTURED_COMPASS", quantity=Quantity(min_qty=1, max_qty=1), no_drop_chance=0.99981, row_weight=1, table_weight=1),
+            DropEntry(item_name='Ancient stone tablet', item_ref="Collectible.ANCIENT_STONE_TABLET", quantity=Quantity(min_qty=1, max_qty=1), no_drop_chance=0.999905, row_weight=1, table_weight=1),
+            DropEntry(item_name='Sand globe', item_ref="Collectible.SAND_GLOBE", quantity=Quantity(min_qty=1, max_qty=1), no_drop_chance=0.999953, row_weight=1, table_weight=1),
+            DropEntry(item_name='Artificial sand grain', item_ref="Collectible.ARTIFICIAL_SAND_GRAIN", quantity=Quantity(min_qty=1, max_qty=1), no_drop_chance=0.999976, row_weight=1, table_weight=1),
+        ],
+        base_steps=200,
+        base_xp=44,
+        secondary_xp={'Foraging': 22, 'Mining': 22},
+        max_efficiency=1.4,
     )
 
     UNDERWATER_AQUEDUCT_CONSTRUCTION = ActivityInfo(
@@ -3575,6 +3682,7 @@ class Activity:
 
 
 ACTIVITIES_BY_NAME: Dict[str, ActivityInfo] = {
+    'Adobe jumping': Activity.ADOBE_JUMPING,
     'Alligator hunting': Activity.ALLIGATOR_HUNTING,
     'Antique market assessor': Activity.ANTIQUE_MARKET_ASSESSOR,
     'Apprentice for Loif': Activity.APPRENTICE_FOR_LOIF,
@@ -3592,11 +3700,13 @@ ACTIVITIES_BY_NAME: Dict[str, ActivityInfo] = {
     'Classic skiing': Activity.CLASSIC_SKIING,
     'Cleaning the holy fountain': Activity.CLEANING_THE_HOLY_FOUNTAIN,
     'Cliff foraging': Activity.CLIFF_FORAGING,
+    'Controlled burning': Activity.CONTROLLED_BURNING,
     'Coral cutting': Activity.CORAL_CUTTING,
     'Crab tracking': Activity.CRAB_TRACKING,
     'Cut bamboo': Activity.CUT_BAMBOO,
     'Cut birch trees': Activity.CUT_BIRCH_TREES,
     'Cut ectoplasm trees': Activity.CUT_ECTOPLASM_TREES,
+    'Cut mahogany trees': Activity.CUT_MAHOGANY_TREES,
     'Cut mangrove trees': Activity.CUT_MANGROVE_TREES,
     'Cut maple trees': Activity.CUT_MAPLE_TREES,
     'Cut oak trees': Activity.CUT_OAK_TREES,
@@ -3694,6 +3804,7 @@ ACTIVITIES_BY_NAME: Dict[str, ActivityInfo] = {
     'Tinkering': Activity.TINKERING,
     'Treasure hunt': Activity.TREASURE_HUNT,
     'Trellin dumpster diving': Activity.TRELLIN_DUMPSTER_DIVING,
+    'Twophointoh hunt': Activity.TWOPHOINTOH_HUNT,
     'Underwater aqueduct construction': Activity.UNDERWATER_AQUEDUCT_CONSTRUCTION,
     'Underwater aqueduct digging': Activity.UNDERWATER_AQUEDUCT_DIGGING,
     'Underwater basket weaving': Activity.UNDERWATER_BASKET_WEAVING,

@@ -22,6 +22,11 @@ STATS = {
         'type': 'chestFind',
         'icon': 'assets/icons/text/stats/skilling/chest_find.png'
     },
+    'counts_as_service': {
+        'id': 'counts_as_service',
+        'name': 'Counts as service',
+        'type': 'countsAsService'
+    },
     'double_action': {
         'id': 'double_action',
         'name': 'Double action',
@@ -52,17 +57,38 @@ STATS = {
         'type': 'findGems',
         'icon': 'assets/icons/text/stats/skilling/find_gems.png'
     },
+    'fine_find': {
+        'id': 'fine_find',
+        'name': 'Fine find',
+        'type': 'dropAsFine'
+    },
     'fine_material_finding': {
         'id': 'fine_material_finding',
         'name': 'Fine material finding',
         'type': 'fineMaterialFind',
         'icon': 'assets/icons/text/stats/skilling/fine_material_find.png'
     },
+    'fine_recipe_outcome': {
+        'id': 'fine_recipe_outcome',
+        'name': 'Fine recipe outcome',
+        'type': 'fineMaterialOutcome',
+        'icon': 'assets/icons/text/stats/skilling/fine_material_outcome.png'
+    },
     'inventory_space': {
         'id': 'inventory_space',
         'name': 'Inventory space',
         'type': 'inventorySpace',
         'icon': 'assets/icons/text/stats/skilling/inventory_space.png'
+    },
+    'item_doubling': {
+        'id': 'item_doubling',
+        'name': 'Item doubling',
+        'type': 'doubleItem'
+    },
+    'item_swap': {
+        'id': 'item_swap',
+        'name': 'Item swap',
+        'type': 'swapItem'
     },
     'no_materials_consumed': {
         'id': 'no_materials_consumed',

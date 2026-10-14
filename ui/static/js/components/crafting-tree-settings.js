@@ -8,6 +8,7 @@
 import Component from './base.js';
 import store from '../state.js';
 import { wireInfoIcons } from '../info-popover.js';
+import { CONSUMABLE_OPTIONS_INFO_ICON_HTML } from '../utils/consumable-options-info.js';
 
 const BUFFER_INFO = 'Crafts/gathers a percentage of extra items above your target as a safety margin against bad RNG. A 5% buffer plans for 5% over the target quantity, so unlucky quality rolls or drop variance are less likely to leave you short.';
 
@@ -63,7 +64,34 @@ class GlobalSettingsPanel extends Component {
         const buffer = ((settings.buffer_percentage ?? 0.05) * 100).toFixed(0);
         const spoiler = settings.spoiler_protection !== false;
         const useFine = settings.use_fine || false;
+        const useFineInputs = settings.use_fine_inputs || false;
         const skipShops = settings.skip_shops !== false;  // default true
+        // "Use banked materials" (use_owned_quantities): subtract items the
+        // character already owns from every non-root node's needed quantity.
+        // Default ON.
+        const useOwned = settings.use_owned_quantities !== false;
+        // "Skip Chests (auto)": when on, the auto route resolver won't farm
+        // chest drops for raw materials (chest farming is almost never the
+        // fastest source, and the multi-chest fan-out was a past timeout
+        // source). Defaults ON, mirroring skip_shops. If an item is ONLY
+        // reachable via chests/shops it still falls back to one (shop
+        // preferred) and the node gets a ⚠️ source_warning.
+        const skipChests = settings.skip_chests !== false;  // default true
+        // "Use fast chests (greedy; not optimal)": only meaningful when chests
+        // ARE being optimized (skip_chests off). Runs chest-source nodes with
+        // the fast greedy pass (max 1 swap) instead of the deep search.
+        const fastChests = !!settings.fast_chests;
+        // "Exact optimizer (beta)": route the whole tree through the bottom-up
+        // EXACT solver (per-node B&B + exact Best(auto) route re-resolution)
+        // instead of the heuristic per-node + route-trial pass. Default OFF —
+        // this is the A/B flag for the prototype. Fixes the Eternal+fine+pets
+        // route-trial timeout (report 938d048e). FAC-gated: only rendered for
+        // sessions holding the 'crafting_tree_exact' feature. The server also
+        // strips exact_tree from non-FAC requests (defense in depth).
+        // Enabled for ALL users as of 2026-08-14 (FAC gate removed) to collect
+        // bug reports before removing the checkbox; the server also honors
+        // exact_tree for every session (has_feature('crafting_tree_exact')=True).
+        const exactTree = !!settings.exact_tree;
         // Optimize-pets / optimize-consumables: when on, the per-node
         // optimizer is allowed to consider pets / consumables in its
         // gearset score. When off (default for both), those slots are
@@ -142,8 +170,28 @@ class GlobalSettingsPanel extends Component {
                         Fine Materials
                     </label>
                     <label class="crafting-tree-settings-label crafting-tree-toggle">
+                        <input type="checkbox" class="ct-use-fine-inputs" ${useFineInputs ? 'checked' : ''}>
+                        Use fine inputs
+                        <span class="travel-info-icon" data-info="When on, hunting activity nodes feed fine inputs (e.g. fine arrows), granting the in-game hunting bonus (+40% work efficiency, +10% double rewards, +100% bonus XP, +200% fine material finding). Off by default — leave off to never use fine inputs. Only affects Hunting activities that consume a keyword input; other skills are unchanged." role="button" tabindex="0" aria-label="About using fine inputs" style="font-style:normal;">ⓘ</span>
+                    </label>
+                    <label class="crafting-tree-settings-label crafting-tree-toggle">
                         <input type="checkbox" class="ct-skip-shops" ${skipShops ? 'checked' : ''}>
                         Skip Shops (auto)
+                    </label>
+                    <label class="crafting-tree-settings-label crafting-tree-toggle">
+                        <input type="checkbox" class="ct-use-owned" ${useOwned ? 'checked' : ''}>
+                        Use Banked Materials
+                        <span class="travel-info-icon" data-info="Subtracts materials and crafts you already own from every step below the final item, so the tree only plans the shortfall. Example: if a step needs 25 Fine stone and you have 20, it shows 5 needed and only counts steps for 5. The final (top) item is never reduced — set its quantity above. Owned counts come from your imported bank + inventory + gear, summed across qualities and matching the fine variant when Fine Materials is on." role="button" tabindex="0" aria-label="About using banked materials" style="font-style:normal;">ⓘ</span>
+                    </label>
+                    <label class="crafting-tree-settings-label crafting-tree-toggle">
+                        <input type="checkbox" class="ct-skip-chests" ${skipChests ? 'checked' : ''}>
+                        Skip Chests (auto)
+                        <span class="travel-info-icon" data-info="When on, the auto optimizer won't farm chest drops for raw materials in the tree — chest farming is almost never the fastest source. If an item is ONLY available from chests (or shops), it falls back to that source and flags a ⚠️ on the node; shops are preferred over chests when both are being skipped." role="button" tabindex="0" aria-label="About Skip Chests" style="font-style:normal;">ⓘ</span>
+                    </label>
+                    <label class="crafting-tree-settings-label crafting-tree-toggle ct-fast-chests-wrap" style="${skipChests ? 'display:none;' : ''}">
+                        <input type="checkbox" class="ct-fast-chests" ${fastChests ? 'checked' : ''}>
+                        Use fast chests (greedy; not optimal)
+                        <span class="travel-info-icon" data-info="Only shown when Skip Chests is off. Optimizes chest-source nodes with a fast greedy pass (max 1 gear swap) instead of the full deep search. Much faster on trees with many chest routes, but the chest gearset may not be optimal." role="button" tabindex="0" aria-label="About fast chests" style="font-style:normal;">ⓘ</span>
                     </label>
                     <label class="crafting-tree-settings-label crafting-tree-toggle">
                         <input type="checkbox" class="ct-optimize-pets" ${optimizePets ? 'checked' : ''}>
@@ -151,7 +199,12 @@ class GlobalSettingsPanel extends Component {
                     </label>
                     <label class="crafting-tree-settings-label crafting-tree-toggle">
                         <input type="checkbox" class="ct-optimize-consumables" ${optimizeConsumables ? 'checked' : ''}>
-                        Optimize Consumables
+                        Optimize Consumables${CONSUMABLE_OPTIONS_INFO_ICON_HTML}
+                    </label>
+                    <label class="crafting-tree-settings-label crafting-tree-toggle">
+                        <input type="checkbox" class="ct-exact-tree" ${exactTree ? 'checked' : ''}>
+                        Exact optimizer (beta)
+                        <span class="travel-info-icon" data-info="Solves each tree node's gear exactly with a bottom-up branch-and-bound solver (and re-resolves Best(auto) routes by exact cost) instead of the heuristic per-node + route-trial pass. Much faster on heavy trees (Eternal + fine + pets/consumables) that otherwise time out, and it accounts for downstream material cost. BETA — newly enabled for everyone: if you see wrong gear, or results worse than the default optimizer, please file a bug with the 'Report a Bug' button so we can fix it before this becomes the default." role="button" tabindex="0" aria-label="About the exact optimizer" style="font-style:normal;">ⓘ</span>
                     </label>
                     ${runLocalCheckboxHtml}
                     <button class="button button-primary crafting-tree-calc-btn" style="width:100%">Calculate &amp; Optimize All</button>
@@ -209,8 +262,25 @@ class GlobalSettingsPanel extends Component {
         // Palette row click — handled in settings-modal.js
         // Custom color input change — handled in settings-modal.js
 
-        this.$element.on('change input', '.ct-qty, .ct-daily, .ct-buffer, .ct-spoiler, .ct-fine, .ct-skip-shops, .ct-optimize-pets, .ct-optimize-consumables', function () {
+        this.$element.on('change input', '.ct-qty, .ct-daily, .ct-buffer, .ct-spoiler, .ct-fine, .ct-skip-shops, .ct-use-owned, .ct-skip-chests, .ct-fast-chests, .ct-optimize-pets, .ct-optimize-consumables, .ct-exact-tree', function () {
             self._emitChange();
+        });
+
+        // Show the "Use fast chests" toggle only when chests are being
+        // optimized (Skip Chests off). _emitChange doesn't re-render this
+        // component, so toggle visibility directly instead of re-rendering.
+        this.$element.on('change', '.ct-skip-chests', function () {
+            const skipping = $(this).is(':checked');
+            const $wrap = self.$element.find('.ct-fast-chests-wrap');
+            if (skipping) {
+                $wrap.hide();
+                // Clear the fast-chests flag when hidden so a stale checked
+                // state can't linger in the emitted settings.
+                $wrap.find('.ct-fast-chests').prop('checked', false);
+                self._emitChange();
+            } else {
+                $wrap.show();
+            }
         });
 
         // "Run optimization locally" mirrors the GLOBAL setting
@@ -242,9 +312,16 @@ class GlobalSettingsPanel extends Component {
             buffer_percentage: (parseInt(this.$element.find('.ct-buffer').val()) || 0) / 100,
             spoiler_protection: this.$element.find('.ct-spoiler').is(':checked'),
             use_fine: this.$element.find('.ct-fine').is(':checked'),
+            use_fine_inputs: this.$element.find('.ct-use-fine-inputs').is(':checked'),
             skip_shops: this.$element.find('.ct-skip-shops').is(':checked'),
+            use_owned_quantities: this.$element.find('.ct-use-owned').is(':checked'),
+            skip_chests: this.$element.find('.ct-skip-chests').is(':checked'),
+            // Only meaningful when skip_chests is off; the visibility toggle
+            // clears the checkbox when Skip Chests is on so this stays false.
+            fast_chests: this.$element.find('.ct-fast-chests').is(':checked'),
             optimize_pets: this.$element.find('.ct-optimize-pets').is(':checked'),
             optimize_consumables: this.$element.find('.ct-optimize-consumables').is(':checked'),
+            exact_tree: this.$element.find('.ct-exact-tree').is(':checked'),
             line_colors: existingSettings.line_colors || DEFAULT_PALETTE,
             custom_colors: existingSettings.custom_colors || LINE_COLOR_PALETTES['Custom'],
         };

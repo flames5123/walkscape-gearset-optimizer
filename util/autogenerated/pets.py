@@ -120,8 +120,8 @@ class Pet:
         }
     )
 
-    CAMEL._levels[1]._stats = {'gathering': {'desert': {'work_efficiency': -30.0}}, 'artisan': {'desert': {'work_efficiency': -20.0}}, 'global': {'desert': {'steps_add': 2.0}, 'global': {'inventory_space': 1}}}
-    CAMEL._levels[2]._stats = {'gathering': {'desert': {'work_efficiency': -15.0}}, 'artisan': {'desert': {'work_efficiency': -10.0}}, 'global': {'desert': {'steps_add': 1.0}, 'global': {'inventory_space': 2}}}
+    CAMEL._levels[1]._stats = {'gathering': {'desert': {'work_efficiency': -30.0}}, 'artisan': {'desert': {'work_efficiency': -20.0}}, 'global': {'desert': {'steps_add': 2.0}, 'global': {'inventory_space': 1.0}}}
+    CAMEL._levels[2]._stats = {'gathering': {'desert': {'work_efficiency': -15.0}}, 'artisan': {'desert': {'work_efficiency': -10.0}}, 'global': {'desert': {'steps_add': 1.0}, 'global': {'inventory_space': 2.0}}}
     CAMEL._levels[3]._stats = {'gathering': {'desert': {'work_efficiency': 5.0}}, 'artisan': {'desert': {'work_efficiency': 2.0}}, 'global': {'desert': {'steps_add': -1.0}, 'global': {'inventory_space': 3.0}}}
 
     CHICKEN = PetLevels(
@@ -285,6 +285,66 @@ class Pet:
     GECKO._levels[3]._stats = {'mining': {'global': {'work_efficiency': 3.0, 'fine_material_finding': 6.0, 'bonus_xp_percent': 3.0}}}
     GECKO._levels[4]._stats = {'mining': {'global': {'work_efficiency': 7.0, 'fine_material_finding': 13.0, 'bonus_xp_percent': 7.0, 'find_gems': 15.0, 'double_rewards': 3.0}}}
 
+    GOLDEN_FROG = PetLevels(
+        name='Golden Frog',
+        egg_name='Golden frog egg',
+        rare_name='Silver Frog',
+        rare_export_name='silver_frog',
+        species='golden_frog',
+        levels={
+            1: PetInfo(
+                name='Golden Frog',
+                level=1,
+                egg_name='Golden frog egg',
+                xp_required=35000,
+                requirement_to_gain_xp='While your total wealth is at least 100,000 coins.',
+            ),
+            2: PetInfo(
+                name='Golden Frog',
+                level=2,
+                egg_name='Golden frog egg',
+                xp_required=85000,
+                requirement_to_gain_xp='While your total wealth is at least 100,000 coins.',
+            ),
+            3: PetInfo(
+                name='Golden Frog',
+                level=3,
+                egg_name='Golden frog egg',
+                xp_required=150000,
+                requirement_to_gain_xp='While your total wealth is at least 100,000 coins.',
+            ),
+            4: PetInfo(
+                name='Golden Frog',
+                level=4,
+                egg_name='Golden frog egg',
+                xp_required=250000,
+                requirement_to_gain_xp='While your total wealth is at least 100,000 coins.',
+                abilities=[
+                    {
+                        'name': 'Lucky Day',
+                        'effect': 'Gives you a buff towards your <skillType type="artisan"/> Quality outcome.',
+                        'icon': 'golden_frog_ability',
+                        'cooldown': 'This ability is charged by spending coins. One full charge requires 10. 1 gained from 100 coins',
+                        'charges': 20,
+                        'duration': 20,
+                        'ability_stats': {'artisan': {'global': {'quality_outcome': 20.0}}},
+                    },
+                ],
+            ),
+        }
+    )
+
+    # Golden Frog's stats each apply above a per-stat total-wealth threshold
+    # (WE >=100k, chest finding >=250k, bonus XP >=500k, step reduction >=1M) —
+    # the API attaches a totalWealth requirement to every stat attribute.
+    # Modelled as a total_wealth gate (assumed always active at scoring time,
+    # like keyword_in_inventory) so each stat renders its "N Total Wealth"
+    # requirement note. _stats stays empty; the gate supplies the values.
+    GOLDEN_FROG._levels[1].gated_stats = {'total_wealth': {'100000': {'artisan': {'global': {'work_efficiency': 1.0}}}}}
+    GOLDEN_FROG._levels[2].gated_stats = {'total_wealth': {'100000': {'artisan': {'global': {'work_efficiency': 2.0}}}, '250000': {'artisan': {'global': {'chest_finding': 2.0}}}}}
+    GOLDEN_FROG._levels[3].gated_stats = {'total_wealth': {'100000': {'artisan': {'global': {'work_efficiency': 3.0}}}, '250000': {'artisan': {'global': {'chest_finding': 3.0}}}, '500000': {'artisan': {'global': {'bonus_xp_percent': 3.0}}}}}
+    GOLDEN_FROG._levels[4].gated_stats = {'total_wealth': {'100000': {'artisan': {'global': {'work_efficiency': 5.0}}}, '250000': {'artisan': {'global': {'chest_finding': 5.0}}}, '500000': {'artisan': {'global': {'bonus_xp_percent': 5.0}}}, '1000000': {'artisan': {'global': {'steps_add': -2.0}}}}}
+
     MUMMY = PetLevels(
         name='Mummy',
         egg_name='Mummy egg',
@@ -323,7 +383,7 @@ class Pet:
                     {
                         'name': "That's A Wrap",
                         'icon': 'mummy_ability',
-                        'effect': 'Your Mummy occasionally takes some of its excess linens that have been sprawling off of its body and hands you them as a gift. Chance to get some linens. +7% Find linens',
+                        'effect': "Your Mummy occasionally takes some of its excess linens that have been sprawling off of its body and hands you them as a gift. +7% Find linens",
                         'passive': True,
                     },
                 ],
@@ -334,7 +394,102 @@ class Pet:
     MUMMY._levels[1]._stats = {'tailoring': {'global': {'chest_finding': 2.0, 'work_efficiency': 2.0}}}
     MUMMY._levels[2]._stats = {'tailoring': {'global': {'chest_finding': 4.0, 'work_efficiency': 5.0}}}
     MUMMY._levels[3]._stats = {'tailoring': {'global': {'chest_finding': 5.0, 'work_efficiency': 8.0, 'bonus_xp_percent': 2.0}}}
-    MUMMY._levels[4]._stats = {'tailoring': {'global': {'chest_finding': 7.0, 'work_efficiency': 12.0, 'bonus_xp_percent': 4.0}}, 'global': {'global': {'find_collectibles': 5.0, 'find_linens': 7.0}}}
+    MUMMY._levels[4]._stats = {'tailoring': {'global': {'chest_finding': 7.0, 'work_efficiency': 12.0, 'bonus_xp_percent': 6.0, 'steps_add': -3.0}}, 'global': {'global': {'find_collectibles': 5.0, 'find_linens': 7.0}}}
+
+    PET_ROCK = PetLevels(
+        name='Pet Rock',
+        egg_name='Pet rock egg',
+        rare_name='Pet Rock Rock Pet',
+        rare_export_name='pet_rock_rock_pet',
+        species='pet_rock',
+        levels={
+            1: PetInfo(
+                name='Pet Rock',
+                level=1,
+                egg_name='Pet rock egg',
+                xp_required=35000,
+                requirement_to_gain_xp='While doing Trinketry.',
+            ),
+            2: PetInfo(
+                name='Pet Rock',
+                level=2,
+                egg_name='Pet rock egg',
+                xp_required=85000,
+                requirement_to_gain_xp='While doing Trinketry.',
+            ),
+            3: PetInfo(
+                name='Pet Rock',
+                level=3,
+                egg_name='Pet rock egg',
+                xp_required=150000,
+                requirement_to_gain_xp='While doing Trinketry.',
+            ),
+            4: PetInfo(
+                name='Pet Rock',
+                level=4,
+                egg_name='Pet rock egg',
+                xp_required=250000,
+                requirement_to_gain_xp='While doing Trinketry.',
+                abilities=[
+                    {
+                        'name': 'Rockslide',
+                        'effect': 'Gives you some buffs toward Trinketry.',
+                        'icon': 'pet_rock_ability',
+                        'cooldown': 'This ability is charged by using items. One full charge requires 10. 1 gained from Stone 10 gained from Large stone',
+                        'charges': 10,
+                        'duration': 20,
+                        'ability_stats': {'trinketry': {'global': {'work_efficiency': 10.0, 'double_action': 3.0, 'ItemFindingCategory.RANDOM_GEM': 5.0}}},
+                    },
+                ],
+            ),
+        }
+    )
+
+    PET_ROCK._levels[1]._stats = {'trinketry': {'global': {'work_efficiency': 1.0}}, 'global': {'global': {'inventory_space': -2.0}}}
+    PET_ROCK._levels[2]._stats = {'trinketry': {'global': {'work_efficiency': 3.0, 'bonus_xp_percent': 2.0}}, 'global': {'global': {'inventory_space': -1.0}}}
+    PET_ROCK._levels[3]._stats = {'trinketry': {'global': {'work_efficiency': 5.0, 'bonus_xp_percent': 3.0, 'chest_finding': 2.0}}}
+    PET_ROCK._levels[4]._stats = {'trinketry': {'global': {'work_efficiency': 10.0, 'bonus_xp_percent': 6.0, 'chest_finding': 7.0}}, 'global': {'global': {'double_action': 2.0}}}
+
+    PIXIE = PetLevels(
+        name='Pixie',
+        egg_name='Pixie egg',
+        rare_name='Party Pixie',
+        rare_export_name='party_pixie',
+        species='pixie',
+        levels={
+            1: PetInfo(
+                name='Pixie',
+                level=1,
+                egg_name='Pixie egg',
+                xp_required=50000,
+            ),
+            2: PetInfo(
+                name='Pixie',
+                level=2,
+                egg_name='Pixie egg',
+                xp_required=150000,
+            ),
+            3: PetInfo(
+                name='Pixie',
+                level=3,
+                egg_name='Pixie egg',
+                xp_required=300000,
+                abilities=[
+                    {
+                        'name': 'Party Mode',
+                        'effect': 'Gives a buff to Find collectibles.',
+                        'icon': 'party_mode',
+                        'charges': 100,
+                        'ability_stats': {'global': {'global': {'find_collectibles': 20.0}}},
+                    },
+                ],
+            ),
+        }
+    )
+
+    PIXIE._levels[1]._stats = {'global': {'global': {'find_collectibles': 5.0}}}
+    PIXIE._levels[2]._stats = {'global': {'global': {'work_efficiency': 1.0, 'chest_finding': 1.0, 'find_collectibles': 10.0}}}
+    PIXIE._levels[3]._stats = {'global': {'global': {'work_efficiency': 3.0, 'chest_finding': 3.0, 'find_collectibles': 20.0}}}
 
     REINDEER = PetLevels(
         name='Reindeer',
@@ -418,11 +573,10 @@ class Pet:
                     {
                         'name': 'The Hunt Is On',
                         'icon': 'tiger_ability',
-                        'effect': 'Gives you some buffs toward Hunting.Effect lasts for: 20 actions +6% Work efficiency While doing Hunting. +3% Double action While doing Hunting. -2 Steps required While doing Hunting.',
+                        'effect': 'Gives you some buffs toward Hunting.Effect lasts for: 20 +6% Work efficiency While doing Hunting. +3% Double action While doing Hunting. -2 Steps required While doing Hunting.',
                         'cooldown': 'This ability is charged by using items. One full charge requires 10. 1 gained from Raw carp 1 gained from Raw pike 2 gained from Animal meat',
                         'charges': 10,
                         'duration': 20,
-                        'duration_unit': 'actions',
                         'ability_stats': {'hunting': {'global': {'work_efficiency': 6.0, 'double_action': 3.0, 'steps_add': -2.0}}},
                     },
                 ],
@@ -493,82 +647,170 @@ class Pet:
 
 
 
-    PIXIE = PetLevels(
-        name='Pixie',
-        egg_name='Pixie egg',
-        species='pixie',
+    SAWMANTIS = PetLevels(
+        name='Sawmantis',
+        egg_name='Sawmantis egg',
+        rare_name='Psycho Sawmantis',
+        rare_export_name='psycho_sawmantis',
+        species='sawmantis',
         levels={
             1: PetInfo(
-                name='Pixie',
+                name='Sawmantis',
                 level=1,
-                egg_name='Pixie egg',
-                xp_required=50000,
-                requirement_to_gain_xp='',
+                egg_name='Sawmantis egg',
+                xp_required=35000,
+                requirement_to_gain_xp='While doing Carpentry.',
             ),
             2: PetInfo(
-                name='Pixie',
+                name='Sawmantis',
                 level=2,
-                egg_name='Pixie egg',
-                xp_required=100000,
-                requirement_to_gain_xp='',
+                egg_name='Sawmantis egg',
+                xp_required=85000,
+                requirement_to_gain_xp='While doing Carpentry.',
             ),
             3: PetInfo(
-                name='Pixie',
+                name='Sawmantis',
                 level=3,
-                egg_name='Pixie egg',
+                egg_name='Sawmantis egg',
                 xp_required=150000,
-                requirement_to_gain_xp='',
+                requirement_to_gain_xp='While doing Carpentry.',
+            ),
+            4: PetInfo(
+                name='Sawmantis',
+                level=4,
+                egg_name='Sawmantis egg',
+                xp_required=250000,
+                requirement_to_gain_xp='While doing Carpentry.',
                 abilities=[
                     {
-                        'name': 'Party Mode',
-                        'icon': 'party_mode',
-                        'effect': 'Gives a buff to Find collectibles.Effect lasts for: 1000 steps +20% Find collectibles',
-                        'cooldown': 'This ability is charged by using items. One full charge requires 3. 3 gained from Wine 1 gained from Beer',
-                        'passive': False,
-                        'charges': 100,
-                        'duration': 1000,
-                        'duration_unit': 'steps',
-                        'ability_stats': {'global': {'global': {'find_collectibles': 20.0}}},
+                        'name': 'Reciprocating Saw',
+                        'effect': 'Gives a large buff toward your Carpentry Double action.',
+                        'icon': 'mantis_karate_chop',
+                        'charges': 25,
+                        'ability_stats': {'carpentry': {'global': {'double_action': 50.0}}},
+                        'cooldown': '3,000 steps',
                     },
                 ],
             ),
         }
     )
 
-    PIXIE._levels[1]._stats = {
-        'global': {
-            'global': {
-                'find_collectibles': 5.0,
-            },
-        },
-    }
-    PIXIE._levels[2]._stats = {
-        'global': {
-            'global': {
-                'work_efficiency': 1.0,
-                'chest_finding': 1.0,
-                'find_collectibles': 10.0,
-            },
-        },
-    }
-    PIXIE._levels[3]._stats = {
-        'global': {
-            'global': {
-                'work_efficiency': 3.0,
-                'chest_finding': 3.0,
-                'find_collectibles': 20.0,
-            },
-        },
-    }
+    TERMITE = PetLevels(
+        name='Termite',
+        egg_name='Termite egg',
+        rare_name='Terminal mite',
+        rare_export_name='terminal_mite',
+        species='termite',
+        levels={
+            1: PetInfo(
+                name='Termite',
+                level=1,
+                egg_name='Termite egg',
+                xp_required=35000,
+                requirement_to_gain_xp='While doing Woodcutting.',
+            ),
+            2: PetInfo(
+                name='Termite',
+                level=2,
+                egg_name='Termite egg',
+                xp_required=85000,
+                requirement_to_gain_xp='While doing Woodcutting.',
+            ),
+            3: PetInfo(
+                name='Termite',
+                level=3,
+                egg_name='Termite egg',
+                xp_required=150000,
+                requirement_to_gain_xp='While doing Woodcutting.',
+            ),
+            4: PetInfo(
+                name='Termite',
+                level=4,
+                egg_name='Termite egg',
+                xp_required=250000,
+                requirement_to_gain_xp='While doing Woodcutting.',
+                abilities=[
+                    {
+                        'name': 'Terminate',
+                        'effect': 'Chance to turn a log you find into Carpentry experience.',
+                        'icon': 'terminate',
+                        'passive': True,
+                        'item_swap': {'chance': 15.0, 'skill': 'woodcutting', 'from_keywords': ['logs'], 'to_skill': 'carpentry', 'xp_effort_modifier': 0.5, 'scopes': ['activityLoot']},
+                    },
+                ],
+            ),
+        }
+    )
+
+    SAWMANTIS._levels[1]._stats = {'carpentry': {'global': {'work_efficiency': 3.0, 'bonus_xp_percent': 1.0}}}
+    SAWMANTIS._levels[2]._stats = {'carpentry': {'global': {'work_efficiency': 5.0, 'bonus_xp_percent': 3.0}}}
+    SAWMANTIS._levels[3]._stats = {'carpentry': {'global': {'work_efficiency': 7.0, 'bonus_xp_percent': 5.0, 'chest_finding': 4.0}}}
+    SAWMANTIS._levels[4]._stats = {'carpentry': {'global': {'work_efficiency': 10.0, 'bonus_xp_percent': 8.0, 'chest_finding': 7.0, 'steps_add': -2.0}}}
+    TERMITE._levels[1]._stats = {'woodcutting': {'global': {'work_efficiency': 3.0}}, 'carpentry': {'global': {'work_efficiency': -15.0}}}
+    TERMITE._levels[2]._stats = {'woodcutting': {'global': {'work_efficiency': 5.0, 'bonus_xp_percent': 1.0, 'fine_material_finding': 5.0}}, 'carpentry': {'global': {'work_efficiency': -10.0}}}
+    TERMITE._levels[3]._stats = {'woodcutting': {'global': {'work_efficiency': 7.0, 'bonus_xp_percent': 3.0, 'fine_material_finding': 8.0}}, 'carpentry': {'global': {'work_efficiency': -5.0}}}
+    TERMITE._levels[4]._stats = {'woodcutting': {'global': {'work_efficiency': 10.0, 'bonus_xp_percent': 4.0, 'fine_material_finding': 10.0, 'chest_finding': 7.0}}}
+
+    LIVING_FLAME = PetLevels(
+        name='Living Flame',
+        egg_name='Living flame egg',
+        species='living_flame',
+        levels={
+            1: PetInfo(
+                name='Living Flame',
+                level=1,
+                egg_name='Living flame egg',
+                xp_required=35000,
+                requirement_to_gain_xp='While doing Cooking.',
+            ),
+            2: PetInfo(
+                name='Living Flame',
+                level=2,
+                egg_name='Living flame egg',
+                xp_required=85000,
+                requirement_to_gain_xp='While doing Cooking.',
+            ),
+            3: PetInfo(
+                name='Living Flame',
+                level=3,
+                egg_name='Living flame egg',
+                xp_required=150000,
+                requirement_to_gain_xp='While doing Cooking.',
+            ),
+            4: PetInfo(
+                name='Living Flame',
+                level=4,
+                egg_name='Living flame egg',
+                xp_required=250000,
+                requirement_to_gain_xp='While doing Cooking.',
+                abilities=[
+                    {
+                        'name': 'Flambé',
+                        'effect': 'Completes 3 Cooking recipe actions instantly with a small chance to give fine results.',
+                        'requirements': 'While doing a Cooking recipe. Not in an Underwater location.',
+                        'cooldown': '2,500 steps',
+                        'charges': 15,
+                        'duration': 3,
+                        'duration_unit': 'actions',
+                        'instant_actions': True,
+                        'instant_actions_skill': 'cooking',
+                        'instant_actions_count': 3,
+                        'not_underwater': True,
+                        'fine_recipe_outcome': 3.0,
+                        'icon': 'living_flame_ability',
+                    },
+                ],
+            ),
+        }
+    )
+
+    LIVING_FLAME._levels[1]._stats = {'cooking': {'global': {'work_efficiency': 2.0, 'chest_finding': 2.0}}}
+    LIVING_FLAME._levels[2]._stats = {'cooking': {'global': {'work_efficiency': 4.0, 'chest_finding': 5.0, 'bonus_xp_percent': 1.0}}}
+    LIVING_FLAME._levels[3]._stats = {'cooking': {'global': {'work_efficiency': 6.0, 'chest_finding': 7.0, 'bonus_xp_percent': 3.0, 'inventory_space': 1.0}}}
+    LIVING_FLAME._levels[4]._stats = {'cooking': {'global': {'work_efficiency': 9.0, 'chest_finding': 9.0, 'bonus_xp_percent': 5.0, 'bonus_xp_add': 3.0, 'inventory_space': 3.0}}}
 
 class Egg:
     """Enum-like class for all eggs."""
-
-    PIXIE_EGG = EggInfo(
-        name='Pixie egg',
-        pet_name='Pixie',
-        xp_to_hatch=50000,
-    )
 
     CAMEL_EGG = EggInfo(
         name='Camel egg',
@@ -594,10 +836,28 @@ class Egg:
         xp_to_hatch=35000,
     )
 
+    GOLDEN_FROG_EGG = EggInfo(
+        name='Golden frog egg',
+        pet_name='Golden Frog',
+        xp_to_hatch=35000,
+    )
+
     MUMMY_EGG = EggInfo(
         name='Mummy egg',
         pet_name='Mummy',
         xp_to_hatch=35000,
+    )
+
+    PET_ROCK_EGG = EggInfo(
+        name='Pet rock egg',
+        pet_name='Pet Rock',
+        xp_to_hatch=35000,
+    )
+
+    PIXIE_EGG = EggInfo(
+        name='Pixie egg',
+        pet_name='Pixie',
+        xp_to_hatch=50000,
     )
 
     REINDEER_EGG = EggInfo(
@@ -620,26 +880,54 @@ class Egg:
 
 
 # Lookup dictionaries
+    SAWMANTIS_EGG = EggInfo(
+        name='Sawmantis egg',
+        pet_name='Sawmantis',
+        xp_to_hatch=35000,
+    )
+
+    TERMITE_EGG = EggInfo(
+        name='Termite egg',
+        pet_name='Termite',
+        xp_to_hatch=35000,
+    )
+
+    LIVING_FLAME_EGG = EggInfo(
+        name='Living flame egg',
+        pet_name='Living Flame',
+        xp_to_hatch=35000,
+    )
+
 PETS_BY_NAME = {
-    'Pixie': Pet.PIXIE,
     'Camel': Pet.CAMEL,
     'Chicken': Pet.CHICKEN,
     'Dolphin': Pet.DOLPHIN,
     'Gecko': Pet.GECKO,
+    'Golden Frog': Pet.GOLDEN_FROG,
     'Mummy': Pet.MUMMY,
+    'Pet Rock': Pet.PET_ROCK,
+    'Pixie': Pet.PIXIE,
     'Reindeer': Pet.REINDEER,
     'Tiger': Pet.TIGER,
     'Tortoise': Pet.TORTOISE,
+    'Sawmantis': Pet.SAWMANTIS,
+    'Termite': Pet.TERMITE,
+    'Living Flame': Pet.LIVING_FLAME,
 }
 
 # Lookup by rare export name (e.g. "precious_tortoise" -> Pet.TORTOISE)
 PETS_BY_RARE_EXPORT_NAME = {
+    'party_pixie': Pet.PIXIE,
+    'silver_frog': Pet.GOLDEN_FROG,
     'two_hump_camel': Pet.CAMEL,
     'lovestruck_chicken': Pet.CHICKEN,
     'trick_dolphin': Pet.DOLPHIN,
     'garnet_gecko': Pet.GECKO,
     'silky_mummy': Pet.MUMMY,
+    'pet_rock_rock_pet': Pet.PET_ROCK,
     'festive_reindeer': Pet.REINDEER,
+    'psycho_sawmantis': Pet.SAWMANTIS,
+    'terminal_mite': Pet.TERMITE,
     'regal_tiger': Pet.TIGER,
     'precious_tortoise': Pet.TORTOISE,
 }
@@ -650,15 +938,20 @@ for pet_levels in PETS_BY_NAME.values():
     ALL_PET_LEVELS.extend(pet_levels.get_all_levels().values())
 
 EGGS_BY_NAME = {
-    'Pixie egg': Egg.PIXIE_EGG,
     'Camel egg': Egg.CAMEL_EGG,
     'Chicken egg': Egg.CHICKEN_EGG,
     'Dolphin egg': Egg.DOLPHIN_EGG,
     'Gecko egg': Egg.GECKO_EGG,
+    'Golden frog egg': Egg.GOLDEN_FROG_EGG,
     'Mummy egg': Egg.MUMMY_EGG,
+    'Pet rock egg': Egg.PET_ROCK_EGG,
+    'Pixie egg': Egg.PIXIE_EGG,
     'Reindeer egg': Egg.REINDEER_EGG,
     'Tiger egg': Egg.TIGER_EGG,
     'Tortoise egg': Egg.TORTOISE_EGG,
+    'Sawmantis egg': Egg.SAWMANTIS_EGG,
+    'Termite egg': Egg.TERMITE_EGG,
+    'Living flame egg': Egg.LIVING_FLAME_EGG,
 }
 
 
@@ -732,22 +1025,45 @@ def get_ability_stats_pet(skill_type: str) -> Optional[dict]:
     if not skill_type:
         return None
     skill = skill_type.lower()
-    for pet_name, pet_levels in PETS_BY_NAME.items():
-        for level, pet_info in pet_levels.get_all_levels().items():
-            if not pet_info.abilities:
-                continue
-            for ability in pet_info.abilities:
-                ability_stats = ability.get("ability_stats")
-                if ability_stats and skill in ability_stats:
-                    return {
-                        "pet_name": pet_levels.name,
-                        "species": pet_levels.species,
-                        "ability_name": ability.get("name"),
-                        "effect": ability.get("effect"),
-                        "duration": ability.get("duration"),
-                        "cooldown": ability.get("cooldown"),
-                        "charges": ability.get("charges"),
-                        "required_level": level,
-                        "ability_stats": ability_stats,
-                    }
-    return None
+
+    # NOTE: manually maintained helper (not emitted by ingest_pets_from_api.py,
+    # which patches this file in place and leaves the tail functions untouched).
+    def _build(pet_levels, level, ability, ability_stats):
+        return {
+            "pet_name": pet_levels.name,
+            "species": pet_levels.species,
+            "ability_name": ability.get("name"),
+            "effect": ability.get("effect"),
+            "duration": ability.get("duration"),
+            "cooldown": ability.get("cooldown"),
+            "charges": ability.get("charges"),
+            "required_level": level,
+            "ability_stats": ability_stats,
+        }
+
+    def _scan(predicate):
+        for pet_name, pet_levels in PETS_BY_NAME.items():
+            for level, pet_info in pet_levels.get_all_levels().items():
+                if not pet_info.abilities:
+                    continue
+                for ability in pet_info.abilities:
+                    ability_stats = ability.get("ability_stats")
+                    if ability_stats and predicate(ability_stats):
+                        return _build(pet_levels, level, ability, ability_stats)
+        return None
+
+    # Pass 1 — exact skill-name key. Preserves the prior behavior (and prefers a
+    # skill-specific pet, e.g. Tiger's Hunting ability, over a broad category
+    # match) so this change can only ADD matches, never redirect existing ones.
+    exact = _scan(lambda a: skill in a)
+    if exact is not None:
+        return exact
+
+    # Pass 2 — skill CATEGORY key. Pets whose ability is keyed by category
+    # ('artisan' / 'gathering' / 'utility') rather than a concrete skill were
+    # never matched before: e.g. the Golden Frog's "Lucky Day" ability is keyed
+    # 'artisan', so it went unresolved for crafting / cooking / smithing / etc.
+    # 'global' keys are intentionally excluded (a global ability isn't
+    # skill-specific and must not be force-equipped for every skill).
+    from util.pet_lookup import ability_stats_apply_to_skill
+    return _scan(lambda a: ability_stats_apply_to_skill(a, skill))

@@ -33,7 +33,33 @@ from typing import Optional, Set
 # stamped in stats_report_precompute_meta and forces a full rebuild on mismatch,
 # so deployed DBs (testing + prod) self-heal on the next startup. v2: category-
 # scoped stats (artisan/gathering/utility) are now included per-skill.
-PRECOMPUTE_LOGIC_VERSION = 2
+#
+# 2026-08-04 (jwbail [fix:stale-detection]) v3: forces one clean full rebuild on
+# every deployed DB to re-heal applicability that got wedged by the old
+# item_ids-membership staleness gate (new items were committed to item_ids
+# before build_applicability ran, so precompute_is_stale falsely reported
+# "fresh" and applicability was stranded at the pre-new-items count). The
+# freshness signal is now a catalog-signature completion stamp written only
+# after applicability finishes (see _catalog_signature / precompute_is_stale).
+PRECOMPUTE_LOGIC_VERSION = 6
+# 2026-08-11 (jwbail [fix:stale-detection]) v4: gated EQUIPMENT (explore_realm /
+# item_ownership / total_collectibles) is now included in applicability +
+# runtime-eval so stale detection tracks it. Bumped to force one clean rebuild
+# so the new applicability bitmaps + items_requiring_runtime_eval regenerate.
+# v5: precompute location matching is now REGION-AWARE (mirrors the optimizer's
+# stats_mixin._location_matches) — a stat keyed at a region (e.g. 'jarvonia')
+# applies to every activity whose location is in that region. Fixes fully-
+# region-scoped items like the Quickdraw map showing 0 applicable scopes.
+#
+# 2026-09-28 (jwbail [fix:termite-effort]) v6: forces one clean full rebuild on
+# every deployed DB after the 2026-09-28 game patch (new pets Termite/Sawmantis,
+# new eggs, new activities/drop tables/locations). The tools-API rescrape path
+# (ingest_all_from_tools_api.py) historically did not call refresh_after_scrape,
+# so the deployed item_ids/applicability/dominators tables were stale and the
+# goals report's "fastest new items" never surfaced the new eggs. The ingest
+# path now refreshes precompute for local dev DBs; this version bump is the
+# deployed-DB counterpart — precompute_is_stale flips on the mismatch and the
+# startup self-heal rebuilds with the new catalog on the next testing/prod boot.
 
 
 def _read_precompute_logic_version(db) -> int:
@@ -66,49 +92,95 @@ def _write_precompute_logic_version(db) -> None:
         pass
 
 
+def _catalog_signature() -> str:
+    """Stable hash of the full catalog's (slug, quality) membership.
+
+    This is the input to the freshness gate: it changes iff the set of items
+    the catalog defines changes (item added, removed, or a quality tier
+    added/dropped). It is INDEPENDENT of the persisted item_ids table on
+    purpose — the whole point of the 2026-08-04 fix is that the freshness
+    signal must NOT be derivable from item_ids alone (which build_item_ids
+    mutates as its very first phase, before dominators/applicability exist).
+    Never raises — returns "" on any error so the caller fails safe (stale).
+    """
+    import hashlib
+    try:
+        from .build_item_ids import _enumerate_catalog_items
+        pairs = sorted(f"{s}\x1f{q}" for s, q in _enumerate_catalog_items())
+    except Exception:
+        return ""
+    h = hashlib.sha256("\x1e".join(pairs).encode("utf-8")).hexdigest()
+    return h[:32]
+
+
+def _read_precompute_signature(db) -> Optional[str]:
+    try:
+        db.execute(
+            "CREATE TABLE IF NOT EXISTS stats_report_precompute_meta "
+            "(key TEXT PRIMARY KEY, value TEXT)"
+        )
+        row = db.execute(
+            "SELECT value FROM stats_report_precompute_meta WHERE key='catalog_signature'"
+        ).fetchone()
+        return row[0] if row and row[0] is not None else None
+    except Exception:
+        return None
+
+
+def _write_precompute_signature(db, signature: str) -> None:
+    """Write the completion stamp. Called ONLY at the successful end of a
+    (re)build — after applicability is populated — so an interrupted rebuild
+    never marks the catalog fresh."""
+    try:
+        db.execute(
+            "CREATE TABLE IF NOT EXISTS stats_report_precompute_meta "
+            "(key TEXT PRIMARY KEY, value TEXT)"
+        )
+        db.execute(
+            "INSERT OR REPLACE INTO stats_report_precompute_meta (key, value) "
+            "VALUES ('catalog_signature', ?)",
+            (signature,),
+        )
+        db.commit()
+    except Exception:
+        pass
+
+
 def precompute_is_stale(db) -> bool:
     """Return True when the precompute needs a (re)build.
 
-    Catalog-growth detection: compares the set of (slug, quality) pairs the
-    catalog currently defines (build_item_ids._enumerate_catalog_items) against
-    the pairs already indexed in item_ids. Stale iff the catalog has ANY pair
-    not yet in item_ids — i.e. the catalog grew (or an item changed quality
-    tiers / was renamed). This also covers the empty-DB case (every catalog
-    pair is missing).
+    Freshness is gated on a COMPLETION STAMP, not on item_ids membership. The
+    stamp (`catalog_signature` in stats_report_precompute_meta) is written only
+    at the successful end of precompute_all / precompute_changed — after
+    build_applicability has populated. `precompute_is_stale` returns True iff:
 
-    Uses a subset check (catalog - stored), NOT exact equality, on purpose:
-    item_ids is append-only (ids are never renumbered/deleted), so a REMOVED
-    catalog item lingers harmlessly in item_ids. Equality would then flag stale
-    on every startup forever (precompute_all never deletes the orphan row);
-    the subset check ignores lingering removals and only triggers on growth.
+      * the stored logic_version != PRECOMPUTE_LOGIC_VERSION (code logic
+        changed — force a rebuild), OR
+      * the stored catalog_signature is missing or != the current catalog's
+        signature (catalog changed, or no completed build has ever stamped).
 
-    Note: this does NOT detect pure stat changes on an existing (slug, quality)
-    — those don't alter the item_ids membership, only the dominators. Stat
-    changes ship via a re-scrape (refresh_after_scrape -> precompute_all) or an
-    OPTIMIZATION_VERSIONS bump (version_bump stale reason), which remain the
-    source of truth for stat-level freshness.
+    Why this instead of the old `catalog - item_ids` subset check: build_item_ids
+    appends new (slug, quality) rows to item_ids as the FIRST phase of a
+    rebuild. The old gate read item_ids, so as soon as those rows were committed
+    the gate flipped to "fresh" — even if build_dominators / build_applicability
+    never ran (crash, container SIGKILL, exception swallowed by the startup
+    try/except). That stranded new items in item_ids but out of applicability
+    permanently (1605 indexed, 1535 applicable). Keying freshness off a stamp
+    written only after applicability completes makes that wedge impossible: a
+    partial rebuild leaves the signal "stale" and the next startup retries.
 
-    Never raises — returns True (rebuild) on any error so we fail safe.
+    The signature captures additions AND removals; a removed item flips stale
+    once, the completed rebuild restamps for the reduced catalog, and it settles
+    (no perpetual stale). Never raises — returns True (rebuild) on any error so
+    we fail safe.
     """
-    # Logic-version mismatch forces a rebuild even when the catalog is
-    # unchanged (e.g. _effective_stats_in_scope started including category-
-    # scoped stats — the stored dominators are now wrong until rebuilt).
     if _read_precompute_logic_version(db) != PRECOMPUTE_LOGIC_VERSION:
         return True
-    try:
-        from .build_item_ids import _enumerate_catalog_items
-        catalog = set(_enumerate_catalog_items())
-    except Exception:
-        return True
-    if not catalog:
-        return False  # nothing to index (defensive; shouldn't happen)
-    try:
-        cur = db.cursor()
-        cur.execute("SELECT import_name, quality FROM item_ids")
-        stored = {(r[0], r[1]) for r in cur.fetchall()}
-    except Exception:
-        return True
-    return bool(catalog - stored)
+    current = _catalog_signature()
+    if not current:
+        return True  # couldn't compute catalog — fail safe to rebuild
+    stored = _read_precompute_signature(db)
+    return stored != current
 
 
 def precompute_all(db, migration_id: Optional[str] = None) -> dict:
@@ -151,6 +223,9 @@ def precompute_all(db, migration_id: Optional[str] = None) -> dict:
 
     print(f"[stats_report precompute] Full rebuild done ({t4 - t0:.2f}s total)")
     _write_precompute_logic_version(db)
+    # Completion stamp LAST — only a fully-built precompute (item_ids +
+    # dominators + applicability) marks the catalog fresh. See precompute_is_stale.
+    _write_precompute_signature(db, _catalog_signature())
     return {
         "item_ids_inserted": n_ids,
         "runtime_eval_rows": n_eval,
@@ -205,6 +280,10 @@ def precompute_changed(
         f"[stats_report precompute] Incremental done ({t1 - t0:.2f}s): "
         f"+{n_ids} ids, {n_eval} eval, {n_dom} dom, {n_act}+{n_rec} app"
     )
+    # Restamp on completion: build_applicability rebuilds every applicability
+    # row (the incremental flag only gates the empty-row insert, not coverage),
+    # so a completed incremental refresh has fully re-indexed the new items.
+    _write_precompute_signature(db, _catalog_signature())
     return {
         "item_ids_inserted": n_ids,
         "runtime_eval_rows": n_eval,

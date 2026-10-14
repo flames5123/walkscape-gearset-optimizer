@@ -585,13 +585,13 @@ class GenericActivityForm extends Component {
 
             // Show View button if not already present
             if (!this.$element.find('.btn-view-generic').length) {
-                const viewBtn = `<div class="ga-row ga-view-btn-row" style="margin-bottom:var(--spacing-xs)"><button class="btn-view-generic optimize-btn" style="font-size:14px;background:#2196F3;width:100%">View Activity Info</button></div>`;
+                const viewBtn = `<div class="ga-row ga-view-btn-row" style="margin-bottom:var(--spacing-xs)"><button class="btn-view-generic optimize-btn" style="font-size: max(var(--min-text, 5px), calc(14px * var(--text-scale, 1)));background:#2196F3;width:100%">View Activity Info</button></div>`;
                 this.$element.find('.ga-saved-selector').after(viewBtn);
             }
 
             // Show Delete button if not already present
             if (!this.$element.find('.btn-delete-generic').length) {
-                this.$element.find('.ga-actions').append('<button class="btn-delete-generic optimize-btn" style="font-size:14px;background:#e53935">🗑 Delete</button>');
+                this.$element.find('.ga-actions').append('<button class="btn-delete-generic optimize-btn" style="font-size: max(var(--min-text, 5px), calc(14px * var(--text-scale, 1)));background:#e53935">🗑 Delete</button>');
             }
 
             // Scroll up to show the info section
@@ -801,7 +801,7 @@ class GenericActivityForm extends Component {
             // XP ambiguous — show candidate buttons + calibrate
             if (xp && xp.ambiguous && xp.candidates && xp.candidates.length > 1) {
                 const xpBtns = xp.candidates.map(c =>
-                    `<button class="btn-pick-xp-candidate optimize-btn" data-xp="${c}" style="width:auto;padding:6px 14px;font-size:13px;margin:2px">${c}</button>`
+                    `<button class="btn-pick-xp-candidate optimize-btn" data-xp="${c}" style="width:auto;padding:6px 14px;font-size: max(var(--min-text, 5px), calc(13px * var(--text-scale, 1)));margin:2px">${c}</button>`
                 ).join('');
                 html += `</div>`;
                 html += `
@@ -810,7 +810,7 @@ class GenericActivityForm extends Component {
                             <div class="reverse-result-detail">${xp.candidates.length} possible values (${Math.round(xp.bonus_xp_pct * 100)}% bonus XP from collectibles & service) — pick if you know, or calibrate:</div>
                             <div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:var(--spacing-xs)">${xpBtns}</div>
                             <div style="margin-top:var(--spacing-sm)">
-                                <button class="btn-calibrate-xp optimize-btn" style="width:auto;padding:8px 16px;font-size:13px;background:#e67e22">🔍 Calibrate with gear</button>
+                                <button class="btn-calibrate-xp optimize-btn" style="width:auto;padding:8px 16px;font-size: max(var(--min-text, 5px), calc(13px * var(--text-scale, 1)));background:#e67e22">🔍 Calibrate with gear</button>
                             </div>
                             <div class="ga-xp-calibration-area"></div>
                         </div>
@@ -822,7 +822,7 @@ class GenericActivityForm extends Component {
             if (r.computed_xp != null) {
                 html += `<br/>✓ Base XP resolved: <strong>${r.computed_xp}</strong>`;
                 if (xp && xp.bonus_xp_pct > 0) {
-                    html += ` <span style="color:var(--text-secondary);font-size:12px">(adjusted for ${Math.round(xp.bonus_xp_pct * 100)}% bonus XP from collectibles & service)</span>`;
+                    html += ` <span style="color:var(--text-secondary);font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)))">(adjusted for ${Math.round(xp.bonus_xp_pct * 100)}% bonus XP from collectibles & service)</span>`;
                 }
             }
             html += `</div>`;
@@ -830,13 +830,13 @@ class GenericActivityForm extends Component {
         }
         if (r.ambiguous) {
             const candidateBtns = r.candidates.slice(0, 10).map(c =>
-                `<button class="btn-pick-candidate optimize-btn" data-steps="${c}" style="width:auto;padding:6px 14px;font-size:13px;margin:2px">${c}</button>`
+                `<button class="btn-pick-candidate optimize-btn" data-steps="${c}" style="width:auto;padding:6px 14px;font-size: max(var(--min-text, 5px), calc(13px * var(--text-scale, 1)));margin:2px">${c}</button>`
             ).join('');
 
             // Also show XP ambiguity note if applicable
             let xpNote = '';
             if (xp && xp.ambiguous && xp.candidates && xp.candidates.length > 1) {
-                xpNote = `<div style="margin-top:var(--spacing-xs);color:var(--text-secondary);font-size:12px">ℹ Base XP is also ambiguous (${xp.candidates.length} candidates) — will resolve after you pick steps.</div>`;
+                xpNote = `<div style="margin-top:var(--spacing-xs);color:var(--text-secondary);font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)))">ℹ Base XP is also ambiguous (${xp.candidates.length} candidates) — will resolve after you pick steps.</div>`;
             }
 
             return `
@@ -846,7 +846,7 @@ class GenericActivityForm extends Component {
                         <div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:var(--spacing-xs)">${candidateBtns}</div>
                         ${xpNote}
                         <div style="margin-top:var(--spacing-sm)">
-                            <button class="btn-calibrate optimize-btn" style="width:auto;padding:8px 16px;font-size:13px;background:#e67e22">🔍 Calibrate with gear</button>
+                            <button class="btn-calibrate optimize-btn" style="width:auto;padding:8px 16px;font-size: max(var(--min-text, 5px), calc(13px * var(--text-scale, 1)));background:#e67e22">🔍 Calibrate with gear</button>
                         </div>
                         <div class="ga-calibration-area"></div>
                     </div>
@@ -866,29 +866,29 @@ class GenericActivityForm extends Component {
                 // For custom keywords, show their emoji; for known keywords, show SVG icon
                 const isCustomKw = r.keyword && this.customKeywordsFromDB.some(ck => ck.name.toLowerCase() === r.keyword.toLowerCase());
                 const customKwData = isCustomKw ? this.customKeywordsFromDB.find(ck => ck.name.toLowerCase() === r.keyword.toLowerCase()) : null;
-                const kwIconHtml = r.keyword ? (customKwData ? `<span style="font-size:14px;margin-right:2px;${window.emojiTintStyle(customKwData.icon_color)}">${window.emojiForPlatform(customKwData.icon || '🏷️')}</span>` : kwIcon(r.keyword)) : '';
+                const kwIconHtml = r.keyword ? (customKwData ? `<span style="font-size: max(var(--min-text, 5px), calc(14px * var(--text-scale, 1)));margin-right:2px;${window.emojiTintStyle(customKwData.icon_color)}">${window.emojiForPlatform(customKwData.icon || '🏷️')}</span>` : kwIcon(r.keyword)) : '';
                 let kwItems = KNOWN_KEYWORDS.map(kw =>
                     `<div class="ga-req-dd-item ga-req-kw-item" data-value="${kw.value}" data-row="${i}">${kwIcon(kw.value)}<span>${kw.value}</span></div>`
                 ).join('');
                 // Add custom keywords section
                 const customKws = (this.customKeywordsFromDB || []).filter(ck => !KNOWN_KEYWORDS.some(k => k.value.toLowerCase() === ck.name.toLowerCase()));
                 if (customKws.length > 0) {
-                    kwItems += `<div style="font-size:0.7rem;color:var(--text-muted);padding:6px 8px 2px;border-top:1px solid var(--border-color);margin-top:4px">Custom Keywords</div>`;
+                    kwItems += `<div style="font-size: max(var(--min-text, 5px), calc(0.7rem * var(--text-scale, 1)));color:var(--text-muted);padding:6px 8px 2px;border-top:1px solid var(--border-color);margin-top:4px">Custom Keywords</div>`;
                     kwItems += customKws.map(ck => {
                         const colorStyle = ck.icon_color ? `${window.emojiTintStyle(ck.icon_color)}` : '';
-                        return `<div class="ga-req-dd-item ga-req-kw-item" data-value="${ck.name}" data-row="${i}"><span style="font-size:14px;margin-right:4px;${colorStyle}">${ck.icon || '🏷️'}</span><span>${ck.name}</span></div>`;
+                        return `<div class="ga-req-dd-item ga-req-kw-item" data-value="${ck.name}" data-row="${i}"><span style="font-size: max(var(--min-text, 5px), calc(14px * var(--text-scale, 1)));margin-right:4px;${colorStyle}">${ck.icon || '🏷️'}</span><span>${ck.name}</span></div>`;
                     }).join('');
                 }
                 fields = `
                         <div class="ga-req-kw-cell" style="position:relative;flex:1">
                             <div class="ga-req-dd-btn ga-req-kw-btn" data-row="${i}">${kwIconHtml}<span class="ga-req-dd-val">${kwDisplay}</span><span class="expand-arrow">▼</span></div>
                             <div class="ga-req-dd-dropdown ga-req-kw-dd" style="display:none">
-                                <input type="text" class="ga-req-kw-search" placeholder="Search keywords..." style="width:calc(100% - 12px);margin:4px 6px;padding:4px 8px;font-size:12px;background:var(--bg-tertiary);border:1px solid var(--border-color);border-radius:4px;color:var(--text-primary)" />
+                                <input type="text" class="ga-req-kw-search" placeholder="Search keywords..." style="width:calc(100% - 12px);margin:4px 6px;padding:4px 8px;font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)));background:var(--bg-tertiary);border:1px solid var(--border-color);border-radius:4px;color:var(--text-primary)" />
                                 <div class="ga-req-kw-list">${kwItems}</div>
                                 <div style="border-top:1px solid var(--border-color);margin-top:4px;padding:4px 6px;display:flex;gap:4px;align-items:center">
-                                    <button class="ga-req-kw-emoji-btn" data-row="${i}" style="background:none;border:1px solid var(--border-color);border-radius:4px;padding:2px 6px;font-size:14px;cursor:pointer;flex-shrink:0" title="Pick emoji">${r.emoji || '🏷️'}</button>
-                                    <input type="text" class="ga-req-kw-custom-input" placeholder="Custom keyword..." style="flex:1;min-width:0;padding:4px 6px;font-size:12px;background:var(--bg-tertiary);border:1px solid var(--border-color);border-radius:4px;color:var(--text-primary)" data-row="${i}" />
-                                    <button class="ga-req-kw-custom-add optimize-btn" data-row="${i}" style="width:auto;padding:3px 8px;font-size:11px;flex-shrink:0">Add</button>
+                                    <button class="ga-req-kw-emoji-btn" data-row="${i}" style="background:none;border:1px solid var(--border-color);border-radius:4px;padding:2px 6px;font-size: max(var(--min-text, 5px), calc(14px * var(--text-scale, 1)));cursor:pointer;flex-shrink:0" title="Pick emoji">${r.emoji || '🏷️'}</button>
+                                    <input type="text" class="ga-req-kw-custom-input" placeholder="Custom keyword..." style="flex:1;min-width:0;padding:4px 6px;font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)));background:var(--bg-tertiary);border:1px solid var(--border-color);border-radius:4px;color:var(--text-primary)" data-row="${i}" />
+                                    <button class="ga-req-kw-custom-add optimize-btn" data-row="${i}" style="width:auto;padding:3px 8px;font-size: max(var(--min-text, 5px), calc(11px * var(--text-scale, 1)));flex-shrink:0">Add</button>
                                 </div>
                             </div>
                         </div>
@@ -926,41 +926,41 @@ class GenericActivityForm extends Component {
                 const kwDisplay = r.keyword || 'Select keyword...';
                 const isCustomKw2 = r.keyword && this.customKeywordsFromDB.some(ck => ck.name.toLowerCase() === r.keyword.toLowerCase());
                 const customKwData2 = isCustomKw2 ? this.customKeywordsFromDB.find(ck => ck.name.toLowerCase() === r.keyword.toLowerCase()) : null;
-                const kwIconHtml = r.keyword ? (customKwData2 ? `<span style="font-size:14px;margin-right:2px;${window.emojiTintStyle(customKwData2.icon_color)}">${window.emojiForPlatform(customKwData2.icon || '🏷️')}</span>` : kwIcon(r.keyword)) : '';
+                const kwIconHtml = r.keyword ? (customKwData2 ? `<span style="font-size: max(var(--min-text, 5px), calc(14px * var(--text-scale, 1)));margin-right:2px;${window.emojiTintStyle(customKwData2.icon_color)}">${window.emojiForPlatform(customKwData2.icon || '🏷️')}</span>` : kwIcon(r.keyword)) : '';
                 let kwItems = KNOWN_KEYWORDS.map(kw =>
                     `<div class="ga-req-dd-item ga-req-kw-item" data-value="${kw.value}" data-row="${i}">${kwIcon(kw.value)} ${kw.value}</div>`
                 ).join('');
                 const customKws2 = (this.customKeywordsFromDB || []).filter(ck => !KNOWN_KEYWORDS.some(k => k.value.toLowerCase() === ck.name.toLowerCase()));
                 if (customKws2.length > 0) {
-                    kwItems += `<div style="font-size:0.7rem;color:var(--text-muted);padding:6px 8px 2px;border-top:1px solid var(--border-color);margin-top:4px">Custom Keywords</div>`;
+                    kwItems += `<div style="font-size: max(var(--min-text, 5px), calc(0.7rem * var(--text-scale, 1)));color:var(--text-muted);padding:6px 8px 2px;border-top:1px solid var(--border-color);margin-top:4px">Custom Keywords</div>`;
                     kwItems += customKws2.map(ck => {
                         const colorStyle = ck.icon_color ? `${window.emojiTintStyle(ck.icon_color)}` : '';
-                        return `<div class="ga-req-dd-item ga-req-kw-item" data-value="${ck.name}" data-row="${i}"><span style="font-size:14px;margin-right:4px;${colorStyle}">${ck.icon || '🏷️'}</span><span>${ck.name}</span></div>`;
+                        return `<div class="ga-req-dd-item ga-req-kw-item" data-value="${ck.name}" data-row="${i}"><span style="font-size: max(var(--min-text, 5px), calc(14px * var(--text-scale, 1)));margin-right:4px;${colorStyle}">${ck.icon || '🏷️'}</span><span>${ck.name}</span></div>`;
                     }).join('');
                 }
                 fields = `
                         <div class="ga-req-kw-cell" style="position:relative;flex:1">
                             <div class="ga-req-dd-btn ga-req-kw-btn" data-row="${i}"><span class="ga-req-dd-val">${kwIconHtml} ${kwDisplay}</span><span class="expand-arrow">▼</span></div>
                             <div class="ga-req-dd-dropdown ga-req-kw-dd" style="display:none">
-                                <input type="text" class="ga-req-kw-search" placeholder="Search..." style="width:100%;box-sizing:border-box;padding:4px 6px;font-size:12px;background:var(--bg-tertiary);border:1px solid var(--border-color);border-radius:4px;color:var(--text-primary);margin-bottom:4px" />
+                                <input type="text" class="ga-req-kw-search" placeholder="Search..." style="width:100%;box-sizing:border-box;padding:4px 6px;font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)));background:var(--bg-tertiary);border:1px solid var(--border-color);border-radius:4px;color:var(--text-primary);margin-bottom:4px" />
                                 <div class="ga-req-kw-list">${kwItems}</div>
                                 <div style="border-top:1px solid var(--border-color);margin-top:4px;padding:4px 6px;display:flex;gap:4px;align-items:center">
-                                    <button class="ga-req-kw-emoji-btn" data-row="${i}" style="background:none;border:1px solid var(--border-color);border-radius:4px;padding:2px 6px;font-size:14px;cursor:pointer;flex-shrink:0" title="Pick emoji">${r.emoji || '🏷️'}</button>
-                                    <input type="text" class="ga-req-kw-custom-input" placeholder="Custom keyword..." style="flex:1;min-width:0;padding:4px 6px;font-size:12px;background:var(--bg-tertiary);border:1px solid var(--border-color);border-radius:4px;color:var(--text-primary)" data-row="${i}" />
-                                    <button class="ga-req-kw-custom-add optimize-btn" data-row="${i}" style="width:auto;padding:3px 8px;font-size:11px;flex-shrink:0">Add</button>
+                                    <button class="ga-req-kw-emoji-btn" data-row="${i}" style="background:none;border:1px solid var(--border-color);border-radius:4px;padding:2px 6px;font-size: max(var(--min-text, 5px), calc(14px * var(--text-scale, 1)));cursor:pointer;flex-shrink:0" title="Pick emoji">${r.emoji || '🏷️'}</button>
+                                    <input type="text" class="ga-req-kw-custom-input" placeholder="Custom keyword..." style="flex:1;min-width:0;padding:4px 6px;font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)));background:var(--bg-tertiary);border:1px solid var(--border-color);border-radius:4px;color:var(--text-primary)" data-row="${i}" />
+                                    <button class="ga-req-kw-custom-add optimize-btn" data-row="${i}" style="width:auto;padding:3px 8px;font-size: max(var(--min-text, 5px), calc(11px * var(--text-scale, 1)));flex-shrink:0">Add</button>
                                 </div>
                             </div>
                         </div>
                         <span>×</span><input type="number" class="ga-req-count" value="${r.count || 1}" min="1" max="10" style="width:48px" />
-                        <span style="font-size:11px;color:var(--text-secondary)">Lv</span><input type="number" class="ga-req-input-level" value="${r.input_level || 0}" min="0" max="99" style="width:48px" title="Minimum item level required (0 = any)" />
-                        <label style="display:flex;align-items:center;gap:2px;font-size:11px;color:var(--text-secondary);white-space:nowrap" title="Optional input — not required"><input type="checkbox" class="ga-req-optional" ${r.optional ? 'checked' : ''} /> Opt</label>
+                        <span style="font-size: max(var(--min-text, 5px), calc(11px * var(--text-scale, 1)));color:var(--text-secondary)">Lv</span><input type="number" class="ga-req-input-level" value="${r.input_level || 0}" min="0" max="99" style="width:48px" title="Minimum item level required (0 = any)" />
+                        <label style="display:flex;align-items:center;gap:2px;font-size: max(var(--min-text, 5px), calc(11px * var(--text-scale, 1)));color:var(--text-secondary);white-space:nowrap" title="Optional input — not required"><input type="checkbox" class="ga-req-optional" ${r.optional ? 'checked' : ''} /> Opt</label>
                     `;
             } else if (r.type === 'input_item') {
                 const itemDisplay = r.item_name || 'Enter item name...';
                 fields = `
-                        <input type="text" class="ga-req-input-item-name" value="${r.item_name || ''}" placeholder="Item name (e.g. Ectoplasm)" style="flex:1;padding:4px 6px;font-size:12px;background:var(--bg-tertiary);border:1px solid var(--border-color);border-radius:4px;color:var(--text-primary)" data-row="${i}" />
+                        <input type="text" class="ga-req-input-item-name" value="${r.item_name || ''}" placeholder="Item name (e.g. Ectoplasm)" style="flex:1;padding:4px 6px;font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)));background:var(--bg-tertiary);border:1px solid var(--border-color);border-radius:4px;color:var(--text-primary)" data-row="${i}" />
                         <span>×</span><input type="number" class="ga-req-count" value="${r.count || 1}" min="1" max="99" style="width:48px" />
-                        <label style="display:flex;align-items:center;gap:2px;font-size:11px;color:var(--text-secondary);white-space:nowrap" title="Optional input — not required"><input type="checkbox" class="ga-req-optional" ${r.optional ? 'checked' : ''} /> Opt</label>
+                        <label style="display:flex;align-items:center;gap:2px;font-size: max(var(--min-text, 5px), calc(11px * var(--text-scale, 1)));color:var(--text-secondary);white-space:nowrap" title="Optional input — not required"><input type="checkbox" class="ga-req-optional" ${r.optional ? 'checked' : ''} /> Opt</label>
                     `;
             }
 
@@ -1170,7 +1170,7 @@ class GenericActivityForm extends Component {
                     <div class="ga-req-dd-dropdown ga-sec-xp-skill-dd" style="display:none">${skillItems}</div>
                 </div>
                 <input type="number" class="ga-sec-xp-value" value="${r.xp || ''}" min="0" step="0.1" inputmode="decimal" placeholder="XP" style="width:70px" />
-                <button class="ga-sec-xp-remove" data-row="${i}" style="background:none;border:none;color:var(--text-secondary);cursor:pointer;font-size:16px" title="Remove">✕</button>
+                <button class="ga-sec-xp-remove" data-row="${i}" style="background:none;border:none;color:var(--text-secondary);cursor:pointer;font-size: max(var(--min-text, 5px), calc(16px * var(--text-scale, 1)))" title="Remove">✕</button>
             </div>`;
         }).join('');
     }
@@ -1208,7 +1208,7 @@ class GenericActivityForm extends Component {
                         </label>
                     </div>
 
-                    ${this.currentDefId ? `<div class="ga-row" style="margin-bottom:var(--spacing-xs)"><button class="btn-view-generic optimize-btn" style="font-size:14px;background:#2196F3;width:100%">View Activity Info</button></div>` : ''}
+                    ${this.currentDefId ? `<div class="ga-row" style="margin-bottom:var(--spacing-xs)"><button class="btn-view-generic optimize-btn" style="font-size: max(var(--min-text, 5px), calc(14px * var(--text-scale, 1)));background:#2196F3;width:100%">View Activity Info</button></div>` : ''}
 
                     <div class="ga-row ga-name-row">
                         <div class="ga-icon-picker">
@@ -1218,9 +1218,9 @@ class GenericActivityForm extends Component {
                                     ${EMOJI_OPTIONS.map(e => `<span class="ga-emoji-option ${e === this.selectedIcon ? 'selected' : ''}" data-emoji="${e}">${e}</span>`).join('')}
                                 </div>
                                 <div style="display:flex;align-items:center;gap:6px;padding:4px 8px">
-                                    <label style="font-size:12px;color:var(--text-secondary)">Tint:</label>
+                                    <label style="font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)));color:var(--text-secondary)">Tint:</label>
                                     <input type="color" class="ga-icon-color" value="${this.selectedIconColor || '#ffffff'}" style="width:32px;height:24px;border:none;cursor:pointer" />
-                                    <button class="ga-color-clear" style="background:none;border:1px solid var(--border-color);border-radius:4px;color:var(--text-secondary);font-size:11px;padding:2px 6px;cursor:pointer">Clear</button>
+                                    <button class="ga-color-clear" style="background:none;border:1px solid var(--border-color);border-radius:4px;color:var(--text-secondary);font-size: max(var(--min-text, 5px), calc(11px * var(--text-scale, 1)));padding:2px 6px;cursor:pointer">Clear</button>
                                 </div>
                                 <emoji-picker class="ga-full-picker"></emoji-picker>
                             </div>
@@ -1243,19 +1243,19 @@ class GenericActivityForm extends Component {
                     <div class="ga-row ga-locations-section">
                         <label>Locations</label>
                         <div id="ga-location-dropdown"></div>
-                        <div class="ga-additional-locations">${this.additionalLocations.map((_, idx) => `<div class="ga-extra-loc-row" data-loc-idx="${idx}" style="display:flex;align-items:center;gap:4px;margin-top:4px"><div class="ga-extra-loc-dd" style="flex:1"></div><button class="ga-remove-loc" data-loc-idx="${idx}" title="Remove" style="background:none;border:1px solid var(--border-color);border-radius:4px;color:var(--text-secondary);cursor:pointer;padding:2px 6px;font-size:12px">✕</button></div>`).join('')}</div>
-                        <button class="ga-add-location optimize-btn" style="width:auto;padding:4px 12px;font-size:12px;margin-top:var(--spacing-xs)">+ Add Location</button>
+                        <div class="ga-additional-locations">${this.additionalLocations.map((_, idx) => `<div class="ga-extra-loc-row" data-loc-idx="${idx}" style="display:flex;align-items:center;gap:4px;margin-top:4px"><div class="ga-extra-loc-dd" style="flex:1"></div><button class="ga-remove-loc" data-loc-idx="${idx}" title="Remove" style="background:none;border:1px solid var(--border-color);border-radius:4px;color:var(--text-secondary);cursor:pointer;padding:2px 6px;font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)))">✕</button></div>`).join('')}</div>
+                        <button class="ga-add-location optimize-btn" style="width:auto;padding:4px 12px;font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)));margin-top:var(--spacing-xs)">+ Add Location</button>
                     </div>
 
                     <div class="ga-row ga-mode-row">
                         <span>Input Mode: <strong class="ga-mode-label">${modeLabel}</strong></span>
-                        <button class="btn-toggle-mode optimize-btn" style="width:auto;padding:6px 12px;font-size:13px">Switch to ${otherModeLabel}</button>
+                        <button class="btn-toggle-mode optimize-btn" style="width:auto;padding:6px 12px;font-size: max(var(--min-text, 5px), calc(13px * var(--text-scale, 1)))">Switch to ${otherModeLabel}</button>
                     </div>
 
                     <div class="ga-row ga-current-loc-row" style="${isObs ? '' : 'display:none'}">
                         <div class="ga-current-loc-header">
                             <label>Current Location</label>
-                            <button class="btn-copy-location optimize-btn" style="width:auto;padding:3px 10px;font-size:12px">📋 Same as activity</button>
+                            <button class="btn-copy-location optimize-btn" style="width:auto;padding:3px 10px;font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)))">📋 Same as activity</button>
                         </div>
                         <div class="ga-helper-text">Your in-game location for collectible lookup</div>
                         <div id="ga-current-loc-dropdown"></div>
@@ -1274,7 +1274,7 @@ class GenericActivityForm extends Component {
                     <div class="ga-row ga-sec-xp-section">
                         <label>Secondary Skill XP</label>
                         <div class="ga-sec-xp-rows">${this._renderSecondaryXpRows()}</div>
-                        <button class="ga-add-sec-xp optimize-btn" style="width:auto;padding:4px 14px;font-size:12px;margin-top:var(--spacing-xs)">+ Add Skill XP</button>
+                        <button class="ga-add-sec-xp optimize-btn" style="width:auto;padding:4px 14px;font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)));margin-top:var(--spacing-xs)">+ Add Skill XP</button>
                     </div>
 
                     <div class="ga-row">
@@ -1305,7 +1305,7 @@ class GenericActivityForm extends Component {
                         <label>Requirements</label>
                         <div class="ga-helper-text">Gear keywords, reputation, activity inputs, etc.</div>
                         <div class="ga-req-rows">${this._renderRequirementRows()}</div>
-                        <button class="ga-add-req optimize-btn" style="width:auto;padding:4px 12px;font-size:12px;margin-top:var(--spacing-xs)">+ Add Requirement</button>
+                        <button class="ga-add-req optimize-btn" style="width:auto;padding:4px 12px;font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)));margin-top:var(--spacing-xs)">+ Add Requirement</button>
                     </div>
 
                     <div class="ga-row">
@@ -1318,8 +1318,8 @@ class GenericActivityForm extends Component {
                     <div class="ga-reverse-result-container">${this._renderReverseResult()}</div>
 
                     <div class="ga-actions">
-                        <button class="btn-save-generic optimize-btn" style="font-size:14px">${btnLabel}</button>
-                        ${this.currentDefId ? '<button class="btn-delete-generic optimize-btn" style="font-size:14px;background:#e53935">🗑 Delete</button>' : ''}
+                        <button class="btn-save-generic optimize-btn" style="font-size: max(var(--min-text, 5px), calc(14px * var(--text-scale, 1)))">${btnLabel}</button>
+                        ${this.currentDefId ? '<button class="btn-delete-generic optimize-btn" style="font-size: max(var(--min-text, 5px), calc(14px * var(--text-scale, 1)));background:#e53935">🗑 Delete</button>' : ''}
                     </div>
                 </div>
             </div>
@@ -1616,7 +1616,7 @@ class GenericActivityForm extends Component {
             e.preventDefault();
             this.additionalLocations.push('');
             const idx = this.additionalLocations.length - 1;
-            const rowHtml = `<div class="ga-extra-loc-row" data-loc-idx="${idx}" style="display:none;align-items:center;gap:4px;margin-top:4px"><div class="ga-extra-loc-dd" style="flex:1"></div><button class="ga-remove-loc" data-loc-idx="${idx}" title="Remove" style="background:none;border:1px solid var(--border-color);border-radius:4px;color:var(--text-secondary);cursor:pointer;padding:2px 6px;font-size:12px">✕</button></div>`;
+            const rowHtml = `<div class="ga-extra-loc-row" data-loc-idx="${idx}" style="display:none;align-items:center;gap:4px;margin-top:4px"><div class="ga-extra-loc-dd" style="flex:1"></div><button class="ga-remove-loc" data-loc-idx="${idx}" title="Remove" style="background:none;border:1px solid var(--border-color);border-radius:4px;color:var(--text-secondary);cursor:pointer;padding:2px 6px;font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)))">✕</button></div>`;
             this.$element.find('.ga-additional-locations').append(rowHtml);
             const $newRow = this.$element.find(`.ga-extra-loc-row[data-loc-idx="${idx}"]`);
             const dd = new LocationDropdown($newRow.find('.ga-extra-loc-dd'), {
@@ -1825,14 +1825,14 @@ class GenericActivityForm extends Component {
                 const row = $emojiBtn.data('row');
                 const currentEmoji = this.requirementRows[row]?.emoji || '🏷️';
                 const quickGrid = EMOJI_OPTIONS.map(em =>
-                    `<span class="ga-req-kw-emoji-opt ${em === currentEmoji ? 'selected' : ''}" data-emoji="${em}" data-row="${row}" style="font-size:20px;cursor:pointer;padding:3px;display:inline-block">${em}</span>`
+                    `<span class="ga-req-kw-emoji-opt ${em === currentEmoji ? 'selected' : ''}" data-emoji="${em}" data-row="${row}" style="font-size: max(var(--min-text, 5px), calc(20px * var(--text-scale, 1)));cursor:pointer;padding:3px;display:inline-block">${em}</span>`
                 ).join('');
                 const pickerHtml = `
                     <div style="display:flex;flex-wrap:wrap;gap:2px;padding:8px">${quickGrid}</div>
                     <div style="display:flex;align-items:center;gap:6px;padding:4px 8px">
-                        <label style="font-size:12px;color:var(--text-secondary)">Tint:</label>
+                        <label style="font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)));color:var(--text-secondary)">Tint:</label>
                         <input type="color" class="ga-req-kw-emoji-color" value="${this.requirementRows[row]?.emojiColor || '#ffffff'}" style="width:32px;height:24px;border:none;cursor:pointer" />
-                        <button class="ga-req-kw-emoji-color-clear" style="background:none;border:1px solid var(--border-color);border-radius:4px;color:var(--text-secondary);font-size:11px;padding:2px 6px;cursor:pointer">Clear</button>
+                        <button class="ga-req-kw-emoji-color-clear" style="background:none;border:1px solid var(--border-color);border-radius:4px;color:var(--text-secondary);font-size: max(var(--min-text, 5px), calc(11px * var(--text-scale, 1)));padding:2px 6px;cursor:pointer">Clear</button>
                     </div>
                     <emoji-picker class="ga-req-kw-full-picker"></emoji-picker>`;
                 const $picker = $('<div class="ga-req-kw-emoji-floating"></div>').html(pickerHtml);
@@ -1998,7 +1998,7 @@ class GenericActivityForm extends Component {
                 }
 
                 const calButtons = calValues.map(({ base, displayed }) =>
-                    `<button class="btn-pick-xp-candidate optimize-btn" data-xp="${base}" style="width:auto;padding:8px 14px;font-size:13px;margin:2px">
+                    `<button class="btn-pick-xp-candidate optimize-btn" data-xp="${base}" style="width:auto;padding:8px 14px;font-size: max(var(--min-text, 5px), calc(13px * var(--text-scale, 1)));margin:2px">
                         If you see <strong>${displayed}</strong> XP → base is <strong>${base}</strong>
                     </button>`
                 ).join('');
@@ -2065,7 +2065,7 @@ class GenericActivityForm extends Component {
                     const stepsEff = Math.ceil(base / eff);
                     const minSteps = Math.ceil(base / (1 + maxEff));
                     const calObs = Math.max(Math.max(stepsEff, minSteps), 10);
-                    return `<button class="btn-pick-candidate optimize-btn" data-steps="${base}" style="width:auto;padding:8px 14px;font-size:13px;margin:2px">
+                    return `<button class="btn-pick-candidate optimize-btn" data-steps="${base}" style="width:auto;padding:8px 14px;font-size: max(var(--min-text, 5px), calc(13px * var(--text-scale, 1)));margin:2px">
                         If you see <strong>${calObs}</strong> steps → base is <strong>${base}</strong>
                     </button>`;
                 }).join('');

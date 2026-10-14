@@ -88,9 +88,16 @@ def _recipe_viable_at(recipe) -> List[Tuple[str, str]]:
 
 def _item_applicable_in_scope(item, skill: str, location: str) -> bool:
     """Return True iff item's stats include any contribution to (skill, location)."""
-    from .build_dominators import _effective_stats_in_scope, QM_ACTIVITY
-    eff = _effective_stats_in_scope(item, skill, location, QM_ACTIVITY)
-    return bool(eff)
+    from .build_dominators import _effective_stats_in_scope, gated_stats_in_scope, QM_ACTIVITY
+    if _effective_stats_in_scope(item, skill, location, QM_ACTIVITY):
+        return True
+    # Gated equipment (explore_realm / item_ownership / total_collectibles) has
+    # NO base stats — its contribution lives under gated_stats and only appears
+    # when the gate is satisfied. Include it in the applicability bitmap for any
+    # scope a gate COULD touch (active=None) so stale detection tracks it once
+    # the player explores the realm / acquires the map / crosses the collectible
+    # threshold (2026-08-11, jwbail [fix:stale-detection]).
+    return bool(gated_stats_in_scope(item, skill, location, QM_ACTIVITY, active=None))
 
 
 def _empty_bitmap(max_id: int) -> bytearray:

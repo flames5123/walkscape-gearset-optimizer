@@ -375,6 +375,33 @@ def main():
                     it for it, qty in getattr(character, 'items', {}).items()
                     if qty and hasattr(it, 'duration')
                 ]
+                # Respect the user's hide list unless "Use hidden consumables"
+                # is on (Consumable Options). Travel previously ignored hidden
+                # consumables entirely — this makes it consistent with the
+                # other optimizers.
+                _tv_use_hidden = ui_config.get('consumable_use_hidden', False) is True
+                if not _tv_use_hidden:
+                    try:
+                        from ui.optimize_worker import build_hidden_items_set
+                        _tv_hidden = build_hidden_items_set(ui_config or {}) or set()
+                        if _tv_hidden:
+                            cons_candidates = [c for c in cons_candidates if c not in _tv_hidden]
+                    except Exception as _hid_e:
+                        print(f"⚠ travel hidden-consumable filter skipped: {_hid_e!r}")
+                # Apply global Consumable Options (Include Fine Consumables +
+                # "Ignore consumables I own X or less of").
+                from ui.optimize_worker import apply_consumable_option_filters
+                _tv_fine = ui_config.get('include_fine_consumables', True) is not False
+                _tv_min_en = ui_config.get('consumable_min_owned_enabled', False) is True
+                try:
+                    _tv_min = int(ui_config.get('consumable_min_owned', 5))
+                except (TypeError, ValueError):
+                    _tv_min = 5
+                _tv_min_op = str(ui_config.get('consumable_min_owned_operator', 'lt') or 'lt').lower()
+                cons_candidates = apply_consumable_option_filters(
+                    cons_candidates, getattr(character, 'items', {}),
+                    include_fine=_tv_fine, min_owned_enabled=_tv_min_en, min_owned=_tv_min,
+                    min_owned_op=_tv_min_op)
                 # ConsumableItem exposes .duration — drop the equipped food.
                 fixed_items = [it for it in fixed_items if not hasattr(it, 'duration')]
                 print(f"Travel optimize consumables ON: {len(cons_candidates)} owned candidates")
@@ -459,7 +486,7 @@ def main():
 
                     show_non_owned = bool(ui_config.get('show_non_owned_alternatives', False))
                     print("\nComputing alternatives for travel gearset (non_owned={}, locked=True)...".format(show_non_owned))
-                    alts, locked_alts = compute_slot_alternatives(
+                    alts, locked_alts, hidden_alts = compute_slot_alternatives(
                         final_gearset=final_gearset,
                         character=character,
                         opt_type='travel',
@@ -473,6 +500,10 @@ def main():
                         # the popup keeps showing "Optimize Slot & Equip"
                         # even after the optimizer ran and found zero results.
                         result['alternatives'] = alts if alts else {}
+                        # Travel doesn't feed hidden_items to the optimizer, so
+                        # this is normally empty — set it anyway for a uniform
+                        # client contract across all opt_types.
+                        result['hidden_alternatives'] = hidden_alts if hidden_alts else {}
                         total_alts = sum(len(v) for v in (alts or {}).values())
                         print(f"Found {total_alts} non-owned alternatives across {len(alts or {})} slots")
                     if locked_alts:

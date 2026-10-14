@@ -195,6 +195,32 @@ class CraftingTreeView extends Component {
             self.calculateAll();
         });
 
+        // Cancel Optimization — two-click same-button confirm, mirroring the
+        // activity / travel / goals-report optimizers. First click arms the
+        // button (swap text, .confirm-pending, 3s revert timer); a second click
+        // within the window actually cancels. Delegated so it works on the
+        // dynamically-injected button (see _updateMainOptimizeButtonState).
+        this.$element.on('click', '.crafting-tree-cancel-btn', function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+            const $btn = $(this);
+            if ($btn.hasClass('confirm-pending')) {
+                if (self._ctCancelRevertTimer) {
+                    clearTimeout(self._ctCancelRevertTimer);
+                    self._ctCancelRevertTimer = null;
+                }
+                self.cancelOptimizationAll();
+                return;
+            }
+            $btn.addClass('confirm-pending').text('Click again to confirm cancel');
+            self._ctCancelRevertTimer = setTimeout(() => {
+                self.$element.find('.crafting-tree-cancel-btn.confirm-pending')
+                    .removeClass('confirm-pending')
+                    .text('Cancel Optimization');
+                self._ctCancelRevertTimer = null;
+            }, 3000);
+        });
+
         // Manual "Rerun Summary" fallback button. Pure aggregation —
         // hits /api/crafting-tree/aggregate-summary which only walks the
         // existing per-node metrics and re-totals them. No per-node
@@ -559,7 +585,11 @@ class CraftingTreeView extends Component {
                 line_colors: existing.line_colors || fromServer.line_colors,
                 custom_colors: existing.custom_colors || fromServer.custom_colors,
                 use_fine: existing.use_fine !== undefined ? existing.use_fine : fromServer.use_fine,
+                use_fine_inputs: existing.use_fine_inputs !== undefined ? existing.use_fine_inputs : fromServer.use_fine_inputs,
                 skip_shops: existing.skip_shops !== undefined ? existing.skip_shops : fromServer.skip_shops,
+                skip_chests: existing.skip_chests !== undefined ? existing.skip_chests : fromServer.skip_chests,
+                fast_chests: existing.fast_chests !== undefined ? existing.fast_chests : fromServer.fast_chests,
+                exact_tree: existing.exact_tree !== undefined ? existing.exact_tree : fromServer.exact_tree,
             };
             console.log('[ct-theme] after merge', {
                 line_colors: this.globalSettings.line_colors,
@@ -598,6 +628,9 @@ class CraftingTreeView extends Component {
         // live element — even after a full _renderTree.
         this._isOptimizingAll = true;
         this._optimizingNodeIds = this._optimizingNodeIds || new Set();
+        // Fresh run — clear any cancel flag from a prior cancelled run so the
+        // poll loop doesn't immediately bail (bug report 3775cbaf).
+        this._optimizeAllCancelled = false;
         this._updateMainOptimizeButtonState();
 
         try {
@@ -2295,6 +2328,34 @@ class CraftingTreeView extends Component {
      * individual node optimization is currently in progress. Shows the spinner
      * and disables the button while anything is running.
      */
+    /**
+     * Cancel the in-flight "Calculate & Optimize All" run.
+     *
+     * Sets a local flag so the poll loop stops immediately, tells the server to
+     * flip the task's cancelled flag (the shared core stops at the next node
+     * boundary), then resets every optimizing button back to idle. Mirrors the
+     * activity/travel optimizer's cancelOptimization(). Bug report 3775cbaf.
+     */
+    async cancelOptimizationAll() {
+        // Local flag: stops _pollOptimization from rescheduling right away, even
+        // before the server-side cancel lands.
+        this._optimizeAllCancelled = true;
+        const sessionUuid = store.get('session.uuid');
+        try {
+            await api.cancelCraftingTreeOptimize(sessionUuid);
+            api.showInfo('Optimization cancelled.');
+        } catch (err) {
+            // Still unstick the UI locally even if the request failed.
+            console.error('[CT-OPT] cancel request failed:', err);
+        }
+        // Clear all optimizing state and reset buttons to idle.
+        this._isOptimizingAll = false;
+        this._optimizingNodeIds = new Set();
+        this.$element.find('.tree-btn-optimize.optimizing')
+            .removeClass('optimizing').prop('disabled', false).text('Optimize');
+        this._updateMainOptimizeButtonState();
+    }
+
     _updateMainOptimizeButtonState() {
         const $btn = this.$element.find('.crafting-tree-calc-btn');
         if (!$btn.length) return;
@@ -2305,9 +2366,39 @@ class CraftingTreeView extends Component {
                 $btn.addClass('optimizing').prop('disabled', true)
                     .html(`<span class="spinner">⏳</span> ${label}`);
             }
+            // Surface a Cancel button beneath the calc button while a run is
+            // active — matches the activity / travel / goals-report optimizers,
+            // which all show a Cancel while optimizing (bug report 3775cbaf).
+            // Injected as a sibling so it inherits the shared .cancel-optimize-btn
+            // styling (red button + two-click .confirm-pending state). The click
+            // handler is delegated in _attachTopbarEvents so it survives
+            // re-renders of the settings panel.
+            if (!this.$element.find('.crafting-tree-cancel-btn').length) {
+                const $cancel = $('<button class="cancel-optimize-btn crafting-tree-cancel-btn" style="width:100%">Cancel Optimization</button>');
+                $btn.after($cancel);
+                // Only animate the FIRST appearance of the cancel button per run.
+                // A calculate/optimize pass calls _renderTree(), which rebuilds
+                // the settings panel and wipes this injected button; the next
+                // _updateMainOptimizeButtonState() re-injects it. Re-running the
+                // slideDown on every re-injection produced a visible
+                // disappear→reappear flicker (~1s in, when the initial calculate
+                // pass finished). On re-injection, show it in place instead.
+                if (!this._ctCancelShown) {
+                    $cancel.hide().slideDown(200);
+                    this._ctCancelShown = true;
+                }
+            }
         } else {
             $btn.removeClass('optimizing').prop('disabled', false)
                 .text('Calculate & Optimize All');
+            // Tear down the Cancel button + any pending two-click confirm timer.
+            if (this._ctCancelRevertTimer) {
+                clearTimeout(this._ctCancelRevertTimer);
+                this._ctCancelRevertTimer = null;
+            }
+            this.$element.find('.crafting-tree-cancel-btn').remove();
+            // Reset so the NEXT run animates the button's first appearance again.
+            this._ctCancelShown = false;
         }
     }
 
@@ -2315,11 +2406,25 @@ class CraftingTreeView extends Component {
         const self = this;
         let pollCount = 0;
         const poll = async () => {
+            // User cancelled locally — stop polling. cancelOptimizationAll() has
+            // already reset the UI; don't reschedule or process a late status.
+            if (self._optimizeAllCancelled) return;
             pollCount++;
             try {
                 const status = await api.getCraftingTreeOptimizeStatus(sessionUuid);
                 console.log(`Poll #${pollCount}:`, status.status, 'completed:', status.completed_nodes?.length, 'pending:', status.pending);
                 self.optimizationStatus = status;
+                if (status.status === 'cancelled') {
+                    // Server confirmed the run was cancelled (this tab or another).
+                    // Unstick the UI: clear optimizing state and reset buttons.
+                    self._optimizeAllCancelled = true;
+                    self._optimizingNodeIds = new Set();
+                    self._isOptimizingAll = false;
+                    self.$element.find('.tree-btn-optimize.optimizing')
+                        .removeClass('optimizing').prop('disabled', false).text('Optimize');
+                    self._updateMainOptimizeButtonState();
+                    return;
+                }
                 if (status.status === 'complete') {
                     console.log('Optimization complete, completed nodes:', status.completed_nodes);
                     // Gear-aware Best(auto) route resolution (bug 9b3527ef) can

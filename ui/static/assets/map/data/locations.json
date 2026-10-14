@@ -1493,6 +1493,38 @@
           "86ca7a7e-c22c-4b24-9c7e-7b9c78e6c66f",
           "2d52fa57-3c71-4faa-8f42-4fc2a2ebda00"
         ]
+      },
+      {
+        "id": "a78587c9-e77a-4bed-b9cd-173fe5b3d50b",
+        "name": "Blackwater Lake",
+        "faction": "wallisia",
+        "wikiUrl": "https://wiki.walkscape.app/wiki/Blackwater_Lake",
+        "coords": [
+          1591,
+          1470
+        ],
+        "icon": {
+          "url": "locations/coast_green.png"
+        },
+        "activities": [],
+        "services": [],
+        "buildings": []
+      },
+      {
+        "id": "59e2f275-fa19-404a-b2b1-9389d4b182ce",
+        "name": "Cactus Canyon",
+        "faction": "wrentmark",
+        "wikiUrl": "https://wiki.walkscape.app/wiki/Cactus_Canyon",
+        "coords": [
+          1883,
+          695
+        ],
+        "icon": {
+          "url": "locations/hills_yellow.png"
+        },
+        "activities": [],
+        "services": [],
+        "buildings": []
       }
     ]
   }

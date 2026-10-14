@@ -24,8 +24,8 @@ class APReward:
 # NOTE: These two cape rewards are not in the rewards API
 # endpoint yet — hardcoded from the legacy ap_rewards.py.
 PROGRESS_REWARDS: List[APReward] = [
-    APReward(item_name='Cape of Half-Achiever', quantity=1, item_type='Loot', ap_required=133, item_ref='Item.CAPE_OF_HALF_ACHIEVER'),
-    APReward(item_name='Cape of Achiever', quantity=1, item_type='Loot', ap_required=265, item_ref='Item.CAPE_OF_ACHIEVER'),
+    APReward(item_name='Cape of Half-Achiever', quantity=1, item_type='Loot', ap_required=132, item_ref='Item.CAPE_OF_HALF_ACHIEVER'),
+    APReward(item_name='Cape of Achiever', quantity=1, item_type='Loot', ap_required=263, item_ref='Item.CAPE_OF_ACHIEVER'),
 ]
 
 
@@ -34,16 +34,17 @@ CHECKPOINT_REWARDS: List[APReward] = [
     APReward(item_name='Juggling balls', quantity=1, item_type='Loot', ap_required=5, item_ref='Item.JUGGLING_BALLS'),
     APReward(item_name='Pathfinder', quantity=1, item_type='Loot', ap_required=10, item_ref='Item.PATHFINDER'),
     APReward(item_name='Ring of homesickness', quantity=1, item_type='Loot', ap_required=15, item_ref='Item.RING_OF_HOMESICKNESS'),
-    APReward(item_name="Adventurers' guild token", quantity=100, item_type='Currency', ap_required=20, item_ref='Currency.ADVENTURERS_GUILD_TOKEN'),
+    APReward(item_name="Adventurers' Guild token", quantity=100, item_type='Currency', ap_required=20, item_ref='Currency.ADVENTURERS_GUILD_TOKEN'),
     APReward(item_name='Running visor', quantity=1, item_type='Loot', ap_required=25, item_ref='Item.RUNNING_VISOR'),
     APReward(item_name='Rusty spyglass', quantity=1, item_type='Loot', ap_required=30, item_ref='Item.RUSTY_SPYGLASS'),
     APReward(item_name='Pants of haste', quantity=1, item_type='Loot', ap_required=35, item_ref='Item.PANTS_OF_HASTE'),
     APReward(item_name='Omni-tool', quantity=1, item_type='Loot', ap_required=40, item_ref='Item.OMNI_TOOL'),
+    APReward(item_name='Pixie egg', quantity=1, item_type='Loot', ap_required=45, item_ref='Egg.PIXIE_EGG'),
     APReward(item_name='Trash grabber', quantity=1, item_type='Loot', ap_required=45, item_ref='Item.TRASH_GRABBER'),
     APReward(item_name='Treasure hunter hat', quantity=1, item_type='Loot', ap_required=50, item_ref='Item.TREASURE_HUNTER_HAT'),
     APReward(item_name='Boots of speed', quantity=1, item_type='Loot', ap_required=55, item_ref='Item.BOOTS_OF_SPEED'),
     APReward(item_name='Treasure hunter pants', quantity=1, item_type='Loot', ap_required=60, item_ref='Item.TREASURE_HUNTER_PANTS'),
-    APReward(item_name="Traveler's kit", quantity=1, item_type='Loot', ap_required=65, item_ref='Item.TRAVELERS_KIT'),
+    APReward(item_name="Traveller's kit", quantity=1, item_type='Loot', ap_required=65, item_ref='Item.TRAVELLERS_KIT'),
     APReward(item_name='Treasure hunter jacket', quantity=1, item_type='Loot', ap_required=70, item_ref='Item.TREASURE_HUNTER_JACKET'),
     APReward(item_name='Absorbing amulet', quantity=1, item_type='Loot', ap_required=75, item_ref='Item.ABSORBING_AMULET'),
     APReward(item_name='Western continent boat pass', quantity=1, item_type='Collectible', ap_required=80, item_ref='Collectible.WESTERN_CONTINENT_BOAT_PASS'),
@@ -57,9 +58,14 @@ CHECKPOINT_REWARDS: List[APReward] = [
     APReward(item_name='Treasure grabber', quantity=1, item_type='Loot', ap_required=150, item_ref='Item.TREASURE_GRABBER'),
     APReward(item_name='Collection ring', quantity=1, item_type='Loot', ap_required=160, item_ref='Item.COLLECTION_RING'),
     APReward(item_name='Treasure hunter gloves', quantity=1, item_type='Loot', ap_required=170, item_ref='Item.TREASURE_HUNTER_GLOVES'),
-    APReward(item_name="Adventurers' guild buckler", quantity=1, item_type='Loot', ap_required=180, item_ref='Item.ADVENTURERS_GUILD_BUCKLER'),
+    APReward(item_name='Adventuring buckler', quantity=1, item_type='Loot', ap_required=180, item_ref='Item.ADVENTURING_BUCKLER'),
     APReward(item_name='Treasure hunter bandolier', quantity=1, item_type='Loot', ap_required=190, item_ref='Item.TREASURE_HUNTER_BANDOLIER'),
     APReward(item_name='Treasure hunter scarf', quantity=1, item_type='Loot', ap_required=200, item_ref='Item.TREASURE_HUNTER_SCARF'),
+    APReward(item_name='Quickdraw map', quantity=1, item_type='Loot', ap_required=220, item_ref='Item.QUICKDRAW_MAP'),
+    APReward(item_name="Globetrotter's backpack", quantity=1, item_type='Loot', ap_required=240, item_ref='Item.GLOBETROTTERS_BACKPACK'),
+    APReward(item_name='Boulder boots', quantity=1, item_type='Loot', ap_required=260, item_ref='Item.BOULDER_BOOTS'),
+    APReward(item_name='Hat of wisdom', quantity=1, item_type='Loot', ap_required=280, item_ref='Item.HAT_OF_WISDOM'),
+    APReward(item_name='Golden frog egg', quantity=1, item_type='Loot', ap_required=300, item_ref='Egg.GOLDEN_FROG_EGG'),
 ]
 
 

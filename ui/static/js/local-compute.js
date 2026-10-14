@@ -23,7 +23,7 @@
 // goals-report worker-recycle fix was deployed + served no-store, yet Firefox
 // kept executing the OLD worker, so the OOM persisted). Bump WORKER_BUILD
 // whenever optimize-local-worker.js changes to force a fresh fetch.
-const WORKER_BUILD = 'recycle-8';
+const WORKER_BUILD = 'target-items-11';
 const WORKER_URL = "/static/js/optimize-local-worker.js?b=" + WORKER_BUILD;
 const _workers = {}; // task -> Worker (one persistent instance each)
 
@@ -60,6 +60,7 @@ const LOG_TAG = {
   "crafting-tree-calc": "[local-tree]",
   "crafting-tree-optimize": "[local-tree-opt]",
   "travel-optimize": "[local-travel]",
+  "fastest-craft": "[local-fc]",
 };
 
 function _getWorker(task) {
@@ -115,7 +116,7 @@ if (typeof window !== 'undefined') {
   window.addEventListener('pagehide', _maybeFinishOnServerBeacon);
 }
 
-export function runLocalCompute(task, payload) {
+export function runLocalCompute(task, payload, opts) {
   return new Promise((resolve, reject) => {
     const worker = _getWorker(task);
     const tag = LOG_TAG[task] || "[local]";
@@ -143,6 +144,12 @@ export function runLocalCompute(task, payload) {
         return;
       }
       if (m.id && m.id !== reqId) return; // a different request's message
+      if (m.type === "progress") {
+        if (opts && typeof opts.onProgress === "function") {
+          try { opts.onProgress(m.done, m.total); } catch (e) { /* non-fatal */ }
+        }
+        return;
+      }
       if (m.type === "result") {
         settle(resolve, m.result);
       } else if (m.type === "error") {
@@ -193,8 +200,34 @@ export async function runCraftingTreeOptimizeLocal(payload) {
   return result;
 }
 
+/**
+ * Run Steps per Recipe (Fastest Craft) locally in Pyodide (FAC:
+ * local_optimization). Computes every selected item across variants x qualities
+ * on-device using the SAME exact B&B solver + cross-item reuse the server uses,
+ * then POSTs the computed details to /api/fastest-craft/local-result so the
+ * SERVER applies the DB-bound layer (persist + owned_counts banked +
+ * base-dominance bitmap). onProgress(done, total) drives the goals progress bar
+ * from the per-cell callback — no 0/0, no 3s server poll.
+ *
+ * payload: { session_uuid, selected_ids:[chip ids]|null, session_data, ui_config }
+ * returns: { items:[...], count } (the computed payload, pre-persist)
+ */
+export async function runFastestCraftLocal(payload, onProgress) {
+  const result = await runLocalCompute('fastest-craft', { payload }, { onProgress });
+  try {
+    const r = await _postJsonWithRetry('/api/fastest-craft/local-result', {
+      session_uuid: payload.session_uuid,
+      items: (result && result.items) || [],
+    });
+    if (!r.ok) throw new Error('local-result POST HTTP ' + r.status);
+  } catch (e) {
+    console.error('[local-fc] result POST failed:', e);
+    throw e;
+  }
+  return result;
+}
+
 // --- Subtree-parallel crafting-tree optimize ---------------------------------
-//
 // Crafting-tree nodes are DEPENDENT (a parent consumes its children's optimized
 // metrics), so we can't shard all nodes like the goals report. But the target's
 // independent BRANCHES (each direct child of the root + its descendants) ARE
@@ -424,11 +457,50 @@ function _getStatsWorkers(n) {
   return _srPool.slice(0, n);
 }
 
+/**
+ * Terminate ALL in-flight local-compute Pyodide workers (task singletons +
+ * crafting-tree-optimize pool + stats-report shard pool) and clear the pools.
+ *
+ * Used when a goals-report run reaches a terminal/abort state so the browser's
+ * Pyodide workers stop grinding immediately instead of continuing to churn CPU
+ * after the UI has given up (bug: a local Steps-per-Recipe run kept logging
+ * [local-fc] EXACT solves for minutes after an error toast fired). The next
+ * local run lazily re-creates fresh workers via the _get* helpers, so clearing
+ * the pools here is safe. Best-effort: a failed terminate never throws.
+ */
+export function terminateLocalComputeWorkers() {
+  let n = 0;
+  for (const task of Object.keys(_workers)) {
+    try { _workers[task].terminate(); n++; } catch (_) { /* ignore */ }
+    delete _workers[task];
+  }
+  while (_ctOptPool.length) {
+    try { _ctOptPool.pop().terminate(); n++; } catch (_) { /* ignore */ }
+  }
+  while (_srPool.length) {
+    try { _srPool.pop().terminate(); n++; } catch (_) { /* ignore */ }
+  }
+  try { console.log('[local-compute] terminated ' + n + ' worker(s) on abort/terminal'); } catch (_) { /* ignore */ }
+  return n;
+}
+
 export function runStatsReportLocal(payload, onProgress) {
   const tag = '[local-goals]';
   console.log(tag, 'coordinator build ' + WORKER_BUILD);
   const baseId = 'sr_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
   const runId = (payload && payload.run_params && payload.run_params.run_id) || null;
+
+  // Browser-side diagnostics (per-shard [local-timing] lines + the LPT cost
+  // balance) collected across all passes and relayed ONCE to the server at the
+  // end, so they land in server_logs / bug reports (docker logs; the page
+  // console is not captured). Best-effort — never blocks or fails the run.
+  const relayLines = [];
+  const relayClientLog = (lines) => {
+    if (!lines || !lines.length) return Promise.resolve();
+    return _postJsonWithRetry('/api/stats-report/client-log',
+      { run_id: runId, lines: lines.slice(0, 200) }, { retries: 2, baseDelayMs: 500 })
+      .catch(() => { /* diagnostics are best-effort */ });
+  };
 
   // Jobs a worker runs before it's recycled (terminate + respawn) to reset its
   // Pyodide WASM heap. The recipe optimizer accreted memory across jobs in one
@@ -450,7 +522,12 @@ export function runStatsReportLocal(payload, onProgress) {
   // folds the consumable into the recipe search slot (bigger combo space), so
   // chests_recipes is now fully serial (1 worker) with a small recycle chunk.
   const SR_CATEGORY_WORKER_CAP = { chests_recipes: 1 };     // default: defaultWorkers
-  const SR_CATEGORY_RECYCLE_CHUNK = { chests_recipes: 4 };  // default: SR_RECYCLE_CHUNK
+  // chests_recipes previously used a tiny recycle chunk (4) to bound the GREEDY
+  // optimizer's per-interpreter memory growth. The exact optimizer is
+  // memory-light, and chunk=4 * SR_MAX_CHUNKS(60) = a 240-job HARD CAP that
+  // silently dropped recipes past 240 (e.g. 9 of 249 never ran until a manual
+  // rerun). Match the default chunk so the cap (60*15=900) clears the full set.
+  const SR_CATEGORY_RECYCLE_CHUNK = { chests_recipes: 15 };  // default: SR_RECYCLE_CHUNK
   const defaultWorkers = _statsWorkerCount(payload && payload.jobCountHint);
 
   // Partition the run's categories into groups sharing a worker cap; same-cap
@@ -506,6 +583,7 @@ export function runStatsReportLocal(payload, onProgress) {
   let passParams = payload.run_params;
   let completedIn = (payload.completed || []);
   let passId = '';
+  let passAssignment = null;   // Option 2: authoritative LPT map for this pass
 
   // Run ONE chunk (up to srChunk jobs) of shard k on `worker`, with the
   // jobs already finished by this shard passed as `completed` so _sr_build skips
@@ -543,6 +621,8 @@ export function runStatsReportLocal(payload, onProgress) {
       if (m.type === 'log') {
         if (m.stream === 'stderr') console.error(tag, m.line);
         else console.log(tag, m.line);
+        // Capture per-shard timing for the server-side relay (bug reports).
+        if (m.line && m.line.indexOf('[local-timing]') >= 0) relayLines.push(m.line);
         return;
       }
       if (m.type === 'ready') { console.log(tag, 'Pyodide ready'); return; }
@@ -579,6 +659,7 @@ export function runStatsReportLocal(payload, onProgress) {
       max_jobs: srChunk,
       run_params: passParams,
       session: payload.session,
+      assignment: passAssignment,
       completed: completedIn.concat(completedForShard),
     });
   });
@@ -627,6 +708,37 @@ export function runStatsReportLocal(payload, onProgress) {
     return { ok: okTot, failed: failedTot, done: baseDone, error: lastErr, completed: shardCompleted };
   };
 
+  // Phase 1 of Option 2: compute the authoritative LPT shard assignment ONCE on
+  // a single worker and return {unit_key_str: shard_index}. Every shard then
+  // filters against this SAME map (broadcast via runChunk's `assignment`), so
+  // there is no per-worker cost recompute to diverge (the 166/156 bug). On any
+  // failure/timeout we resolve null and the workers fall back to the crc32
+  // split (also gap-free), so balancing degrades gracefully — never correctness.
+  const planStatsAssignment = (worker, shardCount, params, completed) => new Promise((resolve) => {
+    const subId = baseId + passId + '_plan';
+    let settled = false;
+    const done = (v) => { if (settled) return; settled = true; clearTimeout(wd); worker.removeEventListener('message', onMessage); resolve(v); };
+    const wd = setTimeout(() => { console.error(tag, 'plan watchdog timeout — crc32 fallback'); done(null); }, 120000);
+    function onMessage(ev) {
+      const m = ev.data || {};
+      if (m.type === 'log') { if (m.stream === 'stderr') console.error(tag, m.line); else console.log(tag, m.line); return; }
+      if (m.type === 'ready') return;
+      if (m.id && m.id !== subId) return;
+      if (m.type === 'result') { const r = m.result || {}; done(r && r.assignment ? r : null); }
+      else if (m.type === 'error') { console.error(tag, 'plan failed — crc32 fallback:', m.error); done(null); }
+    }
+    worker.addEventListener('message', onMessage);
+    worker.onerror = (e) => { console.error(tag, 'plan worker crashed — crc32 fallback:', (e && (e.message || e.filename)) || 'unknown'); done(null); };
+    worker.postMessage({
+      id: subId,
+      task: 'stats-report-plan',
+      shard_count: shardCount,
+      run_params: params,
+      session: payload.session,
+      completed: completed,
+    });
+  });
+
   // Run each category group as its own sharded pass (sequentially), threading
   // completed idents forward so later passes skip finished scopes. Only the
   // throttled (heavy) group runs at reduced parallelism. Finalize EXACTLY ONCE.
@@ -647,6 +759,19 @@ export function runStatsReportLocal(payload, onProgress) {
       passId = '_p' + gi;
       perShardDone = new Array(n).fill(0);
       passTotalSeen = 0;
+      // Phase 1: authoritative LPT assignment for THIS pass (its categories +
+      // its worker count), computed once and broadcast to every shard. n==1
+      // needs no plan (single worker keeps the whole list).
+      passAssignment = null;
+      if (n > 1) {
+        const plan = await planStatsAssignment(workers[0], n, passParams, completedIn);
+        passAssignment = plan && plan.assignment ? plan.assignment : null;
+        const balMsg = 'pass ' + gi + ' [' + cats.join('+') + '] LPT: ' + (plan
+          ? ('loads=' + JSON.stringify(plan.loads) + ' units/shard=' + JSON.stringify(plan.unit_counts) + ' (n=' + n + ')')
+          : 'unavailable -> crc32 fallback');
+        console.log(tag, balMsg);
+        relayLines.push('[LPT] ' + balMsg);
+      }
       console.log(tag, 'pass ' + gi + ': ' + cats.join('+') + ' across ' + n + ' worker(s), chunk=' + srChunk);
       const results = await Promise.all(workers.map((w, k) => runShard(k)));
       ok += results.reduce((a, r) => a + (r.ok || 0), 0);
@@ -657,6 +782,9 @@ export function runStatsReportLocal(payload, onProgress) {
       const passCompleted = results.reduce((a, r) => a.concat(r.completed || []), []);
       if (passCompleted.length) completedAll = completedAll.concat(passCompleted);
     }
+    // Relay the collected browser-side diagnostics to the server so they land
+    // in server_logs / bug reports (one POST for the whole run).
+    try { await relayClientLog(relayLines); } catch (_) { /* best-effort */ }
     // Finalize ONCE, after every pass has drained its scope POSTs: compute the
     // inventory fingerprint + flip the run to complete (the server worker's
     // final step). Done here (not in the workers) so it runs exactly once.

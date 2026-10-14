@@ -52,6 +52,7 @@ def detect_stale_scopes(
     db,
     session_uuid: Optional[str] = None,
     char_config: Optional[dict] = None,
+    include_unavailable: Optional[dict] = None,
 ) -> List[StaleScope]:
     """Single call site for staleness derivation.
 
@@ -66,25 +67,33 @@ def detect_stale_scopes(
     if session_uuid is None:
         return []
 
-    # Whether character/UI state changed since the last cached snapshot.
-    # When it has NOT changed we can skip the expensive per-row item-set /
-    # metric-input recomputation (compute_effective_owned_bitmap +
-    # compute_metric_inputs_hash per row) -- nothing feeding those changed.
-    # But we MUST still run the version-bump check AND the newly-unlocked
-    # check below, because a scope can become stale/missing for reasons
-    # independent of character state:
-    #   * OPTIMIZATION_VERSIONS bumped (forces a re-run regardless of state)
-    #   * the user newly SELECTS a category/kind in the WTO that was never
-    #     optimized -- its scopes have no row yet, so they're newly_unlocked
-    # The old `if prev == curr: return []` short-circuit skipped BOTH of
-    # those, so optimizing a newly-selected category after any prior run
-    # scheduled zero jobs and reported "all owned" (jwbail 2026-06-12:
-    # "optimize tools, then select tools+eggs -> says all eggs owned and
-    # stops"). The job-build filter is the safety net against over-
-    # enumeration: newly_unlocked may include all-owned new_items
-    # (activity, kind) scopes, but build_new_items_jobs never builds jobs
-    # for those, so they get filtered out and never run.
-    state_changed = (prev != curr)
+    # Per-row staleness (Sources 1 & 2 below) is derived by recomputing each
+    # stored row's dominance bitmap / metric-inputs hash from `curr` and
+    # comparing against the row's OWN stored signature. That comparison is
+    # self-contained -- it does NOT depend on the cached `prev` snapshot -- so
+    # it MUST run on every check.
+    #
+    # We used to gate it on `state_changed = (prev != curr)` and skip it when
+    # the character looked unchanged since the cached snapshot. That was unsafe:
+    # the cached snapshot is advanced to full-current by the optimize-finalize
+    # and state-changed handlers even when the stored per-row results were
+    # computed under an OLDER state -- e.g. before a gated regional tool
+    # (Quickdraw map: all its stats live under an `explore_realm` gate) became
+    # credited once its explored_realm custom stat turned on. In that window
+    # `prev == curr` while the stored bitmaps are stale, so the short-circuit
+    # hid genuine staleness for hundreds of scopes and the (!) never appeared
+    # (jwbail 2026-09-23, bug report 6dcff2e9: "just got the Quickdraw map which
+    # would be better for finding collectibles in almost every instance"). The
+    # ~9s recompute the gate saved is absorbed by the /stale-check fingerprint
+    # cache (_STALE_CHECK_CACHE), keyed on the snapshot + gearset-results
+    # signature, so a repeat call with identical inputs still returns instantly.
+    #
+    # The version-bump and newly-unlocked checks were always unconditional and
+    # remain so (they must fire even when nothing about the character changed):
+    #   * OPTIMIZATION_VERSIONS bumped -> forces a re-run regardless of state
+    #   * the user newly SELECTS a category/kind never optimized -- its scopes
+    #     have no row yet, so they're newly_unlocked. The job-build filter is
+    #     the safety net against over-enumeration.
 
     cursor.execute(
         "SELECT category, subcategory, source_name, location, service, "
@@ -106,13 +115,6 @@ def detect_stale_scopes(
         current_version = OPTIMIZATION_VERSIONS.get(cat, 1)
         if stored_version < current_version:
             results.append(StaleScope(*key, reason=REASON_VERSION_BUMP))
-            continue
-
-        # Item-set / metric-input changes only matter when character state
-        # actually changed. When it didn't, this row is up to date -- skip
-        # the expensive per-row recompute and move on (newly-unlocked is
-        # still computed once below, independent of state).
-        if not state_changed:
             continue
 
         # 1. Item-set change: recompute current dominance bitmap
@@ -172,7 +174,9 @@ def detect_stale_scopes(
     # separate chest-chip category leak in the annotator (fixed 28f3893a),
     # not this computation.
     try:
-        current_applicable = enumerate_applicable_sources(curr, db=db, char_config=char_config)
+        current_applicable = enumerate_applicable_sources(
+            curr, db=db, char_config=char_config,
+            include_unavailable=include_unavailable)
     except Exception:
         current_applicable = set()
     newly_unlocked = current_applicable - seen_keys
@@ -212,7 +216,25 @@ def _restrict_to_owned_delta(added_ids, removed_ids, prev, curr, db):
         owned_added_pairs = set(curr.owned_items) - set(prev.owned_items)
         owned_removed_pairs = set(prev.owned_items) - set(curr.owned_items)
         if not owned_added_pairs and not owned_removed_pairs:
-            return added_ids, removed_ids  # non-item state change — keep full diff
+            # Owned set unchanged. The added/removed lists represent OWNED-item
+            # changes, so a bitmap shift from a NON-owned change must not be
+            # rendered as "New items in your gear pool / Items removed". Keep the
+            # full diff ONLY for a skill-level change (a skill-up genuinely makes
+            # already-owned items newly usable — worth surfacing). For any other
+            # non-owned change (e.g. toggling a custom stat like repair_the_bank)
+            # suppress the cascade: the metric_inputs_hash check still re-flags
+            # any row a gated-stat custom stat actually affects (input_change),
+            # and an unlock toggle produces only newly_unlocked. Without this,
+            # toggling "Repaired the Bank" flagged 368 rows with a huge, bogus
+            # added/removed item list (user report 2026-07-31). Fail-open.
+            try:
+                _skills_changed = (dict(getattr(prev, 'skills_xp', {}) or {})
+                                   != dict(getattr(curr, 'skills_xp', {}) or {}))
+            except Exception:
+                _skills_changed = True
+            if _skills_changed:
+                return added_ids, removed_ids  # skill-up — surface newly-usable items
+            return frozenset(), frozenset()   # custom-stat / other non-owned change
 
         from .precompute.build_item_ids import get_item_id_map
         id_map = get_item_id_map(db)  # (slug, quality) -> id

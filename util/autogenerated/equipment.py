@@ -13,7 +13,7 @@ import copy
 
 class ItemInstance(StatsMixin):
     """Base class for item instances"""
-    def __init__(self, name: str, uuid: str, stats: Dict, slot: str = None, keywords: list = None, value: int = 0, rarity: str = None, location_reqs: list = None, gated_stats: Dict = None, requirements: list = None):
+    def __init__(self, name: str, uuid: str, stats: Dict, slot: str = None, keywords: list = None, value: int = 0, rarity: str = None, location_reqs: list = None, gated_stats: Dict = None, requirements: list = None, abilities: list = None):
         self.name = name
         self.uuid = uuid
         self.slot = slot
@@ -24,6 +24,7 @@ class ItemInstance(StatsMixin):
         self._stats = stats
         self.gated_stats = gated_stats or {}
         self.requirements = requirements or []
+        self.abilities = abilities or []
 
     @property
     def da(self) -> float:
@@ -92,9 +93,22 @@ class AchievementItem(StatsMixin):
         return f"{self.name} ({ap} AP)"
 
     def get_instance(self, **kwargs):
+        # Resolve AP-gated stats from the ACTUAL character's achievement points,
+        # NOT the mutable thread-local global (walkscape_globals.ACHIEVEMENT_POINTS).
+        # That global reflects whichever Character was last initialized on the
+        # thread and can be clobbered mid-scoring (e.g. an intermediate build
+        # reset it 265 -> 164 during a crafting-tree decode, silently dropping the
+        # Omni-tool's AP-200 double_action and making the node metric
+        # non-deterministic -- bug d773a4d7). Prefer an explicit achievement_points
+        # kwarg, then the passed character's AP, then the global as a last resort.
         import util.walkscape_globals
-        achievement_points = int(util.walkscape_globals.ACHIEVEMENT_POINTS)
-        return self._get_stats_for_ap(achievement_points)
+        achievement_points = kwargs.get('achievement_points')
+        if achievement_points is None:
+            _ch = kwargs.get('character')
+            achievement_points = getattr(_ch, 'achievement_points', None) if _ch is not None else None
+        if achievement_points is None:
+            achievement_points = util.walkscape_globals.ACHIEVEMENT_POINTS
+        return self._get_stats_for_ap(int(achievement_points))
 
     def __repr__(self):
         import util.walkscape_globals
@@ -195,7 +209,7 @@ class Item:
         stats={'global': {'global': {'fine_material_finding': 10.0, 'find_collectibles': 10.0}}},
         slot='neck',
         keywords=['Amulet', 'Achievement Reward'],
-        value=40,
+        value=0,
         rarity='epic',
         location_reqs=[],
         gated_stats={},
@@ -263,6 +277,19 @@ class Item:
         location_reqs=[],
         gated_stats={'set_pieces': {'adventuring tool set': {1: {'global': {'global': {'work_efficiency': 4.0}}}, 2: {'global': {'global': {'chest_finding': 4.0}}}, 3: {'global': {'global': {'fine_material_finding': 6.0}}}, 4: {'global': {'global': {'double_rewards': 4.0}}}, 5: {'global': {'global': {'steps_add': -1.0}}}}}},
         requirements=[{'type': 'character_level', 'level': 20}]
+    )
+
+    ADVENTURING_BUCKLER = ItemInstance(
+        name='Adventuring buckler',
+        uuid='f4be2b79-f096-4ce0-944c-dd6589af11d9',
+        stats={'global': {'global': {'ItemFindingCategory.ADVENTURERS_GUILD_TOKENS': 1.0}}},
+        slot='secondary',
+        keywords=['Shield', 'Achievement Reward'],
+        value=0,
+        rarity='epic',
+        location_reqs=[],
+        gated_stats={},
+        requirements=[]
     )
 
     ADVENTURING_FISHING_POLE = ItemInstance(
@@ -463,11 +490,12 @@ class Item:
         stats={'fishing': {'global': {'work_efficiency': 8.0, 'double_rewards': 4.0}}},
         slot='ring',
         keywords=['Ring', 'Fishing'],
-        value=7,
+        value=300,
         rarity='ethereal',
         location_reqs=[],
         gated_stats={},
-        requirements=[{'type': 'reputation', 'faction': 'syrenthia', 'amount': 150}]
+        requirements=[{'type': 'reputation', 'faction': 'syrenthia', 'amount': 150}],
+        abilities=[{'name': 'Mermaids Need Me', 'effect': 'Teleports you to Vastalume.', 'icon': 'teleport', 'cooldown': '2d'}]
     )
 
     ALIEN_SQUEAKY_TOY = ItemInstance(
@@ -488,10 +516,10 @@ class Item:
         uuid='6b85ff44-4911-4569-8735-4f65315c313f',
         slot='neck',
         keywords=['Amulet', 'Mining'],
-        value=150,
+        value=168,
         base_stats={'global': {'global': {'bonus_xp_percent': 7.0}}, 'mining': {'global': {'double_action': 3.0, 'find_gems': 10.0, 'find_collectibles': 10.0}}},
         quality_stats={'Normal': {'global': {'global': {'bonus_xp_percent': 7.0}}, 'mining': {'global': {'double_action': 3.0, 'find_gems': 10.0, 'find_collectibles': 10.0}}}, 'Good': {'global': {'global': {'bonus_xp_percent': 7.0}}, 'mining': {'global': {'double_action': 3.5, 'find_gems': 14.0, 'find_collectibles': 12.0}}}, 'Great': {'global': {'global': {'bonus_xp_percent': 7.0}}, 'mining': {'global': {'double_action': 4.0, 'find_gems': 18.0, 'find_collectibles': 14.0}}}, 'Excellent': {'global': {'global': {'bonus_xp_percent': 7.0}}, 'mining': {'global': {'double_action': 4.5, 'find_gems': 22.0, 'find_collectibles': 16.0}}}, 'Perfect': {'global': {'global': {'bonus_xp_percent': 7.0}}, 'mining': {'global': {'double_action': 5.0, 'find_gems': 26.0, 'find_collectibles': 18.0}}}, 'Eternal': {'global': {'global': {'bonus_xp_percent': 7.0}}, 'mining': {'global': {'double_action': 5.5, 'find_gems': 30.0, 'find_collectibles': 20.0}}}},
-        quality_values={'Normal': 150, 'Good': 303, 'Great': 460, 'Excellent': 620, 'Perfect': 869, 'Eternal': 1404},
+        quality_values={'Normal': 168, 'Good': 321, 'Great': 478, 'Excellent': 638, 'Perfect': 887, 'Eternal': 1425},
         requirements=[{'type': 'skill', 'skill': 'Mining', 'level': 35}]
     )
 
@@ -500,10 +528,10 @@ class Item:
         uuid='353b8428-103f-4cc8-a85b-acb4bc70a68a',
         slot='neck',
         keywords=['Amulet', 'Carpentry'],
-        value=150,
+        value=214,
         base_stats={'global': {'global': {'work_efficiency': 5.0}}, 'carpentry': {'global': {'no_materials_consumed': 3.5, 'chest_finding': 10.0}}},
         quality_stats={'Normal': {'global': {'global': {'work_efficiency': 5.0}}, 'carpentry': {'global': {'no_materials_consumed': 3.5, 'chest_finding': 10.0}}}, 'Good': {'global': {'global': {'work_efficiency': 5.0}}, 'carpentry': {'global': {'no_materials_consumed': 4.0, 'chest_finding': 12.0, 'quality_outcome': 2.0, 'bonus_xp_percent': 1.0}}}, 'Great': {'global': {'global': {'work_efficiency': 5.0}}, 'carpentry': {'global': {'no_materials_consumed': 4.5, 'chest_finding': 14.0, 'quality_outcome': 4.0, 'bonus_xp_percent': 2.0}}}, 'Excellent': {'global': {'global': {'work_efficiency': 5.0}}, 'carpentry': {'global': {'no_materials_consumed': 5.0, 'chest_finding': 16.0, 'quality_outcome': 6.0, 'bonus_xp_percent': 3.0}}}, 'Perfect': {'global': {'global': {'work_efficiency': 5.0}}, 'carpentry': {'global': {'no_materials_consumed': 5.5, 'chest_finding': 18.0, 'quality_outcome': 8.0, 'bonus_xp_percent': 4.0}}}, 'Eternal': {'global': {'global': {'work_efficiency': 5.0}}, 'carpentry': {'global': {'no_materials_consumed': 6.0, 'chest_finding': 20.0, 'quality_outcome': 10.0, 'bonus_xp_percent': 5.0}}}},
-        quality_values={'Normal': 150, 'Good': 303, 'Great': 460, 'Excellent': 620, 'Perfect': 869, 'Eternal': 1404},
+        quality_values={'Normal': 214, 'Good': 368, 'Great': 526, 'Excellent': 686, 'Perfect': 936, 'Eternal': 1479},
         requirements=[{'type': 'skill', 'skill': 'Carpentry', 'level': 35}]
     )
 
@@ -512,10 +540,10 @@ class Item:
         uuid='36d823c2-acf5-47f8-92f5-2374c7536ca5',
         slot='neck',
         keywords=['Amulet', 'Woodcutting'],
-        value=150,
+        value=165,
         base_stats={'global': {'global': {'fine_material_finding': 20.0}}, 'woodcutting': {'global': {'double_rewards': 3.5, 'find_bird_nests': 10.0}}},
         quality_stats={'Normal': {'global': {'global': {'fine_material_finding': 20.0}}, 'woodcutting': {'global': {'double_rewards': 3.5, 'find_bird_nests': 10.0}}}, 'Good': {'global': {'global': {'fine_material_finding': 20.0}}, 'woodcutting': {'global': {'double_rewards': 4.0, 'find_bird_nests': 15.0}}}, 'Great': {'global': {'global': {'fine_material_finding': 20.0}}, 'woodcutting': {'global': {'double_rewards': 4.5, 'find_bird_nests': 20.0}}}, 'Excellent': {'global': {'global': {'fine_material_finding': 20.0}}, 'woodcutting': {'global': {'double_rewards': 5.0, 'find_bird_nests': 25.0}}}, 'Perfect': {'global': {'global': {'fine_material_finding': 20.0}}, 'woodcutting': {'global': {'double_rewards': 5.5, 'find_bird_nests': 30.0}}}, 'Eternal': {'global': {'global': {'fine_material_finding': 20.0}}, 'woodcutting': {'global': {'double_rewards': 6.0, 'find_bird_nests': 35.0}}}},
-        quality_values={'Normal': 150, 'Good': 303, 'Great': 460, 'Excellent': 620, 'Perfect': 869, 'Eternal': 1404},
+        quality_values={'Normal': 165, 'Good': 318, 'Great': 475, 'Excellent': 635, 'Perfect': 884, 'Eternal': 1421},
         requirements=[{'type': 'skill', 'skill': 'Woodcutting', 'level': 35}]
     )
 
@@ -524,10 +552,10 @@ class Item:
         uuid='0bc235a8-6b92-4b40-a088-9dc1b5067999',
         slot='neck',
         keywords=['Amulet', 'Smithing'],
-        value=150,
+        value=210,
         base_stats={'global': {'global': {'double_rewards': 4.0}}, 'smithing': {'global': {'no_materials_consumed': 3.5, 'bonus_xp_percent': 5.0}}},
         quality_stats={'Normal': {'global': {'global': {'double_rewards': 4.0}}, 'smithing': {'global': {'no_materials_consumed': 3.5, 'bonus_xp_percent': 5.0}}}, 'Good': {'global': {'global': {'double_rewards': 4.0}}, 'smithing': {'global': {'no_materials_consumed': 4.0, 'bonus_xp_percent': 6.0, 'quality_outcome': 2.0}}}, 'Great': {'global': {'global': {'double_rewards': 4.0}}, 'smithing': {'global': {'no_materials_consumed': 4.5, 'bonus_xp_percent': 7.0, 'quality_outcome': 4.0}}}, 'Excellent': {'global': {'global': {'double_rewards': 4.0}}, 'smithing': {'global': {'no_materials_consumed': 5.0, 'bonus_xp_percent': 8.0, 'quality_outcome': 6.0}}}, 'Perfect': {'global': {'global': {'double_rewards': 4.0}}, 'smithing': {'global': {'no_materials_consumed': 5.5, 'bonus_xp_percent': 9.0, 'quality_outcome': 8.0}}}, 'Eternal': {'global': {'global': {'double_rewards': 4.0}}, 'smithing': {'global': {'no_materials_consumed': 6.0, 'bonus_xp_percent': 10.0, 'quality_outcome': 10.0}}}},
-        quality_values={'Normal': 150, 'Good': 303, 'Great': 460, 'Excellent': 620, 'Perfect': 869, 'Eternal': 1404},
+        quality_values={'Normal': 210, 'Good': 363, 'Great': 521, 'Excellent': 682, 'Perfect': 932, 'Eternal': 1474},
         requirements=[{'type': 'skill', 'skill': 'Smithing', 'level': 35}]
     )
 
@@ -536,10 +564,10 @@ class Item:
         uuid='49ce1eab-9158-4bac-8c42-8695645a41e9',
         slot='neck',
         keywords=['Amulet', 'Agility'],
-        value=150,
+        value=202,
         base_stats={'global': {'global': {'chest_finding': 12.0}}, 'agility': {'global': {'fine_material_finding': 10.0, 'double_rewards': 1.0}}},
         quality_stats={'Normal': {'global': {'global': {'chest_finding': 12.0}}, 'agility': {'global': {'fine_material_finding': 10.0, 'double_rewards': 1.0}}}, 'Good': {'global': {'global': {'chest_finding': 12.0}}, 'agility': {'global': {'fine_material_finding': 15.0, 'double_rewards': 2.0, 'steps_add': -1.0}}}, 'Great': {'global': {'global': {'chest_finding': 12.0}}, 'agility': {'global': {'fine_material_finding': 20.0, 'double_rewards': 3.0, 'steps_add': -1.0}}}, 'Excellent': {'global': {'global': {'chest_finding': 12.0}}, 'agility': {'global': {'fine_material_finding': 25.0, 'double_rewards': 4.0, 'steps_add': -2.0}}}, 'Perfect': {'global': {'global': {'chest_finding': 12.0}}, 'agility': {'global': {'fine_material_finding': 30.0, 'double_rewards': 5.0, 'steps_add': -2.0}}}, 'Eternal': {'global': {'global': {'chest_finding': 12.0}}, 'agility': {'global': {'fine_material_finding': 35.0, 'double_rewards': 6.0, 'steps_add': -3.0}}}},
-        quality_values={'Normal': 150, 'Good': 303, 'Great': 460, 'Excellent': 620, 'Perfect': 869, 'Eternal': 1404},
+        quality_values={'Normal': 202, 'Good': 356, 'Great': 514, 'Excellent': 674, 'Perfect': 924, 'Eternal': 1465},
         requirements=[{'type': 'skill', 'skill': 'Agility', 'level': 35}]
     )
 
@@ -548,10 +576,10 @@ class Item:
         uuid='7a6c5956-7670-4ebe-96a3-8e3d2a721dce',
         slot='neck',
         keywords=['Amulet', 'Travelling'],
-        value=150,
+        value=166,
         base_stats={'traveling': {'global': {'work_efficiency': 10.0, 'chest_finding': 10.0}}},
         quality_stats={'Normal': {'traveling': {'global': {'work_efficiency': 10.0, 'chest_finding': 10.0}}}, 'Good': {'traveling': {'global': {'work_efficiency': 10.0, 'chest_finding': 10.0, 'double_action': 2.0}}}, 'Great': {'traveling': {'global': {'work_efficiency': 10.0, 'chest_finding': 10.0, 'double_action': 4.0}}}, 'Excellent': {'traveling': {'global': {'work_efficiency': 10.0, 'chest_finding': 10.0, 'double_action': 6.0}}}, 'Perfect': {'traveling': {'global': {'work_efficiency': 10.0, 'chest_finding': 10.0, 'double_action': 8.0, 'steps_add': -1.0}}}, 'Eternal': {'traveling': {'global': {'work_efficiency': 10.0, 'chest_finding': 10.0, 'double_action': 10.0, 'steps_add': -2.0}}}},
-        quality_values={'Normal': 150, 'Good': 303, 'Great': 460, 'Excellent': 620, 'Perfect': 869, 'Eternal': 1404},
+        quality_values={'Normal': 166, 'Good': 319, 'Great': 477, 'Excellent': 637, 'Perfect': 886, 'Eternal': 1423},
         requirements=[{'type': 'skill', 'skill': 'Agility', 'level': 35}]
     )
 
@@ -572,10 +600,10 @@ class Item:
         uuid='a337de21-79bc-474e-9642-4a5f37feada3',
         slot='neck',
         keywords=['Amulet', 'Trinketry'],
-        value=150,
+        value=180,
         base_stats={'global': {'global': {'double_action': 3.0}}, 'trinketry': {'global': {'no_materials_consumed': 3.5, 'bonus_xp_percent': 10.0}}},
         quality_stats={'Normal': {'global': {'global': {'double_action': 3.0}}, 'trinketry': {'global': {'no_materials_consumed': 3.5, 'bonus_xp_percent': 10.0}}}, 'Good': {'global': {'global': {'double_action': 3.0}}, 'trinketry': {'global': {'no_materials_consumed': 4.0, 'bonus_xp_percent': 11.0, 'chest_finding': 3.0, 'quality_outcome': 2.0}}}, 'Great': {'global': {'global': {'double_action': 3.0}}, 'trinketry': {'global': {'no_materials_consumed': 4.5, 'bonus_xp_percent': 12.0, 'chest_finding': 6.0, 'quality_outcome': 4.0}}}, 'Excellent': {'global': {'global': {'double_action': 3.0}}, 'trinketry': {'global': {'no_materials_consumed': 5.0, 'bonus_xp_percent': 13.0, 'chest_finding': 9.0, 'quality_outcome': 6.0}}}, 'Perfect': {'global': {'global': {'double_action': 3.0}}, 'trinketry': {'global': {'no_materials_consumed': 5.5, 'bonus_xp_percent': 14.0, 'chest_finding': 12.0, 'quality_outcome': 8.0}}}, 'Eternal': {'global': {'global': {'double_action': 3.0}}, 'trinketry': {'global': {'no_materials_consumed': 6.0, 'bonus_xp_percent': 15.0, 'chest_finding': 15.0, 'quality_outcome': 10.0}}}},
-        quality_values={'Normal': 150, 'Good': 303, 'Great': 460, 'Excellent': 620, 'Perfect': 869, 'Eternal': 1404},
+        quality_values={'Normal': 180, 'Good': 333, 'Great': 491, 'Excellent': 651, 'Perfect': 900, 'Eternal': 1439},
         requirements=[{'type': 'skill', 'skill': 'Trinketry', 'level': 35}]
     )
 
@@ -584,10 +612,10 @@ class Item:
         uuid='b6d7c53e-cc5f-40df-bd0f-90c820707a25',
         slot='neck',
         keywords=['Amulet', 'Cooking'],
-        value=150,
+        value=195,
         base_stats={'global': {'global': {'no_materials_consumed': 3.0}}, 'cooking': {'global': {'double_action': 2.0, 'bonus_xp_percent': 5.0}}},
         quality_stats={'Normal': {'global': {'global': {'no_materials_consumed': 3.0}}, 'cooking': {'global': {'double_action': 2.0, 'bonus_xp_percent': 5.0}}}, 'Good': {'global': {'global': {'no_materials_consumed': 3.0}}, 'cooking': {'global': {'double_action': 2.5, 'bonus_xp_percent': 6.0, 'double_rewards': 1.0}}}, 'Great': {'global': {'global': {'no_materials_consumed': 3.0}}, 'cooking': {'global': {'double_action': 3.0, 'bonus_xp_percent': 7.0, 'double_rewards': 2.0}}}, 'Excellent': {'global': {'global': {'no_materials_consumed': 3.0}}, 'cooking': {'global': {'double_action': 3.5, 'bonus_xp_percent': 8.0, 'double_rewards': 3.0}}}, 'Perfect': {'global': {'global': {'no_materials_consumed': 3.0}}, 'cooking': {'global': {'double_action': 4.0, 'bonus_xp_percent': 9.0, 'double_rewards': 4.0}}}, 'Eternal': {'global': {'global': {'no_materials_consumed': 3.0}}, 'cooking': {'global': {'double_action': 4.5, 'bonus_xp_percent': 10.0, 'double_rewards': 5.0}}}},
-        quality_values={'Normal': 150, 'Good': 303, 'Great': 460, 'Excellent': 620, 'Perfect': 869, 'Eternal': 1404},
+        quality_values={'Normal': 195, 'Good': 348, 'Great': 506, 'Excellent': 666, 'Perfect': 916, 'Eternal': 1456},
         requirements=[{'type': 'skill', 'skill': 'Cooking', 'level': 35}]
     )
 
@@ -608,10 +636,10 @@ class Item:
         uuid='cb3f9c46-a9ab-4f5c-bac6-3d16d5cbb1cc',
         slot='neck',
         keywords=['Amulet', 'Hunting'],
-        value=150,
+        value=210,
         base_stats={'global': {'global': {'steps_percent': -2.0}}, 'hunting': {'global': {'double_action': 2.5, 'fine_material_finding': 12.0}}},
         quality_stats={'Normal': {'global': {'global': {'steps_percent': -2.0}}, 'hunting': {'global': {'double_action': 2.5, 'fine_material_finding': 12.0}}}, 'Good': {'global': {'global': {'steps_percent': -2.0}}, 'hunting': {'global': {'double_action': 3.0, 'fine_material_finding': 15.0}}}, 'Great': {'global': {'global': {'steps_percent': -2.0}}, 'hunting': {'global': {'double_action': 3.5, 'fine_material_finding': 18.0}}}, 'Excellent': {'global': {'global': {'steps_percent': -2.0}}, 'hunting': {'global': {'double_action': 4.0, 'fine_material_finding': 21.0}}}, 'Perfect': {'global': {'global': {'steps_percent': -2.0}}, 'hunting': {'global': {'double_action': 4.5, 'fine_material_finding': 24.0}}}, 'Eternal': {'global': {'global': {'steps_percent': -2.0}}, 'hunting': {'global': {'double_action': 5.0, 'fine_material_finding': 27.0}}}},
-        quality_values={'Normal': 150, 'Good': 303, 'Great': 460, 'Excellent': 620, 'Perfect': 869, 'Eternal': 1404},
+        quality_values={'Normal': 210, 'Good': 363, 'Great': 521, 'Excellent': 682, 'Perfect': 932, 'Eternal': 1474},
         requirements=[{'type': 'skill', 'skill': 'Hunting', 'level': 35}]
     )
 
@@ -620,10 +648,10 @@ class Item:
         uuid='c5d8ffac-5eb1-421a-956a-710da15b0b90',
         slot='neck',
         keywords=['Amulet', 'Foraging'],
-        value=150,
+        value=255,
         base_stats={'global': {'global': {'find_collectibles': 25.0}}, 'foraging': {'global': {'chest_finding': 6.0, 'fine_material_finding': 10.0, 'double_rewards': 1.0}}},
         quality_stats={'Normal': {'global': {'global': {'find_collectibles': 25.0}}, 'foraging': {'global': {'chest_finding': 6.0, 'fine_material_finding': 10.0, 'double_rewards': 1.0}}}, 'Good': {'global': {'global': {'find_collectibles': 25.0}}, 'foraging': {'global': {'chest_finding': 9.0, 'fine_material_finding': 15.0, 'double_rewards': 1.5, 'steps_add': -1.0}}}, 'Great': {'global': {'global': {'find_collectibles': 25.0}}, 'foraging': {'global': {'chest_finding': 12.0, 'fine_material_finding': 20.0, 'double_rewards': 2.0, 'steps_add': -1.0}}}, 'Excellent': {'global': {'global': {'find_collectibles': 25.0}}, 'foraging': {'global': {'chest_finding': 15.0, 'fine_material_finding': 25.0, 'double_rewards': 2.5, 'steps_add': -2.0}}}, 'Perfect': {'global': {'global': {'find_collectibles': 25.0}}, 'foraging': {'global': {'chest_finding': 18.0, 'fine_material_finding': 30.0, 'double_rewards': 3.0, 'steps_add': -2.0}}}, 'Eternal': {'global': {'global': {'find_collectibles': 25.0}}, 'foraging': {'global': {'chest_finding': 21.0, 'fine_material_finding': 35.0, 'double_rewards': 3.5, 'steps_add': -3.0}}}},
-        quality_values={'Normal': 150, 'Good': 303, 'Great': 460, 'Excellent': 620, 'Perfect': 869, 'Eternal': 1404},
+        quality_values={'Normal': 255, 'Good': 409, 'Great': 567, 'Excellent': 728, 'Perfect': 979, 'Eternal': 1526},
         requirements=[{'type': 'skill', 'skill': 'Foraging', 'level': 35}]
     )
 
@@ -644,10 +672,10 @@ class Item:
         uuid='b0fbc54f-00ff-485f-b7e2-7cb433444c70',
         slot='neck',
         keywords=['Amulet'],
-        value=150,
+        value=450,
         base_stats={'global': {'global': {'steps_add': -1.0, 'no_materials_consumed': 1.5, 'chest_finding': 10.0, 'fine_material_finding': 15.0, 'bonus_xp_percent': 4.0, 'double_rewards': 1.5}}},
         quality_stats={'Normal': {'global': {'global': {'steps_add': -1.0, 'no_materials_consumed': 1.5, 'chest_finding': 10.0, 'fine_material_finding': 15.0, 'bonus_xp_percent': 4.0, 'double_rewards': 1.5}}}, 'Good': {'global': {'global': {'steps_add': -1.0, 'no_materials_consumed': 1.75, 'chest_finding': 11.0, 'fine_material_finding': 17.0, 'bonus_xp_percent': 5.0, 'double_rewards': 1.75}}}, 'Great': {'global': {'global': {'steps_add': -2.0, 'no_materials_consumed': 2.0, 'chest_finding': 12.0, 'fine_material_finding': 19.0, 'bonus_xp_percent': 6.0, 'double_rewards': 2.0}}}, 'Excellent': {'global': {'global': {'steps_add': -2.0, 'no_materials_consumed': 2.25, 'chest_finding': 13.0, 'fine_material_finding': 21.0, 'bonus_xp_percent': 7.0, 'double_rewards': 2.25}}}, 'Perfect': {'global': {'global': {'steps_add': -3.0, 'no_materials_consumed': 2.5, 'chest_finding': 14.0, 'fine_material_finding': 23.0, 'bonus_xp_percent': 8.0, 'double_rewards': 2.5}}}, 'Eternal': {'global': {'global': {'steps_add': -4.0, 'no_materials_consumed': 2.75, 'chest_finding': 15.0, 'fine_material_finding': 25.0, 'bonus_xp_percent': 9.0, 'double_rewards': 2.75}}}},
-        quality_values={'Normal': 150, 'Good': 303, 'Great': 460, 'Excellent': 620, 'Perfect': 869, 'Eternal': 1404},
+        quality_values={'Normal': 450, 'Good': 606, 'Great': 767, 'Excellent': 930, 'Perfect': 1185, 'Eternal': 1755},
         requirements=[]
     )
 
@@ -723,7 +751,8 @@ class Item:
         rarity='legendary',
         location_reqs=[],
         gated_stats={},
-        requirements=[{'type': 'skill', 'skill': 'Woodcutting', 'level': 44}]
+        requirements=[{'type': 'skill', 'skill': 'Woodcutting', 'level': 44}],
+        abilities=[{'name': 'Down Go The Trees', 'effect': 'Completes {count} Woodcutting actions instantly.', 'icon': 'destory_wood', 'charges': 3, 'cooldown': '9,999 steps'}]
     )
 
     BABY_PENGUIN_ICE_LURE = ItemInstance(
@@ -880,7 +909,7 @@ class Item:
         stats={'agility': {'snowy': {'work_efficiency': 7.0}}},
         slot='feet',
         keywords=['Skis', 'Agility', 'Snowy'],
-        value=9,
+        value=4,
         rarity='common',
         location_reqs=[],
         gated_stats={},
@@ -981,13 +1010,13 @@ class Item:
     BOLSTERED_QUIVER = ItemInstance(
         name='Bolstered quiver',
         uuid='209ec9b3-e2a7-4fe2-afb3-e45e97613b89',
-        stats={'hunting': {'global': {'inventory_space': 5.0, 'chest_finding': 15.0}}},
+        stats={'hunting': {'global': {'chest_finding': 15.0}}},
         slot='back',
         keywords=['Hunting'],
         value=24,
         rarity='rare',
         location_reqs=[],
-        gated_stats={},
+        gated_stats={'keyword_in_inventory': {'arrows': {'hunting': {'global': {'inventory_space': 5.0}}}}},
         requirements=[{'type': 'skill', 'skill': 'Hunting', 'level': 25}]
     )
 
@@ -997,8 +1026,21 @@ class Item:
         stats={'global': {'global': {'steps_add': -1.0}}},
         slot='feet',
         keywords=['Achievement Reward'],
-        value=21,
+        value=0,
         rarity='rare',
+        location_reqs=[],
+        gated_stats={},
+        requirements=[]
+    )
+
+    BOULDER_BOOTS = ItemInstance(
+        name='Boulder boots',
+        uuid='bd5970a4-7d4d-4af8-8009-b04b95beee01',
+        stats={'global': {'global': {'inventory_space': -8.0}}, 'gathering': {'global': {'work_efficiency': 30.0, 'double_rewards': 2.0}}},
+        slot='feet',
+        keywords=['Achievement Reward', 'Gathering'],
+        value=0,
+        rarity='epic',
         location_reqs=[],
         gated_stats={},
         requirements=[]
@@ -1251,7 +1293,7 @@ class Item:
         rarity='ethereal',
         location_reqs=[],
         gated_stats={},
-        requirements=[{'type': 'achievement_points', 'amount': 265}]
+        requirements=[{'type': 'achievement_points', 'amount': 263}]
     )
 
     CAPE_OF_HALF_ACHIEVER = ItemInstance(
@@ -1264,7 +1306,7 @@ class Item:
         rarity='legendary',
         location_reqs=[],
         gated_stats={},
-        requirements=[{'type': 'achievement_points', 'amount': 133}]
+        requirements=[{'type': 'achievement_points', 'amount': 132}]
     )
 
     CAPE_OF_THE_TRAILBLAZER = ItemInstance(
@@ -1397,6 +1439,19 @@ class Item:
         requirements=[{'type': 'skill', 'skill': 'Tailoring', 'level': 18}]
     )
 
+    COLLECTION_RING = ItemInstance(
+        name='Collection ring',
+        uuid='0a7fac6c-d73c-4001-94fe-214dc8fbd054',
+        stats={'global': {'global': {'find_collectibles': 3.0}}},
+        slot='ring',
+        keywords=['Ring', 'Achievement Reward'],
+        value=0,
+        rarity='epic',
+        location_reqs=[],
+        gated_stats={'total_collectibles': {10: {'global': {'global': {'find_collectibles': 1.0, 'chest_finding': 1.0}}}, 20: {'global': {'global': {'find_collectibles': 1.0, 'chest_finding': 1.0, 'fine_material_finding': 1.0}}}, 30: {'global': {'global': {'find_collectibles': 1.0, 'chest_finding': 1.0, 'fine_material_finding': 1.0, 'inventory_space': 1.0}}}, 40: {'global': {'global': {'find_collectibles': 1.0, 'chest_finding': 1.0, 'fine_material_finding': 1.0}}}, 50: {'global': {'global': {'find_collectibles': 1.0, 'chest_finding': 1.0, 'fine_material_finding': 1.0}}}, 60: {'global': {'global': {'find_collectibles': 1.0, 'chest_finding': 1.0, 'fine_material_finding': 1.0, 'inventory_space': 1.0}}}}},
+        requirements=[]
+    )
+
     COMFY_FISHING_CHAIR = CraftedItem(
         name='Comfy fishing chair',
         uuid='b41e63da-aa4e-4a84-b83d-889a09515b22',
@@ -1428,7 +1483,7 @@ class Item:
         stats={'global': {'global': {'fine_material_finding': 55.0, 'bonus_xp_percent': -6.0}}},
         slot='feet',
         keywords=['Achievement Reward'],
-        value=108,
+        value=0,
         rarity='epic',
         location_reqs=[],
         gated_stats={},
@@ -1441,7 +1496,7 @@ class Item:
         stats={'global': {'global': {'fine_material_finding': 55.0, 'bonus_xp_percent': -6.0}}},
         slot='head',
         keywords=['Achievement Reward'],
-        value=108,
+        value=0,
         rarity='epic',
         location_reqs=[],
         gated_stats={},
@@ -1454,7 +1509,7 @@ class Item:
         stats={'global': {'global': {'fine_material_finding': 55.0, 'bonus_xp_percent': -6.0}}},
         slot='chest',
         keywords=['Achievement Reward'],
-        value=108,
+        value=0,
         rarity='epic',
         location_reqs=[],
         gated_stats={},
@@ -1467,7 +1522,7 @@ class Item:
         stats={'global': {'global': {'fine_material_finding': 55.0, 'bonus_xp_percent': -6.0}}},
         slot='legs',
         keywords=['Achievement Reward'],
-        value=108,
+        value=0,
         rarity='epic',
         location_reqs=[],
         gated_stats={},
@@ -1908,7 +1963,7 @@ class Item:
         stats={'agility': {'underwater': {'work_efficiency': 12.0}}},
         slot='hands',
         keywords=['Aquatic', 'Faction Reward', 'Agility'],
-        value=10,
+        value=0,
         rarity='uncommon',
         location_reqs=[],
         gated_stats={},
@@ -1921,7 +1976,7 @@ class Item:
         stats={'global': {'global': {'fine_material_finding': 6.0}}},
         slot='ring',
         keywords=['Ring', 'Achievement Reward'],
-        value=40,
+        value=0,
         rarity='rare',
         location_reqs=[],
         gated_stats={},
@@ -2167,7 +2222,7 @@ class Item:
         stats={'global': {'global': {'steps_percent': -5.0}}},
         slot='tools',
         keywords=[],
-        value=7,
+        value=123,
         rarity='ethereal',
         location_reqs=[],
         gated_stats={},
@@ -2375,7 +2430,7 @@ class Item:
         stats={'mining': {'global': {'find_gems': 20.0}}},
         slot='hands',
         keywords=['Achievement Reward', 'Mining'],
-        value=300,
+        value=0,
         rarity='epic',
         location_reqs=[],
         gated_stats={},
@@ -2407,7 +2462,7 @@ class Item:
     )
 
     GEM_TIPPED_TWEEZERS = ItemInstance(
-        name='Gem-tipped tweezers',
+        name='Gem tipped tweezers',
         uuid='c02ce499-3133-4b54-8834-8205509b148f',
         stats={'global': {'global': {'quality_outcome': 7.0}}, 'trinketry': {'global': {'no_materials_consumed': 3.0}}},
         slot='tools',
@@ -2442,6 +2497,19 @@ class Item:
         rarity='epic',
         location_reqs=[],
         gated_stats={},
+        requirements=[]
+    )
+
+    GLOBETROTTERS_BACKPACK = ItemInstance(
+        name="Globetrotter's backpack",
+        uuid='c35aafa7-930e-4605-af4f-e1454d2a4e8d',
+        stats={},
+        slot='back',
+        keywords=['Achievement Reward', 'Regional'],
+        value=0,
+        rarity='epic',
+        location_reqs=[],
+        gated_stats={'explore_realm': {'jarvonia': {'global': {'global': {'inventory_space': 1.0, 'bonus_xp_percent': 2.0}}}, 'gdte': {'global': {'global': {'inventory_space': 1.0, 'bonus_xp_percent': 2.0}}}, 'syrenthia': {'global': {'global': {'inventory_space': 1.0, 'bonus_xp_percent': 2.0}}}, 'wallisia': {'global': {'global': {'inventory_space': 1.0, 'bonus_xp_percent': 2.0}}}, 'wrentmark': {'global': {'global': {'inventory_space': 1.0, 'bonus_xp_percent': 2.0}}}}},
         requirements=[]
     )
 
@@ -2684,7 +2752,7 @@ class Item:
         stats={'global': {'global': {'double_action': 2.0}}},
         slot='tools',
         keywords=['Achievement Reward'],
-        value=375,
+        value=0,
         rarity='epic',
         location_reqs=[],
         gated_stats={},
@@ -2767,6 +2835,20 @@ class Item:
         location_reqs=[],
         gated_stats={},
         requirements=[{'type': 'skill', 'skill': 'Trinketry', 'level': 23}]
+    )
+
+    HAT_OF_WISDOM = ItemInstance(
+        name='Hat of wisdom',
+        uuid='item-hat_of_wisdom-67d1339f-902d-46d1-a0c9-28a3a9bd39da',
+        stats={'artisan': {'global': {'bonus_xp_percent': 15.0}}, 'global': {'global': {'bonus_xp_percent': 5.0}}},
+        slot='head',
+        keywords=['Achievement Reward', 'Artisan'],
+        value=0,
+        rarity='legendary',
+        location_reqs=[],
+        gated_stats={},
+        requirements=[],
+        abilities=[{'name': 'Study Time', 'effect': 'Will give you some random Memosphere.', 'icon': 'continued_education', 'charges': 20, 'cooldown': '1,234 steps', 'loot_table': 'find_memospheres', 'loot_rolls': 2, 'charge_steps': 1234, 'loot_drops': [{'item_name': 'Agility memosphere', 'icon': '/assets/icons/items/consumables/agility_memosphere.svg'}, {'item_name': 'Carpentry memosphere', 'icon': '/assets/icons/items/consumables/carpentry_memosphere.svg'}, {'item_name': 'Cooking memosphere', 'icon': '/assets/icons/items/consumables/cooking_memosphere.svg'}, {'item_name': 'Crafting memosphere', 'icon': '/assets/icons/items/consumables/crafting_memosphere.svg'}, {'item_name': 'Fishing memosphere', 'icon': '/assets/icons/items/consumables/fishing_memosphere.svg'}, {'item_name': 'Foraging memosphere', 'icon': '/assets/icons/items/consumables/foraging_memosphere.svg'}, {'item_name': 'Hunting memosphere', 'icon': '/assets/icons/items/consumables/hunting_memosphere.svg'}, {'item_name': 'Mining memosphere', 'icon': '/assets/icons/items/consumables/mining_memosphere.svg'}, {'item_name': 'Smithing memosphere', 'icon': '/assets/icons/items/consumables/smithing_memosphere.svg'}, {'item_name': 'Tailoring memosphere', 'icon': '/assets/icons/items/consumables/tailoring_memosphere.svg'}, {'item_name': 'Trinketry memosphere', 'icon': '/assets/icons/items/consumables/trinketry_memosphere.svg'}, {'item_name': 'Woodcutting memosphere', 'icon': '/assets/icons/items/consumables/woodcutting_memosphere.svg'}]}]
     )
 
     HAT_WITH_A_FEATHER = ItemInstance(
@@ -3261,7 +3343,7 @@ class Item:
         stats={'global': {'global': {'find_collectibles': 5.0}}},
         slot='tools',
         keywords=['Achievement Reward'],
-        value=2,
+        value=0,
         rarity='uncommon',
         location_reqs=[],
         gated_stats={},
@@ -3290,7 +3372,7 @@ class Item:
         base_stats={'global': {'underwater': {'work_efficiency': -10.0, 'double_rewards': -1.0}}},
         quality_stats={'Normal': {'global': {'underwater': {'work_efficiency': -10.0, 'double_rewards': -1.0}}}, 'Good': {'global': {'underwater': {'work_efficiency': -7.0, 'double_rewards': 0.0}}}, 'Great': {'global': {'underwater': {'work_efficiency': -4.0, 'double_rewards': 1.0}}}, 'Excellent': {'global': {'underwater': {'work_efficiency': -1.0, 'double_rewards': 2.0}}}, 'Perfect': {'global': {'underwater': {'work_efficiency': 2.0, 'double_rewards': 3.0}}}, 'Eternal': {'global': {'underwater': {'work_efficiency': 5.0, 'double_rewards': 4.0}}}},
         quality_values={'Normal': 10, 'Good': 23, 'Great': 40, 'Excellent': 60, 'Perfect': 99, 'Eternal': 284},
-        requirements=[{'type': 'skill', 'skill': 'Agility', 'level': 30}]
+        requirements=[{'type': 'skill', 'skill': 'Agility', 'level': 30}, {'type': 'activity_completion', 'activity': 'merfolk_dancing', 'completions': 25}]
     )
 
     KELP_DIVING_PANTS = CraftedItem(
@@ -3302,7 +3384,7 @@ class Item:
         base_stats={'global': {'underwater': {'work_efficiency': -10.0, 'double_rewards': -1.0}}},
         quality_stats={'Normal': {'global': {'underwater': {'work_efficiency': -10.0, 'double_rewards': -1.0}}}, 'Good': {'global': {'underwater': {'work_efficiency': -7.0, 'double_rewards': 0.0}}}, 'Great': {'global': {'underwater': {'work_efficiency': -4.0, 'double_rewards': 1.0}}}, 'Excellent': {'global': {'underwater': {'work_efficiency': -1.0, 'double_rewards': 2.0}}}, 'Perfect': {'global': {'underwater': {'work_efficiency': 2.0, 'double_rewards': 3.0}}}, 'Eternal': {'global': {'underwater': {'work_efficiency': 5.0, 'double_rewards': 4.0}}}},
         quality_values={'Normal': 10, 'Good': 23, 'Great': 40, 'Excellent': 60, 'Perfect': 99, 'Eternal': 284},
-        requirements=[{'type': 'skill', 'skill': 'Agility', 'level': 30}]
+        requirements=[{'type': 'skill', 'skill': 'Agility', 'level': 30}, {'type': 'activity_completion', 'activity': 'merfolk_dancing', 'completions': 25}]
     )
 
     KELP_DIVING_SHIRT = CraftedItem(
@@ -3314,7 +3396,7 @@ class Item:
         base_stats={'global': {'underwater': {'work_efficiency': -10.0, 'double_rewards': -1.0}}},
         quality_stats={'Normal': {'global': {'underwater': {'work_efficiency': -10.0, 'double_rewards': -1.0}}}, 'Good': {'global': {'underwater': {'work_efficiency': -7.0, 'double_rewards': 0.0}}}, 'Great': {'global': {'underwater': {'work_efficiency': -4.0, 'double_rewards': 1.0}}}, 'Excellent': {'global': {'underwater': {'work_efficiency': -1.0, 'double_rewards': 2.0}}}, 'Perfect': {'global': {'underwater': {'work_efficiency': 2.0, 'double_rewards': 3.0}}}, 'Eternal': {'global': {'underwater': {'work_efficiency': 5.0, 'double_rewards': 4.0}}}},
         quality_values={'Normal': 10, 'Good': 23, 'Great': 40, 'Excellent': 60, 'Perfect': 99, 'Eternal': 284},
-        requirements=[{'type': 'skill', 'skill': 'Agility', 'level': 30}]
+        requirements=[{'type': 'skill', 'skill': 'Agility', 'level': 30}, {'type': 'activity_completion', 'activity': 'merfolk_dancing', 'completions': 25}]
     )
 
     KNITTED_MITTENS = ItemInstance(
@@ -3671,7 +3753,7 @@ class Item:
         stats={},
         slot='tools',
         keywords=['Local Map', 'Regional', 'Travelling'],
-        value=11,
+        value=300,
         rarity='epic',
         location_reqs=[],
         gated_stats={'item_ownership': {'map of jarvonia': {'traveling': {'jarvonia': {'double_action': 15.0}}}, 'map of syrenthia': {'traveling': {'syrenthia': {'double_action': 15.0}}}, 'map of trellin': {'traveling': {'trellin': {'double_action': 15.0}}}, 'map of erdwise': {'traveling': {'erdwise': {'double_action': 15.0}}}, 'map of halfling rebels': {'traveling': {'halfling_rebels': {'double_action': 15.0}}}}},
@@ -4111,7 +4193,7 @@ class Item:
         stats={'agility': {'snowy': {'work_efficiency': 24.0}}},
         slot='feet',
         keywords=['Skis', 'Agility', 'Snowy'],
-        value=21,
+        value=30,
         rarity='rare',
         location_reqs=[],
         gated_stats={},
@@ -4137,7 +4219,7 @@ class Item:
         stats={'global': {'global': {'bonus_xp_percent': 2.0, 'chest_finding': 2.0}}},
         slot='ring',
         keywords=['Ring'],
-        value=27,
+        value=20,
         rarity='rare',
         location_reqs=[],
         gated_stats={},
@@ -4186,7 +4268,7 @@ class Item:
         stats={},
         slot='back',
         keywords=['Expert Diving Gear', 'Advanced Diving Gear', 'Diving Gear', 'Aquatic', 'Faction Reward'],
-        value=10,
+        value=0,
         rarity='rare',
         location_reqs=[],
         gated_stats={},
@@ -4199,7 +4281,7 @@ class Item:
         stats={'global': {'global': {'work_efficiency': 3.0, 'inventory_space': 1.0}}},
         slot='legs',
         keywords=['Achievement Reward'],
-        value=10,
+        value=0,
         rarity='rare',
         location_reqs=[],
         gated_stats={},
@@ -4225,7 +4307,7 @@ class Item:
         stats={'traveling': {'global': {'work_efficiency': 5.0}}},
         slot='neck',
         keywords=['Achievement Reward', 'Travelling'],
-        value=4,
+        value=0,
         rarity='uncommon',
         location_reqs=[],
         gated_stats={},
@@ -4418,7 +4500,7 @@ class Item:
         stats={'trinketry': {'global': {'work_efficiency': 5.0, 'quality_outcome': 5.0}}},
         slot='feet',
         keywords=['Proper Gear', 'Faction Reward', 'Trinketry'],
-        value=5,
+        value=0,
         rarity='uncommon',
         location_reqs=[],
         gated_stats={'set_pieces': {'proper gear': {5: {'global': {'global': {'chest_finding': 20.0}}}}}},
@@ -4431,7 +4513,7 @@ class Item:
         stats={'trinketry': {'global': {'work_efficiency': 5.0, 'quality_outcome': 5.0}}},
         slot='cape',
         keywords=['Proper Gear', 'Faction Reward', 'Trinketry'],
-        value=5,
+        value=0,
         rarity='uncommon',
         location_reqs=[],
         gated_stats={'set_pieces': {'proper gear': {5: {'global': {'global': {'chest_finding': 20.0}}}}}},
@@ -4444,7 +4526,7 @@ class Item:
         stats={'trinketry': {'global': {'work_efficiency': 5.0, 'quality_outcome': 5.0}}},
         slot='head',
         keywords=['Proper Gear', 'Faction Reward', 'Trinketry'],
-        value=5,
+        value=0,
         rarity='uncommon',
         location_reqs=[],
         gated_stats={'set_pieces': {'proper gear': {5: {'global': {'global': {'chest_finding': 20.0}}}}}},
@@ -4457,7 +4539,7 @@ class Item:
         stats={'trinketry': {'global': {'work_efficiency': 5.0, 'quality_outcome': 5.0}}},
         slot='legs',
         keywords=['Proper Gear', 'Faction Reward', 'Trinketry'],
-        value=5,
+        value=0,
         rarity='uncommon',
         location_reqs=[],
         gated_stats={'set_pieces': {'proper gear': {5: {'global': {'global': {'chest_finding': 20.0}}}}}},
@@ -4470,7 +4552,7 @@ class Item:
         stats={'trinketry': {'global': {'work_efficiency': 5.0, 'quality_outcome': 5.0}}},
         slot='chest',
         keywords=['Proper Gear', 'Faction Reward', 'Trinketry'],
-        value=32,
+        value=0,
         rarity='uncommon',
         location_reqs=[],
         gated_stats={'set_pieces': {'proper gear': {5: {'global': {'global': {'chest_finding': 20.0}}}}}},
@@ -4545,14 +4627,27 @@ class Item:
     QUAINT_QUIVER = ItemInstance(
         name='Quaint quiver',
         uuid='ede2fd60-f190-4080-9174-a7459d6e679d',
-        stats={'hunting': {'global': {'inventory_space': 2.0, 'chest_finding': 5.0}}},
+        stats={'hunting': {'global': {'chest_finding': 5.0}}},
         slot='back',
         keywords=['Hunting'],
         value=7,
         rarity='common',
         location_reqs=[],
-        gated_stats={},
+        gated_stats={'keyword_in_inventory': {'arrows': {'hunting': {'global': {'inventory_space': 2.0}}}}},
         requirements=[{'type': 'skill', 'skill': 'Hunting', 'level': 5}]
+    )
+
+    QUICKDRAW_MAP = ItemInstance(
+        name='Quickdraw map',
+        uuid='1616511d-1165-4742-aacb-d93db3f811cd',
+        stats={},
+        slot='tools',
+        keywords=['Achievement Reward', 'Regional'],
+        value=0,
+        rarity='epic',
+        location_reqs=[],
+        gated_stats={'explore_realm': {'jarvonia': {'global': {'jarvonia': {'work_efficiency': 16.0, 'double_action': 4.0}}}, 'gdte': {'global': {'gdte': {'work_efficiency': 16.0, 'double_action': 4.0}}}, 'syrenthia': {'global': {'syrenthia': {'work_efficiency': 16.0, 'double_action': 4.0}}}, 'wallisia': {'global': {'wallisia': {'work_efficiency': 16.0, 'double_action': 4.0}}}, 'wrentmark': {'global': {'wrentmark': {'work_efficiency': 16.0, 'double_action': 4.0}}}}},
+        requirements=[]
     )
 
     RABBIT_EARS = ItemInstance(
@@ -4574,7 +4669,7 @@ class Item:
         stats={'cooking': {'global': {'work_efficiency': -12.5, 'double_action': 18.5, 'no_materials_consumed': 7.0}}},
         slot='tools',
         keywords=['Skill Book', 'Cooking'],
-        value=40,
+        value=100,
         rarity='legendary',
         location_reqs=[],
         gated_stats={},
@@ -4612,7 +4707,7 @@ class Item:
         stats={'mining': {'global': {'work_efficiency': 5.0, 'double_rewards': 10.0}}},
         slot='ring',
         keywords=['Ring', 'Mining'],
-        value=7,
+        value=165,
         rarity='ethereal',
         location_reqs=[],
         gated_stats={},
@@ -4629,7 +4724,8 @@ class Item:
         rarity='legendary',
         location_reqs=[],
         gated_stats={},
-        requirements=[]
+        requirements=[],
+        abilities=[{'name': 'Take Me Home', 'effect': 'Teleports you to Kallaheim.', 'icon': 'teleport', 'cooldown': '12h'}]
     )
 
     RING_OF_PANDEMONIUM = ItemInstance(
@@ -4651,11 +4747,12 @@ class Item:
         stats={'mining': {'global': {'find_gems': 5.0}}},
         slot='neck',
         keywords=['Amulet', 'Achievement Reward', 'Mining'],
-        value=52,
+        value=0,
         rarity='rare',
         location_reqs=[],
         gated_stats={},
-        requirements=[]
+        requirements=[],
+        abilities=[{'name': 'Rock And Roll', 'effect': 'Creates 5 random <hl>rough gems</hl>.', 'icon': 'spawn_gems', 'charges': 3, 'cooldown': '300 actions', 'loot_table': 'gem_pouch_table', 'loot_rolls': 5, 'loot_drops': [{'item_name': 'Rough star pearl', 'icon': '/assets/icons/items/materials/rough_star_pearl.svg'}, {'item_name': 'Rough opal', 'icon': '/assets/icons/items/materials/rough_opal.svg'}, {'item_name': 'Rough wrentmarine', 'icon': '/assets/icons/items/materials/rough_wrentmarine.svg'}, {'item_name': 'Rough topaz', 'icon': '/assets/icons/items/materials/rough_topaz.svg'}, {'item_name': 'Rough jade', 'icon': '/assets/icons/items/materials/rough_jade.svg'}, {'item_name': 'Rough sun stone', 'icon': '/assets/icons/items/materials/rough_sun_stone.svg'}, {'item_name': 'Rough ethernite', 'icon': '/assets/icons/items/materials/rough_ethernite.svg'}, {'item_name': 'Rough ruby', 'icon': '/assets/icons/items/materials/rough_ruby.svg'}]}]
     )
 
     ROOTWEAVE_CHAPS = CraftedItem(
@@ -4804,7 +4901,7 @@ class Item:
         stats={'agility': {'global': {'double_rewards': 10.0}}},
         slot='head',
         keywords=['Achievement Reward', 'Agility'],
-        value=7,
+        value=0,
         rarity='rare',
         location_reqs=[],
         gated_stats={},
@@ -4934,7 +5031,7 @@ class Item:
         stats={'global': {'global': {'work_efficiency': -2.0, 'fine_material_finding': 20.0}}},
         slot='tools',
         keywords=['Achievement Reward'],
-        value=7,
+        value=0,
         rarity='rare',
         location_reqs=[],
         gated_stats={},
@@ -5100,7 +5197,7 @@ class Item:
         stats={'foraging': {'global': {'work_efficiency': 12.0, 'chest_finding': 15.0, 'fine_material_finding': 15.0}}, 'global': {'global': {'ItemFindingCategory.SEA_SHELLS': 5.0}}},
         slot='tools',
         keywords=['Foraging'],
-        value=7,
+        value=90,
         rarity='legendary',
         location_reqs=[],
         gated_stats={},
@@ -5113,7 +5210,7 @@ class Item:
         stats={'global': {'global': {'fine_material_finding': 1.0}}},
         slot='ring',
         keywords=['Ring', 'Achievement Reward'],
-        value=4,
+        value=0,
         rarity='uncommon',
         location_reqs=[],
         gated_stats={},
@@ -5143,7 +5240,8 @@ class Item:
         rarity='legendary',
         location_reqs=[],
         gated_stats={},
-        requirements=[{'type': 'skill', 'skill': 'Agility', 'level': 15}]
+        requirements=[{'type': 'skill', 'skill': 'Agility', 'level': 15}],
+        abilities=[{'name': 'Need To Go Fast', 'effect': 'Completes {count} <hl>Travelling</hl> actions instantly.', 'icon': 'move_fast', 'charges': 5, 'cooldown': '6,000 steps'}]
     )
 
     SHOVEL_AXE = ItemInstance(
@@ -6097,7 +6195,7 @@ class Item:
         stats={'global': {'underwater': {'chest_finding': 30.0, 'fine_material_finding': 40.0}}},
         slot='head',
         keywords=['Expert Diving Gear', 'Advanced Diving Gear', 'Diving Gear', 'Aquatic'],
-        value=7,
+        value=100,
         rarity='legendary',
         location_reqs=[],
         gated_stats={},
@@ -6110,7 +6208,7 @@ class Item:
         stats={'fishing': {'global': {'steps_add': -3.0, 'work_efficiency': 10.0, 'chest_finding': 20.0}, 'syrenthia': {'double_action': 5.0}}},
         slot='tools',
         keywords=['Fishing Lure', 'Regional', 'Fishing', 'Syrenthia'],
-        value=7,
+        value=15,
         rarity='epic',
         location_reqs=[],
         gated_stats={},
@@ -6135,7 +6233,7 @@ class Item:
         stats={'global': {'global': {'inventory_space': 1.0}}},
         slot='back',
         keywords=['Achievement Reward'],
-        value=10,
+        value=0,
         rarity='common',
         location_reqs=[],
         gated_stats={},
@@ -6199,15 +6297,15 @@ class Item:
         stats={'global': {'global': {'fine_material_finding': 10.0, 'ItemFindingCategory.RANDOM_PIECE_OF_JUNK': 5.0}}},
         slot='tools',
         keywords=['Achievement Reward'],
-        value=15,
+        value=0,
         rarity='rare',
         location_reqs=[],
         gated_stats={},
         requirements=[]
     )
 
-    TRAVELERS_KIT = ItemInstance(
-        name="Traveler's kit",
+    TRAVELLERS_KIT = ItemInstance(
+        name="Traveller's kit",
         uuid='item-travelers_kit-6fa9af97-63dd-4708-a8c3-2d5ccf0eb42a',
         stats={'traveling': {'global': {'double_action': 30.0, 'steps_add': 10.0}}},
         slot='tools',
@@ -6232,13 +6330,39 @@ class Item:
         requirements=[]
     )
 
+    TREASURE_HUNTER_BANDOLIER = ItemInstance(
+        name='Treasure hunter bandolier',
+        uuid='bc73832c-da80-4517-b6a5-e462d0164d40',
+        stats={'global': {'global': {'double_rewards': 2.0}}},
+        slot='back',
+        keywords=['Treasure Hunter Set', 'Achievement Reward'],
+        value=0,
+        rarity='epic',
+        location_reqs=[],
+        gated_stats={'set_pieces': {'treasure hunter set': {1: {'global': {'global': {'find_collectibles': 5.0}}}, 2: {'global': {'global': {'find_collectibles': 5.0}}}, 3: {'global': {'global': {'find_collectibles': 10.0}}}, 4: {'global': {'global': {'find_collectibles': 5.0}}}, 5: {'global': {'global': {'find_collectibles': 5.0}}}, 6: {'global': {'global': {'find_collectibles': 10.0}}}}}},
+        requirements=[]
+    )
+
+    TREASURE_HUNTER_GLOVES = ItemInstance(
+        name='Treasure hunter gloves',
+        uuid='a8b4073a-cf20-4187-8be2-59aa1225e621',
+        stats={'global': {'global': {'double_rewards': 1.0}}},
+        slot='hands',
+        keywords=['Treasure Hunter Set', 'Achievement Reward'],
+        value=0,
+        rarity='epic',
+        location_reqs=[],
+        gated_stats={'set_pieces': {'treasure hunter set': {1: {'global': {'global': {'find_collectibles': 5.0}}}, 2: {'global': {'global': {'find_collectibles': 5.0}}}, 3: {'global': {'global': {'find_collectibles': 10.0}}}, 4: {'global': {'global': {'find_collectibles': 5.0}}}, 5: {'global': {'global': {'find_collectibles': 5.0}}}, 6: {'global': {'global': {'find_collectibles': 10.0}}}}}},
+        requirements=[]
+    )
+
     TREASURE_HUNTER_HAT = ItemInstance(
         name='Treasure hunter hat',
         uuid='item-treasure_hunter_hat-59b56fc5-32a6-4ece-8725-211bb31de52a',
         stats={'global': {'global': {'double_rewards': 1.0}}},
         slot='head',
         keywords=['Treasure Hunter Set', 'Achievement Reward'],
-        value=10,
+        value=0,
         rarity='rare',
         location_reqs=[],
         gated_stats={'set_pieces': {'treasure hunter set': {1: {'global': {'global': {'find_collectibles': 5.0}}}, 2: {'global': {'global': {'find_collectibles': 5.0}}}, 3: {'global': {'global': {'find_collectibles': 10.0}}}}}},
@@ -6251,7 +6375,7 @@ class Item:
         stats={'global': {'global': {'double_rewards': 3.0}}},
         slot='chest',
         keywords=['Treasure Hunter Set', 'Achievement Reward'],
-        value=10,
+        value=0,
         rarity='rare',
         location_reqs=[],
         gated_stats={'set_pieces': {'treasure hunter set': {1: {'global': {'global': {'find_collectibles': 5.0}}}, 2: {'global': {'global': {'find_collectibles': 5.0}}}, 3: {'global': {'global': {'find_collectibles': 10.0}}}}}},
@@ -6264,10 +6388,23 @@ class Item:
         stats={'global': {'global': {'double_rewards': 2.0}}},
         slot='legs',
         keywords=['Treasure Hunter Set', 'Achievement Reward'],
-        value=10,
+        value=0,
         rarity='rare',
         location_reqs=[],
         gated_stats={'set_pieces': {'treasure hunter set': {1: {'global': {'global': {'find_collectibles': 5.0}}}, 2: {'global': {'global': {'find_collectibles': 5.0}}}, 3: {'global': {'global': {'find_collectibles': 10.0}}}}}},
+        requirements=[]
+    )
+
+    TREASURE_HUNTER_SCARF = ItemInstance(
+        name='Treasure hunter scarf',
+        uuid='1f73fb38-6433-4590-9e18-ca611015b577',
+        stats={'global': {'global': {'double_rewards': 2.0}}},
+        slot='neck',
+        keywords=['Treasure Hunter Set', 'Achievement Reward'],
+        value=0,
+        rarity='epic',
+        location_reqs=[],
+        gated_stats={'set_pieces': {'treasure hunter set': {1: {'global': {'global': {'find_collectibles': 5.0}}}, 2: {'global': {'global': {'find_collectibles': 5.0}}}, 3: {'global': {'global': {'find_collectibles': 10.0}}}, 4: {'global': {'global': {'find_collectibles': 5.0}}}, 5: {'global': {'global': {'find_collectibles': 5.0}}}, 6: {'global': {'global': {'find_collectibles': 10.0}}}}}},
         requirements=[]
     )
 
@@ -6290,7 +6427,7 @@ class Item:
         stats={'global': {'global': {'inventory_space': -2.0}}, 'agility': {'global': {'work_efficiency': 12.0}}},
         slot='tools',
         keywords=['Agility', 'Achievement Reward'],
-        value=15,
+        value=0,
         rarity='rare',
         location_reqs=[],
         gated_stats={},
@@ -6415,7 +6552,7 @@ class Item:
         stats={'global': {'jarvonia': {'work_efficiency': 6.0}}},
         slot='head',
         keywords=['Faction Reward', 'Regional', 'Jarvonia'],
-        value=7,
+        value=0,
         rarity='rare',
         location_reqs=[],
         gated_stats={},
@@ -6428,7 +6565,7 @@ class Item:
         stats={'global': {'jarvonia': {'work_efficiency': 6.0}}},
         slot='chest',
         keywords=['Faction Reward', 'Regional', 'Jarvonia'],
-        value=7,
+        value=0,
         rarity='rare',
         location_reqs=[],
         gated_stats={},
@@ -6683,83 +6820,22 @@ class Item:
         stats={'global': {'jarvonia': {'work_efficiency': 8.0}}},
         slot='tools',
         keywords=['Faction Reward', 'Regional', 'Jarvonia'],
-        value=15,
+        value=0,
         rarity='epic',
         location_reqs=[],
         gated_stats={'activity': {'sledding': {'global': {'global': {'steps_add': -5.0}}}}},
         requirements=[{'type': 'character_level', 'level': 40}]
     )
 
-    ADVENTURERS_GUILD_BUCKLER = ItemInstance(
-        name="Adventurers' guild buckler",
-        uuid="f4be2b79-f096-4ce0-944c-dd6589af11d9",
-        stats={
-                    'global': {
-                        'global': {'ItemFindingCategory.ADVENTURERS_GUILD_TOKENS': 1.0},
-                    },
-                },
-        slot="secondary",
-        keywords=['Shield', 'Achievement reward'],
+    ZORRES_DESERT_GOURDPACK = ItemInstance(
+        name="Zorre's desert gourdpack",
+        uuid='d4f8c2b6-5c1a-4ed1-95d4-9892046779c4',
+        stats={'global': {'wrentmark': {'double_action': 3.0, 'fine_material_finding': 20.0, 'chest_finding': 20.0, 'double_rewards': 3.0}}},
+        slot='back',
+        keywords=['Regional', 'Wrentmark'],
         value=0,
         rarity='epic',
         location_reqs=[],
         gated_stats={},
-        requirements=[]
+        requirements=[{'type': 'activity_completion', 'activity': 'twophointoh_hunt', 'completions': 10}]
     )
-
-    COLLECTION_RING = ItemInstance(
-        name="Collection ring",
-        uuid="0a7fac6c-d73c-4001-94fe-214dc8fbd054",
-        stats={
-                    'global': {
-                        'global': {'find_collectibles': 3.0},
-                    },
-                },
-        slot="ring",
-        keywords=['Ring', 'Achievement reward'],
-        value=0,
-        rarity='epic',
-        location_reqs=[],
-        gated_stats={'total_collectibles': {10: {'global': {'global': {'find_collectibles': 1.0, 'chest_finding': 1.0}}}, 20: {'global': {'global': {'find_collectibles': 1.0, 'chest_finding': 1.0, 'fine_material_finding': 1.0}}}, 30: {'global': {'global': {'find_collectibles': 1.0, 'chest_finding': 1.0, 'fine_material_finding': 1.0, 'inventory_space': 1}}}, 40: {'global': {'global': {'find_collectibles': 1.0, 'chest_finding': 1.0, 'fine_material_finding': 1.0}}}, 50: {'global': {'global': {'find_collectibles': 1.0, 'chest_finding': 1.0, 'fine_material_finding': 1.0}}}, 60: {'global': {'global': {'find_collectibles': 1.0, 'chest_finding': 1.0, 'fine_material_finding': 1.0, 'inventory_space': 1}}}}},
-        requirements=[]
-    )
-
-    TREASURE_HUNTER_BANDOLIER = ItemInstance(
-        name="Treasure hunter bandolier",
-        uuid="bc73832c-da80-4517-b6a5-e462d0164d40",
-        stats={'global': {'global': {'double_rewards': 2.0}}},
-        slot="back",
-        keywords=['Treasure Hunter Set', 'Achievement Reward'],
-        value=0,
-        rarity='epic',
-        location_reqs=[],
-        gated_stats={'set_pieces': {'treasure hunter set': {1: {'global': {'global': {'find_collectibles': 5.0}}}, 2: {'global': {'global': {'find_collectibles': 5.0}}}, 3: {'global': {'global': {'find_collectibles': 10.0}}}, 4: {'global': {'global': {'find_collectibles': 5.0}}}, 5: {'global': {'global': {'find_collectibles': 5.0}}}, 6: {'global': {'global': {'find_collectibles': 10.0}}}}}},
-        requirements=[]
-    )
-
-    TREASURE_HUNTER_GLOVES = ItemInstance(
-        name="Treasure hunter gloves",
-        uuid="a8b4073a-cf20-4187-8be2-59aa1225e621",
-        stats={'global': {'global': {'double_rewards': 1.0}}},
-        slot="hands",
-        keywords=['Treasure Hunter Set', 'Achievement Reward'],
-        value=0,
-        rarity='epic',
-        location_reqs=[],
-        gated_stats={'set_pieces': {'treasure hunter set': {1: {'global': {'global': {'find_collectibles': 5.0}}}, 2: {'global': {'global': {'find_collectibles': 5.0}}}, 3: {'global': {'global': {'find_collectibles': 10.0}}}, 4: {'global': {'global': {'find_collectibles': 5.0}}}, 5: {'global': {'global': {'find_collectibles': 5.0}}}, 6: {'global': {'global': {'find_collectibles': 10.0}}}}}},
-        requirements=[]
-    )
-
-    TREASURE_HUNTER_SCARF = ItemInstance(
-        name="Treasure hunter scarf",
-        uuid="1f73fb38-6433-4590-9e18-ca611015b577",
-        stats={'global': {'global': {'double_rewards': 2.0}}},
-        slot="neck",
-        keywords=['Treasure Hunter Set', 'Achievement Reward'],
-        value=0,
-        rarity='epic',
-        location_reqs=[],
-        gated_stats={'set_pieces': {'treasure hunter set': {1: {'global': {'global': {'find_collectibles': 5.0}}}, 2: {'global': {'global': {'find_collectibles': 5.0}}}, 3: {'global': {'global': {'find_collectibles': 10.0}}}, 4: {'global': {'global': {'find_collectibles': 5.0}}}, 5: {'global': {'global': {'find_collectibles': 5.0}}}, 6: {'global': {'global': {'find_collectibles': 10.0}}}}}},
-        requirements=[]
-    )
-

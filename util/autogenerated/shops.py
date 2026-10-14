@@ -30,6 +30,7 @@ class ShopInfo:
     region: str
     requirements: List[str] = field(default_factory=list)
     inventory: List[ShopItem] = field(default_factory=list)
+    can_sell: bool = True  # False = purchase-only shop; the player cannot sell items here
 
 
 # ============================================================================
@@ -40,6 +41,7 @@ class ShopInfo:
 
 TUNDRA_TRENDS = ShopInfo(
     name='Tundra Trends', building_type='Clothing shop',
+    can_sell=False,
     location='Azurazera', region='Jarvonia',
     inventory=[
         ShopItem('Fancy earring', 1, 650, 'coins', 'Cosmetic', None),
@@ -122,9 +124,10 @@ NORTHSTAR_MERCANTILE = ShopInfo(
 
 NOT_A_SHOP = ShopInfo(
     name='Not a Shop', building_type='Clothing shop',
+    can_sell=False,
     location='Coldington', region='Jarvonia',
     inventory=[
-        ShopItem('Carrot', 1, 4000, 'coins', 'Cosmetic', 'Material.CARROT'),
+        ShopItem('Carrot', 1, 4000, 'coins', 'Cosmetic', None),
         ShopItem('Smoky eyes', 1, 4000, 'coins', 'Cosmetic', None),
         ShopItem('Antler hood', 1, 4000, 'coins', 'Cosmetic', None),
         ShopItem('Aviator hat with goggles', 1, 4000, 'coins', 'Cosmetic', None),
@@ -153,6 +156,7 @@ NOT_A_SHOP = ShopInfo(
 
 HELPFUL_HERBERTS_HUT = ShopInfo(
     name='Helpful Herbert\'s Hut', building_type='House',
+    can_sell=False,
     location='Disenchanted Forest', region='Jarvonia',
     inventory=[
         ShopItem('Herbert\'s boots', 1, 14, 'coins', 'Loot', 'Item.HERBERTS_BOOTS'),
@@ -168,6 +172,7 @@ HELPFUL_HERBERTS_HUT = ShopInfo(
 
 FORT_OF_PERMAFROST = ShopInfo(
     name='Fort of Permafrost', building_type='Castle',
+    can_sell=False,
     location='Fort of Permafrost', region='Jarvonia',
     inventory=[
         ShopItem('Jarvonian letter of passage', 1, 4500, 'coins', 'Collectible', 'Collectible.JARVONIAN_LETTER_OF_PASSAGE'),
@@ -427,6 +432,7 @@ PAWS_ARE_US = ShopInfo(
 
 QUAGMIRE_COUTURE = ShopInfo(
     name='Quagmire Couture', building_type='Clothing shop',
+    can_sell=False,
     location='Salsfirth', region='Grand Duchy of Trellin-Erdwise',
     inventory=[
         ShopItem('Fancy earring', 1, 650, 'coins', 'Cosmetic', None),
@@ -494,6 +500,7 @@ WITCHS_HUT = ShopInfo(
 
 CASBRANTS_SUNKEN_SHIP = ShopInfo(
     name='Casbrant\'s Sunken Ship', building_type='Fishing store',
+    can_sell=False,
     location='Casbrant\'s Grave', region='Syrenthia',
     inventory=[
         ShopItem('Swashbuckler sword', 1, 2000, 'sea_shell', 'Loot', 'Item.SWASHBUCKLER_SWORD'),
@@ -502,6 +509,7 @@ CASBRANTS_SUNKEN_SHIP = ShopInfo(
 
 FIN_TASTIC_FASHION = ShopInfo(
     name='Fin-tastic Fashion', building_type='Clothing shop',
+    can_sell=False,
     location='Vastalume', region='Syrenthia',
     inventory=[
         ShopItem('Fancy earring', 1, 650, 'coins', 'Cosmetic', None),

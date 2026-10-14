@@ -5,6 +5,12 @@ DO NOT EDIT MANUALLY
 """
 
 BUILDINGS = {
+    'adventurers_guild_miragepost': {
+        'id': 'adventurers_guild_miragepost',
+        'name': "Adventurers' Guild Miragepost",
+        'type': 'outpost',
+        'icon': 'assets/icons/buildings/adventure_guild_outpost_cabin.png'
+    },
     'adventurers_guild_outpost': {
         'id': 'adventurers_guild_outpost',
         'name': "Adventurers' Guild Outpost",
@@ -221,6 +227,18 @@ BUILDINGS = {
         'type': 'generalStore',
         'icon': 'assets/icons/buildings/general_store.png'
     },
+    'spire_of_summer': {
+        'id': 'spire_of_summer',
+        'name': 'Spire of Summer',
+        'type': 'outpost',
+        'icon': 'assets/icons/buildings/watchtower.png'
+    },
+    'stone_slingers_tents': {
+        'id': 'stone_slingers_tents',
+        'name': 'Stone Slingers Tents',
+        'type': 'outpost',
+        'icon': 'assets/icons/buildings/stone_slingers_camp.png'
+    },
     'sunken_anchor': {
         'id': 'sunken_anchor',
         'name': 'Sunken Anchor',
@@ -274,6 +292,12 @@ BUILDINGS = {
         'name': 'Undercurrent',
         'type': 'generalStore',
         'icon': 'assets/icons/buildings/general_store.png'
+    },
+    'watchtower_of_winter': {
+        'id': 'watchtower_of_winter',
+        'name': 'Watchtower of Winter',
+        'type': 'outpost',
+        'icon': 'assets/icons/buildings/watchtower.png'
     },
     'witchs_hut': {
         'id': 'witchs_hut',

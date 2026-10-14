@@ -41,10 +41,18 @@ const FINE_INPUT_BONUS = {
     }
 };
 
+// Fine inputs only provide an in-game benefit for Hunting activities (fine bait/arrows/
+// traps/nets carry real bonus stats). Fine variants of other skills' inputs — e.g. Fine
+// Fabric for Tailoring sail repair, fine/tough linen — have identical stats to normal, so
+// the flat "Fine Inputs" bonus must not be shown or applied for them. See bug 8cb1876f.
+function activityBenefitsFromFineInputs(activity) {
+    return (activity?.primary_skill || '').toLowerCase() === 'hunting';
+}
+
 function skillIconHtml(skillName, cssClass = 'xp-icon') {
     const skillId = skillName.toLowerCase().replace(' ', '_');
     const fallback = SKILL_ICON_FALLBACK[skillId];
-    if (fallback) return `<span class="${cssClass}" style="font-size:18px;display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px" title="${skillName}">${fallback}</span>`;
+    if (fallback) return `<span class="${cssClass}" style="font-size: max(var(--min-text, 5px), calc(18px * var(--text-scale, 1)));display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px" title="${skillName}">${fallback}</span>`;
     return `<img src="/assets/icons/text/skill_icons/${skillId}.svg" alt="${skillName}" class="${cssClass}" title="${skillName}" />`;
 }
 
@@ -509,7 +517,7 @@ class ActivityInfoSection extends Component {
 
         // Apply WE (capped at max efficiency)
         const cappedWE = Math.min(we, maxEfficiency);
-        const totalEfficiency = 1 + cappedWE;
+        const totalEfficiency = Math.max(1 + cappedWE, 0.01);  // floor total efficiency at 1% (game rule: negative/zero -> 1% min)
 
         // Match the game's formula (per KamiTzayig reference): single ceil at the
         // END of the chain. Applying ceil before the pct multiplier introduces
@@ -560,6 +568,22 @@ class ActivityInfoSection extends Component {
             secondaryXP[skill] = (secondaryXP[skill] * (1 + fineBonus) + bonusXPAdd) * (1 + bonusXPPercent);
         }
 
+        // Termite "Terminate": logs -> Carpentry XP (drop-derived, computed by
+        // DropsSection). Rendered as its OWN line (no "/ base" suffix), so it is
+        // NOT folded into secondaryXP (whose rows show "value / base" and would
+        // otherwise print "XX / undefined"). Not bonus-XP scaled.
+        let termiteCarpentry = null;
+        try {
+            const tc = window.dropsSection?.termiteCarpentry;
+            if (tc && tc.perStep > 0 && expectedStepsPerAction > 0) {
+                termiteCarpentry = {
+                    skill: tc.skill || 'carpentry',
+                    perStep: tc.perStep,
+                    perAction: tc.perStep * expectedStepsPerAction,
+                };
+            }
+        } catch (_e) { /* dropsSection not ready yet */ }
+
         // Calculate total XP
         let totalXP = primaryXP;
         for (const xp of Object.values(secondaryXP)) {
@@ -580,6 +604,7 @@ class ActivityInfoSection extends Component {
             basePrimaryXP: this.activity.base_xp,
             secondaryXP: secondaryXP,
             baseSecondaryXP: this.activity.secondary_xp,
+            termiteCarpentry: termiteCarpentry,
             gearStats: gearStats
         };
     }
@@ -868,7 +893,7 @@ class ActivityInfoSection extends Component {
 
         // Check user overrides first, then character data
         const overrides = store.state.ui?.user_overrides?.skills || {};
-        const charLevel = overrides[primarySkill] || character.skills?.[primarySkill] || 0;
+        const charLevel = (window.isUnlockAllEnabled && window.isUnlockAllEnabled()) ? 99 : (overrides[primarySkill] || character.skills?.[primarySkill] || 0);
 
         // Get required level from skill requirements
         const requirements = this.activity.requirements?.skill_requirements || {};
@@ -951,9 +976,9 @@ class ActivityInfoSection extends Component {
                         const ck = this._customKeywords.find(k => k.name.toLowerCase() === ii.name.toLowerCase());
                         if (ck && ck.icon) {
                             const cs = ck.icon_color ? `${window.emojiTintStyle(ck.icon_color)};` : '';
-                            return `<span style="font-size:14px;vertical-align:middle;margin-right:2px;${cs}">${ck.icon}</span>`;
+                            return `<span style="font-size: max(var(--min-text, 5px), calc(14px * var(--text-scale, 1)));vertical-align:middle;margin-right:2px;${cs}">${ck.icon}</span>`;
                         }
-                        return `<img src="/assets/icons/keywords/${itemId}.svg" style="width:16px;height:16px;vertical-align:middle;margin-right:2px" onerror="this.outerHTML='<span style=\\'font-size:14px;vertical-align:middle;margin-right:2px\\'>🏷️</span>'" />`;
+                        return `<img src="/assets/icons/keywords/${itemId}.svg" style="width:16px;height:16px;vertical-align:middle;margin-right:2px" onerror="this.outerHTML='<span style=\\'font-size: max(var(--min-text, 5px), calc(14px * var(--text-scale, 1)));vertical-align:middle;margin-right:2px\\'>🏷️</span>'" />`;
                     })()}
                             <span class="input-qty">${ii.quantity}×</span> ${ii.name}${ii.level ? ` <span class="input-level-req" title="Requires level ${ii.level}+ items">Lv.${ii.level}+</span>` : ''}${ii.optional ? ' <span class="input-optional-badge" title="This input is optional">(optional)</span>' : ''}
                         </span>
@@ -965,18 +990,21 @@ class ActivityInfoSection extends Component {
                 const fallback = `/assets/icons/items/${itemId}.svg`;
                 return `<div class="material-item" title="${ii.name}">
                     <img src="${iconPath}" alt="${ii.name}" class="material-icon"
-                        onerror="this.onerror=null;this.src='${fallback}';this.onerror=function(){this.style.display='none';this.parentNode.insertAdjacentHTML('afterbegin','<span style=\\'font-size:16px\\'>📥</span>')}" />
+                        onerror="this.onerror=null;this.src='${fallback}';this.onerror=function(){this.style.display='none';this.parentNode.insertAdjacentHTML('afterbegin','<span style=\\'font-size: max(var(--min-text, 5px), calc(16px * var(--text-scale, 1)))\\'>📥</span>')}" />
                     <span class="material-quantity">${ii.quantity}</span>
                 </div>`;
             }
         }).join('');
 
-        // Fine inputs checkbox — only show when there are keyword-type inputs (selectable slots)
+        // Fine inputs checkbox — only show for Hunting activities that have keyword-type
+        // inputs. Fine variants of non-hunting inputs (e.g. Fine Fabric for sail repair,
+        // fine linen) have identical stats to their normal counterparts, so a "Fine Inputs"
+        // bonus is not real in-game for those activities. See bug 8cb1876f.
         let fineCheckboxHtml = '';
-        if (hasKeywordInput) {
+        if (hasKeywordInput && activityBenefitsFromFineInputs(this.activity)) {
             fineCheckboxHtml = `
                 <div class="fine-inputs-toggle" style="margin-top:6px">
-                    <label class="fine-checkbox" style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;font-size:12px">
+                    <label class="fine-checkbox" style="display:inline-flex;align-items:center;gap:4px;cursor:pointer;font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)))">
                         <input type="checkbox" class="fine-inputs-cb" ${this.useFineInputs ? 'checked' : ''} />
                         <span class="fine-checkbox-label">Fine Inputs</span>
                     </label>
@@ -1049,12 +1077,8 @@ class ActivityInfoSection extends Component {
         const currentWEPercent = column2Stats.work_efficiency || 0;  // Already in percentage format
         const maxWEPercent = this.activity.max_efficiency * 100;
 
-        // Check if WE exceeds or equals max (green highlighting)
-        const weExceedsMax = currentWEPercent >= maxWEPercent;
-        const weClass = weExceedsMax ? 'stat-value-positive' : 'stat-value';
-        const weRowClass = weExceedsMax ? 'we-maxed' : '';
-
-        // Format WE for display - offset by 100 to match in-game display (100% = no bonus)
+        // Format WE for display - offset by 100 to match in-game display (100% = no bonus).
+        // currentWEDisplay is the TOTAL efficiency percent (100% = no bonus).
         const currentWEDisplay = currentWEPercent + 100;
         const maxWEDisplay = maxWEPercent + 100;
         const currentWEFormatted = (currentWEDisplay % 1 === 0)
@@ -1063,6 +1087,18 @@ class ActivityInfoSection extends Component {
                 ? formatFixed(currentWEDisplay, 1)
                 : formatFixed(currentWEDisplay, 2);
         const maxWEFormatted = (maxWEDisplay % 1 === 0) ? formatFixed(maxWEDisplay, 0) : formatFixed(maxWEDisplay, 1);
+
+        // Game rule: total efficiency is floored at 1%. When the raw total
+        // efficiency drops below 1% (very negative WE), show the floored "1",
+        // the real (uncapped) value in parens, and paint it red.
+        const weClampedLow = currentWEDisplay < 1;
+        const rawWEFormatted = (currentWEDisplay % 1 === 0) ? formatFixed(currentWEDisplay, 0) : formatFixed(currentWEDisplay, 1);
+        const weExceedsMax = currentWEPercent >= maxWEPercent;
+        const weClass = weClampedLow ? 'stat-value-negative' : (weExceedsMax ? 'stat-value-positive' : 'stat-value');
+        const weRowClass = (!weClampedLow && weExceedsMax) ? 'we-maxed' : '';
+        const weValueHtml = weClampedLow
+            ? `1 (${rawWEFormatted}%) / ${maxWEFormatted}%`
+            : `${currentWEFormatted} / ${maxWEFormatted}%`;
 
         return `
             <div class="activity-section">
@@ -1074,7 +1110,7 @@ class ActivityInfoSection extends Component {
                     </div>
                     <div class="info-stat-row ${weRowClass}">
                         <img src="/assets/icons/attributes/work_efficiency.svg" alt="WE" class="stat-icon" title="Work Efficiency" />
-                        <span class="${weClass}">${currentWEFormatted} / ${maxWEFormatted}%</span>
+                        <span class="${weClass}">${weValueHtml}</span>
                     </div>
                     <div class="info-stat-row">
                         <img src="/assets/icons/attributes/double_rewards.svg" alt="DR" class="stat-icon" title="Steps per Reward Roll" />
@@ -1332,6 +1368,20 @@ class ActivityInfoSection extends Component {
             }
         }
 
+        // Termite "Terminate" -> Carpentry XP (per action). Dedicated row with
+        // no "/ base" (it is drop-derived, not an activity base-XP stream).
+        if (stats.termiteCarpentry) {
+            const tc = stats.termiteCarpentry;
+            const skillName = tc.skill.charAt(0).toUpperCase() + tc.skill.slice(1);
+            const skillColor = this.getSkillColor(skillName);
+            html += `
+                    <div class="xp-row" style="border-color: ${skillColor};" title="Carpentry XP from the Termite's Terminate ability (converted logs)">
+                        ${skillIconHtml(skillName, 'xp-icon')}
+                        <span class="xp-value">${formatFixed(tc.perAction, 2, { trim: true })}</span>
+                    </div>
+                `;
+        }
+
         html += `
                 </div>
             </div>
@@ -1377,6 +1427,19 @@ class ActivityInfoSection extends Component {
                         <span class="xp-value">${stats.xpPerStep}</span>
                     </div>
             `;
+        }
+
+        // Termite "Terminate" -> Carpentry XP per step. Dedicated row.
+        if (stats.termiteCarpentry) {
+            const tc = stats.termiteCarpentry;
+            const skillName = tc.skill.charAt(0).toUpperCase() + tc.skill.slice(1);
+            const skillColor = this.getSkillColor(skillName);
+            html += `
+                    <div class="xp-row" style="border-color: ${skillColor};" title="Carpentry XP/step from the Termite's Terminate ability (converted logs)">
+                        ${skillIconHtml(skillName, 'xp-icon')}
+                        <span class="xp-value">${formatFixed(tc.perStep, 3, { trim: true })}</span>
+                    </div>
+                `;
         }
 
         html += `
@@ -1609,7 +1672,39 @@ class ActivityInfoSection extends Component {
                     filterKeyword: keyword,
                     filterLevel: level,
                     onSelect: (item) => {
-                        this._selectedInputItems[idx] = item;
+                        // Selecting a Fine input variant checks the "Fine
+                        // Inputs" box; selecting a normal input unchecks it.
+                        // The flag is global across all input slots (matches
+                        // the single Fine Inputs checkbox), so the most recent
+                        // selection wins.
+                        const wantFine = !!item.is_fine;
+                        // The Fine variant is a UI affordance only — the
+                        // underlying input material is the SAME base item, and
+                        // fine-ness is conveyed to the optimizer solely via the
+                        // use_fine_inputs flag. Strip the "_fine" id / " (Fine)"
+                        // name back to the base so the backend input lookup +
+                        // combined-stats match (otherwise the optimizer gets an
+                        // unknown "plank_fine" / "Plank (Fine)" id/name). Keep
+                        // is_fine=true so the slot still renders in fine styling.
+                        let storeItem = item;
+                        if (wantFine) {
+                            storeItem = {
+                                ...item,
+                                itemId: (item.itemId || '').replace(/_fine$/, '') || item.itemId,
+                                id: item.id ? item.id.replace(/_fine$/, '') : item.id,
+                                name: (item.name || '').replace(/ \(Fine\)$/, ''),
+                            };
+                        }
+                        this._selectedInputItems[idx] = storeItem;
+                        if (this.useFineInputs !== wantFine) {
+                            this.useFineInputs = wantFine;
+                            if (!store.state.column3) store.state.column3 = {};
+                            store.state.column3.useFineInputs = wantFine;
+                            const cssFine = window.combinedStatsSection;
+                            if (cssFine && typeof cssFine.setFineInputs === 'function') {
+                                cssFine.setFineInputs(wantFine);
+                            }
+                        }
                         // Persist to store for session save
                         if (!store.state.column3) store.state.column3 = {};
                         store.state.column3.selectedInputItems = { ...this._selectedInputItems };
@@ -1617,7 +1712,7 @@ class ActivityInfoSection extends Component {
                         this.render();
                         const css = window.combinedStatsSection;
                         if (css && typeof css.setInputItem === 'function') {
-                            css.setInputItem(idx, item);
+                            css.setInputItem(idx, storeItem);
                         }
                     },
                     onUnequip: () => {

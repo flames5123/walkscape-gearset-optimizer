@@ -479,9 +479,23 @@ function injectStylesOnce() {
     display: flex; align-items: center; gap: var(--spacing-sm, 8px);
     padding: 8px 4px; border-bottom: 1px dashed var(--border-color);
 }
-.xy-priority-group + .xy-priority-entry-quick,
-.xy-priority-entry-quick + .xy-priority-group {
+/* Group THEN entry: the group's own border-bottom already draws the
+   divider, so suppress the following entry's top border to avoid a
+   double line. */
+.xy-priority-group + .xy-priority-entry-quick {
     border-top: none;
+}
+/* Entry THEN group (e.g. a "Steps/Craft #1" metric priority immediately
+   followed by the "Target Quality" section): the entry has no bottom
+   border and the group draws its border only on the bottom, so without
+   this the two sections butt together with no divider and read as one
+   combined setting — users misread "Steps/Craft #1" + "Target Quality"
+   as "Steps/Craft #1 target for <quality>" (bug report 638179c7). Draw a
+   dashed divider on top of the group to visually separate the metric
+   priorities from the Target Quality section, matching the dashed
+   dividers already used between adjacent metric rows. */
+.xy-priority-entry-quick + .xy-priority-group {
+    border-top: 1px dashed var(--border-color);
 }
 .xy-priority-group .sort-item-content { flex: 1; min-width: 0; }
 .xy-group-label {

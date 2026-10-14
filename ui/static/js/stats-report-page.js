@@ -13,13 +13,19 @@ import store from './state.js';
 
 import { formatFixed } from './utils/number-format.js';
 import { decodeGearsetSlots, renderMiniGearPreview, activityIdFromName } from './utils/gearset-decode.js';
+import { SettingsPanel, Toggle } from './components/settings-panel.js';
+import { createStandardOptimizerChips, createIncludeUnavailableChip } from './components/optimizer-chips.js';
 import { getPetIconPath } from './utils/pet-utils.js';
 import { wireInfoIcons } from './info-popover.js';
+import { CONSUMABLE_OPTIONS_INFO_ICON_HTML } from './utils/consumable-options-info.js';
 import { maybeShowLocalSpeedWarning } from './local-speed-warning.js';
 import { wireDropAnchor } from './drop-item-popover.js';
 import { resolveItemIcon } from './utils/resolve-item-icon.js';
-import { resetLocalGoalsReport } from './local-compute.js';
+import { buildServiceStatsPopoverHtml, serviceHasStats } from './utils/service-stats-popover.js';
+import { resetLocalGoalsReport, terminateLocalComputeWorkers } from './local-compute.js';
 import { buildGoalsReportConfig, applyGoalsReportConfig } from './utils/goals-report-selection.js';
+import { chestSubcategory, targetItemScope, rowMatchesResetScope } from './utils/goals-report-subcat-reset.js';
+import { injectGoalsReportAddToTracker } from './components/goals-report-add-to-tracker.js';
 
 // ============================================================================
 // CONSTANTS
@@ -31,7 +37,11 @@ const CATEGORIES = [
     { key: 'chests', label: 'Best Chest Farming for Activities', hasSkillFilter: false },
     { key: 'chests_recipes', label: 'Best Chest Farming for Recipes', hasSkillFilter: false },
     { key: 'coins', label: 'Best Coin Farming Activities', hasSkillFilter: true },
+    { key: 'target_items', label: 'Fastest Target Item Activities', hasSkillFilter: false },
+    { key: 'fastest_craft', label: 'Steps per Recipe', hasSkillFilter: false, featureGate: 'fastest_craft_goals' },
 ];
+
+const isCategoryVisible = (cat) => !cat.featureGate || !!window._featureFlags?.[cat.featureGate];
 
 const CATEGORY_METRIC_LABELS = {
     xp: 'XP/step',
@@ -39,6 +49,7 @@ const CATEGORY_METRIC_LABELS = {
     chests: 'Steps/chest',
     chests_recipes: 'Steps/chest',
     coins: 'Coins/1k steps',
+    target_items: 'steps/item',
 };
 
 // Single-completion activities (can only ever be done once) and the custom
@@ -101,6 +112,7 @@ const ALL_CHEST_NAMES = [
     'Carpentry chest', 'Cooking chest', 'Crafting chest',
     'Smithing chest', 'Tailoring chest', 'Trinketry chest',
     'Coral chest', 'Rusty chest', 'Sunken chest',
+    'Gem pouch', 'Coin pouch',
 ];
 
 // Category colors — same hex values as the column-1 skill-group palette
@@ -152,9 +164,84 @@ const ALL_KINDS = ['gear', 'tools', 'eggs', 'collectibles'];
 const KIND_META = {
     gear:         { label: 'Gear',         color: '#5B8BD9', icon: '/assets/icons/keywords/proper_gear.svg' },
     tools:        { label: 'Tools',        color: '#D9A55B', icon: '/assets/icons/keywords/tool.svg' },
-    eggs:         { label: 'Eggs',         color: '#A55BD9', icon: '/assets/icons/keywords/pet_egg.svg' },
+    eggs:         { label: 'Eggs',         color: '#F68187', icon: '/assets/icons/keywords/pet_egg.svg' },
     collectibles: { label: 'Collectibles', color: '#5BD988', icon: '/assets/icons/keywords/collectible.svg' },
 };
+
+// 2026-08-11 (jwbail): WTO sub-filter for "Fastest Target Item Activities".
+// One chip per target-category (mirrors the new_items kind chips). Order +
+// v2 keyword-based target groups. Slugs match util/stats_report/target_items.py
+// classify_item output. Labels displayed as group headers.
+const SELECTED_TARGET_GROUPS_KEY = 'stats_report_selected_target_groups_v2';
+const INCLUDE_FINE_KEY = 'stats_report_target_items_include_fine';
+// Dynamic groups discovered from results; these are the FIXED groups that always
+// appear. Material keyword groups are added dynamically from result data.
+const FIXED_TARGET_GROUPS = [
+    'adventurers_guild_tokens', 'sea_shells',
+    'bird_nest', 'ectoplasm',
+];
+// NOTE: the group slugs here MUST mirror the backend's authoritative
+// build_target_groups() (util/stats_report/target_items.py), which derives
+// material groups dynamically by classifying real drops. Entries with no
+// droppable item (e.g. the old beverage/fishing_bait/food/bar chips) are dead
+// selection chips — never listed by the backend — so keep this in sync when
+// the classifier/keywords change (2026-08-14: removed 4 dead chips, added
+// the real 'nugget' group).
+const TARGET_GROUP_META = {
+    adventurers_guild_tokens: { label: "Adventurers' Guild Tokens", color: '#d4a017', icon: "/assets/icons/items/adventurers'_guild_token.svg", kind: 'currency' },
+    sea_shells:               { label: 'Sea Shells',            color: '#5ec4a0', icon: "/assets/icons/items/materials/sea_shell.svg", kind: 'currency' },
+    ectoplasm:                { label: 'Ectoplasm',             color: '#7ad0a0', icon: '/assets/icons/items/materials/ectoplasm.svg', kind: 'finding' },
+    bird_nest:                { label: 'Bird Nest',             color: '#c9a06a', icon: '/assets/icons/items/containers/bird_nest.svg', kind: 'finding' },
+    gem:                      { label: 'Gem',                   color: '#e0457c', icon: '/assets/icons/keywords/gem.svg', kind: 'material' },
+    log:                      { label: 'Log',                   color: '#8b5e3c', icon: '/assets/icons/keywords/log.svg', kind: 'material' },
+    ore:                      { label: 'Ore',                   color: '#7a8b99', icon: '/assets/icons/keywords/ore.svg', kind: 'material' },
+    fish:                     { label: 'Fish',                  color: '#4fc3f7', icon: '/assets/icons/keywords/fish.svg', kind: 'material' },
+    plant:                    { label: 'Plant',                 color: '#66bb6a', icon: '/assets/icons/keywords/plant.svg', kind: 'material' },
+    fibrous_plant:            { label: 'Fibrous Plant',         color: '#8bbf5b', icon: '/assets/icons/keywords/fibrous_plant.svg', kind: 'material' },
+    crustacean:               { label: 'Crustacean',            color: '#e8734f', icon: '/assets/icons/keywords/crustacean.svg', kind: 'material' },
+    hunting_product:          { label: 'Hunting Product',       color: '#a0522d', icon: '/assets/icons/text/sprite_20_icons/materials_hunting_products.png', kind: 'material' },
+    hide:                     { label: 'Hide',                  color: '#c9a06a', icon: '/assets/icons/keywords/hide.svg', kind: 'material' },
+    ingredient:               { label: 'Ingredient',            color: '#ff9800', icon: '/assets/icons/keywords/ingredient.svg', kind: 'material' },
+    cooked_fish:              { label: 'Cooked Fish',           color: '#ff8a65', icon: '/assets/icons/keywords/cooked_fish.svg', kind: 'material' },
+    alcohol:                  { label: 'Alcohol',               color: '#7b1fa2', icon: '/assets/icons/keywords/alcohol.svg', kind: 'material' },
+    nugget:                   { label: 'Nugget',                color: '#b0bec5', icon: '/assets/icons/items/materials/silver_nugget.svg', kind: 'material' },
+    plank:                    { label: 'Plank',                 color: '#a1887f', icon: '/assets/icons/keywords/plank.svg', kind: 'material' },
+    trinket:                  { label: 'Trinket',               color: '#b06fd6', icon: '/assets/icons/keywords/trinket.svg', kind: 'material' },
+    other:                    { label: 'Other',                 color: '#9aa4b2', icon: '/assets/icons/attributes/double_rewards.svg', kind: 'other' },
+};
+// Legacy compat: keep ALL_TARGET_CATEGORIES pointing at the slug list.
+// Ordered per the requested layout: currency first (AGT, Sea Shells), then
+// finding groups alphabetically (Bird Nest, Ectoplasm), then
+// material keyword groups alphabetically by label, then 'Other' last. Used by
+// both the selection chips and (mirrored) the report group order.
+const ALL_TARGET_CATEGORIES = (() => {
+    const byKind = { currency: [], finding: [], material: [], other: [] };
+    for (const [slug, meta] of Object.entries(TARGET_GROUP_META)) {
+        (byKind[meta.kind] || byKind.material).push(slug);
+    }
+    const byLabel = (a, b) =>
+        String(TARGET_GROUP_META[a].label).localeCompare(String(TARGET_GROUP_META[b].label));
+    byKind.finding.sort(byLabel);
+    byKind.material.sort(byLabel);
+    // currency keeps insertion order (AGT, Sea Shells); other is last.
+    return [...byKind.currency, ...byKind.finding, ...byKind.material, ...byKind.other];
+})();
+const TARGET_CATEGORY_META = TARGET_GROUP_META;
+// Legacy key name (unused, renamed to v2)
+const SELECTED_TARGET_CATEGORIES_KEY = SELECTED_TARGET_GROUPS_KEY;
+
+// Fastest Craft WTO sub-filter: grouped chips (Gear / Tools / Consumables /
+// Materials) fetched from /api/fastest-craft/categories. Each chip carries a
+// prefixed selection id ('gear:misc_crafted', 'tools:misc_crafted', 'mat:bar')
+// plus its own icon + color. DESELECTIONS are persisted so chips added later
+// default to selected.
+const FASTEST_CRAFT_DESELECTED_KEY = 'stats_report_fastest_craft_deselected_v2';
+const fastestCraftChipIconHtml = (chip, size) => (chip && chip.icon
+    ? `<img src="${escapeHtml(chip.icon)}" alt="" onerror="this.style.display='none'" style="width:${size}px;height:${size}px;margin-top:1px;margin-bottom:1px">`
+    : `<span aria-hidden="true" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${(chip && chip.color) || 'var(--text-secondary)'};margin:10px 4px"></span>`);
+const escapeHtml = (s) => String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
 // Misc-chest color overrides — aligned with the icon-derived palette
 // the user picked for the misc chest chips. Skill chests use SKILL_META
@@ -165,6 +252,11 @@ const MISC_CHEST_COLORS = {
     'Coral chest':  '#92E8C0',
     'Rusty chest':  '#b7410e',
     'Sunken chest': '#5ec47a',
+    // Pouches (activity-drop containers, not skill/faction chests):
+    //   Gem pouch  → bright wrentmarine blue
+    //   Coin pouch → the gold of coins (matches --coins-color)
+    'Gem pouch':    '#3FA9F5',
+    'Coin pouch':   '#fec880',
 };
 
 // Resolve a chest name → display color. Skill chests (e.g. "Mining chest",
@@ -272,7 +364,15 @@ const RESULTS_RENDER_MIN_INTERVAL_MS = 8000;
 // fires a one-shot recovery (re-POST /local-complete + forced poll, then an
 // escape-hatch toast). Pairs with the server-side lazy-finalize safety net in
 // /api/stats-report/status. Bug report def8e0d5.
-const FINISHING_WATCHDOG_MS = 90000;
+const FINISHING_WATCHDOG_MS = 12000;
+
+// 2026-08-12 (jwbail): literal build tag baked into THIS module. Logged on
+// every Optimize/Start click (see _startRun) so the debug log proves exactly
+// which stats-report-page.js the browser actually executed — independent of
+// server state. If a run's log shows an old/absent tag, the tab is running a
+// stale in-memory module; if it shows this tag, the fix IS loaded. Bump this
+// string whenever this file changes materially.
+const STATS_REPORT_JS_BUILD = 'goals-build-2026-08-13-globalif';
 
 // ============================================================================
 // STATS REPORT PAGE CLASS
@@ -362,6 +462,32 @@ export class StatsReportPage {
         // Default = all 4 kinds selected (matches chest/skill defaults).
         this._selectedKinds = new Set();
         this._selectedKindsHydrated = false;
+        // 2026-08-11 (jwbail): WTO sub-filter selection for target_items.
+        this._selectedTargetCategories = new Set();
+        this._selectedTargetCategoriesHydrated = false;
+        // Fastest Craft WTO sub-filter. The grouped chip taxonomy arrives async
+        // from /api/fastest-craft/categories; the selected set (prefixed chip
+        // ids) is derived from it minus the persisted deselections.
+        this._fastestCraftGroups = [];
+        this._fastestCraftCategories = [];
+        this._fastestCraftChipByLabel = {};
+        this._fastestCraftCategoriesLoaded = false;
+        this._fastestCraftCategoriesLoading = false;
+        this._fastestCraftDeselected = new Set();
+        try {
+            const raw = localStorage.getItem(FASTEST_CRAFT_DESELECTED_KEY);
+            const arr = raw ? JSON.parse(raw) : null;
+            if (Array.isArray(arr)) this._fastestCraftDeselected = new Set(arr);
+        } catch (_) { /* non-fatal */ }
+        this._selectedFastestCraftCategories = new Set();
+        this._fastestCraftItems = [];
+        this._fastestCraftRunning = null;
+        this._fastestCraftPollTimer = null;
+        // 2026-08-12 (jwbail): v2 "Include fine variants" toggle for target_items.
+        this._includeFine = false;
+        try {
+            this._includeFine = localStorage.getItem(INCLUDE_FINE_KEY) === '1';
+        } catch (_) { /* non-fatal */ }
         this._pollFailures = 0;
         this._lastProgressAt = null;
         this._startedAt = null;
@@ -388,7 +514,13 @@ export class StatsReportPage {
             // (the old 671/669 flip).
             this._localRunActive = true;
             if (typeof d.total === 'number' && d.total > 0) {
-                this._totalJobs = d.total;
+                // Monotonic: the local runner accumulates its total PER CATEGORY
+                // PASS (light activities pass = 441, then the chests_recipes pass
+                // adds 249 -> 690), starting from 0, so a raw assignment made the
+                // bar jump 690 (upfront estimate) -> 441 (activities pass only)
+                // -> 690 (recipe pass added). The true total within a run only
+                // grows, so never let the displayed total shrink. (2026-07-30)
+                this._totalJobs = Math.max(this._totalJobs || 0, d.total);
             }
             if (typeof d.done === 'number') {
                 this._completedJobs = Math.max(this._completedJobs || 0, d.done);
@@ -410,6 +542,8 @@ export class StatsReportPage {
             const enabled = !!(window.settingsModal && window.settingsModal.runLocalOptimization);
             const $cb = this._$el && this._$el.find && this._$el.find('#stats-report-run-local-checkbox');
             if ($cb && $cb.length) $cb.prop('checked', enabled);
+            // Reflect the shared run-local state in the report options panel too.
+            if (this._reportPanel) this._reportPanel.syncState();
         };
         window.addEventListener('runLocalOptimizationChanged', this._syncRunLocalCheckbox);
         window.addEventListener('optimizationSettingsLoaded', this._syncRunLocalCheckbox);
@@ -511,14 +645,49 @@ export class StatsReportPage {
             ? !!cfg.notifyOnComplete : true;
         this._includePets = !!cfg.includePets;
         this._includeConsumables = !!cfg.includeConsumables;
+        // "Use Fine Inputs" (R2): report-local hunting input-slot toggle. Default
+        // off; hydrated from the goals-report run config (NOT the global optimizer
+        // gear modal, which is a different surface).
+        this._useFineInputs = !!cfg.useFineInputs;
+        // 2026-08-31 (jwbail): "Always use active applicable pet ability" — the
+        // goals-report-local mirror of the settings-modal child toggle. When the
+        // run/session config has no saved value, default from the GLOBAL setting
+        // (window.isUsePetAbilityEnabled -> localStorage 'usePetAbility', default
+        // true) so first-use matches the user's global preference. Only meaningful
+        // when Include pets is on (the checkbox slides in beside it).
+        this._usePetAbility = (typeof cfg.usePetAbility === 'boolean')
+            ? cfg.usePetAbility
+            : (typeof window.isUsePetAbilityEnabled === 'function'
+                ? !!window.isUsePetAbilityEnabled() : true);
         // 2026-05-23 testing flag: skip local-search refinement, greedy only.
         this._fast = !!cfg.fast;
-        // 2026-07-11 (jwbail): "Exact optimizer" toggle — always visible.
-        // 2026-07-11 (jwbail): old/new engine toggle (gated to session
-        // 20a57b65). Checked (default) = NEW way (today's ring de-dup + slot-
-        // order). Unchecked = OLD way (ring de-dup off). Exact B&B + 5M cap +
-        // greedy/1-4swap fallback are present in BOTH. Default true = new.
-        this._exactNew = cfg.exactNew !== false;
+        // 2026-09-18 (jwbail): report-LOCAL consumable sub-options (mirror of
+        // Column 3's, but independent of the global settingsModal). Sent in the
+        // run body so the server/local worker filter to THIS report's choices
+        // (the /api/stats-report/run endpoint lets a body value take precedence
+        // over ui_config). include_fine defaults ON.
+        this._includeFineConsumables = cfg.includeFineConsumables !== undefined
+            ? !!cfg.includeFineConsumables : true;
+        this._consumableMinOwnedEnabled = !!cfg.consumableMinOwnedEnabled;
+        this._consumableMinOwned = Number.isFinite(cfg.consumableMinOwned) ? cfg.consumableMinOwned : 5;
+        this._consumableMinOwnedOperator = (cfg.consumableMinOwnedOperator === 'lte') ? 'lte' : 'lt';
+        this._consumableUseHidden = !!cfg.consumableUseHidden;
+        // Collapse (caret) state for the report options panel's expandable chips.
+        this._panelConsumablesCollapsed = !!cfg.consumablesCollapsed;
+        this._panelPetsCollapsed = !!cfg.petsCollapsed;
+
+        // 2026-10-01 (jwbail): report-local "Include unavailable" dimension flags.
+        // Parent + By Inputs default ON (preserves today's behavior — input-gated
+        // activities are shown with a "Requires X" warning); By Level / By Location
+        // / By Gear/Tools default OFF. Parent panel defaults EXPANDED (collapsed=false).
+        // The run uses effective[dim] = includeUnavailable && by<Dim>.
+        this._includeUnavailable = cfg.includeUnavailable !== undefined ? !!cfg.includeUnavailable : true;
+        this._unavailByLevel = !!cfg.unavailByLevel;
+        this._unavailByLocation = !!cfg.unavailByLocation;
+        this._unavailByGear = !!cfg.unavailByGear;
+        this._unavailByInputs = cfg.unavailByInputs !== undefined ? !!cfg.unavailByInputs : true;
+        this._unavailByOther = !!cfg.unavailByOther;
+        this._panelUnavailCollapsed = !!cfg.unavailCollapsed;
 
         // Activity catalog cache (name → activity record from /api/activities).
         // Populated by _loadActivitiesCache() on first onNavigatedTo. Used to
@@ -628,6 +797,27 @@ export class StatsReportPage {
                 api.updateConfig(uuid, 'ui.goalsReportCollapse', this._collapseState);
             }
         } catch (_) { /* non-fatal — localStorage remains the fallback */ }
+    }
+
+    /**
+     * Persist the per-(section, skill/chest) "show more" expanded set to the
+     * SESSION's ui_config (under `goalsReportShowMore`), mirroring
+     * _persistGoalsReportCollapse so an expanded group stays expanded across a
+     * page reload. Stored as a plain array of `${section}::${subKey}` strings;
+     * absent keys default to collapsed (top-1 only), so it is auto-expandable.
+     */
+    _persistShowMore() {
+        try {
+            const arr = Array.from(this._showMoreExpanded);
+            if (store && store.state) {
+                if (!store.state.ui) store.state.ui = {};
+                store.state.ui.goalsReportShowMore = arr;
+            }
+            const uuid = store && store.state && store.state.session && store.state.session.uuid;
+            if (uuid && api && typeof api.updateConfig === 'function') {
+                api.updateConfig(uuid, 'ui.goalsReportShowMore', arr);
+            }
+        } catch (_) { /* non-fatal */ }
     }
 
     /**
@@ -763,6 +953,136 @@ export class StatsReportPage {
         this._persistGoalsReportConfig();
     }
 
+    /**
+     * Hydrate `_selectedTargetCategories` from localStorage, else default to
+     * ALL target-categories. Same default-all + persisted-on-change semantic
+     * as the new_items kind filter. Scopes the target_items run to the
+     * selected drop categories (Normal Items, Gems, Fine Items, etc.).
+     */
+    _hydrateSelectedTargetCategories() {
+        if (this._selectedTargetCategoriesHydrated) return;
+        this._selectedTargetCategoriesHydrated = true;
+        try {
+            const raw = localStorage.getItem(SELECTED_TARGET_CATEGORIES_KEY);
+            if (raw != null) {
+                const arr = JSON.parse(raw);
+                if (Array.isArray(arr)) {
+                    this._selectedTargetCategories = new Set(arr);
+                    return;
+                }
+            }
+        } catch (_) { /* fall through */ }
+        this._selectedTargetCategories = new Set(ALL_TARGET_CATEGORIES);
+    }
+
+    _saveSelectedTargetCategories() {
+        try {
+            localStorage.setItem(
+                SELECTED_TARGET_CATEGORIES_KEY,
+                JSON.stringify(Array.from(this._selectedTargetCategories))
+            );
+        } catch (_) { /* non-fatal */ }
+    }
+
+    /** Sync the "Select all / Deselect all" toggle label to current state. */
+    _refreshTargetcatAllToggle($wrap) {
+        if (!$wrap || !$wrap.length) return;
+        const allSelected = ALL_TARGET_CATEGORIES.length > 0
+            && ALL_TARGET_CATEGORIES.every(tc => this._selectedTargetCategories.has(tc));
+        $wrap.find('.stats-report-targetcat-all-toggle').text(allSelected ? 'Deselect all' : 'Select all');
+    }
+
+    _recomputeSelectedFastestCraftCategories() {
+        this._selectedFastestCraftCategories = new Set(
+            this._fastestCraftCategories.filter(c => !this._fastestCraftDeselected.has(c)));
+    }
+
+    _saveSelectedFastestCraftCategories() {
+        this._fastestCraftDeselected = new Set(
+            this._fastestCraftCategories.filter(c => !this._selectedFastestCraftCategories.has(c)));
+        try {
+            localStorage.setItem(FASTEST_CRAFT_DESELECTED_KEY,
+                JSON.stringify(Array.from(this._fastestCraftDeselected)));
+        } catch (_) { /* non-fatal */ }
+        this._persistGoalsReportConfig();
+    }
+
+    _fastestCraftGroupIds(groupKey) {
+        const group = this._fastestCraftGroups.find(g => g.key === groupKey);
+        return group ? group.chips.map(c => c.id) : [];
+    }
+
+    _refreshFastestCraftAllToggle($wrap) {
+        if (!$wrap || !$wrap.length) return;
+        const sel = this._selectedFastestCraftCategories;
+        const all = this._fastestCraftCategories;
+        const allSelected = all.length > 0 && all.every(c => sel.has(c));
+        $wrap.find('.stats-report-fccat-all-toggle').text(allSelected ? 'Deselect all' : 'Select all');
+        $wrap.find('.sr-skill-group-toggle[data-kind="fcgroup"]').each((_i, el) => {
+            const $btn = $(el);
+            const label = $btn.attr('data-group-label') || '';
+            const ids = this._fastestCraftGroupIds($btn.attr('data-group'));
+            const groupSel = ids.length > 0 && ids.every(id => sel.has(id));
+            $btn.toggleClass('all-selected', groupSel);
+            $btn.attr('title', `Click to ${groupSel ? 'deselect' : 'select'} all ${label}`);
+        });
+        $wrap.find('.stats-report-fccat-chip').each((_i, el) => {
+            $(el).toggleClass('selected', sel.has($(el).attr('data-fccat-id')));
+        });
+    }
+
+    /**
+     * Fetch the grouped chip taxonomy once the FAC flag is known. The flag
+     * is populated by an async fetch in main.js, so retry briefly until it
+     * lands; a session without the flag never fetches. Re-renders the chip
+     * list (and any rendered results, whose pills use the chip colors) once
+     * the taxonomy arrives.
+     */
+    _ensureFastestCraftCategories(attempt = 0) {
+        if (this._fastestCraftCategoriesLoaded || this._fastestCraftCategoriesLoading) return;
+        if (!window._featureFlags) {
+            if (attempt < 20) setTimeout(() => this._ensureFastestCraftCategories(attempt + 1), 500);
+            return;
+        }
+        if (!window._featureFlags.fastest_craft_goals) return;
+        // Prefer the taxonomy embedded in the feature-flags payload — synchronous,
+        // so the sub-filter renders with no "Loading craftable categories…" flash.
+        // Fall back to the dedicated endpoint if it isn't present.
+        if (window._fastestCraftTaxonomy) {
+            this._ingestFastestCraftTaxonomy(window._fastestCraftTaxonomy);
+            return;
+        }
+        this._fastestCraftCategoriesLoading = true;
+        fetch('/api/fastest-craft/categories').then(r => (r.ok ? r.json() : null)).then((resp) => {
+            if (resp) this._ingestFastestCraftTaxonomy(resp);
+        }).catch((err) => {
+            console.warn('[StatsReportPage] fastest-craft categories fetch failed:', err);
+        }).finally(() => {
+            this._fastestCraftCategoriesLoading = false;
+        });
+    }
+
+    /** Populate the Steps-per-Recipe chip taxonomy from a {groups:[...]} payload
+     * (embedded flags copy or the fetch), then re-render the sub-filter in place. */
+    _ingestFastestCraftTaxonomy(resp) {
+        const groups = (Array.isArray(resp.groups) ? resp.groups : [])
+            .map(g => ({ ...g, chips: Array.isArray(g.chips) ? g.chips : [] }));
+        this._fastestCraftGroups = groups;
+        this._fastestCraftCategories = groups.flatMap(g => g.chips.map(c => c.id));
+        this._fastestCraftChipByLabel = {};
+        for (const g of groups) {
+            for (const c of g.chips) {
+                if (!this._fastestCraftChipByLabel[c.label]) this._fastestCraftChipByLabel[c.label] = c;
+            }
+        }
+        this._fastestCraftCategoriesLoaded = true;
+        this._recomputeSelectedFastestCraftCategories();
+        if (!this._hasRendered || !this._$el) return;
+        const $row = this._$el.find('.stats-report-category-row[data-category="fastest_craft"]');
+        $row.find('.stats-report-fccat-list').html(this._renderFastestCraftCategoryList('fastest_craft'));
+        if (this._fastestCraftItems.length && this._isPageOpen) this._renderResults();
+    }
+
     // ========================================================================
     // SESSION-LEVEL SELECTION PERSISTENCE (2026-07-06, jwbail)
     // ========================================================================
@@ -786,6 +1106,12 @@ export class StatsReportPage {
         return CATEGORIES.map((c) => c.key);
     }
 
+    _categoryCountText() {
+        const visible = CATEGORIES.filter(isCategoryVisible);
+        const selected = visible.filter((c) => this._selectedCategories.has(c.key)).length;
+        return `${selected}/${visible.length} categories`;
+    }
+
     /**
      * Snapshot the current in-memory selection + flags into
      * ui_config.goalsReportConfig (in-memory store first, then a best-effort
@@ -800,6 +1126,7 @@ export class StatsReportPage {
             const selectedChestsByCat = {};
             for (const cat of CHEST_CHIP_CATEGORIES) selectedChestsByCat[cat] = this._chestsFor(cat);
             this._hydrateSelectedKinds();
+            this._hydrateSelectedTargetCategories();
 
             const cfg = buildGoalsReportConfig({
                 categoryKeys: this._allCategoryKeys(),
@@ -816,8 +1143,24 @@ export class StatsReportPage {
                     notifyOnComplete: this._notifyOnComplete,
                     includePets: this._includePets,
                     includeConsumables: this._includeConsumables,
+                    useFineInputs: this._useFineInputs,
+                    usePetAbility: this._usePetAbility,
                     fast: this._fast,
-                    exactNew: this._exactNew,
+                    includeFineConsumables: this._includeFineConsumables !== false,
+                    consumableMinOwnedEnabled: !!this._consumableMinOwnedEnabled,
+                    consumableMinOwned: Number.isFinite(this._consumableMinOwned) ? this._consumableMinOwned : 5,
+                    consumableMinOwnedOperator: (this._consumableMinOwnedOperator === 'lte') ? 'lte' : 'lt',
+                    consumableUseHidden: !!this._consumableUseHidden,
+                    consumablesCollapsed: !!this._panelConsumablesCollapsed,
+                    petsCollapsed: !!this._panelPetsCollapsed,
+                    includeUnavailable: !!this._includeUnavailable,
+                    unavailByLevel: !!this._unavailByLevel,
+                    unavailByLocation: !!this._unavailByLocation,
+                    unavailByGear: !!this._unavailByGear,
+                    unavailByInputs: this._unavailByInputs !== false,
+                    unavailByOther: !!this._unavailByOther,
+                    unavailCollapsed: !!this._panelUnavailCollapsed,
+                    fastestCraftDeselected: Array.from(this._fastestCraftDeselected),
                 },
             });
 
@@ -858,6 +1201,13 @@ export class StatsReportPage {
         if (savedCollapse && typeof savedCollapse === 'object') {
             this._collapseState = { ...this._collapseState, ...savedCollapse };
         }
+        // Per-(section, skill/chest) "show more" expanded set — same session
+        // ui_config persistence as the collapse map, so expanded groups stay
+        // expanded across a page reload.
+        const savedShowMore = ui && ui.goalsReportShowMore;
+        if (Array.isArray(savedShowMore)) {
+            this._showMoreExpanded = new Set(savedShowMore);
+        }
         const cfg = ui && ui.goalsReportConfig;
         if (!cfg || typeof cfg !== 'object') return; // no saved selection for this session
         const applied = applyGoalsReportConfig(cfg, {
@@ -883,8 +1233,27 @@ export class StatsReportPage {
         if (typeof f.notifyOnComplete === 'boolean') this._notifyOnComplete = f.notifyOnComplete;
         if (typeof f.includePets === 'boolean') this._includePets = f.includePets;
         if (typeof f.includeConsumables === 'boolean') this._includeConsumables = f.includeConsumables;
+        if (typeof f.useFineInputs === 'boolean') this._useFineInputs = f.useFineInputs;
+        if (typeof f.usePetAbility === 'boolean') this._usePetAbility = f.usePetAbility;
         if (typeof f.fast === 'boolean') this._fast = f.fast;
-        if (typeof f.exactNew === 'boolean') this._exactNew = f.exactNew;
+        if (typeof f.includeFineConsumables === 'boolean') this._includeFineConsumables = f.includeFineConsumables;
+        if (typeof f.consumableMinOwnedEnabled === 'boolean') this._consumableMinOwnedEnabled = f.consumableMinOwnedEnabled;
+        if (Number.isFinite(f.consumableMinOwned)) this._consumableMinOwned = f.consumableMinOwned;
+        if (f.consumableMinOwnedOperator === 'lt' || f.consumableMinOwnedOperator === 'lte') this._consumableMinOwnedOperator = f.consumableMinOwnedOperator;
+        if (typeof f.consumableUseHidden === 'boolean') this._consumableUseHidden = f.consumableUseHidden;
+        if (typeof f.consumablesCollapsed === 'boolean') this._panelConsumablesCollapsed = f.consumablesCollapsed;
+        if (typeof f.petsCollapsed === 'boolean') this._panelPetsCollapsed = f.petsCollapsed;
+        if (typeof f.includeUnavailable === 'boolean') this._includeUnavailable = f.includeUnavailable;
+        if (typeof f.unavailByLevel === 'boolean') this._unavailByLevel = f.unavailByLevel;
+        if (typeof f.unavailByLocation === 'boolean') this._unavailByLocation = f.unavailByLocation;
+        if (typeof f.unavailByGear === 'boolean') this._unavailByGear = f.unavailByGear;
+        if (typeof f.unavailByInputs === 'boolean') this._unavailByInputs = f.unavailByInputs;
+        if (typeof f.unavailByOther === 'boolean') this._unavailByOther = f.unavailByOther;
+        if (typeof f.unavailCollapsed === 'boolean') this._panelUnavailCollapsed = f.unavailCollapsed;
+        if (Array.isArray(f.fastestCraftDeselected)) {
+            this._fastestCraftDeselected = new Set(f.fastestCraftDeselected);
+            this._recomputeSelectedFastestCraftCategories();
+        }
     }
 
     /**
@@ -911,7 +1280,8 @@ export class StatsReportPage {
                 $btn.attr('title', `Click to ${allSel ? 'deselect' : 'select'} all ${group} skills`);
             } else if (kind === 'chest' || kind === 'chest-misc') {
                 if (kind === 'chest-misc') {
-                    names = ['Coral chest', 'Rusty chest', 'Sunken chest'];
+                    names = ['Coral chest', 'Rusty chest', 'Sunken chest',
+                             'Gem pouch', 'Coin pouch'];
                 } else {
                     const groupObj = SKILL_GROUPS.find(g => g.label === group);
                     if (!groupObj) return;
@@ -951,8 +1321,25 @@ export class StatsReportPage {
                 notifyOnComplete: !!this._notifyOnComplete,
                 includePets: !!this._includePets,
                 includeConsumables: !!this._includeConsumables,
+                useFineInputs: !!this._useFineInputs,
+                usePetAbility: !!this._usePetAbility,
                 fast: !!this._fast,
-                exactNew: !!this._exactNew,
+                // 2026-09-18: report-local consumable sub-options + panel collapse.
+                includeFineConsumables: this._includeFineConsumables !== false,
+                consumableMinOwnedEnabled: !!this._consumableMinOwnedEnabled,
+                consumableMinOwned: Number.isFinite(this._consumableMinOwned) ? this._consumableMinOwned : 5,
+                consumableMinOwnedOperator: (this._consumableMinOwnedOperator === 'lte') ? 'lte' : 'lt',
+                consumableUseHidden: !!this._consumableUseHidden,
+                consumablesCollapsed: !!this._panelConsumablesCollapsed,
+                petsCollapsed: !!this._panelPetsCollapsed,
+                // 2026-10-01: report-local "Include unavailable" dimension flags.
+                includeUnavailable: !!this._includeUnavailable,
+                unavailByLevel: !!this._unavailByLevel,
+                unavailByLocation: !!this._unavailByLocation,
+                unavailByGear: !!this._unavailByGear,
+                unavailByInputs: this._unavailByInputs !== false,
+                unavailByOther: !!this._unavailByOther,
+                unavailCollapsed: !!this._panelUnavailCollapsed,
                 // 2026-05-21: also persist the WTO category checkboxes
                 // so the user's selection survives a reload. Stored as
                 // an array of category keys.
@@ -974,6 +1361,7 @@ export class StatsReportPage {
         if (key.startsWith('section:')) return false;
         if (key === 'config:what-to-optimize') return true;
         if (key.startsWith('gear:')) return false; // gear previews start collapsed
+        if (key.startsWith('alt:')) return false; // alternative-locations start collapsed
         return true; // categories and skills default-open inside an open section
     }
 
@@ -1054,6 +1442,19 @@ export class StatsReportPage {
 
     onNavigatedTo() {
         this._isPageOpen = true;
+        // Body-scroll (mobile): the window is the scroller, so track its scroll
+        // position LIVE while the report is open. Reading it at close time is
+        // unreliable — removing the open class reflows the layout (main columns
+        // reappear) before onNavigatedFrom runs, corrupting window.scrollY.
+        if (window.innerWidth <= 768) {
+            if (!this._trackWinScroll) {
+                this._trackWinScroll = () => {
+                    this._savedScrollTop = window.scrollY || window.pageYOffset || 0;
+                };
+            }
+            window.removeEventListener('scroll', this._trackWinScroll);
+            window.addEventListener('scroll', this._trackWinScroll, { passive: true });
+        }
         // Fire stats-report stale-detection annotation refresh.
         try { window.dispatchEvent(new CustomEvent('stats-report-opened')); } catch (_) {}
         this._staleDismissed = false;
@@ -1079,7 +1480,10 @@ export class StatsReportPage {
             requestAnimationFrame(() => {
                 if (!this._isPageOpen) return;
                 const saved = this._savedScrollTop || 0;
-                if (this._$el && this._$el[0]) {
+                if (window.innerWidth <= 768) {
+                    // Body-scroll model: the window scrolls the overlay.
+                    window.scrollTo(0, saved);
+                } else if (this._$el && this._$el[0]) {
                     this._$el[0].scrollTop = saved;
                     // Some layouts scroll the inner container instead.
                     const $inner = this._$el.find('.stats-report-container, .stats-report-page');
@@ -1112,6 +1516,7 @@ export class StatsReportPage {
             // one spot. Same semantic: localStorage-or-all.
             this._hydrateSelectedChests();
             this._hydrateSelectedKinds();
+            this._hydrateSelectedTargetCategories();
             // 2026-07-06 (jwbail): the SESSION's saved selection (ui_config
             // .goalsReportConfig) wins over the localStorage seed above, so
             // swapping debug sessions carries each session's own boxes. Must
@@ -1121,6 +1526,11 @@ export class StatsReportPage {
             this._render();
             this._attachEvents();
             this._hasRendered = true;
+            // Body-scroll model (mobile): first open lands at the top (the
+            // window scroll may be non-zero from a previously-scrolled column).
+            if (window.innerWidth <= 768) {
+                requestAnimationFrame(() => { if (this._isPageOpen) window.scrollTo(0, this._savedScrollTop || 0); });
+            }
             // 2026-06-19 (jwbail): first-open render is async (it awaits
             // loadSkillGroups), so it completes AFTER the
             // 'stats-report-opened' event already ran the stale annotator
@@ -1165,7 +1575,14 @@ export class StatsReportPage {
         // user where they were. _$el is the page root; check inner
         // containers too in case scroll moved up the tree.
         try {
-            if (this._$el && this._$el[0]) {
+            if (window.innerWidth <= 768) {
+                // Scroll position is tracked live by _trackWinScroll; just
+                // detach the listener (do NOT re-read window.scrollY here — the
+                // layout has already reflowed by this point).
+                if (this._trackWinScroll) {
+                    window.removeEventListener('scroll', this._trackWinScroll);
+                }
+            } else if (this._$el && this._$el[0]) {
                 let scrollTop = this._$el[0].scrollTop || 0;
                 if (!scrollTop) {
                     const $inner = this._$el.find('.stats-report-container, .stats-report-page');
@@ -1209,7 +1626,7 @@ export class StatsReportPage {
                         <div class="stats-report-about-body" style="display:${this._isExpanded('about:help') ? 'block' : 'none'};margin-top:8px;color:var(--text-secondary);font-size:0.9em;line-height:1.5">
                             <p style="margin:0 0 8px">Finds the best gear for each goal: fastest <strong>XP/step</strong>, most <strong>coins</strong>, fastest <strong>chests</strong>, and quickest path to <strong>new items</strong>, across every activity and recipe you can currently do.</p>
                             <p style="margin:0 0 8px"><strong>How to use:</strong> pick what to optimize below, click <strong>Optimize</strong>, then expand any row to see and equip its gearset.</p>
-                            <p style="margin:0"><strong>The <span style="display:inline-block;background:#d33;color:#fff;border-radius:50%;width:16px;height:16px;line-height:16px;text-align:center;font-weight:bold;font-size:11px;vertical-align:middle;translate:0 -2px">!</span> badge</strong> means a row is out of date. Something on your character changed (an item, quality, pet/level, skill level, or custom stat) since it was last optimized, so its pick may no longer be best. Click <strong>Optimize</strong> to refresh the flagged rows; the badge popover lists what changed.</p>
+                            <p style="margin:0"><strong>The <span style="display:inline-block;background:#d33;color:#fff;border-radius:50%;width:16px;height:16px;line-height:16px;text-align:center;font-weight:bold;font-size: max(var(--min-text, 5px), calc(11px * var(--text-scale, 1)));vertical-align:middle;translate:0 -2px">!</span> badge</strong> means a row is out of date. Something on your character changed (an item, quality, pet/level, skill level, or custom stat) since it was last optimized, so its pick may no longer be best. Click <strong>Optimize</strong> to refresh the flagged rows; the badge popover lists what changed.</p>
                         </div>
                     </div>
                 </div>
@@ -1260,11 +1677,11 @@ export class StatsReportPage {
                          style="display:flex;align-items:center;gap:10px;cursor:pointer;user-select:none">
                         <span class="stats-report-arrow">▼</span>
                         <h3 style="margin:0;flex:1">What to optimize</h3>
-                        <span class="stats-report-cat-count" style="color:var(--text-muted);font-size:0.85em">${this._selectedCategories.size}/${CATEGORIES.length} categories</span>
+                        <span class="stats-report-cat-count" style="color:var(--text-muted);font-size:0.85em">${this._categoryCountText()}</span>
                     </div>
                     <div class="stats-report-config-body">
                         <div class="stats-report-categories">
-                            ${CATEGORIES.map(cat => `
+                            ${CATEGORIES.filter(isCategoryVisible).map(cat => `
                                 <div class="stats-report-category-row" data-category="${cat.key}">
                                     <label class="optimizer-checkbox">
                                         <input type="checkbox" class="stats-report-cat-checkbox"
@@ -1289,6 +1706,22 @@ export class StatsReportPage {
                                             ${this._renderKindList(cat.key)}
                                         </div>
                                     ` : ''}
+                                    ${cat.key === 'target_items' ? `
+                                        <div class="stats-report-kind-list ${this._selectedCategories.has(cat.key) ? '' : 'is-collapsed'}" data-for="${cat.key}">
+                                            <div>
+                                            <label class="optimizer-checkbox" style="display:flex;align-items:center;gap:6px;margin:6px 0 4px 2px;font-size:0.9em">
+                                                <input type="checkbox" id="stats-report-include-fine-checkbox" ${this._includeFine ? 'checked' : ''} />
+                                                <span>Include fine variants</span>
+                                            </label>
+                                            ${this._renderTargetCategoryList(cat.key)}
+                                            </div>
+                                        </div>
+                                    ` : ''}
+                                    ${cat.key === 'fastest_craft' ? `
+                                        <div class="stats-report-kind-list stats-report-fccat-list ${this._selectedCategories.has(cat.key) ? '' : 'is-collapsed'}" data-for="${cat.key}">
+                                            ${this._renderFastestCraftCategoryList(cat.key)}
+                                        </div>
+                                    ` : ''}
                                 </div>
                             `).join('')}
                         </div>
@@ -1307,45 +1740,20 @@ export class StatsReportPage {
                          already granted. Mirrors the bug-report Notify
                          block pattern; cleaner UX than a checkbox the user
                          can't actually use without enabling push first. -->
+                    <!-- 2026-09-18 (jwbail): the consumables/pets, run-locally,
+                         and fast controls are now ONE reusable SettingsPanel of
+                         chips, mounted here after render (append, no rebuild) by
+                         _mountReportPanel(). The push-notify ENABLE banner still
+                         renders above it (when push isn't granted yet); once
+                         granted, the "Notify when done" chip joins the panel. -->
                     ${this._renderPushNotifySection()}
-                    <div class="stats-report-toggle-row">
-                        <label class="stats-report-notify-row" title="Include owned pets in optimization. Each row's chosen pet shows up in the gear preview.">
-                            <input type="checkbox" id="stats-report-include-pets-checkbox" ${this._includePets ? 'checked' : ''} />
-                            <span>Include pets</span>
-                        </label>
-                        <label class="stats-report-notify-row" title="Include owned consumables in optimization. Each row's chosen consumable shows up in the gear preview.">
-                            <input type="checkbox" id="stats-report-include-consumables-checkbox" ${this._includeConsumables ? 'checked' : ''} />
-                            <span>Include consumables</span>
-                        </label>
-                    </div>
-                    ${(window._featureFlags && window._featureFlags.local_optimization) ? `
-                    <div class="stats-report-toggle-row">
-                        <label class="stats-report-notify-row">
-                            <input type="checkbox" id="stats-report-run-local-checkbox" ${(window.settingsModal && window.settingsModal.runLocalOptimization) ? 'checked' : ''} />
-                            <span>Run locally</span>
-                            <span class="travel-info-icon" data-info="Runs the optimizer in your browser instead of on the server. On a reasonably modern phone or computer this is usually faster, and it reduces server load. Older or low-end devices may be slower than the server. Results are identical to a server run, and once finished they're saved to the server, so they're available on all your devices." role="button" tabindex="0" aria-label="About running locally" style="color:var(--accent, #4a90e2);font-weight:600;cursor:pointer;margin-left:4px">ⓘ</span>
-                        </label>
-                    </div>
-                    ` : ''}
-                    <div class="stats-report-toggle-row">
-                        <!-- 2026-05-23: testing-only checkbox. When checked,
-                             the worker skips local-search refinement and
-                             just uses the greedy initial solution. Trades
-                             optimal quality for ~10x faster wall-clock per
-                             job. Useful when verifying the run actually
-                             starts/progresses; not for normal use. -->
-                        <label class="stats-report-notify-row" title="DEBUG: skip local-search refinement and just use the greedy initial solution. ~10x faster per job but suboptimal gearsets.">
-                            <input type="checkbox" id="stats-report-fast-checkbox" ${this._fast ? 'checked' : ''} />
-                            <span>Fast (greedy; not fully optimal)</span>
-                        </label>
-                        ${((window.store || (typeof store !== 'undefined' ? store : null))?.state?.session?.uuid === '00000000-0000-0000-0000-000000000000') ? ('<label class="stats-report-notify-row" title="ON = new way (today\'s ring de-dup + slot-order). OFF = old way (exact DFS, 5M-node cap, greedy+1-4swap fallback, without today\'s changes). Exact runs in both."><input type="checkbox" id="stats-report-exact-checkbox" ' + (this._exactNew ? 'checked' : '') + ' /><span>New exact optimizations (today)</span></label>') : ''}
-                    </div>
+                    <div class="stats-report-opt-panel-slot"></div>
                     <button class="button button-primary stats-report-optimize-btn" id="stats-report-optimize-btn"
                         ${this._selectedCategories.size === 0 ? 'disabled' : ''}>
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="vertical-align:middle;margin-right:6px">
                             <path d="M17.65 6.35A7.958 7.958 0 0 0 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0 1 12 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/>
                         </svg>
-                        Optimize All
+                        Optimize Selected
                     </button>
                     <!-- 2026-06-02 (jwbail): Cancel button. Hidden by
                          default; _updateOptimizeButtonRunningState
@@ -1397,6 +1805,10 @@ export class StatsReportPage {
             </div>
         `;
         this._$el.html(html);
+        // Mount the reusable optimizer options panel (push-notify / consumables
+        // + pets / run-locally + fast) into its slot. Append the persistent
+        // element (no rebuild) so its in-place animations survive re-render.
+        this._mountReportPanel();
         // Wire (i) info popovers in the main page render. The WTO
         // "Run locally" info icon lives in this markup, NOT in the
         // results body that the separate wireInfoIcons($body) call in
@@ -1476,6 +1888,8 @@ export class StatsReportPage {
             { name: 'Coral chest',  icon: '/assets/icons/items/containers/coral_chest.svg',  color: '#92E8C0' },
             { name: 'Rusty chest',  icon: '/assets/icons/items/containers/rusty_chest.svg',  color: '#b7410e' },
             { name: 'Sunken chest', icon: '/assets/icons/items/containers/sunken_chest.svg', color: '#5ec47a' },
+            { name: 'Gem pouch',    icon: '/assets/icons/items/containers/gem_pouch.svg',    color: '#3FA9F5' },
+            { name: 'Coin pouch',   icon: '/assets/icons/items/containers/coin_pouch.svg',   color: '#fec880' },
         ];
 
         const isRecipes = categoryKey === 'chests_recipes';
@@ -1583,20 +1997,281 @@ export class StatsReportPage {
         return html;
     }
 
+    /**
+     * Render the target-category chips for the "Fastest Target Item Activities"
+     * sub-filter (Gems, Normal Items, Fine Items, etc.). Mirrors
+     * `_renderKindList`. Default = all selected; toggle/persist via the
+     * .stats-report-targetcat-chip click handler.
+     */
+    _renderTargetCategoryList(categoryKey) {
+        this._hydrateSelectedTargetCategories();
+        const allSelected = ALL_TARGET_CATEGORIES.length > 0
+            && ALL_TARGET_CATEGORIES.every(tc => this._selectedTargetCategories.has(tc));
+        let html = `<div style="margin:8px 0 2px 2px">
+            <span class="stats-report-targetcat-all-toggle" data-category="${categoryKey}"
+                role="button" tabindex="0"
+                style="cursor:pointer;font-size:0.82em;font-weight:600;color:var(--accent-color,#5B8BD9);user-select:none">
+                ${allSelected ? 'Deselect all' : 'Select all'}
+            </span>
+        </div>`;
+        // Render one grid per KIND so each group starts on its own line
+        // (user request 2026-08-13): line 1 currency (AGT, Sea Shells), line 2
+        // finding (Bird Nest, Ectoplasm), line 3 material keyword
+        // groups (alphabetical, wraps within its own grid), line 4 Other.
+        // ALL_TARGET_CATEGORIES is already ordered, so filtering per kind
+        // preserves the within-group order.
+        const _chipHtml = (tc) => {
+            const meta = TARGET_CATEGORY_META[tc] || { label: tc, color: 'var(--text-secondary)', icon: '' };
+            const selected = this._selectedTargetCategories.has(tc);
+            const iconHtml = meta.icon
+                ? `<img src="${meta.icon}" alt="${meta.label}" onerror="this.style.display='none'" style="width:30px;height:30px;margin-top:1px;margin-bottom:1px">`
+                : '';
+            return `
+                <div class="stats-report-skill-chip stats-report-targetcat-chip ${selected ? 'selected' : ''}"
+                    data-targetcat-name="${tc}" data-category="${categoryKey}"
+                    style="--chip-color:${meta.color}">
+                    ${iconHtml}<span style="font-weight:500">${meta.label}</span>
+                </div>`;
+        };
+        for (const kind of ['currency', 'finding', 'material', 'other']) {
+            const slugs = ALL_TARGET_CATEGORIES.filter(
+                tc => ((TARGET_CATEGORY_META[tc] || {}).kind || 'material') === kind);
+            if (!slugs.length) continue;
+            html += '<div class="sr-skill-flat-grid" style="margin-top:4px">';
+            for (const tc of slugs) html += _chipHtml(tc);
+            html += '</div>';
+        }
+        return html;
+    }
+
+    /**
+     * Render the "Fastest Craft" sub-filter: four groups (Gear / Tools /
+     * Consumables / Materials), each a clickable group label that toggles all
+     * of its chips (the xp skill-group pattern), followed by its child chips.
+     * The taxonomy is fetched async by `_ensureFastestCraftCategories`, which
+     * re-renders this list in place.
+     */
+    _renderFastestCraftCategoryList(categoryKey) {
+        this._ensureFastestCraftCategories();
+        const groups = this._fastestCraftGroups.filter(g => g.chips.length > 0);
+        if (!groups.length) {
+            return `<div style="margin:8px 0 2px 2px;color:var(--text-muted);font-size:0.85em">Loading craftable categories…</div>`;
+        }
+        const sel = this._selectedFastestCraftCategories;
+        // Per-group parent toggles (below) now cover select/deselect-all, so the
+        // old top-level "Select all" link is removed per user direction.
+        let html = '';
+        html += '<div class="sr-skill-flat-grid" style="margin-top:4px">';
+        for (const group of groups) {
+            const groupSel = group.chips.every(c => sel.has(c.id));
+            const label = escapeHtml(group.label);
+            const iconHtml = group.icon
+                ? `<img src="${escapeHtml(group.icon)}" alt="" width="25" height="25" onerror="this.style.display='none'">`
+                : '';
+            html += `<div class="sr-skill-group-label-row sr-skill-group-toggle ${groupSel ? 'all-selected' : ''}"
+                data-group="${escapeHtml(group.key)}" data-group-label="${label}" data-category="${categoryKey}" data-kind="fcgroup"
+                role="button" tabindex="0"
+                style="--group-color:${group.color || 'var(--text-muted)'}" title="Click to ${groupSel ? 'deselect' : 'select'} all ${label}">${iconHtml}<span>${label}</span></div>`;
+            for (const chip of group.chips) {
+                html += `
+                    <div class="stats-report-skill-chip stats-report-targetcat-chip stats-report-fccat-chip ${sel.has(chip.id) ? 'selected' : ''}"
+                        data-fccat-id="${escapeHtml(chip.id)}" data-category="${categoryKey}"
+                        style="--chip-color:${chip.color || 'var(--text-secondary)'}">
+                        ${fastestCraftChipIconHtml(chip, 30)}<span style="font-weight:500">${escapeHtml(chip.label)}</span>
+                    </div>`;
+            }
+        }
+        html += '</div>';
+        return html;
+    }
+
     // ========================================================================
     // EVENTS
     // ========================================================================
 
+    /**
+     * Build the reusable optimizer options panel for the goals report:
+     *   line 1: push-notify (report-local notifyOnComplete)
+     *   line 2: Use consumables (+ sub-options) · Use pets (+ ability)  [shared factory]
+     *   line 3: Run locally (global) · Fast (greedy) (report-local)
+     * All chips bind to REPORT-LOCAL state (readOn/onToggle) except Run locally,
+     * which is the shared global settingsModal.runLocalOptimization.
+     * @returns {SettingsPanel}
+     */
+    _buildReportPanel() {
+        const ST = 'stats-report';
+        const persist = () => { this._saveRunConfig(); if (this._reportPanel) this._reportPanel.syncState(); };
+        const panel = new SettingsPanel({
+            settingType: ST,
+            onCollapseChange: (key, collapsed) => {
+                if (key === 'consumables') this._panelConsumablesCollapsed = collapsed;
+                else if (key === 'pets') this._panelPetsCollapsed = collapsed;
+                else if (key === 'includeUnavailable') this._panelUnavailCollapsed = collapsed;
+                this._saveRunConfig();
+            },
+        });
+
+        // Line 1 — push notification when done.
+        const notify = new Toggle('/assets/icons/ui/mailbox_big.svg', 'Notify when done', '#EA3348', ST,
+            'notifyOnComplete', { readOn: () => !!this._notifyOnComplete, onToggle: (on) => this._toggleReportNotify(on) });
+        // Only surface the chip once push is granted; until then the enable
+        // banner (_renderPushNotifySection) drives turning notifications on.
+        if (this._pushNotifyGranted()) panel.addToggle(notify);
+
+        // Line 2 — consumables (+subs) + pets (+ability), from the shared factory.
+        const { consumables, pets, runLocal } = createStandardOptimizerChips({
+            settingType: ST,
+            consumables: {
+                settingName: 'includeConsumables',
+                readOn: () => !!this._includeConsumables,
+                onToggle: (on) => { this._includeConsumables = on; persist(); },
+                collapsed: this._panelConsumablesCollapsed,
+                minOwned: { value: this._consumableMinOwned, operator: this._consumableMinOwnedOperator },
+                sub: {
+                    fine: { settingName: 'includeFineConsumables', readOn: () => this._includeFineConsumables !== false, onToggle: (on) => { this._includeFineConsumables = on; persist(); } },
+                    minOwned: { settingName: 'consumableMinOwnedEnabled', readOn: () => !!this._consumableMinOwnedEnabled, onToggle: (on) => { this._consumableMinOwnedEnabled = on; persist(); } },
+                    hidden: { settingName: 'consumableUseHidden', readOn: () => !!this._consumableUseHidden, onToggle: (on) => { this._consumableUseHidden = on; persist(); } },
+                },
+            },
+            pets: {
+                settingName: 'includePets',
+                readOn: () => !!this._includePets,
+                onToggle: (on) => { this._includePets = on; persist(); },
+                collapsed: this._panelPetsCollapsed,
+                ability: { settingName: 'usePetAbility', readOn: () => !!this._usePetAbility, onToggle: (on) => { this._usePetAbility = on; persist(); } },
+            },
+            runLocal: {
+                settingName: 'runLocalOptimization',
+                readOn: () => !!(window.settingsModal && window.settingsModal.runLocalOptimization),
+                onToggle: (on) => this._setReportRunLocal(on),
+            },
+        });
+        panel.addToggle(consumables, pets);
+
+        // "Use Fine Inputs" (R2): goals-report hunting input-slot only. Placed
+        // immediately after the pets toggle per user direction. Uses the Fine
+        // variant of a hunting activity's input item (e.g. arrows) when one
+        // exists. Report-local; cyan to match the keyword/fine theme.
+        const useFineInputs = new Toggle(
+            '/assets/icons/keywords/arrows.svg',
+            `Use fine inputs <span class="travel-info-icon opt-simple-chip-info" role="button" tabindex="0" aria-label="About use fine inputs" data-info="Uses the Fine variant of a hunting activity's input item (e.g. arrows) when a Fine version exists. Affects the hunting input slot in this report only.">ⓘ</span>`,
+            '#22d3ee', ST, 'useFineInputs',
+            { readOn: () => !!this._useFineInputs, onToggle: (on) => { this._useFineInputs = on; persist(); } });
+        panel.addToggle(useFineInputs);
+
+        // Line 3 — "Include unavailable" (report-local) parent + 4 sub-dimensions.
+        // Sits between the pets line and the run-locally line per user direction.
+        const { includeUnavailable } = createIncludeUnavailableChip({
+            settingType: ST,
+            settingName: 'includeUnavailable',
+            readOn: () => !!this._includeUnavailable,
+            onToggle: (on) => { this._includeUnavailable = on; persist(); },
+            collapsed: this._panelUnavailCollapsed,
+            sub: {
+                level:    { settingName: 'unavailByLevel',    readOn: () => !!this._unavailByLevel,    onToggle: (on) => { this._unavailByLevel = on; persist(); } },
+                location: { settingName: 'unavailByLocation', readOn: () => !!this._unavailByLocation, onToggle: (on) => { this._unavailByLocation = on; persist(); } },
+                gear:     { settingName: 'unavailByGear',     readOn: () => !!this._unavailByGear,     onToggle: (on) => { this._unavailByGear = on; persist(); } },
+                inputs:   { settingName: 'unavailByInputs',   readOn: () => this._unavailByInputs !== false, onToggle: (on) => { this._unavailByInputs = on; persist(); } },
+                other:    { settingName: 'unavailByOther',    readOn: () => !!this._unavailByOther,    onToggle: (on) => { this._unavailByOther = on; persist(); } },
+            },
+        });
+        panel.addToggle(includeUnavailable);
+
+        // Line 4 — run locally + fast (greedy).
+        const fastSpan = `Fast (greedy) <span class="travel-info-icon opt-simple-chip-info" role="button" tabindex="0" aria-label="About fast mode" data-info="Greedy mode skips the local-search refinement pass, so it runs much faster but will NOT always choose fully optimal gear sets. Turn it off for the best possible results.">ⓘ</span>`;
+        const fast = new Toggle('/assets/icons/ui/fast_mode.svg', fastSpan, '#63AB3F', ST,
+            'fast', { readOn: () => !!this._fast, onToggle: (on) => { this._fast = on; persist(); } });
+        panel.addToggle(runLocal, fast);
+
+        return panel;
+    }
+
+    /** Re-mount the persistent report panel into its slot after each render. */
+    _mountReportPanel() {
+        if (!this._$el || !this._$el.find) return;
+        const slot = this._$el.find('.stats-report-opt-panel-slot')[0];
+        if (!slot) return;
+        // Rebuild when push-granted state flips (the notify chip appears/disappears).
+        const sig = this._pushNotifyGranted() ? 'G' : '-';
+        if (!this._reportPanel || this._reportPanelSig !== sig) {
+            this._reportPanel = this._buildReportPanel();
+            this._reportPanelSig = sig;
+        }
+        this._reportPanel.mount(slot);
+        this._reportPanel.syncState();
+        try { wireInfoIcons(this._reportPanel.element); } catch (_) { /* non-fatal */ }
+    }
+
+    /**
+     * Enable/disable the "notify when done" chip. When enabling and push
+     * permission isn't granted yet, request it (reusing the settings-modal
+     * push init when available); revert the chip if the user denies.
+     */
+    async _toggleReportNotify(on) {
+        if (on && typeof Notification !== 'undefined' && Notification.permission !== 'granted') {
+            try {
+                if (window.settingsModal && typeof window.settingsModal._initPushNotifications === 'function') {
+                    window.settingsModal._pushPermission = 'granted';
+                    await window.settingsModal._initPushNotifications();
+                } else {
+                    await Notification.requestPermission();
+                }
+            } catch (err) {
+                console.warn('[StatsReportPage] enable notifications failed:', err);
+            }
+            if (typeof Notification !== 'undefined' && Notification.permission === 'denied') on = false;
+        }
+        this._notifyOnComplete = on;
+        this._saveRunConfig();
+        if (this._reportPanel) this._reportPanel.syncState();
+    }
+
+    /** Run locally is the SHARED global setting — mirror + broadcast like the old checkbox. */
+    _setReportRunLocal(on) {
+        if (window.settingsModal) {
+            window.settingsModal.runLocalOptimization = on;
+            try { window.settingsModal.saveGlobalOptimizationSettings(); } catch (_) { /* non-fatal */ }
+        }
+        try { window.dispatchEvent(new CustomEvent('runLocalOptimizationChanged', { detail: { enabled: on } })); } catch (_) { /* non-fatal */ }
+        if (this._reportPanel) this._reportPanel.syncState();
+    }
+
     _attachEvents() {
         const $el = this._$el;
 
-        // Strip prior handlers before re-attaching. _attachEvents() runs on
-        // every onNavigatedTo(), so without this every nav fires the click
-        // handler an extra time — user-reported "Equip triggers twice"
+        // Strip prior handlers BEFORE (re-)attaching anything. _attachEvents()
+        // runs on every onNavigatedTo(), so without this every nav fires the
+        // click handler an extra time — user-reported "Equip triggers twice"
         // and a 3rd-time-back trigger fires it 3x. Namespacing scopes the
-        // teardown to our handlers only.
+        // teardown to our handlers only. This MUST come first: the teardown
+        // used to live mid-method (below the min-owned handlers), so the
+        // .statsReport handlers attached above it were torn down immediately
+        // and never re-attached — that's why the goals-report "stay below"
+        // consumable count silently failed to save.
         $el.off('.statsReport');
         $(document).off('keydown.stats-report');
+
+        // Report options panel — min-owned inline controls (rendered by the
+        // shared chip factory inside the panel). Editing either implies enabling
+        // the min-owned sub-option; persist report-locally + reflect the chip.
+        $el.on('change.statsReport', '.opt-consumable-minowned-op', (e) => {
+            this._consumableMinOwnedOperator = (e.target.value === 'lte') ? 'lte' : 'lt';
+            this._consumableMinOwnedEnabled = true;
+            this._saveRunConfig();
+            if (this._reportPanel) this._reportPanel.syncState();
+        });
+        $el.on('change.statsReport blur.statsReport', '.opt-consumable-minowned-input', (e) => {
+            let v = parseInt(e.target.value, 10);
+            if (!Number.isFinite(v)) v = 5;
+            v = Math.max(1, Math.min(100, Math.round(v)));
+            e.target.value = v;
+            this._consumableMinOwned = v;
+            this._consumableMinOwnedEnabled = true;
+            this._saveRunConfig();
+            if (this._reportPanel) this._reportPanel.syncState();
+        });
+        // Don't let clicks on the inline controls bubble to the chip toggle.
+        $el.on('click.statsReport mousedown.statsReport', '.opt-consumable-minowned-op, .opt-consumable-minowned-input', (e) => e.stopPropagation());
 
         // Close button (✕). Delegated through $el so the .off('.statsReport')
         // teardown above cleans these up on every nav back to the page.
@@ -1626,6 +2301,55 @@ export class StatsReportPage {
         };
         $(document).on('keydown.stats-report', this._escHandler);
 
+        // Target items search box: live-filter rows by item/activity name or
+        // keyword. The input now lives INSIDE the (clickable) section header,
+        // so stop clicks/mousedowns in it from toggling the section collapse.
+        $el.on('click.statsReport mousedown.statsReport', '.stats-report-ti-search', (e) => {
+            e.stopPropagation();
+        });
+        $el.on('input.statsReport', '#stats-report-target-items-search-input', (e) => {
+            this._tiSearchQuery = e.target.value || '';
+            this._applyTargetItemsSearch();
+        });
+        // Steps-per-Recipe search (reuses the .stats-report-ti-search click guard
+        // above so typing in the box doesn't collapse the section).
+        $el.on('input.statsReport', '#stats-report-fc-search-input', (e) => {
+            this._fcSearchQuery = e.target.value || '';
+            this._applyFastestCraftSearch();
+        });
+        // Steps-per-Recipe per-row quality dropdown — quality is now per-row
+        // (the sub-group is the CATEGORY). Switching re-renders the row's steps,
+        // fine pill, and ranking. Guard click/mousedown so opening the native
+        // select doesn't bubble up and toggle a group/section collapse.
+        $el.on('click.statsReport mousedown.statsReport', '.stats-report-fc-quality', (e) => {
+            e.stopPropagation();
+        });
+        $el.on('change.statsReport', '.stats-report-fc-quality', (e) => {
+            e.stopPropagation();
+            const ref = $(e.currentTarget).attr('data-item-ref');
+            if (!ref) return;
+            if (!this._fcRowQuality) this._fcRowQuality = {};
+            this._fcRowQuality[ref] = e.target.value;
+            this._renderResults();
+            try { this._applyFastestCraftSearch(); } catch (_) { /* non-fatal */ }
+        });
+        // Steps-per-Recipe Reset (section / master-category). Distinct from the
+        // goals-report reset — hits the FC store endpoint.
+        $el.on('click.statsReport', '.stats-report-fc-reset', (e) => {
+            e.stopPropagation();
+            const $btn = $(e.currentTarget);
+            const scope = $btn.data('fc-scope');
+            const group = $btn.attr('data-cat-group') || null;
+            const quality = $btn.attr('data-quality') || null;
+            const label = scope === 'all' ? 'all Steps per Recipe results'
+                : scope === 'category' ? `the "${group}" category`
+                    : `${group} / ${quality}`;
+            if (!confirm(`Reset ${label}? This deletes the saved results for that scope so they recompute on the next Optimize run. Character and gear data are not affected.`)) {
+                return;
+            }
+            this._resetFastestCraft(scope, group, quality);
+        });
+
         // Notify checkbox — also persisted to localStorage so unchecking
         // it survives a reload (was the silent "checkbox isn't working"
         // bug the user hit).
@@ -1648,6 +2372,14 @@ export class StatsReportPage {
         // optimize_activity_gearsets.INCLUDE_PETS / PET_ITEMS flags.
         $el.on('change.statsReport', '#stats-report-include-pets-checkbox', (e) => {
             this._includePets = e.target.checked;
+            // 2026-08-31 (jwbail): slide the "Use pet ability" child toggle
+            // in/out horizontally, mirroring the settings-modal parent/child
+            // pair. Purely visual — the flag itself is preserved either way so
+            // re-checking Include pets restores the user's ability choice.
+            if (this._$el && this._$el.find) {
+                this._$el.find('.stats-report-use-ability-slide')
+                    .toggleClass('open', !!e.target.checked);
+            }
             this._saveRunConfig();
         });
         // Include-consumables checkbox — same as above for the consumable
@@ -1655,6 +2387,15 @@ export class StatsReportPage {
         // aren't re-optimized until the user clicks "Optimize All" again.
         $el.on('change.statsReport', '#stats-report-include-consumables-checkbox', (e) => {
             this._includeConsumables = e.target.checked;
+            this._saveRunConfig();
+        });
+        // "Use pet ability" child checkbox (2026-08-31 jwbail) — merges each
+        // candidate pet's active applicable (adult-level) ability stats into
+        // scoring, and on Equip checks column-2's per-pet "use ability" box.
+        // Mirrors include-pets/consumables: affects only the NEXT run — existing
+        // rows are not invalidated here (that's what "Optimize All" is for).
+        $el.on('change.statsReport', '#stats-report-use-pet-ability-checkbox', (e) => {
+            this._usePetAbility = e.target.checked;
             this._saveRunConfig();
         });
         // Run-locally checkbox — mirrors Settings > Optimization > Run
@@ -1682,10 +2423,6 @@ export class StatsReportPage {
             this._fast = e.target.checked;
             this._saveRunConfig();
         });
-        $el.on('change.statsReport', '#stats-report-exact-checkbox', (e) => {
-            this._exactNew = e.target.checked;
-            this._saveRunConfig();
-        });
 
         // Category checkboxes. 2026-05-21: dropped jQuery slideToggle in
         // favor of a CSS-only `.is-collapsed` class + max-height
@@ -1711,7 +2448,7 @@ export class StatsReportPage {
             // Live-update the "N/5 categories" counter. Previously this only
             // re-rendered on a full page reload, so the count looked stuck.
             $el.find('.stats-report-cat-count')
-                .text(`${this._selectedCategories.size}/${CATEGORIES.length} categories`);
+                .text(this._categoryCountText());
             this._updateOptimizeButtonState();
             // Persist to localStorage so the user's category selection
             // survives a reload.
@@ -1781,6 +2518,106 @@ export class StatsReportPage {
             this._saveSelectedKinds();
         });
 
+        // 2026-08-11 (jwbail): target-category chips for "Fastest Target Item
+        // Activities" sub-filter (Gems / Normal Items / Fine Items / etc.).
+        $el.on('click.statsReport', '.stats-report-targetcat-chip', (e) => {
+            const $chip = $(e.currentTarget);
+            const tc = $chip.data('targetcat-name');
+            if (!tc) return;
+            if (this._selectedTargetCategories.has(tc)) {
+                this._selectedTargetCategories.delete(tc);
+                $chip.removeClass('selected');
+            } else {
+                this._selectedTargetCategories.add(tc);
+                $chip.addClass('selected');
+            }
+            this._saveSelectedTargetCategories();
+            this._refreshTargetcatAllToggle($chip.closest('.stats-report-kind-list'));
+        });
+
+        // 2026-08-12 (jwbail): select/deselect-all toggle for target-group chips.
+        $el.on('click.statsReport', '.stats-report-targetcat-all-toggle', (e) => {
+            const $btn = $(e.currentTarget);
+            const allSelected = ALL_TARGET_CATEGORIES.length > 0
+                && ALL_TARGET_CATEGORIES.every(tc => this._selectedTargetCategories.has(tc));
+            if (allSelected) {
+                this._selectedTargetCategories.clear();
+            } else {
+                this._selectedTargetCategories = new Set(ALL_TARGET_CATEGORIES);
+            }
+            this._saveSelectedTargetCategories();
+            const $wrap = $btn.closest('.stats-report-kind-list');
+            const sel = this._selectedTargetCategories;
+            $wrap.find('.stats-report-targetcat-chip').each((_i, el) => {
+                $(el).toggleClass('selected', sel.has($(el).data('targetcat-name')));
+            });
+            this._refreshTargetcatAllToggle($wrap);
+        });
+
+        $el.on('click.statsReport', '.stats-report-fccat-chip', (e) => {
+            const $chip = $(e.currentTarget);
+            const id = $chip.attr('data-fccat-id');
+            if (!id) return;
+            if (this._selectedFastestCraftCategories.has(id)) {
+                this._selectedFastestCraftCategories.delete(id);
+            } else {
+                this._selectedFastestCraftCategories.add(id);
+            }
+            this._saveSelectedFastestCraftCategories();
+            this._refreshFastestCraftAllToggle($chip.closest('.stats-report-kind-list'));
+        });
+
+        $el.on('click.statsReport', '.stats-report-fccat-all-toggle', (e) => {
+            const $wrap = $(e.currentTarget).closest('.stats-report-kind-list');
+            const all = this._fastestCraftCategories;
+            const allSelected = all.length > 0 && all.every(c => this._selectedFastestCraftCategories.has(c));
+            this._selectedFastestCraftCategories = allSelected ? new Set() : new Set(all);
+            this._saveSelectedFastestCraftCategories();
+            this._refreshFastestCraftAllToggle($wrap);
+        });
+
+        $el.on('keydown.statsReport', '.stats-report-fccat-all-toggle, .sr-skill-group-toggle[data-kind="fcgroup"]', (e) => {
+            if (e.key !== 'Enter' && e.key !== ' ') return;
+            e.preventDefault();
+            $(e.currentTarget).trigger('click');
+        });
+
+        $el.on('click.statsReport', '.stats-report-fc-tree-btn', (e) => {
+            e.stopPropagation();
+            const ref = $(e.currentTarget).attr('data-item-ref');
+            if (ref && typeof window._openCraftingTreeGlobal === 'function') {
+                window._openCraftingTreeGlobal(ref);
+            }
+        });
+
+        $el.on('click.statsReport', '.stats-report-fc-save-btn', async (e) => {
+            e.stopPropagation();
+            const $btn = $(e.currentTarget);
+            const ref = $btn.attr('data-item-ref');
+            if (!ref || $btn.prop('disabled')) return;
+            $btn.prop('disabled', true).text('Saving…');
+            try {
+                const r = await fetch('/api/fastest-craft/save-tree', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ item_ref: ref, quality: 'Normal', variant: 'normal' }),
+                });
+                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                $btn.text('Saved');
+                api.showSuccess('Crafting tree saved');
+            } catch (err) {
+                console.warn('[StatsReportPage] fastest-craft save failed:', err);
+                $btn.prop('disabled', false).text('Save');
+                api.showError('Could not save crafting tree');
+            }
+        });
+
+        // 2026-08-12 (jwbail): "Include fine variants" toggle for target_items.
+        $el.on('change.statsReport', '#stats-report-include-fine-checkbox', (e) => {
+            this._includeFine = !!e.target.checked;
+            try { localStorage.setItem(INCLUDE_FINE_KEY, this._includeFine ? '1' : '0'); } catch (_) { /* non-fatal */ }
+        });
+
         // 2026-05-21: clickable group label chips ("Gathering",
         // "Artisan", "Utility", "Misc"). Click toggles select-all /
         // deselect-all of every chip in the group. The chip itself
@@ -1792,6 +2629,15 @@ export class StatsReportPage {
             const $btn = $(e.currentTarget);
             const group = $btn.data('group');
             const kind = $btn.data('kind');
+            if (kind === 'fcgroup') {
+                const ids = this._fastestCraftGroupIds(group);
+                const sel = this._selectedFastestCraftCategories;
+                const allSel = ids.length > 0 && ids.every(id => sel.has(id));
+                ids.forEach(id => (allSel ? sel.delete(id) : sel.add(id)));
+                this._saveSelectedFastestCraftCategories();
+                this._refreshFastestCraftAllToggle($btn.closest('.stats-report-kind-list'));
+                return;
+            }
             const $grid = $btn.closest('.sr-skill-flat-grid');
             const cat = $btn.data('category');
             if (kind === 'skill') {
@@ -1815,8 +2661,12 @@ export class StatsReportPage {
                 if (kind === 'chest-misc') {
                     // Misc group lives at the bottom of the grid — its
                     // chips are the ones AFTER the misc label and have
-                    // chest names in MISC_CHESTS.
-                    chests.push('Coral chest', 'Rusty chest', 'Sunken chest');
+                    // chest names in MISC_CHESTS. Keep this list in sync with
+                    // the MISC_CHESTS array in _renderChestGrid (Gem pouch /
+                    // Coin pouch were added 2026-09-28); the renderedNames
+                    // filter below drops any not actually shown in this grid.
+                    chests.push('Coral chest', 'Rusty chest', 'Sunken chest',
+                                'Gem pouch', 'Coin pouch');
                 } else {
                     const groupObj = SKILL_GROUPS.find(g => g.label === group);
                     if (!groupObj) return;
@@ -2034,10 +2884,89 @@ export class StatsReportPage {
             this._equipResult(resultId, $btn);
         });
 
+        // Copy a row's gearset export code straight to the clipboard, so the
+        // user doesn't have to Equip → switch to column 2 → export. Mirrors
+        // the travel-region-card export button (navigator.clipboard + api
+        // toast). Brief "✓ Copied" affordance on the button itself.
+        $el.on('click.statsReport', '.stats-report-export-btn', async (e) => {
+            const $btn = $(e.currentTarget);
+            const exp = $btn.attr('data-gearset-export') || '';
+            if (!exp) return;
+            try {
+                await navigator.clipboard.writeText(exp);
+                if (api && api.showSuccess) api.showSuccess('Export code copied to clipboard.');
+                const orig = $btn.text();
+                $btn.text('✓ Copied');
+                setTimeout(() => { $btn.text(orig); }, 1500);
+            } catch (err) {
+                if (api && api.showError) api.showError('Failed to copy to clipboard.');
+            }
+        });
+
         $el.on('click.statsReport', '.stats-report-gear-toggle-btn', (e) => {
             const $btn = $(e.currentTarget);
             const resultId = $btn.data('result-id');
             this._toggleGearPreview(resultId, $btn);
+        });
+
+        // 2026-07-20 (user request): expand/collapse the new-items per-item
+        // breakdown with an animated slide + chevron. Drives the inline
+        // grid-template-rows 0fr↔1fr transition on the sibling wrap and
+        // rotates the chevron 0°↔90°. Delegated so it survives re-renders.
+        $el.on('click.statsReport', '.stats-report-ni-toggle', (e) => {
+            const btn = e.currentTarget;
+            const expanded = btn.dataset.expanded === '1';
+            btn.dataset.expanded = expanded ? '0' : '1';
+            const arrow = btn.querySelector('.stats-report-ni-arrow');
+            if (arrow) arrow.style.transform = expanded ? 'rotate(0deg)' : 'rotate(90deg)';
+            const wrap = btn.parentElement
+                && btn.parentElement.querySelector('.stats-report-ni-wrap');
+            if (wrap) wrap.style.gridTemplateRows = expanded ? '0fr' : '1fr';
+            const label = btn.querySelector('.stats-report-ni-toggle-label');
+            if (label) {
+                label.textContent = (expanded ? 'Show all ' : 'Hide ')
+                    + (label.textContent.match(/\d+/) || [''])[0] + ' items';
+            }
+        });
+
+        // Inc 4b: Alternative locations / service locations slide toggle.
+        // Same grid-rows 0fr<->1fr slide as ni-toggle but WITHOUT the label
+        // rewrite (its label is "Alternative locations (N)", not "N items").
+        $el.on('click.statsReport', '.stats-report-alt-toggle', (e) => {
+            const btn = e.currentTarget;
+            const expanded = btn.dataset.expanded === '1';
+            btn.dataset.expanded = expanded ? '0' : '1';
+            const arrow = btn.querySelector('.stats-report-alt-arrow');
+            if (arrow) arrow.style.transform = expanded ? 'rotate(0deg)' : 'rotate(90deg)';
+            const wrap = btn.parentElement
+                && btn.parentElement.querySelector('.stats-report-alt-wrap');
+            if (wrap) wrap.style.gridTemplateRows = expanded ? '0fr' : '1fr';
+            // Persist per-row so the expanded state survives leaving/returning
+            // the report (mirrors gear/show-more persistence).
+            if (btn.dataset.altKey) this._setExpanded(btn.dataset.altKey, !expanded);
+        });
+
+        // Inc 4b: Save an alternative location's/service's gearset directly from
+        // its export (alts have no result row). Distinct class from the main
+        // .stats-report-save-btn (which saves by result_id).
+        $el.on('click.statsReport', '.stats-report-alt-save-btn', (e) => {
+            const $btn = $(e.currentTarget);
+            const exp = $btn.attr('data-gearset-export') || '';
+            const name = $btn.attr('data-alt-name') || '';
+            if (!exp) return;
+            $btn.prop('disabled', true).text('Saving…');
+            api.saveGearsetFromExport(exp, name).then((r) => {
+                if (r && r.success) {
+                    $btn.text('✓ Saved').css('opacity', '0.5').prop('disabled', true);
+                    api.showSuccess(`Saved as "${r.name}"`);
+                } else {
+                    $btn.prop('disabled', false).text('Save');
+                    api.showError((r && r.error) || 'Failed to save gearset');
+                }
+            }).catch(() => {
+                $btn.prop('disabled', false).text('Save');
+                api.showError('Failed to save gearset');
+            });
         });
 
         // 2026-05-21: in-place gear-slot picker. Click a slot tile inside
@@ -2119,16 +3048,44 @@ export class StatsReportPage {
                 : String(itemRef).toLowerCase();
 
             try {
-                store.update(`ui.user_overrides.items.${itemId}.hide`, true);
+                store.update(['ui', 'user_overrides', 'items', itemId, 'hide'], true);
             } catch (_e) {
                 console.warn('[StatsReportPage] hide store.update failed:', _e);
             }
             // Drop the row from the current report so the user sees the
-            // section reflow without waiting for a rerun.
+            // section reflow without waiting for a rerun. The SAME item can
+            // be a "fastest to obtain" target under multiple activities (e.g.
+            // Gecko egg drops from both Lizard hunting and Mine coal), so
+            // filtering by resultId alone left the sibling rows behind until
+            // a refresh — where the server-side ownership/hide filter drops
+            // them all (user report 2026-09-01). Match every single-item
+            // new_items row whose targeted drop resolves to the SAME hidden
+            // itemId and drop them together, mirroring what the next load
+            // does. Combined "N new <kind>" rows (new_items_combined.count>1)
+            // are left alone: they aggregate several items, so dropping the
+            // whole row would hide still-wanted siblings — they self-heal on
+            // the next load once the hidden item is excluded.
+            const rowTargetsHiddenItem = (r) => {
+                let mj = r && r.metrics_json;
+                if (typeof mj === 'string') {
+                    try { mj = JSON.parse(mj || '{}'); } catch (_) { mj = {}; }
+                }
+                mj = mj || {};
+                const combined = mj.new_items_combined;
+                if (combined && Number(combined.count) > 1) return false;
+                const bd = mj.best_drop || {};
+                const ref = bd.item_ref || '';
+                if (!ref) return false;
+                const parts = String(ref).split('.');
+                const rid = parts.length === 2
+                    ? String(parts[1]).toLowerCase()
+                    : String(ref).toLowerCase();
+                return rid === itemId;
+            };
             for (const cat of Object.keys(this._results || {})) {
                 if (cat !== 'new_items') continue;
                 this._results[cat] = (this._results[cat] || []).filter(
-                    r => String(r.id) !== resultId
+                    r => String(r.id) !== resultId && !rowTargetsHiddenItem(r)
                 );
             }
             this._renderResults();
@@ -2251,6 +3208,67 @@ export class StatsReportPage {
             }
         });
 
+        // Per-subcategory Reset button (in each group header: skill / chest /
+        // kind / target-category / target-item). Scoped sibling of the section
+        // Reset — clears ONLY this subgroup's saved results so it recomputes
+        // fresh on the next run, leaving every other subgroup and category
+        // intact. stopPropagation keeps the click from also toggling the
+        // group's collapse. Uses the identical "Emergency reset" confirm
+        // wording as the section-level Reset (per user direction).
+        $el.on('click.statsReport', '.stats-report-subcat-reset-btn', async (e) => {
+            e.stopPropagation();
+            const $btn = $(e.currentTarget);
+            const $header = $btn.closest('.stats-report-cat-header, .stats-report-skill-header');
+            if (!$header.length) return;
+            const category = $header.data('section');
+            if (!category) return;
+            const scopes = this._scopesForHeader(category, $header);
+            if (!scopes.length) return;
+            // Header label = the flex:1 title element (h4 for cat headers, span
+            // for skill/chest/item headers), minus the arrow/meta siblings.
+            const $label = $header.children().filter(
+                (_i, el) => ((el.getAttribute && el.getAttribute('style')) || '').includes('flex:1')
+            ).first();
+            const label = ($label.text() || '').trim() || 'this subcategory';
+            if (!confirm(`Emergency reset "${label}": only reset if you believe this subcategory's data is corrupted, because a fresh optimization can take a while. This deletes the saved goals report data for "${label}" (results, stale scopes). Other subcategories, character data, and gear sets are not affected. Continue?`)) {
+                return;
+            }
+            $btn.prop('disabled', true).text('Resetting...');
+            try {
+                const resp = await fetch('/api/stats-report/reset-subcategory', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'same-origin',
+                    body: JSON.stringify({ category, scopes }),
+                });
+                const result = await resp.json();
+                if (result && result.success) {
+                    api.showSuccess(`"${label}" reset. Re-run it to rebuild.`);
+                    // Drop just this subgroup's in-memory rows and re-render so
+                    // the subgroup disappears until re-run; sibling subgroups
+                    // and other categories stay on screen.
+                    if (this._results && this._results[category]) {
+                        this._results[category] = this._results[category].filter(
+                            r => !scopes.some(s => this._rowMatchesResetScope(category, r, s))
+                        );
+                    }
+                    this._renderResults();
+                    // Refresh stale badges (nav ! + per-skill chips) so the
+                    // subgroup shows as needing a run again.
+                    try {
+                        window.dispatchEvent(new CustomEvent('stats-report-stale-refresh'));
+                    } catch (_) {}
+                } else {
+                    api.showError((result && result.error) || 'Subcategory reset failed');
+                }
+            } catch (err) {
+                console.error('[StatsReportPage] subcategory reset failed', err);
+                api.showError('Subcategory reset failed: ' + (err && err.message ? err.message : 'network error'));
+            } finally {
+                $btn.prop('disabled', false).text('Reset');
+            }
+        });
+
         // Section header (e.g. Best XP / Best Coins) — collapse the whole
         // results card. We toggle the .open class + slideToggle the body
         // and persist the new state to localStorage so refreshes preserve
@@ -2365,14 +3383,15 @@ export class StatsReportPage {
             const willExpand = !this._showMoreExpanded.has(subKey);
             if (willExpand) this._showMoreExpanded.add(subKey);
             else this._showMoreExpanded.delete(subKey);
-            const $extras = $btn.closest('.stats-report-skill-body')
+            this._persistShowMore();
+            const $extras = $btn.closest('.stats-report-skill-body, .stats-report-cat-body')
                 .find(`.stats-report-skill-extras[data-section="${sectionId}"][data-${skillName ? 'skill' : 'chest'}-group="${skillName || chestName}"]`);
             $extras.slideToggle(150);
             $btn.toggleClass('open', willExpand);
             // Update label text only (arrow stays put — CSS rotates it).
             const restCount = $extras.children().length;
             $btn.find('.stats-report-show-more-label').text(
-                willExpand ? 'Show less' : `Show ${restCount} more`
+                willExpand ? 'Show fewer' : `Show ${restCount} more`
             );
         });
     }
@@ -2437,7 +3456,7 @@ export class StatsReportPage {
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="vertical-align:middle;margin-right:6px">
                     <path d="M17.65 6.35A7.958 7.958 0 0 0 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0 1 12 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/>
                 </svg>
-                Optimize All
+                Optimize Selected
             `);
             // Re-evaluate disabled state from selected-categories count.
             this._updateOptimizeButtonState();
@@ -2470,15 +3489,9 @@ export class StatsReportPage {
         }
 
         if (permission === 'granted') {
-            // Already granted — show the simple checkbox row.
-            return `
-                <div class="stats-report-toggle-row">
-                    <label class="stats-report-notify-row" title="In-app toast always shown. This controls push notifications.">
-                        <input type="checkbox" id="stats-report-notify-checkbox" ${this._notifyOnComplete ? 'checked' : ''} />
-                        <span>Push notification when done</span>
-                    </label>
-                </div>
-            `;
+            // Granted — the "Notify when done" chip in the options panel handles
+            // this now (no banner, no separate checkbox row).
+            return '';
         }
 
         // permission === 'default' (or anything else not handled above):
@@ -2489,7 +3502,7 @@ export class StatsReportPage {
                 <button type="button" class="stats-report-notify-dismiss" id="stats-report-notify-dismiss"
                         aria-label="Dismiss notifications prompt"
                         title="Don't show this again"
-                        style="position:absolute;top:6px;right:8px;width:22px;height:22px;line-height:1;font-size:18px;background:transparent;border:none;color:var(--text-muted,#888);cursor:pointer;padding:0">&times;</button>
+                        style="position:absolute;top:6px;right:8px;width:22px;height:22px;line-height:1;font-size: max(var(--min-text, 5px), calc(18px * var(--text-scale, 1)));background:transparent;border:none;color:var(--text-muted,#888);cursor:pointer;padding:0">&times;</button>
                 <p style="margin:0;font-size:0.95em;color:var(--text-primary)"><strong>Get a notification when your goals report finishes.</strong></p>
                 <button type="button" class="button button-primary" id="stats-report-enable-notifications"
                         style="align-self:flex-start;font-size:0.95em">
@@ -2506,6 +3519,13 @@ export class StatsReportPage {
         } catch (_) {
             return false;
         }
+    }
+
+    /** True once the user has granted push permission (drives whether the
+     *  "Notify when done" chip is shown in the options panel). */
+    _pushNotifyGranted() {
+        try { return typeof Notification !== 'undefined' && Notification.permission === 'granted'; }
+        catch (_) { return false; }
     }
 
     _isIosNonPwa() {
@@ -2571,15 +3591,19 @@ export class StatsReportPage {
      * rest of the page). Called after Enable / Dismiss clicks.
      */
     _refreshPushNotifySection() {
+        if (!this._$el || !this._$el.find) return;
         const $row = this._$el.find('.stats-report-action-row');
         if (!$row.length) return;
-        // The section is the first child of the action row by convention.
-        const banner = this._$el.find('#stats-report-notify-banner');
-        const checkboxRow = this._$el.find('#stats-report-notify-checkbox').closest('.stats-report-toggle-row');
-        if (banner.length) banner.remove();
-        if (checkboxRow.length) checkboxRow.remove();
+        // Remove any existing banner, then re-inject if still applicable
+        // (banner shows only while push is supported, un-dismissed, and not yet
+        // granted/denied).
+        this._$el.find('#stats-report-notify-banner').remove();
         const html = this._renderPushNotifySection();
         if (html) $row.prepend(html);
+        // Rebuild + re-mount the options panel so the "Notify when done" chip
+        // appears (or disappears) in step with the push-granted state.
+        this._reportPanel = null;
+        this._mountReportPanel();
     }
 
     // ========================================================================
@@ -2590,11 +3614,41 @@ export class StatsReportPage {
         const uuid = store.state.session?.uuid;
         if (!uuid) return;
 
+        // 2026-08-12 (jwbail): build provenance on EVERY Start click. Logs the
+        // literal build tag compiled into the JS the browser is actually
+        // running, plus a live /api/version fetch (server's current commit +
+        // the commit it booted from). This settles "is my browser on the fixed
+        // code?" from the debug log alone — no guessing, no assuming the user
+        // didn't reload. Non-fatal; never blocks the run.
+        try {
+            let server = '(unfetched)';
+            try {
+                const vr = await fetch('/api/version', { cache: 'no-store' }).then(r => r.json());
+                server = 'commit=' + (vr.commit_hash || '?') + ' data_version=' + (vr.data_version || '?')
+                    + ' updated=' + (vr.last_updated || '?');
+            } catch (e) {
+                server = 'fetch-failed:' + ((e && e.message) || e);
+            }
+            console.log('[goals-build] START clicked'
+                + ' | js_module_build=' + STATS_REPORT_JS_BUILD
+                + ' | main_js_v=' + (document.querySelector('script[src*="main.js"]')?.src || '(none)')
+                + ' | server ' + server
+                + ' | now=' + new Date().toISOString());
+        } catch (_) { /* non-fatal */ }
+
         // One-time nudge if this device benchmarked faster than the server.
         try { await maybeShowLocalSpeedWarning(); } catch (_) { /* non-fatal */ }
 
-        const categories = Array.from(this._selectedCategories);
+        let categories = Array.from(this._selectedCategories).filter(
+            (key) => isCategoryVisible(CATEGORIES.find((c) => c.key === key) || {}));
+        const fastestCraftCategories = Array.from(this._selectedFastestCraftCategories);
+        if (this._fastestCraftCategoriesLoaded && fastestCraftCategories.length === 0) {
+            // Nothing selected in the sub-filter; an empty list would mean "all".
+            categories = categories.filter((key) => key !== 'fastest_craft');
+        }
         const kinds = Array.from(this._selectedKinds);
+        this._hydrateSelectedTargetCategories();
+        const targetCategories = Array.from(this._selectedTargetCategories);
         // 2026-06-16 (jwbail): per-category skill/chest selections. XP and
         // Coins keep independent skill picks; Chests (activities) and
         // Chests-recipes keep independent chest picks. The worker applies each
@@ -2652,13 +3706,36 @@ export class StatsReportPage {
             const result = await api.startStatsReportRun(uuid, categories, skills, this._notifyOnComplete, {
                 include_pets: this._includePets,
                 include_consumables: this._includeConsumables,
+                use_pet_ability: this._usePetAbility,
+                // Consumable Options are REPORT-LOCAL here (2026-09-18): send this
+                // report's own choices so the server + local (Pyodide) paths both
+                // filter to them (the run endpoint lets a body value take
+                // precedence over the global ui_config).
+                include_fine_consumables: this._includeFineConsumables !== false,
+                consumable_min_owned_enabled: !!this._consumableMinOwnedEnabled,
+                consumable_min_owned: Number.isFinite(this._consumableMinOwned) ? this._consumableMinOwned : 5,
+                consumable_min_owned_operator: (this._consumableMinOwnedOperator === 'lte') ? 'lte' : 'lt',
+                consumable_use_hidden: !!this._consumableUseHidden,
+                // "Use Fine Inputs" (R2): report-local hunting input-slot toggle.
+                use_fine_inputs: !!this._useFineInputs,
                 stale_only: staleOnly,
                 kinds: kinds,
+                target_categories: targetCategories,
+                include_fine: this._includeFine,
+                fastest_craft_categories: fastestCraftCategories,
                 chests: chests,
                 skills_by_category: skillsByCategory,
                 chests_by_category: chestsByCategory,
                 fast: !!this._fast,
-                ...(uuid === '00000000-0000-0000-0000-000000000000' ? { exact_new: !!this._exactNew } : {}),
+                // 2026-10-01: report-local "Include unavailable" dimensions. Send
+                // the raw master + per-dimension sub-flags; the server derives the
+                // EFFECTIVE map (effective[dim] = includeUnavailable && by<Dim>).
+                include_unavailable: !!this._includeUnavailable,
+                unavail_by_level: !!this._unavailByLevel,
+                unavail_by_location: !!this._unavailByLocation,
+                unavail_by_gear: !!this._unavailByGear,
+                unavail_by_inputs: this._unavailByInputs !== false,
+                unavail_by_other: !!this._unavailByOther,
             });
             if (!result.success) {
                 api.showError(result.error || 'Failed to start optimization run');
@@ -2770,6 +3847,7 @@ export class StatsReportPage {
                     this._results = results.results || {};
                     this._renderResults();
                 }
+                this._loadFastestCraftResults(status.categories);
                 // Surface the stale banner if the server flagged staleness
                 // and the user hasn't dismissed it for this run.
                 if (status.is_stale && !this._staleDismissed &&
@@ -2872,7 +3950,7 @@ export class StatsReportPage {
             // fetched separately below, and only when new scopes have actually
             // completed (throttled), so a long run no longer transfers hundreds
             // of MB by re-pulling the full results set every 3s.
-            const status = await api.getStatsReportStatus(uuid);
+            const status = await api.getStatsReportStatus(uuid, this._runId || null);
 
             // Re-check after await — polling may have been stopped while we waited
             if (!this._pollInterval) return;
@@ -2880,6 +3958,21 @@ export class StatsReportPage {
             this._pollFailures = 0;
 
             if (!status.success) return;
+
+            // 2026-08-12 (jwbail): finishing-hang diagnostics. Logs every poll
+            // tick so a stuck "Finishing…" is fully explained in the client
+            // debug log (bug 079d91d4): whether /status reports the run as
+            // complete, the server vs UI job counts, and the local/poll state.
+            try {
+                console.log('[goals-finish-debug] poll ' + JSON.stringify({
+                    run_id: status.run_id, status: status.status,
+                    is_complete: status.is_complete, is_failed: status.is_failed,
+                    srv_total: status.total_jobs, srv_completed: status.completed_jobs,
+                    ui_total: this._totalJobs, ui_completed: this._completedJobs,
+                    isRunning: this._isRunning, localActive: this._localRunActive,
+                    pollActive: !!this._pollInterval, finishingSince: this._finishingSince,
+                }));
+            } catch (_) { /* non-fatal */ }
 
             // 2026-06-16 (jwbail): reconcile to the LATEST run. After a local-run
             // interruption + resume / finish-on-server, the server's latest run
@@ -2889,6 +3982,18 @@ export class StatsReportPage {
             // 8-job run) and let "Finishing…" stick. Adopt the new id and reset
             // the completed counter so the bar reflects the current run.
             if (status.run_id && this._runId && status.run_id !== this._runId) {
+                // The poll is scoped to this._runId; a DIFFERENT id coming back
+                // means the server fell back to 'latest run' because our run
+                // row isn't found yet. If that fallback run is already TERMINAL
+                // (complete/failed), it's a STALE prior run — NOT ours — so
+                // ignore this tick entirely: never let it fire a bogus "Goals
+                // report failed" toast or mark our UI complete. (This was the
+                // bug: a days-old failed run hijacked a fresh local FC run.)
+                // A legitimate server-resume successor is still 'running', so
+                // it falls through and is adopted below.
+                if (status.is_complete) {
+                    return;
+                }
                 this._runId = status.run_id;
                 this._completedJobs = 0;
                 this._localRunActive = false;  // a server-side run owns it now
@@ -2942,9 +4047,19 @@ export class StatsReportPage {
                 (status.is_complete || wentBackwards || (newWork && throttleOk));
             if (shouldRefreshResults) {
                 const resultsResp = await api.getStatsReportResults(uuid);
-                // Re-check after await — polling may have been stopped meanwhile
-                if (!this._pollInterval) return;
-                if (resultsResp.success && resultsResp.results) {
+                // 2026-08-12 (jwbail) BUGFIX: do NOT early-return here. On the
+                // local (Pyodide) path _pollProgress is driven directly (no
+                // active _pollInterval), so the previous `if (!this._pollInterval)
+                // return;` ALWAYS fired after this await — bailing out before the
+                // `if (status.is_complete)` finalize block below. Result: the
+                // server run flips to complete, the client even logs
+                // status:"complete", but the UI never leaves "Finishing…" and
+                // only escapes via the 12s watchdog. Every local run hung ~12s.
+                // Render the refreshed results unless polling was torn down
+                // mid-await AND the run isn't complete; then ALWAYS fall through
+                // to the completion finalize.
+                if (resultsResp.success && resultsResp.results &&
+                        (this._pollInterval || status.is_complete)) {
                     this._results = resultsResp.results;
                     this._lastRenderedCompleted = this._completedJobs;
                     this._lastResultsRenderAt = nowMs;
@@ -2968,6 +4083,12 @@ export class StatsReportPage {
                 this._localRunActive = false;
                 this._finishingSince = null;
                 this._finishingRecoveryFired = false;
+                // Our tracked run is terminal (complete/failed). Kill any
+                // in-flight local Pyodide workers so they stop grinding CPU
+                // after the UI has settled (bug: [local-fc] solves continued
+                // for minutes past the terminal state). No-op on server runs
+                // (empty pools) and on a clean local finish (already drained).
+                try { terminateLocalComputeWorkers(); } catch (_) { /* non-fatal */ }
                 this._stopPolling();
                 this._hideProgressSection();
 
@@ -2982,6 +4103,7 @@ export class StatsReportPage {
                 if (this._isPageOpen) {
                     this._updateNavIconState('idle');
                     this._showRunSummary();
+                    this._loadFastestCraftResults(status.categories);
                     // Show stale banner if needed
                     if (status.is_stale && !this._staleDismissed &&
                         !localStorage.getItem(`stats_report_stale_dismissed_${this._runId}`)) {
@@ -3049,8 +4171,15 @@ export class StatsReportPage {
     }
 
     _updateProgressBar() {
-        const total = this._totalJobs || 0;
-        const completed = this._completedJobs || 0;
+        // Fold Fastest Craft's live progress (from /api/fastest-craft/run-status,
+        // tracked in _fastestCraftRunning) into the bar. On a LOCAL (Pyodide)
+        // run with only Fastest Craft selected there are 0 regular jobs, so the
+        // base counts are 0/0 and FC is the only work — without this the bar
+        // read 0/0. On the server path FC is already in _totalJobs/_completedJobs
+        // and _fastestCraftRunning is null (no background task), so no double count.
+        const fc = this._fastestCraftRunning || null;
+        const total = (this._totalJobs || 0) + (fc ? (fc.total || 0) : 0);
+        const completed = (this._completedJobs || 0) + (fc ? (fc.done || 0) : 0);
         // 2026-05-21: was `total = this._totalJobs || 1` which made the
         // label show "0/1" while the worker was still starting up
         // (total_jobs=0 in DB during that 200-300ms window before the
@@ -3156,11 +4285,19 @@ export class StatsReportPage {
         }
         try { await this._pollProgress(); } catch (_) {}
         if (this._isRunning && this._isPageOpen) {
-            api.showInfo(
-                'Goals report is taking longer than expected to finalize. '
-                + 'Tap to load the results that are ready.',
-                { duration: 12000, onClick: () => { this._loadAvailableResultsAndClear(); } }
-            );
+            // 2026-08-12 (jwbail): auto-load whatever results landed and clear
+            // the stuck UI instead of only offering a tap-toast — the run has
+            // been on "Finishing…" past the watchdog and re-finalize+poll didn't
+            // flip it, so waiting on a user tap just reads as "hangs forever"
+            // (bug 079d91d4). Still surface a brief note so the user knows.
+            console.warn('[goals-finish-debug] recovery: still running after '
+                + 'forceFinalize+poll — auto-loading available results for run', runId);
+            try { await this._loadAvailableResultsAndClear(); } catch (_) {}
+            api.showInfo('Goals report finalized with the results that were ready.',
+                { duration: 6000 });
+        } else {
+            console.log('[goals-finish-debug] recovery: run cleared (isRunning='
+                + this._isRunning + ', pageOpen=' + this._isPageOpen + ')');
         }
     }
 
@@ -3178,7 +4315,8 @@ export class StatsReportPage {
                 this._renderResults();
             }
         } catch (e) {
-            console.warn('[StatsReportPage] _loadAvailableResultsAndClear failed:', e);
+            console.warn('[StatsReportPage] _loadAvailableResultsAndClear failed:',
+                (e && (e.stack || e.message)) || (typeof e === 'object' ? JSON.stringify(e) : e));
         }
         this._isRunning = false;
         this._localRunActive = false;
@@ -3197,7 +4335,8 @@ export class StatsReportPage {
         const $body = this._$el.find('#stats-report-results-body');
         if (!$body.length) return;
 
-        const hasResults = Object.values(this._results).some(arr => arr.length > 0);
+        const hasResults = Object.values(this._results).some(arr => arr.length > 0)
+            || this._fastestCraftItems.length > 0;
         if (!hasResults) {
             // No results to render — clear the previously-rendered body and
             // hide the wrapper so the user sees an empty UI after Reset.
@@ -3215,10 +4354,43 @@ export class StatsReportPage {
             .map(cat => {
                 const rows = this._results[cat.key];
                 if (!rows || rows.length === 0) return '';
-                return this._renderSection(cat, rows);
+                // 2026-08-12 (jwbail): render each section in isolation. A throw
+                // in one section's renderer (e.g. a bad target_items row) used to
+                // bubble out of _renderResults — which is called from the poll's
+                // results-refresh block, so the exception aborted the poll BEFORE
+                // its `if (status.is_complete)` finalize ran. Net effect: the run
+                // completed server-side but the UI stuck on "Finishing…" and
+                // showed nothing, and the watchdog recovery hit the same throw
+                // ("_loadAvailableResultsAndClear failed: {}"). Now a bad section
+                // logs its exact error + stack and renders a small inline notice
+                // instead of taking down the whole report + the finalize path.
+                try {
+                    return this._renderSection(cat, rows);
+                } catch (e) {
+                    console.error('[goals-render-error] section=' + cat.key
+                        + ' rows=' + rows.length + ' err=' + (e && (e.stack || e.message) || e));
+                    return `<div class="stats-report-section" data-section="${cat.key}">`
+                        + `<div class="stats-report-section-header"><h3 style="margin:0;flex:1;text-align:left">${cat.label}</h3></div>`
+                        + `<div style="padding:8px 12px;color:var(--text-muted);font-size:0.85em">`
+                        + `Couldn't render this section (${(e && e.message) || 'error'}). The data is saved; this is a display bug.</div></div>`;
+                }
             })
-            .join('');
+            .join('') + this._renderFastestCraftSection();
         $body.html(html);
+
+        // Phase 4 (Item Upgrades Tracker): inject "Add all to upgrades tracker"
+        // controls into the new_items section + kind headers (FAC-gated inside).
+        try { injectGoalsReportAddToTracker($body, this); } catch (_e) { /* non-fatal */ }
+
+        // 2026-08-12 (jwbail): tint each target_items item sub-header's side
+        // bar with the item icon's dominant (non-black/white) color. Async —
+        // loads each icon, samples pixels, sets --chip-color/--glow-color.
+        try { this._applyTargetItemColors($body); } catch (_) { /* non-fatal */ }
+
+        // Re-apply the target_items search filter (if any) so a live query
+        // survives poll / stale-refresh re-renders instead of resetting.
+        try { this._applyTargetItemsSearch(); } catch (_) { /* non-fatal */ }
+        try { this._applyFastestCraftSearch(); } catch (_) { /* non-fatal */ }
 
         // Wire (i) info icons (Secondary popover etc.). wireInfoIcons() is
         // idempotent — skips icons already wired — so calling it on every
@@ -3272,6 +4444,65 @@ export class StatsReportPage {
     }
 
     /**
+     * Small per-subcategory "Reset" button injected into each group header
+     * (skill / chest / new-item kind / target-category / target-item). Scoped
+     * sibling of the section-level Reset — clears ONLY this subgroup's saved
+     * results so it recomputes fresh on the next run, leaving every other
+     * subgroup's cached results intact. flex:0 0 auto so it never stretches the
+     * header; the .stats-report-subcat-reset-btn handler stopPropagation()s so
+     * the click doesn't also toggle the group's collapse.
+     */
+    _subcatResetBtn() {
+        return `<button class="button button-secondary stats-report-subcat-reset-btn"
+            title="Reset only this subcategory's saved results so it recomputes fresh on the next run. Other subcategories and your character/gear data are untouched."
+            style="margin:0 0 0 8px;padding:1px 7px;font-size:0.72em;line-height:1.4;flex:0 0 auto">Reset</button>`;
+    }
+
+    /**
+     * Build the reset scope(s) for a group header from its data-* attributes.
+     * Returns a list of {subcategory, leaf?} matching the backend contract.
+     * A cat-header in xp/coins (Gathering/Artisan/Utility) is a pure UI bucket
+     * with no stored key, so it expands to one scope per child skill-group.
+     */
+    _scopesForHeader(category, $header) {
+        const isCat = $header.hasClass('stats-report-cat-header');
+        const scopes = [];
+        if (category === 'chests' || category === 'chests_recipes') {
+            const cn = $header.attr('data-chest-group');
+            if (cn) scopes.push({ subcategory: chestSubcategory(cn) });
+        } else if (category === 'target_items') {
+            if (isCat) {
+                const catSlug = ($header.attr('data-cat-group') || '').toLowerCase();
+                if (catSlug) scopes.push({ subcategory: catSlug });
+            } else {
+                const sc = targetItemScope($header.attr('data-skill-group'));
+                if (sc) scopes.push(sc);
+            }
+        } else if (category === 'new_items') {
+            const k = ($header.attr('data-skill-group') || '').toLowerCase();
+            if (k) scopes.push({ subcategory: k });
+        } else { // xp / coins
+            if (isCat) {
+                // Category bucket -> one scope per child skill-group.
+                const $group = $header.closest('.stats-report-cat-group');
+                $group.find('.stats-report-skill-group[data-skill-group]').each((_i, g) => {
+                    const sk = (g.getAttribute('data-skill-group') || '').toLowerCase();
+                    if (sk) scopes.push({ subcategory: sk });
+                });
+            } else {
+                const sk = ($header.attr('data-skill-group') || '').toLowerCase();
+                if (sk) scopes.push({ subcategory: sk });
+            }
+        }
+        return scopes;
+    }
+
+    /** Thin instance wrapper over the pure rowMatchesResetScope helper. */
+    _rowMatchesResetScope(category, row, scope) {
+        return rowMatchesResetScope(category, row, scope);
+    }
+
+    /**
      * Top-level section (e.g. "Best XP/Leveling Activity per Skill").
      * Header is collapsible; body groups rows by Gathering/Artisan/Utility
      * → individual skill (or by chest name for chests/chests_recipes).
@@ -3282,10 +4513,11 @@ export class StatsReportPage {
         let groupingMode = 'skill';
         if (cat.key === 'chests' || cat.key === 'chests_recipes') groupingMode = 'chest';
         else if (cat.key === 'new_items') groupingMode = 'kind';
+        else if (cat.key === 'target_items') groupingMode = 'target_category';
 
         return `
             <div class="stats-report-section ${expanded ? 'open' : ''}" data-section="${cat.key}">
-                <div class="stats-report-section-header" data-section="${cat.key}">
+                <div class="stats-report-section-header ${cat.key === 'target_items' ? 'stats-report-section-header--has-search' : ''}" data-section="${cat.key}">
                     <span class="stats-report-arrow">▼</span>
                     <h3 style="margin:0;flex:1;text-align:left">${cat.label}</h3>
                     <span class="stats-report-section-meta" style="color:var(--text-muted);font-size:0.85em">${rows.length} results</span>
@@ -3293,16 +4525,389 @@ export class StatsReportPage {
                         data-category="${cat.key}"
                         title="Reset only this category's saved results so it recomputes fresh on the next run. Other categories and your character/gear data are untouched."
                         style="margin:0 0 0 10px;padding:2px 9px;font-size:0.78em;line-height:1.4">Reset</button>
+                    ${cat.key === 'target_items' ? `
+                        <div class="stats-report-ti-search">
+                            <input type="text" id="stats-report-target-items-search-input"
+                                placeholder="Search items or activities (name or keyword)…"
+                                value="${(this._tiSearchQuery || '').replace(/"/g, '&quot;')}"
+                                style="width:100%;padding:6px 10px;border-radius:6px;border:1px solid var(--border-color,#444);background:var(--bg-secondary,#252540);color:var(--text-primary,#eee);font-size:0.9em;box-sizing:border-box" />
+                        </div>
+                    ` : ''}
                 </div>
                 <div class="stats-report-section-body" style="${expanded ? '' : 'display:none'}">
                     ${groupingMode === 'skill'
                         ? this._renderSectionGroupedBySkill(cat.key, rows)
                         : groupingMode === 'kind'
                             ? this._renderSectionGroupedByKind(cat.key, rows)
-                            : this._renderSectionGroupedByChest(cat.key, rows)}
+                            : groupingMode === 'target_category'
+                                ? this._renderSectionGroupedByTargetCategory(cat.key, rows)
+                                : this._renderSectionGroupedByChest(cat.key, rows)}
                 </div>
             </div>
         `;
+    }
+
+    /**
+     * Load stored Fastest Craft rows when the latest run included the
+     * fastest_craft category, then re-render the results. While a background
+     * Fastest Craft compute is still running (local-compute runs host it in a
+     * server thread), re-poll until it settles.
+     */
+    async _loadFastestCraftResults(runCategories) {
+        let cats = runCategories;
+        if (typeof cats === 'string') {
+            try { cats = JSON.parse(cats); } catch (_) { cats = []; }
+        }
+        if (this._fastestCraftPollTimer) {
+            clearTimeout(this._fastestCraftPollTimer);
+            this._fastestCraftPollTimer = null;
+        }
+        const included = Array.isArray(cats) && cats.includes('fastest_craft')
+            && !!window._featureFlags?.fastest_craft_goals;
+        if (!included) {
+            if (this._fastestCraftItems.length) {
+                this._fastestCraftItems = [];
+        this._fastestCraftRunning = null;
+                this._renderResults();
+            }
+            return;
+        }
+        try {
+            const resp = await fetch('/api/fastest-craft/results').then(r => (r.ok ? r.json() : null));
+            const items = (resp && resp.count > 0 && resp.items) ? Object.values(resp.items) : [];
+            this._fastestCraftItems = items
+                .map(it => ({ ...it, _steps: this._fastestCraftSteps(it) }))
+                .sort((a, b) => (a._steps ?? Infinity) - (b._steps ?? Infinity)
+                    || String(a.output_name || a.item_ref).localeCompare(String(b.output_name || b.item_ref)));
+            const st = await fetch('/api/fastest-craft/run-status').then(r => (r.ok ? r.json() : null));
+            // Surface Fastest Craft's own progress (done/total) so a run that
+            // selected ONLY fastest_craft doesn't look like "0/0 nothing ran" —
+            // the goals-report job bar is 0 in that case because FC isn't a
+            // regular job. We show a dedicated "Solving N/M items…" banner in the
+            // FC section instead (see _renderFastestCraftSection), driven here.
+            const active = !!st && (st.status === 'running' || st.status === 'pending');
+            const wasActive = !!this._fastestCraftRunning;
+            this._fastestCraftRunning = active
+                ? { done: Number(st.done) || 0, total: Number(st.total) || 0 }
+                : null;
+            if (this._isPageOpen) this._renderResults();
+            if (active && this._isPageOpen) {
+                // Keep the progress card visible and the MAIN bar moving while
+                // Fastest Craft computes server-side — this is what makes a
+                // local (Pyodide) FC-only run show N/M instead of 0/0 (the base
+                // job bar is 0/0 because Pyodide has no regular jobs to run).
+                this._showProgressSection();
+                this._updateProgressBar();
+                this._fastestCraftPollTimer = setTimeout(
+                    () => this._loadFastestCraftResults(cats), 5000);
+            } else if (wasActive && !active) {
+                // FC just finished: refresh the bar, and if the base run is also
+                // done, hide the progress card and show the summary.
+                this._updateProgressBar();
+                if (!this._isRunning) {
+                    this._hideProgressSection();
+                }
+            }
+        } catch (err) {
+            console.warn('[StatsReportPage] fastest-craft results fetch failed:', err);
+        }
+    }
+
+    /** Fewest steps/craft: Normal quality, else the min across qualities. */
+    _fastestCraftSteps(item) {
+        const headline = (item && item.headline) || {};
+        const normal = headline.Normal && headline.Normal.total_steps;
+        if (normal != null) return normal;
+        const vals = Object.values(headline)
+            .map(h => h && h.total_steps)
+            .filter(v => v != null && Number.isFinite(Number(v)))
+            .map(Number);
+        return vals.length ? Math.min(...vals) : null;
+    }
+
+    _renderFastestCraftSection() {
+        const items = this._fastestCraftItems;
+        if (!items.length) return '';
+        this._ensureFastestCraftCategories();
+        const key = 'fastest_craft';
+        const expanded = this._isExpanded(`section:${key}`);
+        const QUALS = ['Normal', 'Good', 'Great', 'Excellent', 'Perfect', 'Eternal'];
+        if (!this._fcRowQuality) this._fcRowQuality = {};
+
+        // Master-group meta (label/icon/color) + display order from the WTO taxonomy.
+        const groupMeta = {};
+        for (const g of (this._fastestCraftGroups || [])) groupMeta[g.key] = g;
+        const masterOrder = (this._fastestCraftGroups || []).map(g => g.key);
+        const order = masterOrder.length ? masterOrder : ['gear', 'tools', 'cons', 'mat'];
+
+        // Preferred category (chip) order per master = chip order in the taxonomy.
+        const catOrderByGroup = {};
+        for (const g of (this._fastestCraftGroups || [])) {
+            catOrderByGroup[g.key] = (g.chips || []).map(c => c.label);
+        }
+
+        // Row's displayed quality (per item) — defaults to Normal, switchable
+        // via the per-row dropdown. Normal always exists for every output.
+        const rowQ = (it) => this._fcRowQuality[it.item_ref] || 'Normal';
+
+        // Bucket items: master -> category(label) -> [items]. Grouping is now by
+        // CATEGORY (the chip, e.g. "Toolboxes" / "Plank"), mirroring Target
+        // Items — the category is the sub-group (icon + its own color), NOT a
+        // pill on the row, and NOT the quality (quality is a per-row dropdown).
+        const byGroupCat = {};
+        for (const it of items) {
+            const gk = it.group || 'mat';
+            const cats = (it.categories && it.categories.length) ? it.categories : ['Other'];
+            for (const c of cats) {
+                const m = (byGroupCat[gk] = byGroupCat[gk] || {});
+                (m[c] = m[c] || []).push(it);
+            }
+        }
+
+        let body = '';
+        for (const gk of order) {
+            const cats = byGroupCat[gk];
+            if (!cats) continue;
+            const meta = groupMeta[gk] || { label: gk, color: 'var(--text-secondary)', icon: '' };
+            const masterColor = meta.color || 'var(--text-secondary)';
+            const catExpanded = this._isExpanded(`category:${key}:${gk}`);
+            const iconHtml = meta.icon
+                ? `<img src="${escapeHtml(meta.icon)}" alt="" width="32" height="32" onerror="this.style.display='none'">`
+                : '';
+
+            // Category (chip) subsections, in taxonomy order then any extras alpha.
+            const present = Object.keys(cats);
+            const known = (catOrderByGroup[gk] || []).filter(c => present.includes(c));
+            const ordered = known.concat(present.filter(c => !known.includes(c)).sort());
+
+            let catBody = '';
+            let masterCount = 0;
+            for (const catLabel of ordered) {
+                const chip = this._fastestCraftChipByLabel[catLabel]
+                    || { label: catLabel, color: masterColor };
+                const chipColor = chip.color || masterColor;   // DISTINCT from master -> clean 2-tone nesting
+                // Rank items in this category by the row's chosen-quality steps
+                // (default Normal), ascending. One row per item.
+                const seen = new Set();
+                const ranked = cats[catLabel]
+                    .filter(it => (seen.has(it.item_ref) ? false : seen.add(it.item_ref)))
+                    .map(it => ({ it, steps: this._fcQualitySteps(it, rowQ(it)) }))
+                    .filter(x => x.steps != null)
+                    .sort((a, b) => a.steps - b.steps);
+                if (!ranked.length) continue;
+                masterCount += ranked.length;
+                const sg = `${gk}::${catLabel}`;             // unique skill-group key per (master, category)
+                const sgExpanded = this._isExpanded(`skill:${key}:${sg}`);
+                const showMore = this._showMoreExpanded.has(`${key}::${sg}`);
+                const total = ranked.length;
+                const top = ranked[0];
+                const rest = ranked.slice(1);
+                const catIcon = fastestCraftChipIconHtml(chip, 28);
+                catBody += `
+                    <div class="stats-report-skill-group ${sgExpanded ? 'open' : ''}"
+                         data-section="${key}" data-skill-group="${sg}"
+                         style="--chip-color:${chipColor};--glow-color:${chipColor}">
+                        <div class="stats-report-side-collapse" data-target="skill-group" title="Collapse / expand"></div>
+                        <div class="stats-report-skill-header" data-section="${key}" data-skill-group="${sg}">
+                            <span class="stats-report-arrow">▼</span>
+                            ${catIcon}
+                            <span style="flex:1;text-align:left;font-weight:600">${escapeHtml(catLabel)}</span>
+                            <span class="stats-report-group-meta">${total} item${total === 1 ? '' : 's'}</span>
+                        </div>
+                        <div class="stats-report-skill-body" style="${sgExpanded ? '' : 'display:none'}">
+                            ${this._renderFastestCraftRow(top.it, rowQ(top.it), top.steps, 0, total, chipColor)}
+                            ${rest.length ? `
+                                <div class="stats-report-show-more-wrap">
+                                    <button class="button button-secondary stats-report-show-more-btn ${showMore ? 'open' : ''}"
+                                        data-section="${key}" data-skill-group="${sg}">
+                                        <span class="stats-report-show-more-arrow">▼</span>
+                                        <span class="stats-report-show-more-label">${showMore ? 'Show fewer' : `Show ${rest.length} more`}</span>
+                                    </button>
+                                </div>
+                                <div class="stats-report-skill-extras" data-section="${key}" data-skill-group="${sg}" style="${showMore ? '' : 'display:none'}">
+                                    ${rest.map((x, i) => this._renderFastestCraftRow(x.it, rowQ(x.it), x.steps, i + 1, total, chipColor)).join('')}
+                                </div>` : ''}
+                        </div>
+                    </div>`;
+            }
+            if (!catBody) continue;
+            body += `
+                <div class="stats-report-cat-group ${catExpanded ? 'open' : ''}"
+                     data-section="${key}" data-cat-group="${gk}"
+                     data-group-name="${escapeHtml(meta.label || gk)}"
+                     style="--cat-color:${masterColor};--glow-color:${masterColor}">
+                    <div class="stats-report-side-collapse" data-target="cat-group" title="Collapse / expand"></div>
+                    <div class="stats-report-cat-header" data-section="${key}" data-cat-group="${gk}">
+                        <span class="stats-report-arrow">▼</span>
+                        ${iconHtml}
+                        <h4 style="margin:0;flex:1;text-align:left">${escapeHtml(meta.label || gk)}</h4>
+                        <span class="stats-report-group-meta">${masterCount} item${masterCount === 1 ? '' : 's'}</span>
+                        ${this._fcResetBtn({ scope: 'category', group: gk })}
+                    </div>
+                    <div class="stats-report-cat-body" style="${catExpanded ? '' : 'display:none'}">
+                        ${catBody}
+                    </div>
+                </div>`;
+        }
+
+        const runSearchGroups = body;
+        return `
+            <div class="stats-report-section ${expanded ? 'open' : ''}" data-section="${key}">
+                <div class="stats-report-section-header stats-report-section-header--has-search" data-section="${key}">
+                    <span class="stats-report-arrow">▼</span>
+                    <h3 style="margin:0;flex:1;text-align:left">Steps per Recipe</h3>
+                    <span class="stats-report-section-meta" style="color:var(--text-muted);font-size:0.85em">${items.length} results</span>
+                    ${this._fcResetBtn({ scope: 'all' })}
+                    <div class="stats-report-ti-search">
+                        <input type="text" id="stats-report-fc-search-input"
+                            placeholder="Search recipes (item name)…"
+                            value="${(this._fcSearchQuery || '').replace(/"/g, '&quot;')}"
+                            style="width:100%;padding:6px 10px;border-radius:6px;border:1px solid var(--border-color,#444);background:var(--bg-secondary,#252540);color:var(--text-primary,#eee);font-size:0.9em;box-sizing:border-box" />
+                    </div>
+                </div>
+                <div class="stats-report-section-body" style="${expanded ? '' : 'display:none'}">
+                    ${runSearchGroups}
+                </div>
+            </div>`;
+    }
+
+    /** Steps/craft for one item at a quality tier (banked if present, else total). */
+    _fcQualitySteps(it, q) {
+        const h = (it.headline || {})[q];
+        if (!h) return null;
+        const v = (h.with_banked_steps != null) ? h.with_banked_steps : h.total_steps;
+        return (v != null && Number.isFinite(Number(v))) ? Number(v) : null;
+    }
+
+    /** True when the fine-materials variant wins (<= normal) at this quality. */
+    _fcFineWins(it, q) {
+        const n = ((it.variants || {}).normal || {})[q];
+        const f = ((it.variants || {}).fine || {})[q];
+        const nv = n && (n.with_banked_steps != null ? n.with_banked_steps : n.total_steps);
+        const fv = f && (f.with_banked_steps != null ? f.with_banked_steps : f.total_steps);
+        if (fv == null) return false;
+        if (nv == null) return true;
+        return Number(fv) <= Number(nv);
+    }
+
+    _renderFastestCraftRow(it, q, steps, idx, total, color) {
+        const name = it.output_name || it.item_ref;
+        const icon = resolveItemIcon({ itemRef: it.item_ref, itemName: it.output_name });
+        const ref = escapeHtml(it.item_ref);
+        const nameAttr = String(name).replace(/"/g, '&quot;');
+        // Quality moved OFF the grouping and onto the row (category is now the
+        // sub-group). Default Normal; dropdown lists only qualities with data.
+        const QUALS = ['Normal', 'Good', 'Great', 'Excellent', 'Perfect', 'Eternal'];
+        const availQ = QUALS.filter(qq => this._fcQualitySteps(it, qq) != null);
+        const qSel = availQ.length > 1
+            ? `<select class="stats-report-fc-quality" data-item-ref="${ref}" title="Quality to show"
+                   style="padding:1px 6px;border-radius:9px;font-size:0.78em;border:1px solid var(--border-color,#555);background:var(--bg-secondary,#252540);color:var(--text-primary,#eee)">
+                   ${availQ.map(qq => `<option value="${qq}" ${qq === q ? 'selected' : ''}>${qq}</option>`).join('')}
+               </select>`
+            : `<span style="display:inline-block;padding:1px 7px;border-radius:9px;font-size:0.75em;border:1px solid var(--border-color,#555);color:var(--text-secondary)">${escapeHtml(q)}</span>`;
+        const finePill = this._fcFineWins(it, q)
+            ? `<span title="Fine materials win at this quality" style="display:inline-block;padding:1px 7px;border-radius:9px;font-size:0.75em;border:1px solid var(--fine-color,#22d3ee);color:var(--fine-color,#22d3ee)">fine</span>`
+            : '';
+        const staleBadge = it.stale
+            ? `<span title="Inputs changed since this was computed — re-run Optimize to refresh" style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#e53935;color:#fff;font-size:0.72em;font-weight:700;margin-left:6px">!</span>`
+            : '';
+        const rankBox = ['stats-report-rank-box-gold', 'stats-report-rank-box-silver', 'stats-report-rank-box-bronze'][idx] || '';
+        return `
+            <div class="stats-report-result-row" data-item-ref="${ref}" data-item-name="${nameAttr}"
+                 style="border-left:6px solid ${color}">
+                <span class="stats-report-rank stats-report-rank-floating ${rankBox}">${idx + 1}</span>
+                <div class="stats-report-row-top" style="display:flex;align-items:flex-start;gap:10px">
+                    ${icon ? `<img src="${escapeHtml(icon)}" alt="" width="50" height="50" class="stats-report-activity-icon" style="flex-shrink:0" onerror="this.style.visibility='hidden'">` : ''}
+                    <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:4px;text-align:left">
+                        <span class="stats-report-activity-name">${escapeHtml(name)}${staleBadge}</span>
+                        <span style="display:flex;flex-wrap:wrap;gap:4px;align-items:center">${qSel} ${finePill}</span>
+                    </div>
+                </div>
+                <div class="stats-report-metric-row" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                    <span class="stats-report-metric-value" style="background:${color};color:#fff;padding:3px 8px;border-radius:4px;font-size:0.95em;text-align:center;font-weight:600">
+                        ${steps != null ? formatFixed(steps, 1) : '—'} <span style="font-size:0.75em;opacity:0.8;font-weight:400">steps/craft</span>
+                    </span>
+                    <button class="button button-secondary stats-report-fc-tree-btn" data-item-ref="${ref}"
+                        style="font-size:0.9em;padding:6px 12px" title="Open this item in the crafting tree">Crafting tree</button>
+                    <button class="button button-secondary stats-report-fc-save-btn" data-item-ref="${ref}"
+                        style="font-size:0.9em;padding:6px 12px" title="Save the optimized crafting tree (Normal quality)">Save</button>
+                </div>
+            </div>`;
+    }
+
+    /** Small Reset button for a Steps-per-Recipe scope (section/category/quality). */
+    _fcResetBtn(opts) {
+        const scope = opts.scope;
+        const g = opts.group ? ` data-cat-group="${escapeHtml(opts.group)}"` : '';
+        const q = opts.quality ? ` data-quality="${escapeHtml(opts.quality)}"` : '';
+        const sz = scope === 'all'
+            ? 'margin:0 0 0 10px;padding:2px 9px;font-size:0.78em'
+            : 'margin:0 0 0 8px;padding:1px 7px;font-size:0.72em;flex:0 0 auto';
+        return `<button class="button button-secondary stats-report-fc-reset" data-fc-scope="${scope}"${g}${q}
+            title="Delete this scope's saved Steps-per-Recipe results so they recompute on the next run."
+            style="${sz};line-height:1.4">Reset</button>`;
+    }
+
+    /** item_refs in scope for an FC reset (all, or one master category). */
+    _fcItemsForScope(group) {
+        if (!group) return this._fastestCraftItems.map(it => it.item_ref);
+        return this._fastestCraftItems
+            .filter(it => (it.group || 'mat') === group).map(it => it.item_ref);
+    }
+
+    async _resetFastestCraft(scope, group, quality) {
+        const body = {};
+        if (scope !== 'all') body.item_refs = this._fcItemsForScope(group);
+        if (scope === 'quality' && quality) body.quality = quality;
+        try {
+            const resp = await fetch('/api/fastest-craft/reset', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                credentials: 'same-origin', body: JSON.stringify(body),
+            });
+            const result = await resp.json();
+            if (result && result.success) {
+                api.showSuccess('Steps per Recipe reset. Re-run Optimize to rebuild.');
+                const r = await fetch('/api/fastest-craft/results').then(x => (x.ok ? x.json() : null));
+                const its = (r && r.count > 0 && r.items) ? Object.values(r.items) : [];
+                this._fastestCraftItems = its
+                    .map(it => ({ ...it, _steps: this._fastestCraftSteps(it) }))
+                    .sort((a, b) => (a._steps ?? Infinity) - (b._steps ?? Infinity));
+                this._renderResults();
+                try { window.dispatchEvent(new CustomEvent('stats-report-stale-refresh')); } catch (_) {}
+            } else {
+                api.showError((result && result.error) || 'Reset failed');
+            }
+        } catch (err) {
+            api.showError('Reset failed: ' + (err && err.message ? err.message : 'network error'));
+        }
+    }
+
+    /** Row-level name filter for the Steps-per-Recipe section (mirrors target items). */
+    _applyFastestCraftSearch() {
+        const $el = this._$el;
+        if (!$el) return;
+        const $section = $el.find('.stats-report-section[data-section="fastest_craft"]');
+        if (!$section.length) return;
+        const query = (this._fcSearchQuery || '').trim().toLowerCase();
+        if (!query) {
+            $section.find('.stats-report-result-row, .stats-report-skill-group, .stats-report-cat-group')
+                .each((_i, el) => { el.style.display = ''; });
+            return;
+        }
+        $section.find('.stats-report-result-row').each((_i, row) => {
+            const nm = (row.dataset.itemName || '').toLowerCase();
+            row.style.display = nm.includes(query) ? '' : 'none';
+        });
+        $section.find('.stats-report-skill-group').each((_i, sg) => {
+            const anyRow = Array.from(sg.querySelectorAll('.stats-report-result-row'))
+                .some(r => r.style.display !== 'none');
+            sg.style.display = anyRow ? '' : 'none';
+        });
+        $section.find('.stats-report-cat-group').each((_i, cg) => {
+            const anySg = Array.from(cg.querySelectorAll('.stats-report-skill-group'))
+                .some(s => s.style.display !== 'none');
+            cg.style.display = anySg ? '' : 'none';
+        });
     }
 
     /**
@@ -3363,6 +4968,7 @@ export class StatsReportPage {
                 // that separates these cases. User-reported: deselecting
                 // tools still showed "All owned. Congrats!".
                 this._hydrateSelectedKinds();
+            this._hydrateSelectedTargetCategories();
                 const wasOptimized = this._selectedKinds.has(kind);
                 const emptyMsg = wasOptimized
                     ? `All accessible ${label.toLowerCase()} obtained. Congrats!`
@@ -3391,8 +4997,12 @@ export class StatsReportPage {
             kindRows.sort((a, b) =>
                 Number(a.metric_value || Infinity) - Number(b.metric_value || Infinity)
             );
-            const top = kindRows[0];
-            const rest = kindRows.slice(1);
+            // Partition gear-keyword-gated rows into a separate bottom
+            // "Possible with more gear" sub-section; normal rows keep the
+            // ranked top + show-more layout exactly as before.
+            const { normal: _kNormal, gearGated: _kGear } = this._partitionGearGated(kindRows);
+            const top = _kNormal[0];
+            const rest = _kNormal.slice(1);
             const total = kindRows.length;
 
             const skillKey = `skill:${sectionKey}:${kind}`;
@@ -3413,21 +5023,23 @@ export class StatsReportPage {
                         ${iconHtml}
                         <span style="flex:1;text-align:left;font-weight:600">${label}</span>
                         <span class="stats-report-group-meta">Top ${topMetric} · ${total} activities</span>
+                        ${this._subcatResetBtn()}
                     </div>
                     <div class="stats-report-skill-body" style="${expanded ? '' : 'display:none'}">
-                        ${this._renderResultRow(top, 0, total, sectionKey, color)}
+                        ${top ? this._renderResultRow(top, 0, total, sectionKey, color) : ''}
                         ${rest.length > 0 ? `
                             <div class="stats-report-show-more-wrap">
                                 <button class="button button-secondary stats-report-show-more-btn ${showMore ? 'open' : ''}"
                                     data-section="${sectionKey}" data-skill-group="${kind}">
                                     <span class="stats-report-show-more-arrow">▼</span>
-                                    <span class="stats-report-show-more-label">${showMore ? 'Show less' : `Show ${rest.length} more`}</span>
+                                    <span class="stats-report-show-more-label">${showMore ? 'Show fewer' : `Show ${rest.length} more`}</span>
                                 </button>
                             </div>
                             <div class="stats-report-skill-extras" data-section="${sectionKey}" data-skill-group="${kind}" style="${showMore ? '' : 'display:none'}">
                                 ${rest.map((r, i) => this._renderResultRow(r, i + 1, total, sectionKey, color)).join('')}
                             </div>
                         ` : ''}
+                        ${this._renderGearGatedSubsection(sectionKey, color, _kGear)}
                     </div>
                 </div>
             `;
@@ -3470,6 +5082,7 @@ export class StatsReportPage {
                         <img src="${CATEGORY_ICONS[catName] || ''}" alt="${catName}" width="32" height="32" onerror="this.style.display='none'">
                         <h4 style="margin:0;flex:1;text-align:left">${catName}</h4>
                         <span class="stats-report-group-meta">${skillNames.length} skills · ${totalRows} results</span>
+                        ${this._subcatResetBtn()}
                     </div>
                     <div class="stats-report-cat-body" style="${catExpanded ? '' : 'display:none'}">
                         ${skillNames.map(sn => this._renderSkillGroup(sectionKey, sn, skillsInCat[sn])).join('')}
@@ -3498,12 +5111,12 @@ export class StatsReportPage {
         // xp/coins, ascending for chests/new_items). The rows arrive
         // pre-sorted by the backend in get_stats_report_results, but be
         // defensive here in case a partial poll surfaces them out of order.
-        const top = rowsForSkill[0];
-        const rest = rowsForSkill.slice(1);
+        const { normal: _sNormal, gearGated: _sGear } = this._partitionGearGated(rowsForSkill);
+        const top = _sNormal[0];
+        const rest = _sNormal.slice(1);
         const total = rowsForSkill.length;
         const topMetric = top && top.metric_value != null
             ? formatFixed(Number(top.metric_value), 2) : '—';
-
         return `
             <div class="stats-report-skill-group ${expanded ? 'open' : ''}"
                  data-section="${sectionKey}" data-skill-group="${skillName}"
@@ -3514,6 +5127,7 @@ export class StatsReportPage {
                     <img src="${skillIcon}" alt="${skillName}" width="32" height="32" onerror="this.style.display='none'">
                     <span style="flex:1;text-align:left;font-weight:600">${skillName}</span>
                     <span class="stats-report-group-meta">Top ${topMetric} · ${total} results</span>
+                    ${this._subcatResetBtn()}
                 </div>
                 <div class="stats-report-skill-body" style="${expanded ? '' : 'display:none'}">
                     ${top ? this._renderResultRow(top, 0, total, sectionKey, chipColor) : ''}
@@ -3522,7 +5136,7 @@ export class StatsReportPage {
                             <button class="button button-secondary stats-report-show-more-btn ${showMore ? 'open' : ''}"
                                 data-section="${sectionKey}" data-skill-group="${skillName}">
                                 <span class="stats-report-show-more-arrow">▼</span>
-                                <span class="stats-report-show-more-label">${showMore ? 'Show less' : `Show ${rest.length} more`}</span>
+                                <span class="stats-report-show-more-label">${showMore ? 'Show fewer' : `Show ${rest.length} more`}</span>
                             </button>
                             </button>
                         </div>
@@ -3530,6 +5144,7 @@ export class StatsReportPage {
                             ${rest.map((r, i) => this._renderResultRow(r, i + 1, total, sectionKey, chipColor)).join('')}
                         </div>
                     ` : ''}
+                    ${this._renderGearGatedSubsection(sectionKey, chipColor, _sGear)}
                 </div>
             </div>
         `;
@@ -3585,6 +5200,9 @@ export class StatsReportPage {
             const total = rowsForChest.length;
             const topMetric = top && top.metric_value != null
                 ? Math.ceil(Number(top.metric_value)).toLocaleString() : '—';
+            const { normal: _cNormal, gearGated: _cGear } = this._partitionGearGated(rowsForChest);
+            const _cTop = _cNormal[0];
+            const _cRest = _cNormal.slice(1);
 
             return `
                 <div class="stats-report-skill-group ${expanded ? 'open' : ''}"
@@ -3596,30 +5214,609 @@ export class StatsReportPage {
                         <img src="${chestIcon}" alt="${cn}" width="32" height="32" onerror="this.style.display='none'">
                         <span style="flex:1;text-align:left;font-weight:600">${cn}</span>
                         <span class="stats-report-group-meta">Top ${topMetric} · ${total} results</span>
+                        ${this._subcatResetBtn()}
                     </div>
                     <div class="stats-report-skill-body" style="${expanded ? '' : 'display:none'}">
-                        ${top ? this._renderResultRow(top, 0, total, sectionKey, chestColor) : ''}
-                        ${rest.length > 0 ? `
+                        ${_cTop ? this._renderResultRow(_cTop, 0, total, sectionKey, chestColor) : ''}
+                        ${_cRest.length > 0 ? `
                             <div class="stats-report-show-more-wrap">
                                 <button class="button button-secondary stats-report-show-more-btn ${showMore ? 'open' : ''}"
                                     data-section="${sectionKey}" data-chest-group="${cn}">
                                     <span class="stats-report-show-more-arrow">▼</span>
-                                    <span class="stats-report-show-more-label">${showMore ? 'Show less' : `Show ${rest.length} more`}</span>
+                                    <span class="stats-report-show-more-label">${showMore ? 'Show fewer' : `Show ${_cRest.length} more`}</span>
                                 </button>
                             </div>
                             <div class="stats-report-skill-extras" data-section="${sectionKey}" data-chest-group="${cn}" style="${showMore ? '' : 'display:none'}">
-                                ${rest.map((r, i) => this._renderResultRow(r, i + 1, total, sectionKey, chestColor)).join('')}
+                                ${_cRest.map((r, i) => this._renderResultRow(r, i + 1, total, sectionKey, chestColor)).join('')}
                             </div>
                         ` : ''}
+                        ${this._renderGearGatedSubsection(sectionKey, chestColor, _cGear)}
                     </div>
                 </div>
             `;
         }).join('');
     }
 
-    _renderResultRow(row, idx, total, category, rowColor) {
+    /**
+     * Render target_items section grouped by target-category (gems, normal_items, etc).
+     * Worker stores target_category_slug in subcategory (row.skill_name).
+     * Each group header shows the category label; rows are individual items sorted
+     * by steps/item ascending (fastest first).
+     *
+     * DEFERRED: future per-target-category searchable checkbox list (name OR keyword,
+     * with 'check/uncheck all filtered') to select which items run, as a perf escape hatch.
+     */
+    /**
+     * Render a group's activity rows with a "Show X more" affordance mirroring
+     * the XP/chest sections: the fastest row is always shown; the rest live in
+     * a collapsed .stats-report-skill-extras block toggled by the shared
+     * .stats-report-show-more-btn handler (keyed `${sectionKey}::${groupId}`).
+     * `rows` are pre-sorted row objects; `groupId` must equal the enclosing
+     * group's data-skill-group so the toggle handler + search restore match.
+     */
+    _renderActivityRowsWithShowMore(rows, sectionKey, color, groupId) {
+        const total = rows.length;
+        const top = rows[0];
+        const rest = rows.slice(1);
+        const showMoreKey = `${sectionKey}::${groupId}`;
+        const showMore = this._showMoreExpanded.has(showMoreKey);
+        return `
+            ${top ? this._renderResultRow(top, 0, total, sectionKey, color) : ''}
+            ${rest.length > 0 ? `
+                <div class="stats-report-show-more-wrap">
+                    <button class="button button-secondary stats-report-show-more-btn ${showMore ? 'open' : ''}"
+                        data-section="${sectionKey}" data-skill-group="${groupId}">
+                        <span class="stats-report-show-more-arrow">▼</span>
+                        <span class="stats-report-show-more-label">${showMore ? 'Show fewer' : `Show ${rest.length} more`}</span>
+                    </button>
+                </div>
+                <div class="stats-report-skill-extras" data-section="${sectionKey}" data-skill-group="${groupId}" style="${showMore ? '' : 'display:none'}">
+                    ${rest.map((r, i) => this._renderResultRow(r, i + 1, total, sectionKey, color)).join('')}
+                </div>
+            ` : ''}
+        `;
+    }
+
+    /**
+     * Live-filter the target_items section by the search query. Matches each
+     * activity row against item name, activity name, keywords, and the group
+     * label. While a query is active every body + show-more block is force-
+     * shown so hidden matches surface, and empty item/category groups are
+     * hidden. When the query is cleared, row visibility and each group/show-
+     * more block are restored to the user's expand state (so we don't leave
+     * show-more-hidden rows revealed). Safe to call after every _renderResults
+     * so the filter survives re-renders (poll / stale refresh).
+     */
+    _applyTargetItemsSearch() {
+        const $el = this._$el;
+        if (!$el) return;
+        const $section = $el.find('.stats-report-section[data-section="target_items"]');
+        if (!$section.length) return;
+        const query = (this._tiSearchQuery || '').trim().toLowerCase();
+
+        // IMPORTANT: search operates at the ITEM sub-group / group level only.
+        // It never touches individual activity rows, the show-more extras, or
+        // the show-more buttons — those are owned solely by the render +
+        // show-more click handler, so search can't desync the "Show X more /
+        // Show fewer" state (2026-08-13 bug: it was inverted because search
+        // moved the extras out from under the button). Item NAMES live in the
+        // sub-headers now, so we match on the item name + its keywords + the
+        // group name — NOT activity names (per user 2026-08-13).
+        if (!query) {
+            // Cleared — reveal every group + item sub-group. Leave rows /
+            // extras / bodies exactly as the render + user left them.
+            $section.find('.stats-report-cat-group, .stats-report-skill-group')
+                .each((_i, g) => { g.style.display = ''; });
+            return;
+        }
+
+        // Material/finding groups: match each ITEM sub-group by item name +
+        // keywords (+ its group label lives on the parent cat-group).
+        $section.find('.stats-report-skill-group').each((_i, g) => {
+            const hay = [g.dataset.itemName, g.dataset.itemKeywords]
+                .map(s => (s || '').toLowerCase());
+            g.style.display = hay.some(h => h.includes(query)) ? '' : 'none';
+        });
+
+        // Category groups: visible if the group/currency NAME matches, or (for
+        // material/finding groups) any child item sub-group is still visible.
+        // Currency groups have no item sub-groups — they match on name only.
+        $section.find('.stats-report-cat-group').each((_i, g) => {
+            const $g = $(g);
+            const nameMatches = (g.dataset.groupName || '').toLowerCase().includes(query);
+            const $subs = $g.find('.stats-report-skill-group');
+            if (nameMatches && $subs.length) {
+                // Searching the group name reveals all its items.
+                $subs.each((_j, sg) => { sg.style.display = ''; });
+            }
+            const anyVisibleSub = $subs.filter((_j, sg) => sg.style.display !== 'none').length > 0;
+            g.style.display = (nameMatches || anyVisibleSub) ? '' : 'none';
+        });
+    }
+
+    _renderSectionGroupedByTargetCategory(sectionKey, rows) {
+        // Bucket rows by group_slug, carrying the parsed metrics_json.
+        const buckets = {};
+        for (const r of rows) {
+            // Hide impossible/worthless rows: the gear-gated global-IF expansion
+            // can still yield the optimizer's impossible-penalty (>=9e8) or a
+            // 0-value currency find on a given activity. Steps/item and units/1k
+            // are always > 0 for a real result, so drop null/NaN/<=0/penalty.
+            const _mv = (r.metric_value != null) ? Number(r.metric_value) : NaN;
+            if (!Number.isFinite(_mv) || _mv <= 0 || _mv >= 9e8) continue;
+            const mj = (typeof r.metrics_json === 'string') ? JSON.parse(r.metrics_json || '{}') : (r.metrics_json || {});
+            const groupSlug = mj.group_slug || mj.target_category || r.subcategory || r.skill_name || 'other';
+            if (!buckets[groupSlug]) buckets[groupSlug] = [];
+            buckets[groupSlug].push({ row: r, mj });
+        }
+
+        // Display order: currency, finding (alpha: Bird Nest, Ectoplasm),
+        // material (alpha by label), other last. Mirrors the selection
+        // chip order (ALL_TARGET_CATEGORIES).
+        const TARGET_GROUP_ORDER = [
+            'adventurers_guild_tokens', 'sea_shells',
+            'bird_nest', 'ectoplasm',
+        ];
+        const orderedFixed = TARGET_GROUP_ORDER.filter(c => buckets[c] && buckets[c].length > 0);
+        const _labelOf = (c) => String((TARGET_GROUP_META[c] || {}).label || c);
+        const remaining = Object.keys(buckets)
+            .filter(c => !TARGET_GROUP_ORDER.includes(c) && c !== 'other' && buckets[c].length > 0)
+            .sort((a, b) => _labelOf(a).localeCompare(_labelOf(b)));
+        const allCats = orderedFixed.concat(remaining);
+        if (buckets['other'] && buckets['other'].length > 0) allCats.push('other');
+
+        const _mv = (e) => (e.row.metric_value != null ? Number(e.row.metric_value) : Infinity);
+
+        let html = '';
+        for (const catSlug of allCats) {
+            const entries = buckets[catSlug];
+            if (!entries || entries.length === 0) continue;
+            const meta = TARGET_GROUP_META[catSlug] || { label: catSlug, color: 'var(--text-secondary)', icon: '', kind: 'material' };
+            const groupColor = meta.color || 'var(--text-secondary)';
+            const isSingleItem = meta.kind === 'currency';
+            const isCurrency = meta.kind === 'currency';
+            const catKey = `category:${sectionKey}:${catSlug}`;
+            const catExpanded = this._isExpanded(catKey);
+
+            let bodyHtml, metaText;
+            if (isSingleItem) {
+                // Single item (currency / finding): activities directly.
+                const arr = entries.slice().sort((a, b) => isCurrency
+                    ? (Number(b.row.metric_value || 0) - Number(a.row.metric_value || 0))
+                    : (_mv(a) - _mv(b)));
+                metaText = `${arr.length} activities`;
+                bodyHtml = this._renderActivityRowsWithShowMore(arr.map(e => e.row), sectionKey, groupColor, catSlug);
+            } else {
+                // Keyword group: sub-bucket by item -> per-item sub-header.
+                const byItem = {};
+                for (const e of entries) {
+                    const k = e.mj.item_slug || e.mj.item_name || (e.row.metric_name || 'item');
+                    if (!byItem[k]) byItem[k] = [];
+                    byItem[k].push(e);
+                }
+                // Items within a category: alphabetical by base name, with fine
+                // variants immediately after their normal counterpart (user
+                // request 2026-08-12). Activities WITHIN each item stay sorted
+                // by speed (handled in _renderTargetItemSubGroup).
+                const _itemSortInfo = (k) => {
+                    const e0 = byItem[k][0] || {};
+                    const nm = String((e0.mj && e0.mj.item_name) || (e0.row && e0.row.metric_name) || k);
+                    const fine = !!(e0.mj && e0.mj.is_fine) || /\(fine\)\s*$/i.test(nm);
+                    const base = nm.replace(/\s*\(fine\)\s*$/i, '').toLowerCase();
+                    return { base, fine };
+                };
+                const itemKeys = Object.keys(byItem).sort((a, b) => {
+                    const ia = _itemSortInfo(a), ib = _itemSortInfo(b);
+                    if (ia.base !== ib.base) return ia.base.localeCompare(ib.base);
+                    return (ia.fine ? 1 : 0) - (ib.fine ? 1 : 0);  // normal before fine
+                });
+                metaText = `${itemKeys.length} items`;
+                bodyHtml = itemKeys.map(ik => this._renderTargetItemSubGroup(sectionKey, catSlug, byItem[ik])).join('');
+            }
+
+            const iconHtml = meta.icon
+                ? `<img src="${meta.icon}" alt="${meta.label}" width="32" height="32" onerror="this.style.display='none'">`
+                : '';
+            html += `
+                <div class="stats-report-cat-group ${catExpanded ? 'open' : ''}"
+                     data-section="${sectionKey}" data-cat-group="${catSlug}"
+                     data-group-name="${String((meta.label || '') + ' ' + catSlug).replace(/"/g, '&quot;')}"
+                     style="--cat-color:${groupColor};--glow-color:${groupColor}">
+                    <div class="stats-report-side-collapse" data-target="cat-group" title="Collapse / expand"></div>
+                    <div class="stats-report-cat-header" data-section="${sectionKey}" data-cat-group="${catSlug}">
+                        <span class="stats-report-arrow">▼</span>
+                        ${iconHtml}
+                        <h4 style="margin:0;flex:1;text-align:left">${meta.label}</h4>
+                        <span class="stats-report-group-meta">${metaText}</span>
+                        ${this._subcatResetBtn()}
+                    </div>
+                    <div class="stats-report-cat-body" style="${catExpanded ? '' : 'display:none'}">
+                        ${bodyHtml}
+                    </div>
+                </div>
+            `;
+        }
+        return html;
+    }
+
+    /**
+     * One item sub-header inside a keyword target group (e.g. a single
+     * crustacean under "Crustacean"). Colored collapsible side bar (item's
+     * dominant icon color, applied async by _applyTargetItemColors), item icon
+     * on the left, and its activities as rows underneath.
+     */
+    _renderTargetItemSubGroup(sectionKey, groupSlug, entries) {
+        const first = entries[0];
+        const mj = first.mj || {};
+        const itemName = mj.item_name || first.row.metric_name || 'Item';
+        const itemRef = mj.item_ref || '';
+        const itemSlug = mj.item_slug || (itemName.toLowerCase().replace(/\s+/g, '_').replace(/[()']/g, ''));
+        const isFine = !!(mj && mj.is_fine) || /\(fine\)\s*$/i.test(itemName);
+        // Fine variants have no separate icon asset — resolve the BASE item's
+        // icon (strip "(Fine)") and overlay the fine drop-shadow. Without this,
+        // resolveItemIcon builds "gold_nugget_(fine).svg" which 404s and the
+        // onerror handler hides the icon (user: "fine items still not showing
+        // icons"). itemRef is already the base ref (classify keeps it).
+        const iconName = isFine ? itemName.replace(/\s*\(Fine\)\s*$/i, '') : itemName;
+        const itemIcon = resolveItemIcon({ itemRef, itemName: iconName });
+        const fineFilter = isFine
+            ? 'filter:drop-shadow(1px 0 0 var(--fine-color)) drop-shadow(-1px 0 0 var(--fine-color)) drop-shadow(0 1px 0 var(--fine-color)) drop-shadow(0 -1px 0 var(--fine-color)) !important;'
+            : '';
+        const arr = entries.slice().sort((a, b) =>
+            (a.row.metric_value != null ? Number(a.row.metric_value) : Infinity)
+            - (b.row.metric_value != null ? Number(b.row.metric_value) : Infinity));
+        const sgId = `${groupSlug}__${itemSlug}`;
+        const key = `skill:${sectionKey}:${sgId}`;
+        const expanded = this._isExpanded(key);
+        const iconHtml = itemIcon
+            ? `<img src="${itemIcon}" alt="${itemName}" width="28" height="28" style="${fineFilter}" onerror="this.style.display='none'">`
+            : '';
+        const _itemKeywords = Array.isArray(mj.item_keywords)
+            ? mj.item_keywords.join(' ')
+            : (mj.item_keywords || '');
+        return `
+            <div class="stats-report-skill-group ${expanded ? 'open' : ''}"
+                 data-section="${sectionKey}" data-skill-group="${sgId}"
+                 data-item-name="${String(itemName).replace(/"/g, '&quot;')}"
+                 data-item-keywords="${String(_itemKeywords).replace(/"/g, '&quot;')}"
+                 data-ti-icon="${itemIcon}"
+                 style="--chip-color:var(--text-secondary);--glow-color:var(--text-secondary)">
+                <div class="stats-report-side-collapse" data-target="skill-group" title="Collapse / expand"></div>
+                <div class="stats-report-skill-header" data-section="${sectionKey}" data-skill-group="${sgId}">
+                    <span class="stats-report-arrow">▼</span>
+                    ${iconHtml}
+                    <span style="flex:1;text-align:left;font-weight:600">${itemName}</span>
+                    <span class="stats-report-group-meta">${arr.length} activities</span>
+                    ${this._subcatResetBtn()}
+                </div>
+                <div class="stats-report-skill-body" style="${expanded ? '' : 'display:none'}">
+                    ${this._renderActivityRowsWithShowMore(arr.map(e => e.row), sectionKey, 'var(--text-secondary)', sgId)}
+                </div>
+            </div>
+        `;
+    }
+
+    /**
+     * Tint each target_items item sub-header's colored side bar with the
+     * dominant NON-black/white color of the item's icon. Loads the icon into a
+     * small canvas, samples pixels, picks the most common vivid color, caches
+     * it by URL, and sets --chip-color / --glow-color on the group element.
+     * Same-origin icons (/assets), so canvas is not tainted. Fully async and
+     * best-effort — a failure just leaves the default side-bar color.
+     */
+    _applyTargetItemColors($body) {
+        const root = ($body && $body[0]) ? $body[0] : (this._$el && this._$el[0]);
+        if (!root) return;
+        this._tiColorCache = this._tiColorCache || {};
+        const groups = root.querySelectorAll('.stats-report-skill-group[data-ti-icon]');
+        const apply = (el, color) => {
+            if (!color) return;
+            el.style.setProperty('--chip-color', color);
+            el.style.setProperty('--glow-color', color);
+        };
+        groups.forEach((el) => {
+            const url = el.getAttribute('data-ti-icon');
+            if (!url) return;
+            if (this._tiColorCache[url]) { apply(el, this._tiColorCache[url]); return; }
+            const img = new Image();
+            img.crossOrigin = 'anonymous';
+            img.onload = () => {
+                try {
+                    const c = document.createElement('canvas');
+                    const w = c.width = 24, h = c.height = 24;
+                    const ctx = c.getContext('2d');
+                    ctx.drawImage(img, 0, 0, w, h);
+                    const d = ctx.getImageData(0, 0, w, h).data;
+                    const counts = {};
+                    let best = null, bestScore = 0;
+                    for (let i = 0; i < d.length; i += 4) {
+                        const r = d[i], g = d[i + 1], b = d[i + 2], a = d[i + 3];
+                        if (a < 128) continue;                 // transparent
+                        const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+                        if (mx < 45) continue;                 // near-black
+                        if (mn > 210) continue;                // near-white
+                        const sat = mx - mn;                   // rough saturation
+                        // quantize to 4 bits/channel to bucket similar colors
+                        const key = ((r >> 4) << 8) | ((g >> 4) << 4) | (b >> 4);
+                        const bucket = (counts[key] = counts[key] || { n: 0, r: 0, g: 0, b: 0 });
+                        bucket.n++; bucket.r += r; bucket.g += g; bucket.b += b;
+                        // score favors frequent AND saturated colors
+                        const score = bucket.n * (1 + sat / 64);
+                        if (score > bestScore) {
+                            bestScore = score;
+                            best = [Math.round(bucket.r / bucket.n), Math.round(bucket.g / bucket.n), Math.round(bucket.b / bucket.n)];
+                        }
+                    }
+                    if (best) {
+                        const color = `rgb(${best[0]},${best[1]},${best[2]})`;
+                        this._tiColorCache[url] = color;
+                        apply(el, color);
+                    }
+                } catch (_) { /* canvas/CORS — leave default */ }
+            };
+            img.src = url;
+        });
+    }
+
+    /**
+     * 2026-07-19 (bug 276fbd0a follow-up): render the expandable per-item
+     * breakdown for a combined "N new <kind>" row. `nc` = {kind, count,
+     * items:[{item_name, item_ref, steps}]} (steps are gear-aware, sorted
+     * fastest-first by the worker).
+     *
+     * 2026-07-20 (user request): sits ABOVE the metric/buttons row, starts
+     * COLLAPSED, and slides open/closed with an animated chevron. Uses the
+     * grid-template-rows 0fr↔1fr trick (inline transition) so the content
+     * animates to its natural height without measuring it; the toggle is
+     * wired by a delegated handler in attachEvents (._stats-report-ni-toggle).
+     * Item icons/names carry .stats-report-drop-anchor so the existing
+     * wireDropAnchor pass makes them popover anchors even while collapsed
+     * (the content stays in the DOM, just clipped to 0 height).
+     */
+    _renderNewItemsBreakdown(nc) {
+        const items = (nc && nc.items) || [];
+        if (items.length < 2) return '';
+        const rowsHtml = items.map((it) => {
+            const name = it.item_name || '';
+            const ref = it.item_ref || '';
+            const icon = resolveItemIcon({ itemRef: ref, itemName: name });
+            const steps = (it.steps != null && Number(it.steps) > 0)
+                ? Math.ceil(Number(it.steps)).toLocaleString() : '—';
+            const nameEsc = name.replace(/"/g, '&quot;');
+            const refEsc = ref.replace(/"/g, '&quot;');
+            return `
+                <div class="stats-report-ni-item" style="display:flex;align-items:center;gap:8px;padding:3px 0">
+                    ${icon ? `<img src="${icon}" alt="${nameEsc}" width="24" height="24"
+                         class="stats-report-drop-anchor"
+                         data-drop-name="${nameEsc}" data-drop-ref="${refEsc}"
+                         style="flex-shrink:0;cursor:pointer" onerror="this.style.visibility='hidden'">` : ''}
+                    <span class="stats-report-drop-anchor" data-drop-name="${nameEsc}" data-drop-ref="${refEsc}"
+                          style="flex:1;min-width:0;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${name || '—'}</span>
+                    <span style="color:var(--text-secondary);font-size:0.9em;white-space:nowrap">${steps} <span style="opacity:0.7">steps/item</span></span>
+                </div>`;
+        }).join('');
+        return `
+            <div class="stats-report-new-items-breakdown" style="margin:2px 0 6px">
+                <button type="button" class="stats-report-ni-toggle" data-expanded="0"
+                        style="background:none;border:none;padding:2px 0;cursor:pointer;color:var(--text-secondary);font-size:0.9em;display:inline-flex;align-items:center;gap:6px;user-select:none">
+                    <span class="stats-report-ni-arrow" aria-hidden="true"
+                          style="display:inline-block;transition:transform .2s ease;transform:rotate(0deg)">▶</span>
+                    <span class="stats-report-ni-toggle-label">Show all ${items.length} items</span>
+                </button>
+                <div class="stats-report-ni-wrap"
+                     style="display:grid;grid-template-rows:0fr;transition:grid-template-rows .25s ease">
+                    <div style="overflow:hidden;min-height:0">
+                        <div style="padding:4px 0 2px 4px">${rowsHtml}</div>
+                    </div>
+                </div>
+            </div>`;
+    }
+
+    /**
+     * Alternative locations / service locations slide section (Inc 4b).
+     * Consumes worker fields: alt_locations (activities: [{location,
+     * metric_value, gearset_export}]) and service_alternatives (chests_recipes:
+     * [{grouped_name, locations, metric_value, gearset_export, extras}]). Each
+     * alt reuses the EXISTING Equip/Gear handlers via data-gearset-export + a
+     * synthetic data-result-id (event delegation auto-binds). Save is omitted
+     * on alts (Equip loads to column 2 where the normal Save applies) — a
+     * save-from-export path is the only extra wiring, deferred. Uses the same
+     * grid-rows 0fr<->1fr slide as the new-items breakdown; own toggle class so
+     * the shared ni-toggle label rewrite doesn't clobber it.
+     */
+    _renderAltLocations(row, category, mb, parentIdx = 0, parentTotal = 1) {
+        if (!mb) return '';
+        // Alts are always WORSE than the parent row (higher steps/chest etc.),
+        // so their pills must sit FURTHER down the green→red gradient than the
+        // parent — never restart at green. Color them on the [parentT, 1]
+        // segment (parentT = the parent's gradient position), progressively
+        // redder. (User report: parent 14,210 red but its 14,599 alt showed
+        // green because the alt gradient restarted at 0.)
+        const parentT = (parentTotal > 1) ? (parentIdx / (parentTotal - 1)) : 1;
+        const recipeSkill = mb.service_skill || '';
+        let alts = [];
+        let heading = '';
+        if (category === 'chests_recipes'
+                && Array.isArray(mb.service_alternatives) && mb.service_alternatives.length) {
+            heading = 'Alternative service locations';
+            alts = mb.service_alternatives.map(a => ({
+                name: a.grouped_name || (a.locations || []).join(', '),
+                locations: a.locations || [],
+                metric: a.metric_value, export: a.gearset_export, extras: a.extras || [],
+                serviceStats: a.service_stats || null, locationId: a.location_id || '',
+                optCons: a.optimized_consumable || null, optPet: a.optimized_pet || null,
+                // Region alts (service-less recipes) carry a concrete location id
+                // in their region so Equip selects a real col-3 location (#5).
+                regionLocationId: a.region_location_id || '',
+                // Raw service name + a concrete location for the Equip button to
+                // select the right service/location in column 3 (Bug 5).
+                serviceName: a.service_name || '', serviceLocation: a.service_location || (a.locations || [])[0] || '',
+                // Prefer the service icon (service recipes) or region icon
+                // (service-less recipes) emitted by the worker; the location-icon
+                // derivation is only a fallback for older rows.
+                icon: a.service_icon || a.region_icon || '',
+            }));
+        } else if (Array.isArray(mb.alt_locations) && mb.alt_locations.length) {
+            heading = 'Alternative locations';
+            alts = mb.alt_locations.map(a => ({
+                name: a.location, locations: a.locations || [],
+                metric: a.metric_value, export: a.gearset_export, extras: [],
+                optCons: a.optimized_consumable || null, optPet: a.optimized_pet || null,
+                // Slugified first location id so the Equip button can select it
+                // in the activity info section (activity-info matches loc.id). (#D)
+                locId: (a.locations && a.locations[0])
+                    ? String(a.locations[0]).toLowerCase().replace(/\s+/g, '_').replace(/'/g, '')
+                    : '',
+            }));
+        }
+        if (!alts.length) return '';
+        const activityName = (row.activity_name || row.recipe_name || '').replace(/"/g, '&quot;');
+        const isCurrency = !!(mb && (mb.metric_kind === 'per_1k' || mb.group_kind === 'currency'));
+        const metricLabel = isCurrency ? '/1k steps' : (CATEGORY_METRIC_LABELS[category] || 'Metric');
+        // Resolve a location's icon the same way the main row does: look up the
+        // catalog icon_name, else slugify. Used for the alt group's first loc.
+        const locIconFor = (nm) => {
+            if (!nm) return '';
+            const known = this._locationIconByName ? this._locationIconByName.get(nm) : null;
+            if (known) return `/assets/icons/locations/${known}`;
+            const slug = String(nm).toLowerCase().replace(/\s+/g, '_').replace(/'/g, '');
+            return `/assets/icons/locations/${slug}.svg`;
+        };
+        const rowsHtml = alts.map((a, i) => {
+            const altId = `${row.id}::alt::${i}`;
+            const hasMetric = a.metric != null && Number(a.metric) > 0;
+            const metricVal = hasMetric
+                ? (isCurrency
+                    ? formatFixed(Number(a.metric), 2)
+                    : ((category === 'new_items' || category === 'chests' || category === 'chests_recipes' || category === 'target_items')
+                        ? Math.ceil(Number(a.metric)).toLocaleString()
+                        : formatFixed(Number(a.metric), 2)))
+                : '—';
+            const exp = a.export || '';
+            const hasGear = !!exp;
+            const nameEsc = (a.name || '—').replace(/"/g, '&quot;');
+            const saveNm = `${(row.activity_name || row.recipe_name || 'Gearset')} - ${a.name || ''}`.replace(/"/g, '&quot;');
+            // Pill color: give each alt its own green->red gradient slot. Alts
+            // are collapsed by default, so this never disturbs the smooth main
+            // display gradient — matching an existing hue is fine per spec.
+            const color = this._colorForT(parentT + (1 - parentT) * ((i + 1) / alts.length));
+            const firstLocName = (a.locations && a.locations[0]) || (a.name || '').split(' or ')[0];
+            const firstIcon = a.icon || locIconFor(firstLocName);
+            let iHtml = '';
+            if (a.serviceStats && serviceHasStats(a.serviceStats)) {
+                // Full column-3-style popover (shared renderer). Replaces the
+                // old raw intrinsic-diff string that showed partial/mis-formatted
+                // stats (user report: "wrong stats / not formatted like column 3").
+                const popover = buildServiceStatsPopoverHtml(a.serviceStats, {
+                    recipeSkill, contextLocation: a.locationId });
+                if (popover) {
+                    const escaped = popover.replace(/"/g, '&quot;');
+                    iHtml = ` <span class="travel-info-icon service-info-icon" data-info-title="${nameEsc}" data-info-html="${escaped}" role="button" aria-label="Show service stats" style="cursor:pointer">ⓘ</span>`;
+                }
+            } else if (a.extras && a.extras.length) {
+                // Legacy fallback (e.g. region alts, or rows from an older worker
+                // without full service_stats).
+                const stxt = a.extras.map(e => {
+                    const st = Object.entries(e.stats || {})
+                        .map(([k, v]) => `${k.replace(/_/g, ' ')}: ${v}`).join(', ');
+                    return `${e.name || ''}${e.location ? ' (' + e.location + ')' : ''}: ${st}`;
+                }).join(' • ').replace(/"/g, '&quot;');
+                iHtml = ` <sup class="travel-info-icon" data-info-title="Extra service stats" data-info-html="${stxt}" style="cursor:pointer">ⓘ</sup>`;
+            }
+            return `
+                <div class="stats-report-alt-item" style="padding:8px 0;border-top:1px solid var(--border-color,#333)">
+                    <span class="stats-report-loc-row" style="display:flex;align-items:center;gap:6px">
+                        ${firstIcon ? `<img src="${firstIcon}" alt="" width="30" height="30" class="stats-report-loc-icon" onerror="this.style.display='none'">` : ''}
+                        <span>${nameEsc}${iHtml}</span>
+                    </span>
+                    <div class="stats-report-metric-row" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:4px">
+                        <span class="stats-report-metric-value" style="background:${color};color:#fff;padding:3px 8px;border-radius:4px;font-size:0.95em;text-align:center;font-weight:600">
+                            ${metricVal}${hasMetric ? ` <span style="font-size:0.75em;opacity:0.8;font-weight:400">${metricLabel}</span>` : ''}
+                        </span>
+                        ${hasGear ? `
+                        <button class="button button-secondary stats-report-gear-toggle-btn" data-result-id="${altId}" data-expanded="0" style="font-size:0.9em;padding:6px 12px" title="Show this location's gear">Gear <span class="stats-report-gear-toggle-arrow">▼</span></button>
+                        <button class="button button-primary stats-report-equip-btn" data-result-id="${altId}" data-category="${category}" data-activity-name="${activityName}" data-gearset-export="${exp}" data-optimized-pet="${a.optPet ? encodeURIComponent(JSON.stringify(a.optPet)) : ''}" data-optimized-consumable="${a.optCons ? encodeURIComponent(JSON.stringify(a.optCons)) : ''}" data-optimized-service-name="${a.serviceName ? a.serviceName.replace(/"/g, '&quot;') : ''}" data-optimized-service-location="${a.serviceLocation ? a.serviceLocation.replace(/"/g, '&quot;') : ''}" data-optimized-location="${(a.regionLocationId || a.locId || '').replace(/"/g, '&quot;')}" style="font-size:0.9em;padding:6px 14px" title="Equip this location's gearset">Equip</button>
+                        <button class="button button-secondary stats-report-alt-save-btn" data-gearset-export="${exp}" data-alt-name="${saveNm}" style="font-size:0.9em;padding:6px 12px" title="Save this gearset to Gear Sets">Save to Gear Sets</button>
+                        ` : ''}
+                    </div>
+                    ${hasGear ? `<div class="stats-report-gear-preview-container" data-result-id="${altId}" data-gearset-export="${exp}" data-optimized-consumable="${a.optCons ? encodeURIComponent(JSON.stringify(a.optCons)) : ''}" data-optimized-pet="${a.optPet ? encodeURIComponent(JSON.stringify(a.optPet)) : ''}" style="display:none;margin-top:8px"></div>` : ''}
+                </div>`;
+        }).join('');
+        const altExpanded = this._isExpanded('alt:' + row.id);
+        return `
+            <div class="stats-report-alt-locations" style="margin:4px 0 2px">
+                <button type="button" class="stats-report-alt-toggle" data-expanded="${altExpanded ? '1' : '0'}" data-alt-key="alt:${row.id}"
+                        style="background:none;border:none;padding:2px 0;cursor:pointer;color:var(--text-secondary);font-size:0.9em;display:inline-flex;align-items:center;gap:6px;user-select:none">
+                    <span class="stats-report-alt-arrow" aria-hidden="true"
+                          style="display:inline-block;transition:transform .2s ease;transform:rotate(${altExpanded ? '90' : '0'}deg)">▶</span>
+                    <span>${heading} (${alts.length})</span>
+                </button>
+                <div class="stats-report-alt-wrap"
+                     style="display:grid;grid-template-rows:${altExpanded ? '1fr' : '0fr'};transition:grid-template-rows .25s ease">
+                    <div style="overflow:hidden;min-height:0">
+                        <div style="padding:2px 0 2px 4px">${rowsHtml}</div>
+                    </div>
+                </div>
+            </div>`;
+    }
+
+    /**
+     * Parse a result row's metrics_json and report whether it was flagged
+     * gear_gated by the worker (a gear-keyword requirement the player can't
+     * satisfy from owned gear). Such rows render in a separate bottom
+     * "Possible with more gear" sub-section with no rank badge.
+     */
+    _rowGearGated(row) {
+        if (!row) return false;
+        let mj = row.metrics_json;
+        if (typeof mj === 'string') {
+            try { mj = JSON.parse(mj); } catch (_) { return false; }
+        }
+        return !!(mj && mj.gear_gated);
+    }
+
+    /**
+     * Split a group's rows into { normal, gearGated }. Order is preserved
+     * within each bucket (the backend already sorts by score), so the
+     * gear-gated rows arrive best-first.
+     */
+    _partitionGearGated(rows) {
+        const normal = [];
+        const gearGated = [];
+        for (const r of (rows || [])) {
+            (this._rowGearGated(r) ? gearGated : normal).push(r);
+        }
+        return { normal, gearGated };
+    }
+
+    /**
+     * Render the bottom "Possible with more gear" sub-section for a group's
+     * gear-keyword-gated rows. Each row renders with suppressRank=true so it
+     * carries no rank/# badge (its ranking is meaningless — the player can't
+     * actually run it until they own the required gear).
+     */
+    _renderGearGatedSubsection(sectionKey, color, gearGated) {
+        if (!gearGated || !gearGated.length) return '';
+        const total = gearGated.length;
+        const rowsHtml = gearGated
+            .map((r, i) => this._renderResultRow(r, i, total, sectionKey, color, { suppressRank: true }))
+            .join('');
+        return `
+            <div class="stats-report-gear-gated-subsection" style="margin-top:8px;padding-top:6px;border-top:1px dashed var(--border-color,#555)">
+                <div class="stats-report-gear-gated-header"
+                     title="These activities need gear you don't own yet. The optimizer ran over your OWNED gear only — it never assumes you own the required gear."
+                     style="font-size:0.85em;font-weight:600;color:var(--text-secondary);margin:2px 0 6px 2px;text-align:left">
+                    Possible with more gear
+                </div>
+                ${rowsHtml}
+            </div>
+        `;
+    }
+
+    _renderResultRow(row, idx, total, category, rowColor, opts) {
+        const suppressRank = !!(opts && opts.suppressRank);
         const color = this._metricColor(idx, total, category);
-        const metricLabel = CATEGORY_METRIC_LABELS[category] || 'Metric';
+        let metricLabel = CATEGORY_METRIC_LABELS[category] || 'Metric';
         const activityName = row.activity_name || row.skill_name || '—';
         const isSaved = row._saved;
         const hasGearset = !!row.gearset_export;
@@ -3693,11 +5890,20 @@ export class StatsReportPage {
                 }
             }
         }
-        const metricVal = metricValueNum != null
-            ? (category === 'new_items' || category === 'chests' || category === 'chests_recipes'
+        let metricVal = metricValueNum != null
+            ? (category === 'new_items' || category === 'chests' || category === 'chests_recipes' || category === 'target_items'
                 ? Math.ceil(metricValueNum).toLocaleString()
                 : formatFixed(metricValueNum, 2))
             : '—';
+
+        // 2026-08-12 (jwbail): target_items CURRENCY groups (AGT, sea shells)
+        // are units-per-1k-steps (higher = better), not steps/item. Override
+        // the label + use a decimal format instead of the ceil'd steps format.
+        if (category === 'target_items' && metricsBreakdown
+                && (metricsBreakdown.group_kind === 'currency' || metricsBreakdown.metric_kind === 'per_1k')) {
+            metricLabel = '/1k steps';
+            metricVal = metricValueNum != null ? formatFixed(metricValueNum, 2) : '—';
+        }
 
         // For new_items: the item name (from metric_name) is now rendered
         // as the row title in the new layout below — see the new_items
@@ -3716,9 +5922,28 @@ export class StatsReportPage {
         let newItemIconPath = '';
         let newItemName = '';
         let newItemRef = '';
+        let newItemNameTitle = '';
+        let newItemsListHtml = '';
         if (category === 'new_items') {
             const bd = (metricsBreakdown && metricsBreakdown.best_drop) || null;
-            if (bd && bd.item_ref) {
+            const nc = (metricsBreakdown && metricsBreakdown.new_items_combined) || null;
+            const kindKey = (nc && nc.kind) || (bd && bd.kind) || 'collectibles';
+            const kindMeta = KIND_META[kindKey] || KIND_META.collectibles;
+            if (nc && nc.count > 1) {
+                // 2026-07-19 (bug 276fbd0a + follow-up): combined "any new
+                // <kind>" row. One row per (activity, kind) representing the
+                // odds of obtaining ANY still-missing item of that kind (each
+                // reward roll can yield any of them, so the combined rate
+                // beats the single fastest item — and improves the more you
+                // are missing). Header shows a count + the kind's generic
+                // icon; an expandable list below breaks down steps/item for
+                // each specific item. Per-item drop popovers live in the list.
+                newItemName = `${nc.count} new ${kindMeta.label.toLowerCase()}`;
+                newItemRef = '';
+                newItemIconPath = kindMeta.icon;
+                metricLabel = 'steps/any new';
+                newItemsListHtml = this._renderNewItemsBreakdown(nc);
+            } else if (bd && bd.item_ref) {
                 newItemRef = bd.item_ref;
                 newItemName = bd.item_name || row.metric_name || '';
                 newItemIconPath = resolveItemIcon({
@@ -3731,6 +5956,20 @@ export class StatsReportPage {
                 // ref to know the kind, so leave the icon empty and
                 // let the row render with name only.
                 newItemName = row.metric_name;
+            }
+        }
+
+        // target_items: derive item icon + name from extras/metrics_json
+        if (category === 'target_items') {
+            const tiName = (metricsBreakdown && metricsBreakdown.item_name) || row.metric_name || '';
+            const tiRef = (metricsBreakdown && metricsBreakdown.item_ref) || '';
+            newItemName = tiName;
+            newItemRef = tiRef;
+            if (tiRef || tiName) {
+                newItemIconPath = resolveItemIcon({
+                    itemRef: tiRef,
+                    itemName: tiName,
+                });
             }
         }
 
@@ -3925,24 +6164,31 @@ export class StatsReportPage {
                 // a plain location pill (no service prefix) so users
                 // see a meaningful "where" instead of a blank slot.
                 locName = svcLoc;
-                // 2026-06-02 (jwbail v2): look up the actual icon_name
-                // from the locations catalog before slugifying. Location
-                // SVG filenames are type-themed (e.g. castle_white_icon.svg,
-                // port_green_icon.svg) — they are NOT named after the
-                // location. Slugifying the location name produced 404s
-                // for /assets/icons/locations/azurazera.svg and
-                // /assets/icons/locations/bilgemont_port.svg. Falls
-                // back to slugify only if the name isn't in the catalog
-                // (preserving prior behavior for any new location the
-                // catalog hasn't been updated to include).
-                const knownIconName = this._locationIconByName
-                    ? this._locationIconByName.get(svcLoc)
-                    : null;
-                if (knownIconName) {
-                    locIcon = `/assets/icons/locations/${knownIconName}`;
+                if (metricsBreakdown.is_region && metricsBreakdown.region_icon) {
+                    // Service-less recipe: the worker grouped by accessible
+                    // REGION and picked the best (svcLoc is a region name here).
+                    // Render the region icon + region name, not a location icon.
+                    locIcon = metricsBreakdown.region_icon;
                 } else {
-                    const locSlug = svcLoc.toLowerCase().replace(/\s+/g, '_').replace(/'/g, '');
-                    locIcon = `/assets/icons/locations/${locSlug}.svg`;
+                    // 2026-06-02 (jwbail v2): look up the actual icon_name
+                    // from the locations catalog before slugifying. Location
+                    // SVG filenames are type-themed (e.g. castle_white_icon.svg,
+                    // port_green_icon.svg) — they are NOT named after the
+                    // location. Slugifying the location name produced 404s
+                    // for /assets/icons/locations/azurazera.svg and
+                    // /assets/icons/locations/bilgemont_port.svg. Falls
+                    // back to slugify only if the name isn't in the catalog
+                    // (preserving prior behavior for any new location the
+                    // catalog hasn't been updated to include).
+                    const knownIconName = this._locationIconByName
+                        ? this._locationIconByName.get(svcLoc)
+                        : null;
+                    if (knownIconName) {
+                        locIcon = `/assets/icons/locations/${knownIconName}`;
+                    } else {
+                        const locSlug = svcLoc.toLowerCase().replace(/\s+/g, '_').replace(/'/g, '');
+                        locIcon = `/assets/icons/locations/${locSlug}.svg`;
+                    }
                 }
             }
             // 2026-06-02 (jwbail): row's main icon is the recipe OUTPUT
@@ -3964,17 +6210,146 @@ export class StatsReportPage {
                 recipeIconPath = `/assets/icons/items/containers/${chestSlug}.svg`;
             }
         }
+        // Multi-location / service grouping (increment 4a): when several
+        // locations (or services) yield the IDENTICAL optimal gearset, show
+        // them together ("Azurazera or Frusenholm" / "Basic Kitchen (A, B, or
+        // C)") instead of only the primary. Data comes from the worker's
+        // same_set_locations (activities) and service_grouped_name /
+        // service_alt_locations (chests_recipes). Text-only; no layout change.
+        if (metricsBreakdown) {
+            if (category === 'chests_recipes'
+                    && metricsBreakdown.service_grouped_name
+                    && Array.isArray(metricsBreakdown.service_alt_locations)
+                    && metricsBreakdown.service_alt_locations.length > 1) {
+                locName = metricsBreakdown.service_grouped_name;
+            } else if (metricsBreakdown.primary_location) {
+                // Activity multi-location: display the BEST location the
+                // multi-loc pass picked (primary_location), not the activity's
+                // first-listed location (firstLoc/row.location). Otherwise the
+                // row shows the first location while the best one appears as an
+                // "alternative", which reads as a duplicate (e.g. Sea fishing
+                // Net showed Beach of Woes as both primary and alt while the
+                // best was Granfiddich Shores). Append any same_set (tied)
+                // locations. (2026-07-31)
+                const primaryLoc = metricsBreakdown.primary_location;
+                const otherLocs = (Array.isArray(metricsBreakdown.same_set_locations)
+                    ? metricsBreakdown.same_set_locations.filter(l => l && l !== primaryLoc)
+                    : []);
+                locName = otherLocs.length
+                    ? `${primaryLoc} or ${otherLocs.join(' or ')}`
+                    : primaryLoc;
+                const _pIcon = this._locationIconByName
+                    ? this._locationIconByName.get(primaryLoc) : null;
+                locIcon = _pIcon
+                    ? `/assets/icons/locations/${_pIcon}`
+                    : `/assets/icons/locations/${primaryLoc.toLowerCase().replace(/\s+/g, '_').replace(/'/g, '')}.svg`;
+            }
+        }
+
+        // Primary service (i): full-stat popover next to the service pill,
+        // rendered identically to column 3 via the shared service-stats-popover
+        // module. Only for chests_recipes rows carrying a real service with stats
+        // (service-less region rows have no service_stats -> no icon).
+        let serviceIHtml = '';
+        if (category === 'chests_recipes' && metricsBreakdown
+                && metricsBreakdown.service_stats
+                && serviceHasStats(metricsBreakdown.service_stats)) {
+            const pop = buildServiceStatsPopoverHtml(metricsBreakdown.service_stats, {
+                recipeSkill: metricsBreakdown.service_skill || '',
+                contextLocation: metricsBreakdown.service_location_id || '' });
+            if (pop) {
+                const esc = pop.replace(/"/g, '&quot;');
+                const title = (metricsBreakdown.service_name || 'Service').replace(/"/g, '&quot;');
+                serviceIHtml = ` <span class="travel-info-icon service-info-icon" data-info-title="${title}" data-info-html="${esc}" role="button" aria-label="Show service stats" style="cursor:pointer">ⓘ</span>`;
+            }
+        }
+
         const displayIcon = recipeIconPath || actIcon;
 
+        // Bug 2 (2026-07-29): when a recipe's same-set group spans multiple
+        // SERVICE TYPES (e.g. Alight Kitchen + Basic Kitchen), or a service-less
+        // recipe spans multiple REGIONS, render one line per type/region with
+        // its OWN icon instead of jamming everything under the primary's name.
+        let locRowsHtml = '';
+        const _svcTypeGroups = (category === 'chests_recipes' && metricsBreakdown
+            && Array.isArray(metricsBreakdown.service_type_groups))
+            ? metricsBreakdown.service_type_groups : [];
+        const _regionLines = (metricsBreakdown && metricsBreakdown.is_region
+            && Array.isArray(metricsBreakdown.region_lines))
+            ? metricsBreakdown.region_lines : [];
+        if (_svcTypeGroups.length > 1) {
+            locRowsHtml = _svcTypeGroups.map(g => {
+                const gi = g.icon ? `<img src="${g.icon}" alt="" width="30" height="30" class="stats-report-loc-icon" onerror="this.style.display='none'">` : '';
+                let iHtml = '';
+                if (g.service_stats && serviceHasStats(g.service_stats)) {
+                    const pop = buildServiceStatsPopoverHtml(g.service_stats, {
+                        recipeSkill: (metricsBreakdown.service_skill || ''),
+                        contextLocation: (g.location_id || '') });
+                    if (pop) {
+                        const esc = pop.replace(/"/g, '&quot;');
+                        const title = (g.name || 'Service').replace(/"/g, '&quot;');
+                        iHtml = ` <span class="travel-info-icon service-info-icon" data-info-title="${title}" data-info-html="${esc}" role="button" aria-label="Show service stats" style="cursor:pointer">ⓘ</span>`;
+                    }
+                }
+                return `<span class="stats-report-loc-row">${gi}<span>${g.grouped_name}${iHtml}</span></span>`;
+            }).join('');
+        } else if (_regionLines.length > 1) {
+            locRowsHtml = _regionLines.map(r => {
+                const ri = r.icon ? `<img src="${r.icon}" alt="" width="30" height="30" class="stats-report-loc-icon" onerror="this.style.display='none'">` : '';
+                return `<span class="stats-report-loc-row">${ri}<span>${r.display}</span></span>`;
+            }).join('');
+        }
+
+        // Include-unavailable warning badges (orange "Requires X" style, matching
+        // the existing missing_input badge). A row can only appear when its
+        // gating dimension is enabled, so whatever reasons are present always
+        // render. Gear-keyword requirements use "Required:" wording; everything
+        // else uses "Requires". Built once and injected into both top-row layouts.
+        const _warnSvg = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" aria-hidden="true" style="flex-shrink:0"><path d="M12 2 L1 22 L23 22 Z" stroke="#e8820c" stroke-width="2" stroke-linejoin="round" fill="rgba(232,130,12,0.15)"/><path d="M12 9 L12 14" stroke="#e8820c" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="17.5" r="1.2" fill="#e8820c"/></svg>`;
+        const _mkWarn = (text, title) => `<span class="stats-report-unavail-badge" title="${String(title || text).replace(/"/g, '&quot;')}" style="display:inline-flex;align-items:center;gap:4px;color:#e8820c;font-size:0.85em;font-weight:600;margin-top:2px">${_warnSvg}${String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;')}</span>`;
+        const _warnParts = [];
+        if (metricsBreakdown) {
+            const mb = metricsBreakdown;
+            if (mb.missing_level && mb.missing_level.skill) {
+                _warnParts.push(_mkWarn(`Requires ${mb.missing_level.skill} level ${mb.missing_level.level}`,
+                    `Your ${mb.missing_level.skill} level is too low to unlock this activity.`));
+            }
+            if (mb.missing_location && mb.missing_location.name) {
+                const hint = mb.missing_location.hint ? ` (${mb.missing_location.hint})` : '';
+                _warnParts.push(_mkWarn(`Requires access to ${mb.missing_location.name}${hint}`,
+                    `This activity's location isn't accessible to your character yet.`));
+            }
+            if (mb.missing_tool && mb.missing_tool.keyword_display) {
+                const lvl = mb.missing_tool.min_level > 0 ? ` (Lv.${mb.missing_tool.min_level}+)` : '';
+                _warnParts.push(_mkWarn(`Requires ${mb.missing_tool.keyword_display}${lvl}`,
+                    `You don't own a ${mb.missing_tool.keyword_display}${lvl} — the tool slot is left empty in the optimized gearset.`));
+            }
+            if (mb.missing_other && mb.missing_other.detail) {
+                _warnParts.push(_mkWarn(`Requires ${mb.missing_other.detail}`,
+                    `This activity has an unmet ${mb.missing_other.kind || 'other'} requirement.`));
+            }
+            if (mb.missing_input && mb.missing_input.keyword_display) {
+                const lvl = mb.missing_input.min_level > 0 ? ` (Lv.${mb.missing_input.min_level}+)` : '';
+                _warnParts.push(_mkWarn(`Requires ${mb.missing_input.keyword_display}${lvl}`,
+                    `You don't own a ${mb.missing_input.keyword_display}${lvl} — required to perform this activity. The displayed metric assumes you have one.`));
+            }
+            if (mb.missing_gear && mb.missing_gear.keyword_display) {
+                const own = (Number(mb.missing_gear.owned) > 0) ? ` (you own ${mb.missing_gear.owned})` : '';
+                _warnParts.push(_mkWarn(`Required: ${mb.missing_gear.count}x ${mb.missing_gear.keyword_display}${own}`,
+                    `This activity needs ${mb.missing_gear.count}x ${mb.missing_gear.keyword_display}. The optimizer runs over your OWNED gear only — it never assumes you own this gear.`));
+            }
+        }
+        const warningsHtml = _warnParts.join('');
+
         return `
-            <div class="stats-report-result-row">
+            <div class="stats-report-result-row"${category === 'target_items' ? ` data-metric-name="${(row.metric_name || '').replace(/"/g, '&quot;')}" data-activity-name="${(activityName || '').replace(/"/g, '&quot;')}" data-target-keywords="${((metricsBreakdown && metricsBreakdown.item_keywords) || []).join(',').replace(/"/g, '&quot;')}" data-target-category-label="${((metricsBreakdown && metricsBreakdown.target_category_label) || '').replace(/"/g, '&quot;')}"` : ''}>
                 <!-- Floating rank circle in the top-left corner. Overhangs
                      the card by ~1/3 of its diameter on top and left so it
                      reads as a "floating badge" anchored to the corner.
                      For ranks 1-3 it carries the gold/silver/bronze glow
                      applied via .stats-report-rank-box-* classes. For 4+
                      it stays neutral (just the white border + flat bg). -->
-                <span class="stats-report-rank stats-report-rank-floating ${rankBoxClass}">${idx + 1}</span>
+                <span class="stats-report-rank stats-report-rank-floating ${rankBoxClass}" style="${suppressRank ? 'display:none' : ''}">${suppressRank ? '' : (idx + 1)}</span>
                 <!-- Top row layout differs for new_items rows (per user
                      direction 2026-05-24). All other categories keep the
                      activity-icon-left layout. New layout for new_items:
@@ -3983,7 +6358,7 @@ export class StatsReportPage {
                                           location
                      The item icon + name double as drop-popover anchors
                      (wired in attachEvents → wireDropAnchor). -->
-                ${category === 'new_items' ? `
+                ${(category === 'new_items') ? `
                 <div class="stats-report-row-top stats-report-row-top-new-items"
                      style="display:flex;align-items:flex-start;gap:10px">
                     ${newItemIconPath ? `
@@ -3998,7 +6373,7 @@ export class StatsReportPage {
                     ` : ''}
                     <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;text-align:left">
                         <span class="stats-report-new-item-name"
-                              style="font-weight:600;font-size:1.05em">
+                              style="font-weight:600;font-size:1.05em"${newItemNameTitle ? ` title="${newItemNameTitle.replace(/"/g, '&quot;')}"` : ''}>
                             ${newItemName || '—'}
                         </span>
                         <span class="stats-report-activity-name" style="color:var(--text-secondary);font-size:0.9em">${activityName}</span>
@@ -4008,18 +6383,7 @@ export class StatsReportPage {
                                 <span style="color:var(--text-muted);font-size:0.85em">${locName}</span>
                             </span>
                         ` : ''}
-                        ${(metricsBreakdown && metricsBreakdown.missing_input && metricsBreakdown.missing_input.keyword_display) ? `
-                            <span class="stats-report-missing-input-badge"
-                                  title="You don't own a ${metricsBreakdown.missing_input.keyword_display}${metricsBreakdown.missing_input.min_level > 0 ? ` (Lv.${metricsBreakdown.missing_input.min_level}+)` : ''} — required to perform this activity. The displayed metric assumes you have one."
-                                  style="display:inline-flex;align-items:center;gap:4px;color:#e8820c;font-size:0.85em;font-weight:600;margin-top:2px">
-                                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" aria-hidden="true" style="flex-shrink:0">
-                                    <path d="M12 2 L1 22 L23 22 Z" stroke="#e8820c" stroke-width="2" stroke-linejoin="round" fill="rgba(232,130,12,0.15)"/>
-                                    <path d="M12 9 L12 14" stroke="#e8820c" stroke-width="2" stroke-linecap="round"/>
-                                    <circle cx="12" cy="17.5" r="1.2" fill="#e8820c"/>
-                                </svg>
-                                Requires ${metricsBreakdown.missing_input.keyword_display}${metricsBreakdown.missing_input.min_level > 0 ? ` (Lv.${metricsBreakdown.missing_input.min_level}+)` : ''}
-                            </span>
-                        ` : ''}
+                        ${warningsHtml}
                     </div>
                 </div>
                 ` : `
@@ -4030,27 +6394,17 @@ export class StatsReportPage {
                     <img src="${displayIcon}" alt="${activityName}" width="50" height="50" class="stats-report-activity-icon" style="flex-shrink:0" onerror="this.style.visibility='hidden'">
                     <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;text-align:left">
                         <span class="stats-report-activity-name">${activityName}${subLabel}</span>
-                        ${locName ? `
+                        ${locRowsHtml ? locRowsHtml : (locName ? `
                             <span class="stats-report-loc-row">
                                 ${locIcon ? `<img src="${locIcon}" alt="" width="30" height="30" class="stats-report-loc-icon" onerror="this.style.display='none'">` : ''}
-                                <span>${locName}</span>
+                                <span>${locName}${serviceIHtml}</span>
                             </span>
-                        ` : ''}
-                        ${(metricsBreakdown && metricsBreakdown.missing_input && metricsBreakdown.missing_input.keyword_display) ? `
-                            <span class="stats-report-missing-input-badge"
-                                  title="You don't own a ${metricsBreakdown.missing_input.keyword_display}${metricsBreakdown.missing_input.min_level > 0 ? ` (Lv.${metricsBreakdown.missing_input.min_level}+)` : ''} — required to perform this activity. The displayed metric assumes you have one."
-                                  style="display:inline-flex;align-items:center;gap:4px;color:#e8820c;font-size:0.85em;font-weight:600;margin-top:2px">
-                                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" aria-hidden="true" style="flex-shrink:0">
-                                    <path d="M12 2 L1 22 L23 22 Z" stroke="#e8820c" stroke-width="2" stroke-linejoin="round" fill="rgba(232,130,12,0.15)"/>
-                                    <path d="M12 9 L12 14" stroke="#e8820c" stroke-width="2" stroke-linecap="round"/>
-                                    <circle cx="12" cy="17.5" r="1.2" fill="#e8820c"/>
-                                </svg>
-                                Requires ${metricsBreakdown.missing_input.keyword_display}${metricsBreakdown.missing_input.min_level > 0 ? ` (Lv.${metricsBreakdown.missing_input.min_level}+)` : ''}
-                            </span>
-                        ` : ''}
+                        ` : '')}
+                        ${warningsHtml}
                     </div>
                 </div>
                 `}
+                ${newItemsListHtml}
                 <!-- Metric strip below the activity row. The pill itself
                      sits left-aligned (was right) per user direction;
                      trimmed horizontal padding to make it visually
@@ -4090,9 +6444,18 @@ export class StatsReportPage {
                             data-optimized-input="${metricsBreakdown && metricsBreakdown.optimized_input ? encodeURIComponent(JSON.stringify(metricsBreakdown.optimized_input)) : ''}"
                             data-optimized-service-name="${metricsBreakdown && metricsBreakdown.service_name ? (metricsBreakdown.service_name).replace(/"/g, '&quot;') : ''}"
                             data-optimized-service-location="${metricsBreakdown && metricsBreakdown.service_location ? (metricsBreakdown.service_location).replace(/"/g, '&quot;') : ''}"
+                            data-optimized-location="${((metricsBreakdown && metricsBreakdown.region_location_id) ? metricsBreakdown.region_location_id : ((metricsBreakdown && metricsBreakdown.primary_location) ? String(metricsBreakdown.primary_location).toLowerCase().replace(/\s+/g, '_').replace(/'/g, '') : (row.location || ''))).replace(/"/g, '&quot;')}"
                             style="font-size:0.9em;padding:6px 14px"
                             title="Equip this gearset to column 2 and open the activity">
                             Equip
+                        </button>
+                    ` : ''}
+                    ${hasGearset ? `
+                        <button class="button button-secondary stats-report-export-btn"
+                            data-gearset-export="${row.gearset_export}"
+                            style="font-size:0.9em;padding:6px 12px"
+                            title="Copy this gearset's export code to the clipboard (no need to equip first)">
+                            Export
                         </button>
                     ` : ''}
                     ${hasGearset ? `
@@ -4165,6 +6528,7 @@ export class StatsReportPage {
                         <!-- Lazily populated by _toggleGearPreview() on first expand. Spans the full card width — was margin-left:88px before the rank moved to a floating badge. -->
                     </div>
                 ` : ''}
+                ${this._renderAltLocations(row, category, metricsBreakdown, idx, total)}
             </div>
         `;
     }
@@ -4177,6 +6541,12 @@ export class StatsReportPage {
         if (total <= 1) return '#4caf50';
         // Normalize 0..1 where 0=best, 1=worst
         const t = idx / (total - 1);
+        return this._colorForT(t);
+    }
+
+    /** Green(0)→yellow→red(1) gradient color for a normalized position t. */
+    _colorForT(t) {
+        t = Math.max(0, Math.min(1, t));
         // HSL: green=120, yellow=60, red=0
         const hue = Math.round(120 * (1 - t));
         return `hsl(${hue}, 70%, 38%)`;
@@ -4234,6 +6604,42 @@ export class StatsReportPage {
             for (const r of arr) {
                 if (String(r.id) === String(resultId)) {
                     return { row: r, category: cat };
+                }
+            }
+        }
+        // Synthetic alternative-location id "<baseId>::alt::<i>": resolve to a
+        // lightweight read-only row carrying that alt's gearset_export, so the
+        // slot popup can show what's equipped in each alt slot (user: "clicking a
+        // gear slot [in the alt dropdown] does not have a slot popup"). Edits on
+        // alts don't persist — see the guard in _applySlotEdit.
+        const _m = String(resultId).match(/^(.+)::alt::(\d+)$/);
+        if (_m) {
+            for (const cat of Object.keys(this._results || {})) {
+                for (const r of (this._results[cat] || [])) {
+                    if (String(r.id) !== _m[1]) continue;
+                    let mb = null;
+                    try {
+                        mb = r.metrics_json
+                            ? (typeof r.metrics_json === 'string' ? JSON.parse(r.metrics_json) : r.metrics_json)
+                            : null;
+                    } catch (_) { mb = null; }
+                    const list = (mb && (mb.service_alternatives
+                        || (Array.isArray(mb.alt_locations) ? mb.alt_locations : []))) || [];
+                    const alt = list[parseInt(_m[2], 10)];
+                    const exp = alt && (alt.gearset_export || alt.export);
+                    if (!exp) return null;
+                    return {
+                        row: {
+                            id: String(resultId),
+                            gearset_export: exp,
+                            activity_name: r.activity_name,
+                            recipe_name: r.recipe_name,
+                            skill_name: r.skill_name,
+                            metrics_json: r.metrics_json,
+                        },
+                        category: cat,
+                        isAlt: true,
+                    };
                 }
             }
         }
@@ -4341,17 +6747,21 @@ export class StatsReportPage {
         if (!mj) return null;
         const alts = mj._slot_alternatives;
         const locked = mj._slot_locked_alternatives;
+        const hidden = mj._slot_hidden_alternatives;
         const hasAlts = alts && Object.keys(alts).length > 0;
         const hasLocked = locked && Object.keys(locked).length > 0;
-        if (!hasAlts && !hasLocked) return null;
+        const hasHidden = hidden && Object.keys(hidden).length > 0;
+        if (!hasAlts && !hasLocked && !hasHidden) return null;
         // Clone before anchoring — _anchorAlternativesToRow mutates in
         // place and mj is the live (cached) row object.
-        let a = {}, l = {};
+        let a = {}, l = {}, h = {};
         try { a = JSON.parse(JSON.stringify(alts || {})); } catch (_) { a = {}; }
         try { l = JSON.parse(JSON.stringify(locked || {})); } catch (_) { l = {}; }
+        try { h = JSON.parse(JSON.stringify(hidden || {})); } catch (_) { h = {}; }
         this._anchorAlternativesToRow(a, row, category);
         this._anchorAlternativesToRow(l, row, category);
-        return { alternatives: a, lockedAlternatives: l };
+        this._anchorAlternativesToRow(h, row, category);
+        return { alternatives: a, lockedAlternatives: l, hiddenAlternatives: h };
     }
 
     /**
@@ -4474,6 +6884,7 @@ export class StatsReportPage {
                 alternativesEntry = {
                     alternatives: stored.alternatives,
                     lockedAlternatives: stored.lockedAlternatives,
+                    hiddenAlternatives: stored.hiddenAlternatives,
                     gearsetKey,
                     pending: null,
                 };
@@ -4483,6 +6894,7 @@ export class StatsReportPage {
             alternativesEntry = {
                 alternatives: {},
                 lockedAlternatives: {},
+                hiddenAlternatives: {},
                 gearsetKey,
                 pending: api.getStatsReportSlotAlternatives({
                     activity_name: row.activity_name,
@@ -4491,6 +6903,7 @@ export class StatsReportPage {
                     chest_name: row.chest_name || null,
                     target_item: targetItem,
                     gearset_slots: equippedSlots,
+                    result_id: resultId,
                 }),
             };
             this._alternativesCache.set(String(resultId), alternativesEntry);
@@ -4500,6 +6913,23 @@ export class StatsReportPage {
                 if (resp && resp.success) {
                     alternativesEntry.alternatives = resp.alternatives || {};
                     alternativesEntry.lockedAlternatives = resp.locked_alternatives || {};
+                    alternativesEntry.hiddenAlternatives = resp.hidden_alternatives || {};
+                    // Mirror the server's DB cache-write into the in-memory
+                    // row so a later reopen this session serves via
+                    // _storedRowAlternatives (no re-fetch). Store the RAW
+                    // endpoint values — _storedRowAlternatives re-anchors on
+                    // read, matching how worker-stored alts were consumed.
+                    if (found && found.row) {
+                        let _mj = found.row.metrics_json;
+                        try {
+                            _mj = (typeof _mj === 'string') ? JSON.parse(_mj) : (_mj || {});
+                        } catch (_) { _mj = {}; }
+                        if (!_mj || typeof _mj !== 'object') _mj = {};
+                        _mj._slot_alternatives = resp.alternatives || {};
+                        _mj._slot_locked_alternatives = resp.locked_alternatives || {};
+                        _mj._slot_hidden_alternatives = resp.hidden_alternatives || {};
+                        found.row.metrics_json = _mj;
+                    }
                     // 2026-06-04 (jwbail): anchor the alt old/new values to
                     // the ROW's displayed metric. The endpoint scores the
                     // current gearset in a slightly different environment
@@ -4515,6 +6945,7 @@ export class StatsReportPage {
                     // the row and "new" a consistent projection.
                     this._anchorAlternativesToRow(alternativesEntry.alternatives, found.row, category);
                     this._anchorAlternativesToRow(alternativesEntry.lockedAlternatives, found.row, category);
+                    this._anchorAlternativesToRow(alternativesEntry.hiddenAlternatives, found.row, category);
                 }
                 alternativesEntry.pending = null;
                 // Hot-swap into the live popup if it's still showing
@@ -4527,6 +6958,7 @@ export class StatsReportPage {
                     && popup._treeNodeContext.nodeId === `stats-report:${resultId}`) {
                     popup._treeNodeContext.alternatives = alternativesEntry.alternatives;
                     popup._treeNodeContext.lockedAlternatives = alternativesEntry.lockedAlternatives;
+                    popup._treeNodeContext.hiddenAlternatives = alternativesEntry.hiddenAlternatives;
                     // Fetch resolved — drop the loading affordance so the
                     // section renders the list (or "No better alternatives").
                     popup._treeNodeContext.alternativesLoading = false;
@@ -4540,7 +6972,12 @@ export class StatsReportPage {
                     // out it does populate, just stays collapsed.)
                     const slotAlts = (alternativesEntry.alternatives || {})[slot] || [];
                     const slotLocked = (alternativesEntry.lockedAlternatives || {})[slot] || [];
-                    if (slotAlts.length + slotLocked.length > 0) {
+                    const slotHidden = (alternativesEntry.hiddenAlternatives || {})[slot] || [];
+                    // Respect the user's persisted collapse choice — don't
+                    // re-expand if they explicitly hid the section (bug
+                    // 019399d9: the group "routinely uncollapses itself").
+                    const altPrefCollapsed = typeof popup._altCollapsedPref === 'function' && popup._altCollapsedPref();
+                    if (!altPrefCollapsed && slotAlts.length + slotLocked.length + slotHidden.length > 0) {
                         popup._alternativesExpanded = true;
                     }
                     if (typeof popup._rerenderInPlace === 'function') {
@@ -4578,6 +7015,7 @@ export class StatsReportPage {
                 equippedSlots,
                 alternatives: alternativesEntry.alternatives,
                 lockedAlternatives: alternativesEntry.lockedAlternatives,
+                hiddenAlternatives: alternativesEntry.hiddenAlternatives,
                 // 2026-06-05 (jwbail): true while the fetch is still in
                 // flight so the popup shows a "Finding upgrades…" spinner
                 // instead of prematurely rendering "No better alternatives".
@@ -4617,6 +7055,10 @@ export class StatsReportPage {
      * updates the pill display + asterisk, and patches the tile icon.
      */
     async _applySlotEdit(resultId, slot, item) {
+        // Alternative-location previews are read-only: their slot popup exists
+        // only to show what's equipped. Editing them has no result row to recalc
+        // (and no persistence), so ignore selections rather than 404 the recalc.
+        if (String(resultId).includes('::alt::')) return;
         const found = this._findRow(resultId);
         if (!found) return;
         const row = found.row;
@@ -5058,6 +7500,41 @@ export class StatsReportPage {
             if (petAttr) {
                 const pet = JSON.parse(decodeURIComponent(petAttr));
                 if (pet && pet.name) {
+                    // Bug 4 (2026-07-29): the worker emits variant:'normal'
+                    // pool-wide, so equipping sent the col-2 pet slot to the
+                    // adult default color even though the gear preview showed
+                    // the user's real variant/age. Resolve the user's actual
+                    // variant + age icon here the SAME way the preview does
+                    // (user_overrides.items[petId].variant -> base
+                    // items[petId].variant) and recompute the icon so the
+                    // equipped pet matches the preview exactly.
+                    try {
+                        const petId = pet.itemId
+                            || String(pet.name || '').toLowerCase().replace(/\s+/g, '_');
+                        const st = (typeof store !== 'undefined' && store.state) ? store.state : {};
+                        const ov = (((st.ui || {}).user_overrides || {}).items || {})[petId] || {};
+                        const base = (st.items || {})[petId] || {};
+                        const v = ov.variant !== undefined ? ov.variant
+                            : (base.variant !== undefined ? base.variant : null);
+                        if (v) pet.variant = v;
+                        let maxLevel = pet.max_level || 0;
+                        try {
+                            const catalog = window.api?._catalogCache;
+                            const catalogItems = (catalog && catalog.items) || [];
+                            const fullItem = catalogItems.find(it =>
+                                (it.name && it.name.toLowerCase() === pet.name.toLowerCase())
+                                || it.id === pet.itemId || it.uuid === pet.itemId);
+                            if (fullItem && fullItem.max_level) maxLevel = fullItem.max_level;
+                        } catch (_) { /* non-fatal */ }
+                        if (maxLevel) pet.max_level = maxLevel;
+                        if (typeof getPetIconPath === 'function') {
+                            pet.icon_path = getPetIconPath(
+                                pet.name,
+                                pet.level !== undefined ? pet.level : 0,
+                                pet.variant || 'normal',
+                                maxLevel);
+                        }
+                    } catch (_) { /* non-fatal — fall back to worker's pet meta */ }
                     extraSlots = extraSlots || {};
                     extraSlots.pet = { ...pet, type: 'pet' };
                 }
@@ -5125,6 +7602,7 @@ export class StatsReportPage {
                             entry = {
                                 alternatives: stored.alternatives,
                                 lockedAlternatives: stored.lockedAlternatives,
+                                hiddenAlternatives: stored.hiddenAlternatives,
                                 gearsetKey,
                             };
                             this._alternativesCache.set(String(resultId), entry);
@@ -5137,15 +7615,18 @@ export class StatsReportPage {
                             chest_name: found.row.chest_name || null,
                             target_item: this._rowTargetItem(found.row, found.category),
                             gearset_slots: equippedSlots,
+                            result_id: resultId,
                         });
                         if (!resp || !resp.success) return null;
                         entry = {
                             alternatives: resp.alternatives || {},
                             lockedAlternatives: resp.locked_alternatives || {},
+                            hiddenAlternatives: resp.hidden_alternatives || {},
                             gearsetKey,
                         };
                         this._anchorAlternativesToRow(entry.alternatives, found.row, found.category);
                         this._anchorAlternativesToRow(entry.lockedAlternatives, found.row, found.category);
+                        this._anchorAlternativesToRow(entry.hiddenAlternatives, found.row, found.category);
                         this._alternativesCache.set(String(resultId), entry);
                     }
                     return entry;
@@ -5281,6 +7762,38 @@ export class StatsReportPage {
                         } catch (svcErr) {
                             console.warn('[StatsReportPage:Equip] failed to resolve suggested service:', svcErr);
                         }
+                    } else {
+                        // Service-less recipe (region row): no service to resolve,
+                        // but pick a concrete location in the chosen region so
+                        // column 2 scores at a real location instead of leaving
+                        // the location blank (user: equip should select the first
+                        // location in that region). region_location_id is the
+                        // optimizer's chosen best_loc within the primary region.
+                        try {
+                            // Prefer the Equip button's own location: for an
+                            // ALTERNATIVE region the button carries that region's
+                            // concrete location id (data-optimized-location); only
+                            // fall back to the primary row's region_location_id.
+                            // Without this, an alt region equip used the primary's
+                            // location (wrong region) or the region name (not a
+                            // location). (#5, 2026-07-31)
+                            const btnLoc = ($btn.attr('data-optimized-location') || '').trim();
+                            if (btnLoc) {
+                                if (!store.state.column3) store.state.column3 = {};
+                                store.state.column3.selectedLocation = btnLoc;
+                            } else {
+                                const rf = this._findRow(resultId);
+                                let rmb = null;
+                                if (rf && rf.row && rf.row.metrics_json) {
+                                    rmb = typeof rf.row.metrics_json === 'string'
+                                        ? JSON.parse(rf.row.metrics_json) : rf.row.metrics_json;
+                                }
+                                if (rmb && rmb.is_region && rmb.region_location_id) {
+                                    if (!store.state.column3) store.state.column3 = {};
+                                    store.state.column3.selectedLocation = rmb.region_location_id;
+                                }
+                            }
+                        } catch (_) { /* non-fatal */ }
                     }
                     if (window.recipeSelector && typeof window.recipeSelector.selectRecipe === 'function') {
                         window.recipeSelector.selectRecipe(recipeId);
@@ -5294,6 +7807,24 @@ export class StatsReportPage {
                             store._saveColumn3Selection();
                         }
                     }
+                    // #6 (2026-07-30): when the recipe is ALREADY selected (e.g.
+                    // equipping a different alt-service of the same recipe),
+                    // selectRecipe is a re-select and onRecipeChange restores the
+                    // service/location asynchronously — but the col-3 location
+                    // dropdown keeps its OWN state and won't resync on a same-
+                    // recipe re-select, so the dropdown showed the stale location.
+                    // Explicitly notify selectedService + selectedLocation so
+                    // recipe-info-section.onLocationChange fires and re-renders the
+                    // dropdown to the equipped location. onRecipeChange reads the
+                    // same store values, so this only ever re-asserts the correct
+                    // location (the onLocationChange value-diff guard makes it a
+                    // no-op when already applied).
+                    if (store.state.column3 && store.state.column3.selectedService != null) {
+                        store._notifySubscribers('column3.selectedService');
+                    }
+                    if (store.state.column3 && store.state.column3.selectedLocation != null) {
+                        store._notifySubscribers('column3.selectedLocation');
+                    }
                 } else {
                     console.warn(
                         '[StatsReportPage:Equip] could not resolve recipe id for name=', activityName,
@@ -5303,6 +7834,18 @@ export class StatsReportPage {
             } else if (activityName) {
                 const activityId = activityIdFromName(activityName);
                 if (activityId) {
+                    // #D (2026-07-30): pre-set the equipped location so
+                    // activity-info-section.onActivityChange restores it (it
+                    // matches store.state.column3.selectedLocation to a location
+                    // id, else defaults to locations[0]). Without this the
+                    // activity opened at its FIRST location instead of the
+                    // equipped one (the primary's best location, or the chosen
+                    // alternative location).
+                    const actLoc = ($btn.attr('data-optimized-location') || '').trim();
+                    if (actLoc) {
+                        if (!store.state.column3) store.state.column3 = {};
+                        store.state.column3.selectedLocation = actLoc;
+                    }
                     if (window.activitySelector && typeof window.activitySelector.selectActivity === 'function') {
                         window.activitySelector.selectActivity(activityId);
                     } else {
@@ -5313,6 +7856,13 @@ export class StatsReportPage {
                         if (typeof store._saveColumn3Selection === 'function') {
                             store._saveColumn3Selection();
                         }
+                    }
+                    // Resync the location dropdown even on a same-activity
+                    // re-equip (selectActivity is a re-select; the activity's
+                    // location dropdown keeps its own state and won't resync
+                    // without a selectedLocation notify). Mirrors the recipe fix.
+                    if (actLoc) {
+                        store._notifySubscribers('column3.selectedLocation');
                     }
                 }
             }
@@ -5325,14 +7875,59 @@ export class StatsReportPage {
             // selectors already ran above), so it wins the last write
             // without blocking navigation on the cold-cache fetch. See the
             // _equipAltsReady comment above.
+            //
+            // 2026-09-08 (jwbail): set the computing flag HERE — after the
+            // selectors ran (they synchronously null gearsets.alternatives and
+            // would clobber an earlier flag) — and notify so column-2's
+            // nonowned-upgrades-section flips to "⏳ Finding upgrades…"
+            // immediately (the slot popup reads the same flag). Cleared in the
+            // .then/.catch below.
+            if (!store.state.gearsets) store.state.gearsets = {};
+            store.state.gearsets.alternativesComputing = true;
+            store._notifySubscribers('gearsets.alternativesComputing');
             _equipAltsReady.then((_alts) => {
-                if (!_alts) return;
                 if (!store.state.gearsets) store.state.gearsets = {};
+                // Fetch settled — drop the "Finding upgrades…" affordance
+                // regardless of outcome.
+                store.state.gearsets.alternativesComputing = false;
+                store._notifySubscribers('gearsets.alternativesComputing');
+                if (!_alts) {
+                    // No alternatives (fetch failed / returned nothing) —
+                    // notify so the section + popup re-render out of the
+                    // spinner into their no-alternatives affordance.
+                    store._notifySubscribers('gearsets.alternatives');
+                    return;
+                }
                 store.state.gearsets.alternatives = _alts.alternatives || {};
                 store.state.gearsets.lockedAlternatives = _alts.lockedAlternatives || {};
+                store.state.gearsets.hiddenAlternatives = _alts.hiddenAlternatives || {};
                 store._notifySubscribers('gearsets.alternatives');
                 store._notifySubscribers('gearsets.lockedAlternatives');
-            }).catch(() => { /* non-fatal */ });
+                store._notifySubscribers('gearsets.hiddenAlternatives');
+                // 2026-09-08 (jwbail): persist the equipped alternatives to
+                // ui_config so they survive a reload — same as a normal
+                // column-2 optimize (state.js loadGearSetFromExport syncs
+                // ui.alternatives / ui.locked_alternatives /
+                // ui.hidden_alternatives). Previously the goals-report equip
+                // only set these in-memory; worse, the loadGearSetFromExport
+                // call above (extraSlots has no _alternatives) had already
+                // synced ui.alternatives=null, so a reload dropped them.
+                // _syncToBackend is debounced per-path (last write within
+                // 500ms wins), and this .then() microtask runs after that
+                // null-sync, so the real alternatives are the value that
+                // gets PATCHed.
+                if (typeof store._syncToBackend === 'function') {
+                    store._syncToBackend('ui.alternatives', store.state.gearsets.alternatives);
+                    store._syncToBackend('ui.locked_alternatives', store.state.gearsets.lockedAlternatives);
+                    store._syncToBackend('ui.hidden_alternatives', store.state.gearsets.hiddenAlternatives);
+                }
+            }).catch(() => { /* non-fatal */
+                if (store.state.gearsets) {
+                    store.state.gearsets.alternativesComputing = false;
+                    store._notifySubscribers('gearsets.alternativesComputing');
+                    store._notifySubscribers('gearsets.alternatives');
+                }
+            });
 
             api.showSuccess(`Equipped "${gearsetName}"`);
         } catch (err) {

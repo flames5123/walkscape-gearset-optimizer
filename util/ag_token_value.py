@@ -178,7 +178,16 @@ def compute_agt_targets_for_activity(activity, drop_rates, stats=None,
         if fine_steps and fine_steps > 0 and fine_steps != float('inf'):
             fine_agt_value = get_drop_fine_ag_token_value(drop)
             if fine_agt_value > 0:
-                agt_per_step += (1.0 / fine_steps) * fine_agt_value
+                # A fine drop REPLACES a normal drop of this item, and the base
+                # branch above already counted EVERY drop of this item (incl. the
+                # fraction that turn out fine) at the base AGT value. So add only
+                # the NET upgrade (fine - base) for the fine subset — matching the
+                # JS currency pill (drops-section.js:calculateCurrencyPer1kSteps).
+                # Adding the full fine value double-counted the base value for
+                # fines, inflating AGT (Rescue team: 3.655 vs the real tool 3.58).
+                # (bug 2026-08-13 jwbail)
+                base_agt_value = get_drop_ag_token_value(drop)
+                agt_per_step += (1.0 / fine_steps) * (fine_agt_value - base_agt_value)
 
     steps_per_agt = (1.0 / agt_per_step) if agt_per_step > 0 else float('inf')
     return {AGT_TARGET: steps_per_agt}

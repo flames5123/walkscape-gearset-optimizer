@@ -1,3 +1,4 @@
+import { rewardSourceGroupsHtml, openAchievementFromSource } from '../utils/reward-sources.js';
 /**
  * RecipeInfoSection Component
  * 
@@ -34,7 +35,7 @@ const SKILL_ICON_FALLBACK = {
 function skillIconHtml(skillName, cssClass = 'stat-icon') {
     const skillId = skillName.toLowerCase().replace(' ', '_');
     const fallback = SKILL_ICON_FALLBACK[skillId];
-    if (fallback) return `<span class="${cssClass}" style="font-size:18px;display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px" title="${skillName}">${fallback}</span>`;
+    if (fallback) return `<span class="${cssClass}" style="font-size: max(var(--min-text, 5px), calc(18px * var(--text-scale, 1)));display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px" title="${skillName}">${fallback}</span>`;
     return `<img src="/assets/icons/text/skill_icons/${skillId}.svg" alt="${skillName}" class="${cssClass}" title="${skillName}" />`;
 }
 
@@ -64,6 +65,11 @@ class RecipeInfoSection extends Component {
         this.subscribe('column3.selectedLocation', () => this.onLocationChange());
         this.subscribe('column3.useFine', () => this.onFineChange());
         this.subscribe('gearset', () => this.onGearsetChange());
+        // Watch the live equipped gear (the 'gearset' key above is never
+        // notified; 'gearsets.current' is the real one) so the optimize-location
+        // "Gear set optimized for <regions>" caption slides away when the user
+        // edits any gear slot. Report 30c7ea11 follow-up.
+        this.subscribe('gearsets.current', () => this._watchOptimizedRegionsGearChange());
         // Re-render when instant-actions checkbox changes
         this.subscribe('ui.instant_actions_smelting', () => { if (this.recipe) this.render(); });
 
@@ -92,11 +98,16 @@ class RecipeInfoSection extends Component {
      */
     async onRecipeChange() {
         const selectedId = store.state.column3?.selectedRecipe;
+        // A recipe switch invalidates any optimize-location caption.
+        this._optimizedRegions = null;
+        this._optimizedRegionsBaselineSig = null;
 
         if (!selectedId) {
             this.recipe = null;
             this.selectedService = null;
             this.selectedLocation = null;
+            this._optimizedRegions = null;
+            this._optimizedRegionsBaselineSig = null;
             this.render();
 
             // Notify Column 2 that recipe was cleared
@@ -614,6 +625,211 @@ class RecipeInfoSection extends Component {
     }
 
     /**
+     * Reflect the service + location chosen by an "Optimize services" run in
+     * the Column 3 selector, so the displayed service, its stats, and the
+     * red/green requirements panel match the optimized gear set. Mirrors
+     * selectService() but targets a specific winning location rather than the
+     * first one. Called by optimize-button._handleOptimizationResult when the
+     * saved gear set carries slots_json._optimized_service (single view only).
+     * @param {string} groupedId - grouped service id (e.g. "sawmill_of_barbantok")
+     * @param {string|null} locationId - location id (e.g. "barbantok")
+     */
+    async applyOptimizedService(groupedId, locationId) {
+        if (!this.recipe || !groupedId) return;
+        // Generic recipes resolve services differently; skip reflection for them.
+        if (this.recipe.id && String(this.recipe.id).startsWith('generic::')) return;
+        try {
+            const response = await $.get(`/api/services/for-recipe/${this.recipe.id}`);
+            const service = (response.services || []).find(s => s.id === groupedId);
+            if (!service || !service.locations || service.locations.length === 0) return;
+            const loc = (locationId && service.locations.find(
+                l => l.location && l.location.id === locationId)) || service.locations[0];
+            if (!loc || !loc.location) return;
+
+            this.selectedService = groupedId;
+            this.selectedServiceSpecific = loc.service_id;
+            this.selectedLocation = loc.location.id;
+
+            if (!store.state.column3) store.state.column3 = {};
+            store.state.column3.selectedService = this.selectedServiceSpecific;
+            store.state.column3.selectedLocation = this.selectedLocation;
+
+            const regions = (loc.location.regions && loc.location.regions.length > 0)
+                ? loc.location.regions
+                : [this.selectedLocation];
+
+            // Notify Column 2 so gear bonuses re-scope to the winning location.
+            const combinedStatsSection = window.combinedStatsSection;
+            if (combinedStatsSection && typeof combinedStatsSection.setRecipeContext === 'function') {
+                await combinedStatsSection.setRecipeContext(
+                    this.recipe.id, this.selectedServiceSpecific, regions);
+            }
+
+            store._saveColumn3Selection();
+            this.render();
+        } catch (e) {
+            console.error('applyOptimizedService failed:', e);
+        }
+    }
+
+    /**
+     * Reflect the "optimize services" winner for a NO-SERVICE recipe (single
+     * view). A recipe that needs no station has no service to swap — only a
+     * location — so the optimizer returns the winning zone in
+     * slots_json._optimized_location and this points the Column 3 location
+     * selector at it and re-scopes Column 2 gear bonuses to that zone's regions.
+     * Without it, the optimizer equips the gear best for the winning zone (e.g.
+     * Spectral sickle DR at Wraithwater) but the location stays pinned to the
+     * old/default zone, so the bonus silently doesn't show. Report 30c7ea11.
+     * @param {string} locationId - winning location id (e.g. "wraithwater")
+     * @param {string[]} [regionTags] - raw region tags the winning set applies
+     *        to (union of tying zones). Mapped to named-region display names.
+     * @param {boolean} [allRegions] - set is location-agnostic (works anywhere).
+     */
+    async applyOptimizedLocation(locationId, regionTags, allRegions) {
+        if (!this.recipe || !locationId) return;
+        // Generic recipes resolve context differently; skip reflection.
+        if (this.recipe.id && String(this.recipe.id).startsWith('generic::')) return;
+        try {
+            // Resolve the zone's regions (e.g. Wraithwater -> ['wallisia',
+            // 'ghostly']) so region-scoped gear bonuses apply. Mirror the
+            // no-service block in the main resolver, which uses loc.regions ||
+            // [loc.id]. Also map the applicable region tags to named-region
+            // display names for the "Gear set optimized for <regions>" caption.
+            let locRegions = [locationId];
+            let regionNames = [];
+            try {
+                const locResp = await $.get('/api/locations');
+                const regions = locResp.regions || [];
+                for (const region of regions) {
+                    const loc = (region.locations || []).find(l => l.id === locationId);
+                    if (loc) {
+                        locRegions = (loc.regions && loc.regions.length > 0)
+                            ? loc.regions : [locationId];
+                        break;
+                    }
+                }
+                // Named regions are exactly those with an entry in /api/locations
+                // (biome-only tags like 'ghostly' don't appear and are dropped).
+                const tags = (regionTags && regionTags.length) ? regionTags : locRegions;
+                const tagSet = new Set(tags.map(t => String(t).toLowerCase()));
+                regionNames = regions
+                    .filter(r => tagSet.has(String(r.id).toLowerCase()))
+                    .map(r => r.name);
+            } catch (e) {
+                console.error('applyOptimizedLocation: failed to resolve regions:', e);
+            }
+
+            // No service for these recipes.
+            this.selectedService = '__none__';
+            this.selectedServiceSpecific = null;
+            this.selectedLocation = locationId;
+
+            if (!store.state.column3) store.state.column3 = {};
+            store.state.column3.selectedService = '__none__';
+            store.state.column3.selectedLocation = locationId;
+
+            // Arm the "Gear set optimized for <regions>" caption. It renders
+            // below the location dropdown and slides up when the user changes
+            // any gear (see _watchOptimizedRegionsGearChange). Baseline sig is
+            // captured on the optimizer's own equip (the first gearsets.current
+            // fire after this), so that equip doesn't dismiss it.
+            this._optimizedRegions = {
+                names: regionNames,
+                allRegions: !!allRegions,
+            };
+            this._optimizedRegionsBaselineSig = null;
+
+            const combinedStatsSection = window.combinedStatsSection;
+            if (combinedStatsSection && typeof combinedStatsSection.setRecipeContext === 'function') {
+                await combinedStatsSection.setRecipeContext(this.recipe.id, null, locRegions);
+            }
+
+            store._saveColumn3Selection();
+            this.render();
+        } catch (e) {
+            console.error('applyOptimizedLocation failed:', e);
+        }
+    }
+
+    /**
+     * Build the green-italic "Gear set optimized for <regions>" caption HTML
+     * shown below the no-service location dropdown. Empty string when no
+     * optimize-location result is active. Report 30c7ea11 follow-up.
+     */
+    _optimizedRegionsCaptionHtml() {
+        const info = this._optimizedRegions;
+        if (!info) return '';
+        let text;
+        if (info.allRegions || !info.names || info.names.length === 0) {
+            text = 'Gear set optimized for any region';
+        } else {
+            const names = info.names.slice();
+            let list;
+            if (names.length === 1) {
+                list = names[0];
+            } else if (names.length === 2) {
+                list = `${names[0]} or ${names[1]}`;
+            } else {
+                list = `${names.slice(0, -1).join(', ')}, or ${names[names.length - 1]}`;
+            }
+            text = `Gear set optimized for ${list}`;
+        }
+        return `<div class="optimized-regions-caption">${this._escapeHtml(text)}</div>`;
+    }
+
+    _escapeHtml(s) {
+        return String(s).replace(/[&<>"']/g, c => ({
+            '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+        }[c]));
+    }
+
+    /**
+     * Compute a stable signature of the currently-equipped gear so we can tell
+     * the optimizer's own equip (keep caption) from a later user gear edit
+     * (dismiss caption). Slot -> itemId:quality across non-metadata slots.
+     */
+    _currentGearSignature() {
+        const cur = (store.state.gearsets && store.state.gearsets.current) || {};
+        return Object.keys(cur)
+            .filter(k => !k.startsWith('_'))
+            .sort()
+            .map(k => {
+                const v = cur[k] || {};
+                return `${k}:${v.itemId || v.id || ''}:${v.quality || ''}`;
+            })
+            .join('|');
+    }
+
+    /**
+     * Watch gearsets.current: the FIRST fire after applyOptimizedLocation is the
+     * optimizer's own equip (record it as baseline, keep caption); any later
+     * change with a different signature is a user gear edit -> slide the caption
+     * up and drop it. Report 30c7ea11 follow-up.
+     */
+    _watchOptimizedRegionsGearChange() {
+        if (!this._optimizedRegions) return;
+        const sig = this._currentGearSignature();
+        if (this._optimizedRegionsBaselineSig === null) {
+            this._optimizedRegionsBaselineSig = sig;
+            return;
+        }
+        if (sig !== this._optimizedRegionsBaselineSig) {
+            this._dismissOptimizedRegionsCaption();
+        }
+    }
+
+    /** Slide the optimized-regions caption up, then clear its state. */
+    _dismissOptimizedRegionsCaption() {
+        this._optimizedRegions = null;
+        this._optimizedRegionsBaselineSig = null;
+        const $cap = this.$element && this.$element.find('.optimized-regions-caption');
+        if ($cap && $cap.length) {
+            $cap.slideUp(180, function () { $(this).remove(); });
+        }
+    }
+
+    /**
      * Select a location
      * Requirements: 3.21
      * @param {string} locationId - Location ID
@@ -807,7 +1023,7 @@ class RecipeInfoSection extends Component {
         // END of the chain. Applying ceil before the pct multiplier introduces
         // off-by-one errors (e.g. Flowing pocketwatch -5%).
         const cappedWE = Math.min(we, maxEfficiency);
-        const totalEfficiency = 1 + cappedWE;
+        const totalEfficiency = Math.max(1 + cappedWE, 0.01);  // floor total efficiency at 1% (game rule: negative/zero -> 1% min)
         const baseOverEff = baseSteps / totalEfficiency;
         const withPct = baseOverEff * (1 + pct);
         const stepsPerSingleAction = Math.max(Math.ceil(withPct + flat), 10);
@@ -917,7 +1133,7 @@ class RecipeInfoSection extends Component {
 
         const character = store.state.character || {};
         const skill = this.recipe.skill.toLowerCase();
-        const charLevel = character.skills?.[skill] || 0;
+        const charLevel = (window.isUnlockAllEnabled && window.isUnlockAllEnabled()) ? 99 : (character.skills?.[skill] || 0);
         const requiredLevel = this.recipe.level || 1;
 
         const levelsAbove = Math.max(0, charLevel - requiredLevel);
@@ -938,7 +1154,7 @@ class RecipeInfoSection extends Component {
 
         const character = store.state.character || {};
         const skill = this.recipe.skill.toLowerCase();
-        const charLevel = character.skills?.[skill] || 0;
+        const charLevel = (window.isUnlockAllEnabled && window.isUnlockAllEnabled()) ? 99 : (character.skills?.[skill] || 0);
         const requiredLevel = this.recipe.level || 1;
 
         const levelsAbove = Math.max(0, charLevel - requiredLevel);
@@ -1432,9 +1648,17 @@ class RecipeInfoSection extends Component {
         const maxWEFormatted = (maxWEDisplay % 1 === 0) ? formatFixed(maxWEDisplay, 0) : formatFixed(maxWEDisplay, 1);
 
         // Check if WE exceeds or equals max (for green highlighting)
+        // Game rule: total efficiency is floored at 1%. When the raw total
+        // efficiency drops below 1% (very negative WE), show the floored "1",
+        // the real (uncapped) value in parens, and paint it red.
+        const weClampedLow = currentWEDisplay < 1;
+        const rawWEFormatted = (currentWEDisplay % 1 === 0) ? formatFixed(currentWEDisplay, 0) : formatFixed(currentWEDisplay, 1);
         const weExceedsMax = currentWEPercent >= maxWEPercent;
-        const weClass = weExceedsMax ? 'stat-value-positive' : 'stat-value';
-        const weRowClass = weExceedsMax ? 'we-maxed' : '';
+        const weClass = weClampedLow ? 'stat-value-negative' : (weExceedsMax ? 'stat-value-positive' : 'stat-value');
+        const weRowClass = (!weClampedLow && weExceedsMax) ? 'we-maxed' : '';
+        const weValueHtml = weClampedLow
+            ? `1 (${rawWEFormatted}%) / ${maxWEFormatted}%`
+            : `${currentWEFormatted} / ${maxWEFormatted}%`;
 
         // Get skill icon and color
         const skillColor = this.getSkillColor(this.recipe.skill);
@@ -1461,7 +1685,7 @@ class RecipeInfoSection extends Component {
                     <div class="recipe-stat-header">WORK EFFICIENCY</div>
                     <div class="info-stat-row ${weRowClass}">
                         <img src="/assets/icons/attributes/work_efficiency.svg" alt="WE" class="stat-icon" title="Work Efficiency" />
-                        <span class="${weClass}">${currentWEFormatted} / ${maxWEFormatted}%</span>
+                        <span class="${weClass}">${weValueHtml}</span>
                     </div>
                 </div>
                 
@@ -1709,6 +1933,118 @@ class RecipeInfoSection extends Component {
     }
 
     /**
+     * Count how many items in the current equipped gearset carry a keyword.
+     * Used to decide whether a service's keyword (gear) requirement — e.g.
+     * "3x diving gear" — is satisfied. Advanced/expert diving gear items also
+     * carry the base "diving gear" keyword, so a base-keyword match counts them.
+     * @param {string} keyword
+     * @returns {number}
+     */
+    _countGearsetKeyword(keyword) {
+        const gs = store.state.gearsets?.current || {};
+        const kw = String(keyword).toLowerCase();
+        let count = 0;
+        for (const item of Object.values(gs)) {
+            if (item && Array.isArray(item.keywords) &&
+                item.keywords.some(k => String(k).toLowerCase() === kw)) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    /**
+     * Build the red/green requirements panel that slides down below the
+     * selected service. Shows the selected service+location's skill,
+     * reputation and keyword (gear) requirements. Each is green when the
+     * player's character satisfies it — skill level and reputation from the
+     * entered character, keyword gear from the currently equipped gearset —
+     * and red otherwise.
+     * @param {Object} service - grouped service object (from for-recipe or /api/services)
+     * @returns {string} HTML (empty string when the service has no requirements)
+     */
+    _renderServiceRequirementsPanel(service) {
+        if (!service) return '';
+
+        // Resolve requirements for the currently-selected location within the
+        // service (reputation/skill can vary per location). Fall back to the
+        // first location, then to the service-level requirements (generic view).
+        let reqs = null;
+        if (Array.isArray(service.locations) && service.locations.length > 0) {
+            const loc = service.locations.find(l => l.service_id === this.selectedServiceSpecific)
+                || service.locations.find(l => l.location && l.location.id === this.selectedLocation)
+                || service.locations[0];
+            reqs = loc && loc.requirements;
+        }
+        reqs = reqs || service.requirements || {};
+
+        const skillReqs = reqs.skill || {};
+        const repReqs = reqs.reputation || {};
+        const keywordReqs = reqs.keyword_counts || {};
+
+        const rows = [];
+
+        // Skill level requirements (character-based)
+        for (const [skill, level] of Object.entries(skillReqs)) {
+            if (!level) continue;
+            const skillLower = skill.toLowerCase();
+            const override = store.state.ui?.user_overrides?.skills?.[skillLower];
+            const have = override !== undefined
+                ? override
+                : (store.state.character?.skills?.[skillLower] || 0);
+            const met = have >= level;
+            rows.push(`
+                <div class="requirement-item ${met ? 'requirement-fulfilled' : 'requirement-not-fulfilled'}">
+                    <img src="/assets/icons/text/skill_icons/${skillLower}.svg" alt="${skill}" class="requirement-icon" onerror="this.style.display='none'" />
+                    <span class="requirement-label">${skill.charAt(0).toUpperCase() + skill.slice(1)}</span>
+                    <span class="requirement-value">${have}/${level}</span>
+                </div>`);
+        }
+
+        // Reputation requirements (character-based)
+        for (const [faction, amount] of Object.entries(repReqs)) {
+            if (!amount) continue;
+            const have = this._getPlayerReputation(faction);
+            const met = have >= amount;
+            const factionId = faction.toLowerCase().replace(/ /g, '_').replace(/'/g, '');
+            const factionName = this._formatFactionName(faction);
+            rows.push(`
+                <div class="requirement-item ${met ? 'requirement-fulfilled' : 'requirement-not-fulfilled'}">
+                    <img src="/assets/icons/factions/${factionId}.svg" alt="${factionName}" class="requirement-icon" onerror="this.style.display='none'" />
+                    <span class="requirement-label">${factionName} rep</span>
+                    <span class="requirement-value">${have}/${amount}</span>
+                </div>`);
+        }
+
+        // Keyword (gear) requirements — fulfillment from the equipped gearset
+        for (const [kw, count] of Object.entries(keywordReqs)) {
+            if (!count || count <= 0) continue;
+            const have = this._countGearsetKeyword(kw);
+            const met = have >= count;
+            const kwId = kw.replace(/ /g, '_').replace(/'/g, '');
+            rows.push(`
+                <div class="requirement-item ${met ? 'requirement-fulfilled' : 'requirement-not-fulfilled'}">
+                    <img src="/assets/icons/keywords/${kwId}.svg" alt="${kw}" class="requirement-icon" onerror="this.style.display='none'" />
+                    <span class="requirement-label">${kw}</span>
+                    <span class="requirement-value">${have}/${count}</span>
+                </div>`);
+        }
+
+        if (rows.length === 0) return '';
+
+        // Only play the slide-down animation on a fresh selection, not on every
+        // re-render that happens while the same service stays selected.
+        const animate = this._reqPanelShownFor !== this.selectedServiceSpecific;
+        this._reqPanelShownFor = this.selectedServiceSpecific;
+
+        return `
+            <div class="service-requirements-panel ${animate ? 'svc-req-animate' : ''}">
+                <div class="service-req-title">Requirements</div>
+                ${rows.join('')}
+            </div>`;
+    }
+
+    /**
      * Render services section
      * Requirements: 3.12, 3.13, 3.14, 3.15, 3.16, 3.17, 3.18, 3.19
      * @returns {string} HTML for services section
@@ -1786,6 +2122,11 @@ class RecipeInfoSection extends Component {
                             ${infoIconHtml}
                         </div>
                     `;
+
+                    // When selected, slide down the red/green requirements panel.
+                    if (isSelected) {
+                        html += this._renderServiceRequirementsPanel(service);
+                    }
                 }
 
                 if (filtered.length === 0) {
@@ -1795,7 +2136,7 @@ class RecipeInfoSection extends Component {
                 html += `
                         </div>
                         ${window._featureFlags?.generic ? `
-                        <label class="recipe-generic-svc-toggle" style="display:flex;align-items:center;gap:6px;margin-top:var(--spacing-xs);cursor:pointer;font-size:13px;color:var(--text-secondary)">
+                        <label class="recipe-generic-svc-toggle" style="display:flex;align-items:center;gap:6px;margin-top:var(--spacing-xs);cursor:pointer;font-size: max(var(--min-text, 5px), calc(13px * var(--text-scale, 1)));color:var(--text-secondary)">
                             <input type="checkbox" class="show-generic-services-cb" ${this.showGenericServices ? 'checked' : ''} />
                             Show generic services
                         </label>
@@ -1855,26 +2196,20 @@ class RecipeInfoSection extends Component {
                         <img src="${serviceIcon}" alt="${service.name}" class="service-icon" />
                         <span class="service-name">${displayName}</span>
                         ${infoIconHtml}
-                `;
-
-                // Show missing requirements if locked and selected
-                if (!service.is_unlocked && isSelected && service.missing_requirements.length > 0) {
-                    html += `
-                        <div class="service-requirements">
-                            ${service.missing_requirements.map(req => `<div class="requirement-missing">${req}</div>`).join('')}
-                        </div>
-                    `;
-                }
-
-                html += `
                     </div>
                 `;
+
+                // When selected, slide down a red/green requirements panel below
+                // the service (skill / reputation / keyword-gear, e.g. diving gear).
+                if (isSelected) {
+                    html += this._renderServiceRequirementsPanel(service);
+                }
             }
 
             html += `
                     </div>
                     ${window._featureFlags?.generic ? `
-                    <label class="recipe-generic-svc-toggle" style="display:flex;align-items:center;gap:6px;margin-top:var(--spacing-xs);cursor:pointer;font-size:13px;color:var(--text-secondary)">
+                    <label class="recipe-generic-svc-toggle" style="display:flex;align-items:center;gap:6px;margin-top:var(--spacing-xs);cursor:pointer;font-size: max(var(--min-text, 5px), calc(13px * var(--text-scale, 1)));color:var(--text-secondary)">
                         <input type="checkbox" class="show-generic-services-cb" ${this.showGenericServices ? 'checked' : ''} />
                         Show generic services
                     </label>
@@ -1908,6 +2243,7 @@ class RecipeInfoSection extends Component {
                 <div class="recipe-section">
                     <div class="section-header">LOCATION</div>
                     <div id="recipe-no-svc-location-dropdown"></div>
+                    ${this._optimizedRegionsCaptionHtml()}
                 </div>
             `;
         }
@@ -2608,6 +2944,12 @@ class RecipeInfoSection extends Component {
             }
         });
 
+        // Achievement-reward source → open the Achievements page (scroll + highlight).
+        this.$element.on('click', '.source-item-achievement', (e) => {
+            e.stopPropagation();
+            openAchievementFromSource($(e.currentTarget).data('source-id'));
+        });
+
         // Material source nav prev/next buttons
         this.$element.on('click', '.material-source-prev, .material-source-next', (e) => {
             e.stopPropagation();
@@ -2661,7 +3003,7 @@ class RecipeInfoSection extends Component {
                     const iconStyle = svc.icon_color ? (window.emojiTintStyle ? window.emojiTintStyle(svc.icon_color) : '') : '';
                     html += `
                         <div class="service-item generic-svc-item ${isSelected ? 'service-selected' : ''}" data-id="${svc.id}">
-                            <span class="service-icon" style="font-size:18px">${window.tintedEmoji(svc.icon || '🔧', svc.icon_color)}</span>
+                            <span class="service-icon" style="font-size: max(var(--min-text, 5px), calc(18px * var(--text-scale, 1)))">${window.tintedEmoji(svc.icon || '🔧', svc.icon_color)}</span>
                             <span class="service-name">${svc.name}</span>
                         </div>
                     `;
@@ -2673,7 +3015,7 @@ class RecipeInfoSection extends Component {
 
             // Community checkbox
             html += `
-                <label style="display:flex;align-items:center;gap:6px;margin-top:var(--spacing-xs);cursor:pointer;font-size:12px;color:var(--text-secondary)">
+                <label style="display:flex;align-items:center;gap:6px;margin-top:var(--spacing-xs);cursor:pointer;font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)));color:var(--text-secondary)">
                     <input type="checkbox" class="show-generic-svc-community-cb" ${this.showGenericServicesCommunity ? 'checked' : ''} />
                     Show community definitions
                 </label>
@@ -2686,7 +3028,7 @@ class RecipeInfoSection extends Component {
                     const isSelected = this.selectedService === `generic::${svc.id}` || this.selectedServiceSpecific === `generic::${svc.id}`;
                     html += `
                         <div class="service-item generic-svc-item ${isSelected ? 'service-selected' : ''}" data-id="${svc.id}">
-                            <span class="service-icon" style="font-size:18px">${window.tintedEmoji(svc.icon || '🔧', svc.icon_color)}</span>
+                            <span class="service-icon" style="font-size: max(var(--min-text, 5px), calc(18px * var(--text-scale, 1)))">${window.tintedEmoji(svc.icon || '🔧', svc.icon_color)}</span>
                             <span class="service-name">${svc.name}</span>
                         </div>
                     `;
@@ -2907,6 +3249,7 @@ class RecipeInfoSection extends Component {
             }
         }
 
+        html += rewardSourceGroupsHtml(sources);
         html += '</div>';
         return html;
     }

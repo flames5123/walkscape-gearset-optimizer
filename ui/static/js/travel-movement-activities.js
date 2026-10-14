@@ -29,18 +29,45 @@ import { formatFixed } from './utils/number-format.js';
  * `id` matches the key used in Travel_Config_Store.movement_activities.
  */
 const MOVEMENT_ACTIVITIES = [
+    // --- Normal movement activities (from wiki Movement_Activities) ---
+    // `from` is the location that hosts the activity (its activityList); `to` is
+    // the destination the activity moves you to (per wiki). `region` = the from
+    // location's region so the entry shows under that region's card.
     {
-        id: 'run_for_your_life',
-        name: 'Run for Your Life',
-        from: 'Any Halfling Rebels location',
-        to: 'Old Arena Ruins',
-        baseSteps: 500,
-        region: 'halfling_rebels',
-        requirements: ['2 unique Light source equipped', 'Agility lvl. 35'],
+        id: 'venture_into_the_bog',
+        name: 'Venture into the bog',
+        from: 'Granfiddich',
+        to: 'Bog Top',
+        region: 'trellin',
+        requirements: [],
+    },
+    {
+        id: 'venture_into_the_hideout',
+        name: 'Venture into the hideout',
+        from: 'Blackspell Harbour',
+        to: 'Halfmaw Hideout',
+        region: 'erdwise',
+        requirements: [],
+    },
+    {
+        id: 'venture_into_the_woods',
+        name: 'Venture into the woods',
+        from: 'Salsfirth',
+        to: 'Witched Woods',
+        region: 'trellin',
+        requirements: [],
+    },
+    {
+        id: 'spring_bat_tracking',
+        name: 'Spring bat tracking',
+        from: "Winter's End",
+        to: 'Bog Top',
+        region: 'jarvonia',
+        requirements: [],
     },
     {
         id: 'explore_bog_bottom',
-        name: 'Explore Bog Bottom',
+        name: 'Explore bog bottom',
         from: 'Bog Bottom',
         to: 'Underwater Cave',
         baseSteps: 2500,
@@ -49,12 +76,54 @@ const MOVEMENT_ACTIVITIES = [
     },
     {
         id: 'explore_underwater_cave',
-        name: 'Explore Underwater Cave',
+        name: 'Explore underwater cave',
         from: 'Underwater Cave',
         to: 'Bog Bottom',
         baseSteps: 2500,
         region: 'syrenthia',
         requirements: ['Underwater map collectible', 'Mining lvl. 50'],
+    },
+    // --- Emergency (anti-soft-lock) escape activities ---
+    {
+        id: 'run_for_your_life',
+        name: 'Run for your life',
+        from: 'Witched Woods',
+        to: 'Old Arena Ruins',
+        baseSteps: 500,
+        region: 'halfling_rebels',
+        requirements: [],
+    },
+    {
+        id: 'emergency_darkness_escape_swamp',
+        name: 'Emergency darkness escape (Swamp)',
+        from: 'Witched Woods',
+        to: 'Old Arena Ruins',
+        region: 'halfling_rebels',
+        requirements: [],
+    },
+    {
+        id: 'emergency_swim_escape_swamp',
+        name: 'Emergency swim escape (Swamp)',
+        from: 'Bog Bottom',
+        to: 'Old Arena Ruins',
+        region: 'halfling_rebels',
+        requirements: [],
+    },
+    {
+        id: 'emergency_swim_escape',
+        name: 'Emergency swim escape',
+        from: 'Vastalume',
+        to: 'Port Skildar',
+        region: 'syrenthia',
+        requirements: [],
+    },
+    {
+        id: 'emergency_desert_escape',
+        name: 'Emergency desert escape',
+        from: 'Myriadian Arc',
+        to: 'Kildome Cross',
+        region: 'wrentmark',
+        requirements: [],
     },
 ];
 
@@ -148,7 +217,7 @@ export default class MovementActivitiesSection {
                     <div class="travel-movement-activity-info">
                         <span class="travel-movement-activity-name">${this._escapeHtml(act.name)}</span>
                         <span class="travel-movement-activity-route">${this._escapeHtml(act.from)} → ${this._escapeHtml(act.to)}</span>
-                        <span class="travel-movement-activity-steps">${act.baseSteps} base steps</span>
+                        ${act.baseSteps != null ? `<span class="travel-movement-activity-steps">${act.baseSteps} base steps</span>` : ''}
                         ${act.requirements?.length ? `<span class="travel-movement-activity-reqs">${act.requirements.map(r => this._escapeHtml(r)).join(' · ')}</span>` : ''}
                     </div>
                 </div>

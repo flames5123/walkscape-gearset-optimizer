@@ -18,12 +18,24 @@
 import Component from './base.js';
 import store from '../state.js';
 import api from '../api.js';
-import { wireDropCards } from '../drop-item-popover.js';
+import { wireDropCards, wireDropAnchor } from '../drop-item-popover.js';
 import { getInstantActionsPet, SMELTING_RECIPE_NAMES } from '../utils/pet-utils.js';
 import { getPetIconPath } from '../utils/pet-utils.js';
 
 import { formatFixed } from '../utils/number-format.js';
+import { isCollectibleOwned } from '../utils/collectibles-ownership.js';
 import { TRAVEL_TARGETS } from './travel-priority-list.js';
+
+// Client-side cache for /api/expand-equipment-drops. The expansion output
+// depends ONLY on the ItemFindingCategory stat values (item refs, chances,
+// fine flags, sell values) — NOT on the gearset or activity — so we cache by a
+// stable stats signature to skip the blocking HTTP round-trip on every drops
+// re-render. This is why equipping a target_items (finding/AGT) gearset felt
+// slower than other goals-report rows: those gearsets carry
+// ItemFindingCategory gear, so addEquipmentDrops fires this fetch while
+// xp/coins/chests gearsets skip it entirely. steps_per_item is still recomputed
+// per call from the current stepsPerRewardRoll. (2026-08-13 jwbail)
+const _IFC_EXPAND_CACHE = new Map();
 
 // Icon lookup for travel drops. Reuses the curated TRAVEL_TARGETS icons
 // (chests + item-finding categories) so the travel DROPS card matches the
@@ -408,7 +420,7 @@ class DropsSection extends Component {
             const _recipeCappedWE = Math.min(_recipeWE, this.dropSource.max_efficiency);
             // Single ceil at the END (KamiTzayig reference) — prevents off-by-one
             // errors when a pct modifier is applied.
-            const _recipeBaseOverEff = this.dropSource.base_steps / (1 + _recipeCappedWE);
+            const _recipeBaseOverEff = this.dropSource.base_steps / Math.max(1 + _recipeCappedWE, 0.01);  // floor total efficiency at 1% (game rule)
             const _recipeWithPct = _recipeBaseOverEff * (1 + _recipePct);
             const _recipeStepsPerAction = Math.max(Math.ceil(_recipeWithPct + _recipeFlat), 10);
             equipmentCalcMPI = (stepsPerItem) => {
@@ -417,6 +429,11 @@ class DropsSection extends Component {
             };
         }
         await this.addEquipmentDrops(drops, column2Stats, stepsPerRewardRoll, equipmentCalcMPI);
+
+        // Add memospheres (etc.) rolled by equipped-item abilities such as the
+        // Hat of Wisdom's Study Time — step-charged, so independent of the
+        // activity's reward rolls. Gated on the item being equipped.
+        await this.addAbilityLootDrops(drops);
 
         // Process drop table (activities only)
         if (this.sourceType === 'activity' && this.dropSource.drop_table) {
@@ -501,6 +518,11 @@ class DropsSection extends Component {
                     fine_shell_value: drop.fine_shell_value || 0,
                     fine_ag_token_value: drop.fine_ag_token_value || 0,
                     special_sell: drop.special_sell || null,
+                    // Keywords/type carried through for the calculator's
+                    // Inventory Slots column (material Heavy/Light/Ultra light
+                    // stack-size overrides). From the API drop entry.
+                    item_keywords: drop.item_keywords || [],
+                    item_type: drop.item_type || null,
                     source: 'primary'
                 });
             }
@@ -639,6 +661,9 @@ class DropsSection extends Component {
                     fine_shell_value: drop.fine_shell_value || 0,
                     fine_ag_token_value: drop.fine_ag_token_value || 0,
                     special_sell: drop.special_sell || null,
+                    // Keywords/type carried through for the Inventory Slots column.
+                    item_keywords: drop.item_keywords || [],
+                    item_type: drop.item_type || null,
                     source: 'secondary'
                 });
             }
@@ -662,7 +687,7 @@ class DropsSection extends Component {
             const recipeFlat = recipeGearStats.flat_steps || 0;
             const recipePct = recipeGearStats.percent_steps || 0;
             const recipeCappedWE = Math.min(recipeWE, recipeMaxEff);
-            const recipeBaseWithEff = recipeBaseSteps / (1 + recipeCappedWE);
+            const recipeBaseWithEff = recipeBaseSteps / Math.max(1 + recipeCappedWE, 0.01);  // floor total efficiency at 1% (game rule)
             const recipeWithPct = recipeBaseWithEff * (1 + recipePct);
             const recipeStepsPerAction = Math.max(Math.ceil(recipeWithPct) + recipeFlat, 10);
 
@@ -766,6 +791,9 @@ class DropsSection extends Component {
                         fine_shell_value: sideFineShellValue,
                         is_fine: false,
                         is_collectible: false,
+                        // Keywords/type for the Inventory Slots column.
+                        item_keywords: drop.item_keywords || [],
+                        item_type: drop.item_type || null,
                         source: 'recipe_drop',
                     });
                 }
@@ -1077,21 +1105,29 @@ class DropsSection extends Component {
             return drops;  // No equipment drops
         }
 
-        // Call backend to expand categories
+        // Call backend to expand categories (cached by IFC-stats signature —
+        // the expansion is gearset/activity-independent, so a repeat render or
+        // re-equip with the same finding gear reuses it with no round-trip).
         try {
-            const response = await fetch('/api/expand-equipment-drops', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ stats: itemFindingStats })
-            });
+            const _cacheKey = JSON.stringify(
+                Object.keys(itemFindingStats).sort().map(k => [k, itemFindingStats[k]]));
+            let equipmentDrops = _IFC_EXPAND_CACHE.get(_cacheKey);
+            if (!equipmentDrops) {
+                const response = await fetch('/api/expand-equipment-drops', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ stats: itemFindingStats })
+                });
 
-            if (!response.ok) {
-                console.error('Failed to expand equipment drops');
-                return drops;
+                if (!response.ok) {
+                    console.error('Failed to expand equipment drops');
+                    return drops;
+                }
+
+                const data = await response.json();
+                equipmentDrops = data.drops || [];
+                _IFC_EXPAND_CACHE.set(_cacheKey, equipmentDrops);
             }
-
-            const data = await response.json();
-            const equipmentDrops = data.drops || [];
 
             // Convert to drop format and add to drops array
             const fineMaterialFinding = (column2Stats.fine_material_finding || 0) / 100;
@@ -1172,10 +1208,131 @@ class DropsSection extends Component {
     }
 
     /**
+     * Synchronously collect equipped-item ability loot rows from the active
+     * gearset (reads enriched gear entries' `abilities`). Returns
+     * [{item_name, icon, steps_per_item}] where steps_per_item =
+     * charge_steps * N / loot_rolls. Used by the travel drops render (sync);
+     * the activity/recipe path uses addAbilityLootDrops (async, catalog-backed).
+     * @returns {Array}
+     */
+    _equippedAbilityLoot() {
+        const gear = store.getActiveGearset() || {};
+        const rows = [];
+        const seen = new Set();
+        if (!gear || typeof gear !== 'object') return rows;
+        for (const slotItem of Object.values(gear)) {
+            if (!slotItem || !Array.isArray(slotItem.abilities)) continue;
+            for (const ability of slotItem.abilities) {
+                const ld = ability.loot_drops;
+                const cs = ability.charge_steps;
+                const rolls = ability.loot_rolls || 1;
+                if (!Array.isArray(ld) || ld.length === 0 || !cs) continue;
+                const n = ld.length;
+                const spi = (cs * n) / rolls;
+                for (const d of ld) {
+                    const key = `${ability.name}|${d.item_name}`;
+                    if (seen.has(key)) continue;
+                    seen.add(key);
+                    rows.push({
+                        item_name: d.item_name,
+                        icon: d.icon,
+                        steps_per_item: spi,
+                        ability_name: ability.name,
+                        ability_icon: ability.icon
+                            ? `/assets/icons/abilities/${ability.icon}.svg`
+                            : null,
+                    });
+                }
+            }
+        }
+        return rows;
+    }
+
+    /**
+     * Add drops produced by equipped-item abilities (e.g. Hat of Wisdom's
+     * Study Time rolls find_memospheres). Step-charged: one charge every
+     * `charge_steps` steps, each charge rolls `loot_rolls` items from an
+     * equal-weight pool of `loot_drops`. steps/drop = charge_steps * N /
+     * loot_rolls (N = pool size). Gated on the item being equipped; assumed
+     * always-charged.
+     * @param {Array} drops - Existing drops array (mutated + returned)
+     * @returns {Promise<Array>}
+     */
+    async addAbilityLootDrops(drops) {
+        const gear = store.getActiveGearset() || {};
+        if (!gear || typeof gear !== 'object') return drops;
+
+        let catalogItems = [];
+        try {
+            const catalog = await api.getCatalog();
+            catalogItems = catalog.items || [];
+        } catch (e) {
+            return drops;  // catalog unavailable — skip silently
+        }
+        const byId = new Map();
+        for (const it of catalogItems) {
+            if (it.id) byId.set(it.id, it);
+            if (it.uuid) byId.set(it.uuid, it);
+        }
+
+        const seen = new Set();
+        for (const slotItem of Object.values(gear)) {
+            if (!slotItem) continue;
+            // The equipped entry may already be enriched with abilities; else
+            // resolve it from the catalog by id/uuid.
+            const resolved = (Array.isArray(slotItem.abilities) ? slotItem : null)
+                || byId.get(slotItem.itemId) || byId.get(slotItem.id) || null;
+            const abilities = resolved && resolved.abilities;
+            if (!Array.isArray(abilities)) continue;
+
+            for (const ability of abilities) {
+                const lootDrops = ability.loot_drops;
+                const chargeSteps = ability.charge_steps;
+                const rolls = ability.loot_rolls || 1;
+                if (!Array.isArray(lootDrops) || lootDrops.length === 0 || !chargeSteps) continue;
+
+                const n = lootDrops.length;
+                // steps to obtain one specific (equal-weight) drop
+                const stepsPerItem = (chargeSteps * n) / rolls;
+                // display chance: expected count of THIS drop per charge (%)
+                const chancePerCharge = (100 * rolls) / n;
+
+                for (const ld of lootDrops) {
+                    const dedupeKey = `${ability.name}|${ld.item_name}`;
+                    if (seen.has(dedupeKey)) continue;
+                    seen.add(dedupeKey);
+                    drops.push({
+                        item_name: ld.item_name,
+                        item_ref: null,
+                        icon_override: ld.icon || null,
+                        drop_percent: chancePerCharge,
+                        quantity: { min: 1, max: 1 },
+                        avg_quantity: 1,
+                        steps_per_item: stepsPerItem,
+                        steps_per_fine_item: null,
+                        fine_drop_percent: null,
+                        is_fine: false,
+                        is_collectible: false,
+                        coin_value: 0,
+                        shell_value: 0,
+                        fine_shell_value: 0,
+                        source: 'ability_loot',
+                        source_label: ability.name,
+                        ability_icon: ability.icon
+                            ? `/assets/icons/abilities/${ability.icon}.svg`
+                            : null,
+                    });
+                }
+            }
+        }
+        return drops;
+    }
+
+    /**
      * Merge duplicate drops that appear from multiple sources.
-     * When an item appears in both the activity drop table and an item finding category
-     * (e.g., Rough Opal from Mine Copper Ore activity + Gem Pouch equipment),
-     * combine them into a single entry with summed drop percentages.
+     * When an item appears in both the activity drop table and an item finding
+     * category (e.g., Rough Opal from Mine Copper Ore + Gem Pouch), combine
+     * them into a single entry with summed drop percentages.
      * @param {Array} drops - All collected drops (may contain duplicates)
      * @param {number} stepsPerRewardRoll - Steps per reward roll for recalculating steps
      * @returns {Array} Deduplicated drops array
@@ -1189,7 +1346,8 @@ class DropsSection extends Component {
             const skipMerge = drop.source === 'chest' ||
                 drop.source === 'synthetic_fine' ||
                 drop.source === 'synthetic_collectible' ||
-                drop.source === 'recipe_drop';
+                drop.source === 'recipe_drop' ||
+                drop.source === 'ability_loot';
             const key = skipMerge ? null : (drop.item_ref || drop.item_name);
 
             if (!key || !mergeMap.has(key)) {
@@ -1343,30 +1501,18 @@ class DropsSection extends Component {
      * @returns {Array} Filtered drops
      */
     filterOwnedCollectibles(drops) {
-        const character = store.state.character || {};
-        const ownedCollectibles = character.collectibles || [];
-
-        // Convert owned collectibles to lowercase for case-insensitive comparison
-        const ownedCollectiblesLower = ownedCollectibles.map(c => c.toLowerCase());
-
-        console.log('Filtering collectibles:', {
-            ownedCollectibles,
-            totalDrops: drops.length,
-            collectibleDrops: drops.filter(d => d.is_collectible).length
-        });
-
         return drops.filter(drop => {
             if (!drop.is_collectible) {
                 return true;
             }
 
-            // Check if collectible is owned
-            // item_ref format: "Collectible.COLLECTIBLE_NAME"
+            // Check if collectible is owned. item_ref format is
+            // "Collectible.COLLECTIBLE_NAME". isCollectibleOwned honors both the
+            // imported character.collectibles AND manual "owned" checks stored in
+            // ui.user_overrides.items[slug].has (bug 5d24decc — manually checked
+            // collectibles used to stay in the drop table).
             const collectibleName = drop.item_ref.replace('Collectible.', '');
-            const collectibleNameLower = collectibleName.toLowerCase();
-            const isOwned = ownedCollectiblesLower.includes(collectibleNameLower);
-
-            console.log(`Collectible "${drop.item_name}" (${collectibleName}): owned=${isOwned}`);
+            const isOwned = isCollectibleOwned(collectibleName);
 
             return !isOwned;
         });
@@ -1400,7 +1546,7 @@ class DropsSection extends Component {
             // END of the chain. Applying ceil before the pct multiplier introduces
             // off-by-one errors (e.g. Flowing pocketwatch -5%).
             const cappedWE = Math.min(we, maxEfficiency);
-            const totalEfficiency = 1 + cappedWE;
+            const totalEfficiency = Math.max(1 + cappedWE, 0.01);  // floor total efficiency at 1% (game rule)
             const baseOverEff = baseSteps / totalEfficiency;
             const stepsWithPct = baseOverEff * (1 + pct);
             const stepsPerSingleAction = Math.max(10, Math.ceil(stepsWithPct + flat));
@@ -1426,7 +1572,7 @@ class DropsSection extends Component {
             // Match the game's formula (per KamiTzayig reference): single ceil at the
             // END of the chain.
             const cappedWE = Math.min(we, maxEfficiency);
-            const totalEfficiency = 1 + cappedWE;
+            const totalEfficiency = Math.max(1 + cappedWE, 0.01);  // floor total efficiency at 1% (game rule)
             const baseOverEff = baseSteps / totalEfficiency;
             const withPct = baseOverEff * (1 + pct);
             const stepsPerSingleAction = Math.max(Math.ceil(withPct + flat), 10);
@@ -2015,13 +2161,30 @@ class DropsSection extends Component {
             // whole-route steps/item + a cumulative whole-route % (expected count
             // over the ENTIRE route, not per action).
             let totalHtml = '';
-            if (dropsTotal && (dropsTotal.drops || []).length) {
-                const totalCards = dropsTotal.drops.map(d => this.renderTravelDropCard(d)).join('');
+            // Equipped-item ability loot (e.g. Hat of Wisdom's Study Time
+            // memospheres) applies per walking step, so it accrues over the
+            // whole travel route. Add those cards to the TOTAL section too.
+            const totalSteps = (statsData && statsData.total && statsData.total.steps_avg) || 0;
+            let abilityCards = '';
+            if (totalSteps > 0) {
+                for (const r of this._equippedAbilityLoot()) {
+                    abilityCards += this.renderTravelDropCard({
+                        name: r.item_name,
+                        icon_override: r.icon,
+                        steps_per_item: r.steps_per_item,
+                        chance_percent: (100 * totalSteps) / r.steps_per_item,
+                        ability_name: r.ability_name,
+                        ability_icon: r.ability_icon,
+                    });
+                }
+            }
+            if ((dropsTotal && (dropsTotal.drops || []).length) || abilityCards) {
+                const totalCards = ((dropsTotal && dropsTotal.drops) || []).map(d => this.renderTravelDropCard(d)).join('') + abilityCards;
                 totalHtml = `
                     <div class="travel-drops-total">
                         <div class="travel-drops-segment-header" style="font-size: 0.82em; font-weight: 700; color: var(--text-primary); margin: var(--spacing-sm) 0 1px var(--spacing-sm);">TOTAL — whole route</div>
                         <div style="font-size: 0.72em; opacity: 0.65; margin: 0 0 2px var(--spacing-sm);">Expected drops, steps/item &amp; % over the ENTIRE route (not per action)</div>
-                        ${this._renderTravelCurrency(dropsTotal.coins_per_1k, dropsTotal.agt_per_1k)}
+                        ${this._renderTravelCurrency((dropsTotal && dropsTotal.coins_per_1k) || 0, (dropsTotal && dropsTotal.agt_per_1k) || 0)}
                         <div class="drops-list" data-pin-id="drops-list">${totalCards}</div>
                     </div>`;
             }
@@ -2104,10 +2267,21 @@ class DropsSection extends Component {
      * @returns {string} HTML
      */
     renderTravelDropCard(d) {
-        const icon = travelDropIcon(d.target);
+        const icon = d.icon_override || travelDropIcon(d.target);
         const isFine = /_fine$/.test(d.target || '');
         const fineClass = isFine ? ' drop-card-fine' : '';
         const slug = (d.target || d.name || '').toString().toLowerCase().replace(/[^a-z0-9_-]/g, '_');
+
+        // Popover wiring (issue: travel drops weren't hoverable/clickable like
+        // activities). The Agility chest opens the container popover; item-
+        // finding categories open the item popover by name when it resolves in
+        // the catalog (showDropPopover no-ops gracefully otherwise). Wired in
+        // attachEvents() via wireDropAnchor using these data attributes.
+        const isChest = (d.target || '') === 'cat:chests';
+        const dropName = isChest ? 'Agility chest' : (d.name || '');
+        const dropDataAttrs = dropName
+            ? ` data-drop-name="${dropName}"${isChest ? ' data-drop-container="1"' : ''}`
+            : '';
 
         const pct = (d.chance_percent === null || d.chance_percent === undefined)
             ? null
@@ -2120,17 +2294,27 @@ class DropsSection extends Component {
         const stepsFormatted = spi < 100
             ? formatFixed(spi, 1, { trim: true })
             : Math.ceil(spi).toLocaleString();
+        // Clickable steps → fill the calculator (same handler as activities).
+        const stepsClickable = (spi > 0 && isFinite(spi));
+        const stepsClass = stepsClickable ? 'drop-card-steps drop-card-steps-clickable' : 'drop-card-steps';
+        const stepsAttrs = stepsClickable
+            ? ` data-steps-value="${spi}" role="button" tabindex="0" title="Click to fill the calculator with this step count" style="cursor:pointer;"`
+            : '';
 
         return `
             <div class="drop-card${fineClass}" data-drop="${slug}" title="${d.name}">
-                <div class="drop-card-icon-wrapper">
+                <div class="drop-card-icon-wrapper"${dropDataAttrs}>
                     <img src="${icon}" alt="${d.name}" class="drop-card-icon" loading="lazy" onerror="if(this.src.endsWith('.svg')){this.src=this.src.replace('.svg','.png')}else{this.src='/assets/icons/items/containers/treasure_chest.svg'}" />
                 </div>
                 ${percentHtml}
-                <div class="drop-card-steps" data-pin-id="drop-steps">
+                <div class="${stepsClass}" data-pin-id="drop-steps"${stepsAttrs}>
                     <img src="/assets/icons/attributes/steps_required.svg" alt="Steps" class="steps-icon" />
                     <span>${stepsFormatted}</span>
                 </div>
+                ${d.ability_name ? `<div class="drop-card-ability" title="Granted by the ${d.ability_name} ability">
+                    ${d.ability_icon ? `<img src="${d.ability_icon}" alt="" class="drop-card-ability-icon" onerror="this.style.display='none'" />` : ''}
+                    <span>Ability: ${d.ability_name}</span>
+                </div>` : ''}
             </div>
         `;
     }
@@ -2319,6 +2503,16 @@ class DropsSection extends Component {
         const dropSlug = (drop.item_export_name || drop.item_id || drop.item_name || '')
             .toString().trim().toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_-]/g, '');
 
+        // Ability-granted drops (e.g. Hat of Wisdom's Study Time -> memospheres)
+        // carry an "Ability: <name>" caption so it's clear the drop comes from
+        // an equipped item's ability, not the activity/recipe itself.
+        const abilityBadgeHtml = (drop.source === 'ability_loot' && drop.source_label)
+            ? `<div class="drop-card-ability" title="Granted by the ${drop.source_label} ability">
+                    ${drop.ability_icon ? `<img src="${drop.ability_icon}" alt="" class="drop-card-ability-icon" onerror="this.style.display='none'" />` : ''}
+                    <span>Ability: ${drop.source_label}</span>
+                </div>`
+            : '';
+
         return `
             <div class="drop-card ${fineClass}${isGated ? ' drop-card-gated' : ''}" data-drop="${dropSlug}">
                 <div class="drop-card-icon-wrapper">
@@ -2331,6 +2525,7 @@ class DropsSection extends Component {
                 ${isGated ? '' : fineStepsHtml}
                 ${isGated ? '' : chargeHtml}
                 ${isGated ? '' : materialsHtml}
+                ${abilityBadgeHtml}
             </div>
         `;
     }
@@ -2339,15 +2534,140 @@ class DropsSection extends Component {
      * Render the component
      * Requirements: 4.1
      */
+    /**
+     * Resolve the active pet's Termite-style item_swap ability (e.g. the
+     * Termite's "Terminate": convert a found log into Carpentry XP), or null.
+     * Reads the equipped pet from the store and its ability from the pet
+     * catalog (window.optimizeButton._petCatalog), which carries item_swap.
+     */
+    _getActiveTermiteSwap() {
+        try {
+            const pet = store.state.gearsets?.current?.pet;
+            if (!pet) return null;
+            const petId = String(pet.itemId || pet.petId || pet.id || pet.name || '').toLowerCase();
+            const petName = String(pet.name || '').toLowerCase();
+            const level = pet.level != null ? parseInt(pet.level, 10) : 0;
+            if (!level || level < 1) return null;
+            const catalog = window.optimizeButton?._petCatalog || [];
+            const entry = catalog.find(p =>
+                (p.id && p.id.toLowerCase() === petId) ||
+                (p.name && p.name.toLowerCase() === petName)
+            );
+            const levelData = entry?.levels?.[String(level)] || null;
+            const abilities = levelData?.abilities || [];
+            let swap = null;
+            for (const ability of abilities) {
+                if (ability && ability.item_swap) { swap = ability.item_swap; break; }
+            }
+            if (!swap) return null;
+            const chance = (Number(swap.chance) || 0) / 100;
+            const modifier = Number(swap.xp_effort_modifier) || 0;
+            if (chance <= 0 || chance >= 1 || !modifier) return null;
+            const normKw = k => String(k).toLowerCase().replace(/s$/, '');
+            return {
+                chance,
+                modifier,
+                toSkill: (swap.to_skill || 'carpentry').toLowerCase(),
+                skill: (swap.skill || '').toLowerCase(),
+                fromKeywords: new Set((swap.from_keywords || []).map(normKw)),
+            };
+        } catch (_e) {
+            return null;
+        }
+    }
+
+    /**
+     * Re-render the columns that display the drop-derived Termite Carpentry XP
+     * (CalculatorSection + ActivityInfoSection) so they re-read the (possibly
+     * now-null) this.termiteCarpentry. Called from render()'s early-return paths
+     * (travel / no drop table) where _applyTermiteEffort never runs, so a stale
+     * Carpentry line from the previous activity would otherwise persist.
+     * Re-entrancy guarded like the main-path notifies below.
+     */
+    _notifyCarpentryDependents() {
+        if (!this._notifyingCalculator && window.calculatorSection
+                && typeof window.calculatorSection.render === 'function') {
+            this._notifyingCalculator = true;
+            try { window.calculatorSection.render(); } finally { this._notifyingCalculator = false; }
+        }
+        if (!this._notifyingActivityInfo && window.activityInfoSection
+                && typeof window.activityInfoSection.render === 'function') {
+            this._notifyingActivityInfo = true;
+            try { window.activityInfoSection.render(); } finally { this._notifyingActivityInfo = false; }
+        }
+    }
+
+    /**
+     * Apply the active Termite "Terminate" swap to the computed drops:
+     * reduce each logs-keyword material's yield by the swap chance (steps rise
+     * by 1/(1-chance)) and accumulate the converted Carpentry XP per step.
+     * Stores the result on this.termiteCarpentry = {perStep, skill, chance} for
+     * the activity-info + calculator columns. Mutates `drops` in place.
+     */
+    _applyTermiteEffort(drops) {
+        this.termiteCarpentry = null;
+        try {
+            if (this.sourceType !== 'activity' || !this.dropSource) return;
+            const swap = this._getActiveTermiteSwap();
+            if (!swap) return;
+            const activitySkill = String(this.dropSource.primary_skill || '').toLowerCase();
+            if (swap.skill && activitySkill !== swap.skill) return;
+            const normKw = k => String(k).toLowerCase().replace(/s$/, '');
+            // Map item_name -> effort from the source drop tables (the pushed
+            // drop objects don't carry effort; the source entries do).
+            const effortMap = new Map();
+            for (const tbl of [this.dropSource.drop_table, this.dropSource.secondary_drop_table]) {
+                for (const e of (tbl || [])) {
+                    if (e && e.item_name && e.effort != null) effortMap.set(e.item_name, Number(e.effort));
+                }
+            }
+            if (effortMap.size === 0) return;
+            const oneMinus = 1 - swap.chance;
+            let perStep = 0;
+            for (const d of (drops || [])) {
+                if (!d || d.is_fine) continue;
+                const kws = d.item_keywords || [];
+                if (!kws.some(k => swap.fromKeywords.has(normKw(k)))) continue;
+                if (!effortMap.has(d.item_name)) continue;
+                const effort = effortMap.get(d.item_name);
+                const steps = d.steps_per_item;
+                if (!isFinite(steps) || steps <= 0) continue;
+                perStep += (1 / steps) * swap.chance * effort * swap.modifier;
+                // Reduce displayed yield: only (1-chance) of the logs remain.
+                // The swap converts NON-fine logs only, so steps_per_fine_item
+                // and fine_drop_percent are intentionally left unchanged.
+                d.steps_per_item = steps / oneMinus;
+                if (d.drop_percent) d.drop_percent *= oneMinus;
+                d.termite_reduced = true;
+            }
+            if (perStep > 0) {
+                this.termiteCarpentry = { perStep, skill: swap.toSkill, chance: swap.chance };
+            }
+        } catch (_e) {
+            this.termiteCarpentry = null;
+        }
+    }
+
     async render() {
+        // Termite "Terminate" Carpentry is drop-derived and activity-specific.
+        // Reset it at the very top of EVERY render so a value computed for a
+        // previous activity can never leak into the next one. Without this, an
+        // early-return path below (travel / no drop table) would skip
+        // _applyTermiteEffort and the stale value would keep showing a Carpentry
+        // line on the new activity (bug: switching a log activity -> a non-log
+        // Woodcutting activity kept the Carpentry line until the pet was toggled).
+        this.termiteCarpentry = null;
+
         // Travel mode: per-segment travel drops (published by TravelInfoSection)
         // rendered in the standard DROPS card — same look as activities/recipes.
         if (this.sourceType === 'travel') {
             this.renderTravelDrops();
+            this._notifyCarpentryDependents();
             return;
         }
         if (!this.dropSource) {
             this.$element.html('');
+            this._notifyCarpentryDependents();
             return;
         }
 
@@ -2368,6 +2688,7 @@ class DropsSection extends Component {
             // show the section so the synthetic entry appears
         } else if (!hasDrops) {
             this.$element.html('');
+            this._notifyCarpentryDependents();
             return;
         }
 
@@ -2379,11 +2700,24 @@ class DropsSection extends Component {
         // Cache for other components (e.g. CalculatorSection)
         this._lastCalculatedDrops = drops;
 
+        // Termite "Terminate": convert `chance`% of logs-keyword drops into
+        // Carpentry XP. Reduces those drops' yields in-place and stores the
+        // computed Carpentry XP on this.termiteCarpentry for the activity-info
+        // and calculator columns to display (informational only).
+        this._applyTermiteEffort(drops);
+
         // Notify CalculatorSection to re-render its drops table (guard against loops)
         if (!this._notifyingCalculator && window.calculatorSection && typeof window.calculatorSection.render === 'function') {
             this._notifyingCalculator = true;
             window.calculatorSection.render();
             this._notifyingCalculator = false;
+        }
+
+        // Notify ActivityInfoSection so its Carpentry-XP line reflects the
+        // freshly computed termite conversion (guard against re-entrancy).
+        if (!this._notifyingActivityInfo && window.activityInfoSection && typeof window.activityInfoSection.render === 'function') {
+            this._notifyingActivityInfo = true;
+            try { window.activityInfoSection.render(); } finally { this._notifyingActivityInfo = false; }
         }
 
         const contentHtml = `
@@ -2692,7 +3026,22 @@ class DropsSection extends Component {
         // INDEX, so wiring here would attach travel cards to random leftover
         // activity items (bug: AGT hover showed "raw perch"). Travel cards keep
         // their native title tooltip; skip the item popover entirely.
-        if (this.sourceType !== 'travel' && this._lastCalculatedDrops) {
+        if (this.sourceType === 'travel') {
+            // Travel cards are category cards (Agility chest + item-finding
+            // categories), not catalog items in _lastCalculatedDrops, so they
+            // can't be index-mapped by wireDropCards. Wire each by NAME instead:
+            // the chest → container popover, item-finding categories → item
+            // popover when the name resolves (graceful no-op otherwise).
+            const container = this.$element[0];
+            if (container) {
+                container.querySelectorAll('.drop-card-icon-wrapper[data-drop-name]').forEach(anchor => {
+                    const name = anchor.dataset.dropName;
+                    if (!name) return;
+                    const isContainer = anchor.dataset.dropContainer === '1';
+                    wireDropAnchor(anchor, name, isContainer);
+                });
+            }
+        } else if (this._lastCalculatedDrops) {
             const container = this.$element[0];
             console.log('[DROP-POPOVER] container element:', container);
             console.log('[DROP-POPOVER] drop-cards found:', container?.querySelectorAll('.drop-card')?.length);

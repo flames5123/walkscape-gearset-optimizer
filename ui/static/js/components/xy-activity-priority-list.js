@@ -813,6 +813,23 @@ function renderEntryReveal(entry, activityDropTable) {
     // gets a reveal panel.
     const y = yOption(entry.y);
     if (y && y.needs === 'target_item') {
+        // "Skip if all collectibles owned" — shown only under a collectibles
+        // target that the activity actually drops (hidden on N/A). Bound to the
+        // single session variable window.settingsModal.skipObtainedCollectibles;
+        // all instances (quick/detailed/inline) sync via the change handler.
+        let skipHtml = '';
+        if (entry.targetItem === 'cat:collectibles'
+                && isTargetAvailable('cat:collectibles', activityDropTable)) {
+            const skipEnabled = !!(window.settingsModal && window.settingsModal.skipObtainedCollectibles);
+            const labelStyle = skipEnabled
+                ? 'color:#27ae60;font-style:italic;'
+                : 'color:var(--text-muted);';
+            skipHtml = `
+                <label class="optimizer-checkbox skip-collectibles-reveal" style="margin-top:6px;margin-left:8px;font-size:0.8em;display:flex;align-items:center;gap:5px;cursor:pointer;">
+                    <input type="checkbox" class="skip-obtained-collectibles" ${skipEnabled ? 'checked' : ''} />
+                    <span class="optimizer-checkbox-label" style="${labelStyle}font-weight:600;">Skip if all collectibles owned</span>
+                </label>`;
+        }
         return `
             <div class="mockup-reveal">
                 <div class="xy-wrap target-item-btn-wrap" data-entry-id="${entry.id}" data-xy-axis="target_item">
@@ -826,6 +843,7 @@ function renderEntryReveal(entry, activityDropTable) {
                         </button>
                     </div>
                 </div>
+                ${skipHtml}
             </div>
         `;
     }
@@ -1851,6 +1869,30 @@ export function mountXyActivityPriorityList($container, options = {}) {
         }
     });
 
+    // "Skip if all collectibles owned" checkbox (rendered under a collectibles
+    // target reveal). Bound to the single session variable
+    // window.settingsModal.skipObtainedCollectibles. Self-contained so it works
+    // in every mount (Column 3 Quick/Detailed + Settings modal). stopPropagation
+    // keeps optimize-button's own delegated handler from double-firing when this
+    // panel is mounted inside it.
+    $container.on('change.xypl', '.skip-obtained-collectibles', function (e) {
+        e.stopPropagation();
+        const checked = !!this.checked;
+        if (window.settingsModal) {
+            window.settingsModal.skipObtainedCollectibles = checked;
+            try { localStorage.setItem('skipObtainedCollectibles', String(checked)); } catch (_e) { /* noop */ }
+            try { window.settingsModal.saveOptimizationSettings(); } catch (_e) { /* noop */ }
+        }
+        // Sync every skip checkbox in the DOM + its label styling.
+        $('.skip-obtained-collectibles').each(function () {
+            if (this !== e.target && this.checked !== checked) this.checked = checked;
+        });
+        const css = checked
+            ? { color: '#27ae60', fontStyle: 'italic' }
+            : { color: 'var(--text-muted)', fontStyle: 'normal' };
+        $('.skip-obtained-collectibles').closest('label').find('.optimizer-checkbox-label').css(css);
+    });
+
     // Budget input persistence
     $container.on('input.xypl', 'input[data-budget]', function () {
         const entryId = parseInt(this.dataset.entryId, 10);
@@ -2093,6 +2135,14 @@ export function mountXyActivityPriorityList($container, options = {}) {
         // saveOptimizationSettings triggered a parent re-render).
         getExpandedGroups: () => new Set(state.expandedGroups),
         refresh: render,
+        // Update the activity's drop table (drives N/A greying + the (ⓘ)
+        // items popover on each target) and re-render. Called when the
+        // selected activity changes so the panel recomputes availability
+        // without a full destroy+remount (which would lose focus/scroll).
+        setActivityDropTable: (dropTable) => {
+            state.activityDropTable = Array.isArray(dropTable) ? dropTable : null;
+            render();
+        },
         destroy: () => {
             $container.off('.xypl');
             closeGlobalDropdown(true);

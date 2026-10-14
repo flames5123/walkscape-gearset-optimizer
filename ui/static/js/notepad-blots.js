@@ -18,6 +18,7 @@ export const NP_TYPE_ICON = {
     crafting_tree: '\uD83C\uDF33', // 🌳
     gearset: '\uD83E\uDDF0',       // 🧰
     location: '\uD83D\uDCCD',      // 📍
+    achievement: '\uD83C\uDFC6',   // 🏆
 };
 
 export const NP_TYPE_LABEL = {
@@ -28,6 +29,7 @@ export const NP_TYPE_LABEL = {
     crafting_tree: 'Crafting tree',
     gearset: 'Gear set',
     location: 'Location',
+    achievement: 'Achievement',
 };
 
 /** Normalize a raw blot value into a clean, fully-populated object. */

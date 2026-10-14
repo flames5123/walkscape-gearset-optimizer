@@ -5,6 +5,144 @@ DO NOT EDIT MANUALLY
 """
 
 LOOT_TABLES = {
+    '2.0_hunt': {
+        'id': '2.0_hunt',
+        'name': '2.0 hunt',
+        'category': 'normal',
+        'noDropChance': 0.950848,
+        'tableRows': [
+            {
+                'rowItemID': 'strange_fur',
+                'name': 'Strange fur',
+                'icon': 'assets/icons/items/materials/twophointoh_fur.png',
+                'isMoney': False,
+                'linearWeightScaling': True,
+                'rowWeight': 415,
+                'rowMinimumAmount': 1,
+                'rowMaximumAmount': 1,
+                'minWeightScale': 0.05,
+                'requirementsBonuses': []
+            },
+            {
+                'rowItemID': 'mysterious_chitin',
+                'name': 'Mysterious chitin',
+                'icon': 'assets/icons/items/materials/twophointoh_chitin.png',
+                'isMoney': False,
+                'linearWeightScaling': True,
+                'rowWeight': 69,
+                'rowMinimumAmount': 1,
+                'rowMaximumAmount': 1,
+                'minWeightScale': 0.05,
+                'requirementsBonuses': []
+            }
+        ],
+        'subTables': []
+    },
+    '2.0_hunt_ancient_stone_tablet': {
+        'id': '2.0_hunt_ancient_stone_tablet',
+        'name': '2.0 hunt ancient stone tablet',
+        'category': 'collectible',
+        'noDropChance': 0.999905,
+        'tableRows': [
+            {
+                'rowItemID': 'ancient_stone_tablet',
+                'name': 'Ancient stone tablet',
+                'icon': 'assets/icons/items/stone_tablet.png',
+                'isMoney': False,
+                'linearWeightScaling': True,
+                'rowWeight': 1,
+                'rowMinimumAmount': 1,
+                'rowMaximumAmount': 1,
+                'minWeightScale': 0.05,
+                'requirementsBonuses': []
+            }
+        ],
+        'subTables': []
+    },
+    '2.0_hunt_artificial_sandgrain': {
+        'id': '2.0_hunt_artificial_sandgrain',
+        'name': '2.0 hunt artificial sandgrain',
+        'category': 'collectible',
+        'noDropChance': 0.999976,
+        'tableRows': [
+            {
+                'rowItemID': 'artificial_sand_grain',
+                'name': 'Artificial sand grain',
+                'icon': 'assets/icons/items/collectibles/artificial_sand_grain.png',
+                'isMoney': False,
+                'linearWeightScaling': True,
+                'rowWeight': 1,
+                'rowMinimumAmount': 1,
+                'rowMaximumAmount': 1,
+                'minWeightScale': 0.05,
+                'requirementsBonuses': []
+            }
+        ],
+        'subTables': []
+    },
+    '2.0_hunt_fractured_compass': {
+        'id': '2.0_hunt_fractured_compass',
+        'name': '2.0 hunt fractured compass',
+        'category': 'collectible',
+        'noDropChance': 0.99981,
+        'tableRows': [
+            {
+                'rowItemID': 'fractured_compass',
+                'name': 'Fractured compass',
+                'icon': 'assets/icons/items/collectibles/fractured_compass.png',
+                'isMoney': False,
+                'linearWeightScaling': True,
+                'rowWeight': 1,
+                'rowMinimumAmount': 1,
+                'rowMaximumAmount': 1,
+                'minWeightScale': 0.05,
+                'requirementsBonuses': []
+            }
+        ],
+        'subTables': []
+    },
+    '2.0_hunt_petrified_desert_flower': {
+        'id': '2.0_hunt_petrified_desert_flower',
+        'name': '2.0 hunt petrified desert flower',
+        'category': 'collectible',
+        'noDropChance': 0.999621,
+        'tableRows': [
+            {
+                'rowItemID': 'petrified_desert_flower',
+                'name': 'Petrified desert flower',
+                'icon': 'assets/icons/items/collectibles/petrified_desert_flower.png',
+                'isMoney': False,
+                'linearWeightScaling': True,
+                'rowWeight': 1,
+                'rowMinimumAmount': 1,
+                'rowMaximumAmount': 1,
+                'minWeightScale': 0.05,
+                'requirementsBonuses': []
+            }
+        ],
+        'subTables': []
+    },
+    '2.0_hunt_sand_globe': {
+        'id': '2.0_hunt_sand_globe',
+        'name': '2.0 hunt sand globe',
+        'category': 'collectible',
+        'noDropChance': 0.999953,
+        'tableRows': [
+            {
+                'rowItemID': 'sand_globe',
+                'name': 'Sand globe',
+                'icon': 'assets/icons/items/collectibles/sand_globe.png',
+                'isMoney': False,
+                'linearWeightScaling': True,
+                'rowWeight': 1,
+                'rowMinimumAmount': 1,
+                'rowMaximumAmount': 1,
+                'minWeightScale': 0.05,
+                'requirementsBonuses': []
+            }
+        ],
+        'subTables': []
+    },
     '99_year_old_wine': {
         'id': '99_year_old_wine',
         'name': '99 year old wine',
@@ -25,6 +163,123 @@ LOOT_TABLES = {
             }
         ],
         'subTables': []
+    },
+    'adobe_jumping': {
+        'id': 'adobe_jumping',
+        'name': 'adobe jumping',
+        'category': 'normal',
+        'noDropChance': 0,
+        'tableRows': [
+            {
+                'rowItemID': None,
+                'name': None,
+                'icon': 'assets/icons/items/money.png',
+                'isMoney': True,
+                'linearWeightScaling': True,
+                'rowWeight': 300,
+                'rowMinimumAmount': 5,
+                'rowMaximumAmount': 10,
+                'minWeightScale': 0.05,
+                'requirementsBonuses': []
+            },
+            {
+                'rowItemID': None,
+                'name': None,
+                'icon': 'assets/icons/items/money.png',
+                'isMoney': True,
+                'linearWeightScaling': True,
+                'rowWeight': 300,
+                'rowMinimumAmount': 15,
+                'rowMaximumAmount': 25,
+                'minWeightScale': 0.05,
+                'requirementsBonuses': []
+            },
+            {
+                'rowItemID': 'rough_wrentmarine',
+                'name': 'Rough wrentmarine',
+                'icon': 'assets/icons/items/materials/ores/rough_wrentmarine.png',
+                'isMoney': False,
+                'linearWeightScaling': True,
+                'rowWeight': 105,
+                'rowMinimumAmount': 1,
+                'rowMaximumAmount': 1,
+                'minWeightScale': 0.05,
+                'requirementsBonuses': []
+            },
+            {
+                'rowItemID': 'rough_topaz',
+                'name': 'Rough topaz',
+                'icon': 'assets/icons/items/materials/ores/rough_topaz.png',
+                'isMoney': False,
+                'linearWeightScaling': True,
+                'rowWeight': 50,
+                'rowMinimumAmount': 1,
+                'rowMaximumAmount': 1,
+                'minWeightScale': 0.05,
+                'requirementsBonuses': []
+            },
+            {
+                'rowItemID': 'rough_jade',
+                'name': 'Rough jade',
+                'icon': 'assets/icons/items/materials/ores/rough_jade.png',
+                'isMoney': False,
+                'linearWeightScaling': True,
+                'rowWeight': 40,
+                'rowMinimumAmount': 1,
+                'rowMaximumAmount': 1,
+                'minWeightScale': 0.05,
+                'requirementsBonuses': []
+            },
+            {
+                'rowItemID': 'rough_ruby',
+                'name': 'Rough ruby',
+                'icon': 'assets/icons/items/materials/ores/rough_ruby.png',
+                'isMoney': False,
+                'linearWeightScaling': True,
+                'rowWeight': 30,
+                'rowMinimumAmount': 1,
+                'rowMaximumAmount': 1,
+                'minWeightScale': 0.05,
+                'requirementsBonuses': []
+            },
+            {
+                'rowItemID': 'rough_sun_stone',
+                'name': 'Rough sun stone',
+                'icon': 'assets/icons/items/materials/ores/rough_sunstone.png',
+                'isMoney': False,
+                'linearWeightScaling': True,
+                'rowWeight': 0.7,
+                'rowMinimumAmount': 1,
+                'rowMaximumAmount': 1,
+                'minWeightScale': 0.05,
+                'requirementsBonuses': []
+            },
+            {
+                'rowItemID': 'rough_ethernite',
+                'name': 'Rough ethernite',
+                'icon': 'assets/icons/items/materials/ores/rough_ethernite.png',
+                'isMoney': False,
+                'linearWeightScaling': True,
+                'rowWeight': 0.05,
+                'rowMinimumAmount': 1,
+                'rowMaximumAmount': 1,
+                'minWeightScale': 0.05,
+                'requirementsBonuses': []
+            },
+            {
+                'rowItemID': 'fireball_wine',
+                'name': 'Fireball wine',
+                'icon': 'assets/icons/items/consumables/fireball_wine.png',
+                'isMoney': False,
+                'linearWeightScaling': True,
+                'rowWeight': 0.05,
+                'rowMinimumAmount': 1,
+                'rowMaximumAmount': 1,
+                'minWeightScale': 0.05,
+                'requirementsBonuses': None
+            }
+        ],
+        'subTables': None
     },
     'adventurers_guild_chest_table': {
         'id': 'adventurers_guild_chest_table',
@@ -203,19 +458,16 @@ LOOT_TABLES = {
         ],
         'subTables': [
             {
-                'id': '94475344-84ss-4862-lods-02a8bf0fd1dc',
                 'weight': 0.2164,
                 'type': 'money',
                 'tableRows': []
             },
             {
-                'id': '81ffb865-bc87-4823-8a76-de0d1e89c15e',
                 'weight': 0.2,
                 'type': 'common',
                 'tableRows': []
             },
             {
-                'id': '1ef5d83a-8fe7-4376-a76f-8434695a2fb4',
                 'weight': 0.05,
                 'type': 'uncommon',
                 'tableRows': [
@@ -282,7 +534,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': 'b8130a73-a668-43cc-b605-dce49e7098da',
                 'weight': 0.025,
                 'type': 'rare',
                 'tableRows': [
@@ -361,7 +612,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': 'f21be717-31fb-439b-8000-203d69e42304',
                 'weight': 0.0075,
                 'type': 'epic',
                 'tableRows': [
@@ -392,7 +642,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': 'ceecd17a-db09-4864-bc14-e76051ee02cf',
                 'weight': 0.001,
                 'type': 'legendary',
                 'tableRows': [
@@ -423,7 +672,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': '2f4da361-b414-4e90-8a5f-46c44486fc7c',
                 'weight': 0.0001,
                 'type': 'ethereal',
                 'tableRows': []
@@ -532,7 +780,6 @@ LOOT_TABLES = {
         ],
         'subTables': [
             {
-                'id': 'bd29cbd4-fe71-4979-91f8-e267abae4518',
                 'weight': 0.2164,
                 'type': 'money',
                 'tableRows': [
@@ -575,7 +822,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': '84cebf0b-7e8e-4c48-b1d7-8000e845afc6',
                 'weight': 0.2,
                 'type': 'common',
                 'tableRows': [
@@ -606,7 +852,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': 'e10de81f-af1a-4468-9833-ee029888d542',
                 'weight': 0.05,
                 'type': 'uncommon',
                 'tableRows': [
@@ -637,7 +882,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': 'fc7fee74-57d2-480c-ad8d-91e19c778fea',
                 'weight': 0.025,
                 'type': 'rare',
                 'tableRows': [
@@ -668,7 +912,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': '1f91f2e1-a508-4366-8e01-f56d06753257',
                 'weight': 0.0075,
                 'type': 'epic',
                 'tableRows': [
@@ -699,7 +942,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': '527e2bf7-2839-4792-bc1b-0df10a7d1338',
                 'weight': 0.001,
                 'type': 'legendary',
                 'tableRows': [
@@ -718,7 +960,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': '9456caa5-9270-4658-a470-b37a8502e999',
                 'weight': 0.0001,
                 'type': 'ethereal',
                 'tableRows': []
@@ -926,6 +1167,27 @@ LOOT_TABLES = {
         ],
         'subTables': []
     },
+    'antique_market_assessor_pet_rock_egg': {
+        'id': 'antique_market_assessor_pet_rock_egg',
+        'name': 'antique market assessor pet rock egg',
+        'category': 'petEgg',
+        'noDropChance': 0.99554,
+        'tableRows': [
+            {
+                'rowItemID': 'pet_rock_egg',
+                'name': 'Pet rock egg',
+                'icon': 'assets/icons/pets/rock/rock_egg_static.png',
+                'isMoney': False,
+                'linearWeightScaling': True,
+                'rowWeight': 10,
+                'rowMinimumAmount': 1,
+                'rowMaximumAmount': 1,
+                'minWeightScale': 0.05,
+                'requirementsBonuses': []
+            }
+        ],
+        'subTables': None
+    },
     'bear_hunting': {
         'id': 'bear_hunting',
         'name': 'bear hunting',
@@ -939,7 +1201,7 @@ LOOT_TABLES = {
                 'isMoney': False,
                 'linearWeightScaling': True,
                 'rowWeight': 15,
-                'rowMinimumAmount': 1,
+                'rowMinimumAmount': 3,
                 'rowMaximumAmount': 3,
                 'minWeightScale': 0.05,
                 'requirementsBonuses': []
@@ -1143,8 +1405,8 @@ LOOT_TABLES = {
                 'isMoney': False,
                 'linearWeightScaling': True,
                 'rowWeight': 12,
-                'rowMinimumAmount': 1,
-                'rowMaximumAmount': 1,
+                'rowMinimumAmount': 2,
+                'rowMaximumAmount': 2,
                 'minWeightScale': 0.05,
                 'requirementsBonuses': []
             },
@@ -1754,7 +2016,6 @@ LOOT_TABLES = {
         ],
         'subTables': [
             {
-                'id': '0161f184-06bc-4120-912b-2e822f3d6d6e',
                 'weight': 0.2164,
                 'type': 'money',
                 'tableRows': [
@@ -1785,7 +2046,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': '525ee1fe-2c60-4b39-8943-12cddcc7aea1',
                 'weight': 0.2,
                 'type': 'common',
                 'tableRows': [
@@ -1816,7 +2076,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': 'b09f1e46-ba05-442d-b558-5eb1be4351bb',
                 'weight': 0.05,
                 'type': 'uncommon',
                 'tableRows': [
@@ -1871,7 +2130,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': '801b7127-06f0-4c9f-8dcc-f95d241695d4',
                 'weight': 0.025,
                 'type': 'rare',
                 'tableRows': [
@@ -1902,7 +2160,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': 'bcdcbe87-f712-4c80-b4df-d5feaff11488',
                 'weight': 0.0075,
                 'type': 'epic',
                 'tableRows': [
@@ -1933,7 +2190,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': 'ac1bb943-bc67-4297-acc6-024cbd52635e',
                 'weight': 0.001,
                 'type': 'legendary',
                 'tableRows': [
@@ -1952,7 +2208,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': 'e688e6f0-acd1-42c8-b1e9-d851efb4ba04',
                 'weight': 0.0001,
                 'type': 'ethereal',
                 'tableRows': []
@@ -2301,43 +2556,36 @@ LOOT_TABLES = {
         ],
         'subTables': [
             {
-                'id': '2c639e59-a27e-4362-a345-359ebb08f66b',
                 'weight': 0.2164,
                 'type': 'money',
                 'tableRows': []
             },
             {
-                'id': '1df473a9-bdb2-4766-9386-f679ad678d04',
                 'weight': 0.2,
                 'type': 'common',
                 'tableRows': []
             },
             {
-                'id': '740f2736-f609-4fbd-b449-5f9d61233939',
                 'weight': 0.05,
                 'type': 'uncommon',
                 'tableRows': []
             },
             {
-                'id': '5534c5d0-2d51-4d0e-b429-e4754c6470db',
                 'weight': 0.025,
                 'type': 'rare',
                 'tableRows': []
             },
             {
-                'id': '2cd196ec-b8fd-481d-a081-d5c781264424',
                 'weight': 0.0075,
                 'type': 'epic',
                 'tableRows': []
             },
             {
-                'id': 'a3d4f067-f080-44c6-8c00-727f7f381b25',
                 'weight': 0.001,
                 'type': 'legendary',
                 'tableRows': []
             },
             {
-                'id': 'b17b5f84-1ccb-4c20-9935-f2d77ef7b4ff',
                 'weight': 0.0001,
                 'type': 'ethereal',
                 'tableRows': []
@@ -2364,6 +2612,48 @@ LOOT_TABLES = {
             }
         ],
         'subTables': []
+    },
+    'controlled_burning': {
+        'id': 'controlled_burning',
+        'name': 'controlled burning',
+        'category': 'normal',
+        'noDropChance': 0.93,
+        'tableRows': [
+            {
+                'rowItemID': 'crystallized_flame',
+                'name': 'Crystallized flame',
+                'icon': 'assets/icons/items/materials/crystalized_flame.png',
+                'isMoney': False,
+                'linearWeightScaling': True,
+                'rowWeight': 10,
+                'rowMinimumAmount': 1,
+                'rowMaximumAmount': 3,
+                'minWeightScale': 0.05,
+                'requirementsBonuses': []
+            }
+        ],
+        'subTables': []
+    },
+    'controlled_burning_living_flame_egg': {
+        'id': 'controlled_burning_living_flame_egg',
+        'name': 'controlled burning living flame egg',
+        'category': 'petEgg',
+        'noDropChance': 0.9979,
+        'tableRows': [
+            {
+                'rowItemID': 'living_flame_egg',
+                'name': 'Living flame egg',
+                'icon': 'assets/icons/pets/living_flame/living_flame_egg_static.png',
+                'isMoney': False,
+                'linearWeightScaling': True,
+                'rowWeight': 10,
+                'rowMinimumAmount': 1,
+                'rowMaximumAmount': 1,
+                'minWeightScale': 0.05,
+                'requirementsBonuses': []
+            }
+        ],
+        'subTables': None
     },
     'cooking_activity_chest': {
         'id': 'cooking_activity_chest',
@@ -2515,7 +2805,6 @@ LOOT_TABLES = {
         ],
         'subTables': [
             {
-                'id': '94475344-d558-4862-aecf-02a8bf0fd1dc',
                 'weight': 0.2164,
                 'type': 'money',
                 'tableRows': [
@@ -2546,7 +2835,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': 'ba81c95e-e745-4a13-aa95-58035cc2fc53',
                 'weight': 0.2,
                 'type': 'common',
                 'tableRows': [
@@ -2589,7 +2877,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': '88107d7e-adc4-4c11-ae50-1ebe3a3c3efa',
                 'weight': 0.05,
                 'type': 'uncommon',
                 'tableRows': [
@@ -2632,7 +2919,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': '42028c70-ba8f-4e3a-98b4-bb80bcb6c62c',
                 'weight': 0.025,
                 'type': 'rare',
                 'tableRows': [
@@ -2687,7 +2973,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': 'b4f8df00-2bee-4617-83c9-2967be6191de',
                 'weight': 0.0075,
                 'type': 'epic',
                 'tableRows': [
@@ -2718,7 +3003,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': '4f4c43f0-dc99-4db0-96c5-c077ef8fec43',
                 'weight': 0.001,
                 'type': 'legendary',
                 'tableRows': [
@@ -2737,7 +3021,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': '853a6d5d-c41e-46f1-a5a9-892e25e3fecb',
                 'weight': 0.0001,
                 'type': 'ethereal',
                 'tableRows': []
@@ -2834,19 +3117,16 @@ LOOT_TABLES = {
         ],
         'subTables': [
             {
-                'id': '98455344-d558-6248-aecf-3258bf0fd1dc',
                 'weight': 0.2164,
                 'type': 'money',
                 'tableRows': []
             },
             {
-                'id': '8be94468-2905-4c30-82b8-ae50843373d3',
                 'weight': 0.2,
                 'type': 'common',
                 'tableRows': []
             },
             {
-                'id': 'ea99af55-1baa-433a-8eff-f2115e6247f5',
                 'weight': 0.05,
                 'type': 'uncommon',
                 'tableRows': [
@@ -2865,25 +3145,21 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': '884e6569-dacf-41db-a5a4-3a203094c95c',
                 'weight': 0.025,
                 'type': 'rare',
                 'tableRows': []
             },
             {
-                'id': '19a69c5c-06c0-4c33-8376-605a58c66820',
                 'weight': 0.0075,
                 'type': 'epic',
                 'tableRows': []
             },
             {
-                'id': 'd380a214-883f-4cd2-9260-a8489d735c5c',
                 'weight': 0.001,
                 'type': 'legendary',
                 'tableRows': []
             },
             {
-                'id': '22d6868e-ec7c-4a59-9c0e-9539dbd0f90a',
                 'weight': 0.0001,
                 'type': 'ethereal',
                 'tableRows': []
@@ -3118,7 +3394,6 @@ LOOT_TABLES = {
         ],
         'subTables': [
             {
-                'id': '553138f9-3b77-4b7f-ba27-cfc15e61bc90',
                 'weight': 0.2164,
                 'type': 'money',
                 'tableRows': [
@@ -3149,7 +3424,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': 'ee1753a4-cd60-458d-9042-38a679a01233',
                 'weight': 0.2,
                 'type': 'common',
                 'tableRows': [
@@ -3180,7 +3454,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': '3c922979-e2e6-4140-a76b-612e235c418d',
                 'weight': 0.05,
                 'type': 'uncommon',
                 'tableRows': [
@@ -3223,7 +3496,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': '49c261f9-8ffb-4284-b8d4-8e69327fae78',
                 'weight': 0.025,
                 'type': 'rare',
                 'tableRows': [
@@ -3266,7 +3538,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': 'a57dba60-700d-4ea3-bb60-5e243aab62d7',
                 'weight': 0.0075,
                 'type': 'epic',
                 'tableRows': [
@@ -3297,7 +3568,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': 'f82f4402-0e6e-442d-8331-9427cb560b43',
                 'weight': 0.001,
                 'type': 'legendary',
                 'tableRows': [
@@ -3316,7 +3586,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': '610c8342-d902-4851-8cb6-b00a04be12ff',
                 'weight': 0.0001,
                 'type': 'ethereal',
                 'tableRows': []
@@ -3419,6 +3688,27 @@ LOOT_TABLES = {
         ],
         'subTables': []
     },
+    'cut_mahogany_trees': {
+        'id': 'cut_mahogany_trees',
+        'name': 'cut mahogany trees',
+        'category': 'normal',
+        'noDropChance': 0,
+        'tableRows': [
+            {
+                'rowItemID': 'mahogany_logs',
+                'name': 'Mahogany logs',
+                'icon': 'assets/icons/items/materials/logs/mahogany_log.png',
+                'isMoney': False,
+                'linearWeightScaling': True,
+                'rowWeight': 1000,
+                'rowMinimumAmount': 1,
+                'rowMaximumAmount': 1,
+                'minWeightScale': 0,
+                'requirementsBonuses': []
+            }
+        ],
+        'subTables': []
+    },
     'cut_mangrove_trees': {
         'id': 'cut_mangrove_trees',
         'name': 'cut mangrove trees',
@@ -3484,6 +3774,27 @@ LOOT_TABLES = {
             }
         ],
         'subTables': []
+    },
+    'cut_maple_trees_termite_egg': {
+        'id': 'cut_maple_trees_termite_egg',
+        'name': 'cut maple trees termite egg',
+        'category': 'petEgg',
+        'noDropChance': 0.99955,
+        'tableRows': [
+            {
+                'rowItemID': 'termite_egg',
+                'name': 'Termite egg',
+                'icon': 'assets/icons/pets/woodmunch/woodmunch_egg_static.png',
+                'isMoney': False,
+                'linearWeightScaling': True,
+                'rowWeight': 10,
+                'rowMinimumAmount': 1,
+                'rowMaximumAmount': 1,
+                'minWeightScale': 0.05,
+                'requirementsBonuses': []
+            }
+        ],
+        'subTables': None
     },
     'cut_oak_trees': {
         'id': 'cut_oak_trees',
@@ -4391,13 +4702,11 @@ LOOT_TABLES = {
         ],
         'subTables': [
             {
-                'id': 'fe251aad-0f0c-4f08-b5a3-deb688adecd5',
                 'weight': 0.2164,
                 'type': 'money',
                 'tableRows': []
             },
             {
-                'id': 'b6b0b9d6-132d-4dfc-bc1a-723dc970c677',
                 'weight': 0.2,
                 'type': 'common',
                 'tableRows': [
@@ -4440,7 +4749,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': 'af8d051c-f5d1-4f4e-ab49-8fe82923eb42',
                 'weight': 0.05,
                 'type': 'uncommon',
                 'tableRows': [
@@ -4471,7 +4779,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': '59cdc30a-5c2c-484f-88c6-82c1280b4894',
                 'weight': 0.025,
                 'type': 'rare',
                 'tableRows': [
@@ -4502,7 +4809,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': '9dd70b57-89c2-4207-a7fa-f4f0f1d4e699',
                 'weight': 0.0075,
                 'type': 'epic',
                 'tableRows': [
@@ -4533,7 +4839,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': '0551ee25-1d82-4fd7-9fd4-fa2ce5f94d5d',
                 'weight': 0.001,
                 'type': 'legendary',
                 'tableRows': [
@@ -4552,7 +4857,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': 'fa4faea7-ea81-4fb5-88a5-8f79ce341552',
                 'weight': 0.0001,
                 'type': 'ethereal',
                 'tableRows': [
@@ -4820,6 +5124,159 @@ LOOT_TABLES = {
             }
         ],
         'subTables': []
+    },
+    'find_memospheres': {
+        'id': 'find_memospheres',
+        'name': 'find memospheres',
+        'category': 'normal',
+        'noDropChance': 0,
+        'tableRows': [
+            {
+                'rowItemID': 'agility_memosphere',
+                'name': 'Agility memosphere',
+                'icon': 'assets/icons/items/consumables/memospheres/memosphere_agility.png',
+                'isMoney': False,
+                'linearWeightScaling': True,
+                'rowWeight': 1,
+                'rowMinimumAmount': 1,
+                'rowMaximumAmount': 1,
+                'minWeightScale': None,
+                'requirementsBonuses': None
+            },
+            {
+                'rowItemID': 'carpentry_memosphere',
+                'name': 'Carpentry memosphere',
+                'icon': 'assets/icons/items/consumables/memospheres/memosphere_carpentry.png',
+                'isMoney': False,
+                'linearWeightScaling': True,
+                'rowWeight': 1,
+                'rowMinimumAmount': 1,
+                'rowMaximumAmount': 1,
+                'minWeightScale': None,
+                'requirementsBonuses': None
+            },
+            {
+                'rowItemID': 'cooking_memosphere',
+                'name': 'Cooking memosphere',
+                'icon': 'assets/icons/items/consumables/memospheres/memosphere_cooking.png',
+                'isMoney': False,
+                'linearWeightScaling': True,
+                'rowWeight': 1,
+                'rowMinimumAmount': 1,
+                'rowMaximumAmount': 1,
+                'minWeightScale': None,
+                'requirementsBonuses': None
+            },
+            {
+                'rowItemID': 'crafting_memosphere',
+                'name': 'Crafting memosphere',
+                'icon': 'assets/icons/items/consumables/memospheres/memosphere_crafting.png',
+                'isMoney': False,
+                'linearWeightScaling': True,
+                'rowWeight': 1,
+                'rowMinimumAmount': 1,
+                'rowMaximumAmount': 1,
+                'minWeightScale': None,
+                'requirementsBonuses': None
+            },
+            {
+                'rowItemID': 'fishing_memosphere',
+                'name': 'Fishing memosphere',
+                'icon': 'assets/icons/items/consumables/memospheres/memosphere_fishing.png',
+                'isMoney': False,
+                'linearWeightScaling': True,
+                'rowWeight': 1,
+                'rowMinimumAmount': 1,
+                'rowMaximumAmount': 1,
+                'minWeightScale': None,
+                'requirementsBonuses': None
+            },
+            {
+                'rowItemID': 'foraging_memosphere',
+                'name': 'Foraging memosphere',
+                'icon': 'assets/icons/items/consumables/memospheres/memosphere_foraging.png',
+                'isMoney': False,
+                'linearWeightScaling': True,
+                'rowWeight': 1,
+                'rowMinimumAmount': 1,
+                'rowMaximumAmount': 1,
+                'minWeightScale': None,
+                'requirementsBonuses': None
+            },
+            {
+                'rowItemID': 'hunting_memosphere',
+                'name': 'Hunting memosphere',
+                'icon': 'assets/icons/items/consumables/memospheres/hunting_memosphere.png',
+                'isMoney': False,
+                'linearWeightScaling': True,
+                'rowWeight': 1,
+                'rowMinimumAmount': 1,
+                'rowMaximumAmount': 1,
+                'minWeightScale': None,
+                'requirementsBonuses': None
+            },
+            {
+                'rowItemID': 'mining_memosphere',
+                'name': 'Mining memosphere',
+                'icon': 'assets/icons/items/consumables/memospheres/memosphere_mining.png',
+                'isMoney': False,
+                'linearWeightScaling': True,
+                'rowWeight': 1,
+                'rowMinimumAmount': 1,
+                'rowMaximumAmount': 1,
+                'minWeightScale': None,
+                'requirementsBonuses': None
+            },
+            {
+                'rowItemID': 'smithing_memosphere',
+                'name': 'Smithing memosphere',
+                'icon': 'assets/icons/items/consumables/memospheres/memosphere_smithing.png',
+                'isMoney': False,
+                'linearWeightScaling': True,
+                'rowWeight': 1,
+                'rowMinimumAmount': 1,
+                'rowMaximumAmount': 1,
+                'minWeightScale': None,
+                'requirementsBonuses': None
+            },
+            {
+                'rowItemID': 'tailoring_memosphere',
+                'name': 'Tailoring memosphere',
+                'icon': 'assets/icons/items/consumables/memospheres/tailoring_memosphere.png',
+                'isMoney': False,
+                'linearWeightScaling': True,
+                'rowWeight': 1,
+                'rowMinimumAmount': 1,
+                'rowMaximumAmount': 1,
+                'minWeightScale': None,
+                'requirementsBonuses': None
+            },
+            {
+                'rowItemID': 'trinketry_memosphere',
+                'name': 'Trinketry memosphere',
+                'icon': 'assets/icons/items/consumables/memospheres/trinketry_memosphere.png',
+                'isMoney': False,
+                'linearWeightScaling': True,
+                'rowWeight': 1,
+                'rowMinimumAmount': 1,
+                'rowMaximumAmount': 1,
+                'minWeightScale': None,
+                'requirementsBonuses': None
+            },
+            {
+                'rowItemID': 'woodcutting_memosphere',
+                'name': 'Woodcutting memosphere',
+                'icon': 'assets/icons/items/consumables/memospheres/memosphere_woodcutting.png',
+                'isMoney': False,
+                'linearWeightScaling': True,
+                'rowWeight': 1,
+                'rowMinimumAmount': 1,
+                'rowMaximumAmount': 1,
+                'minWeightScale': None,
+                'requirementsBonuses': None
+            }
+        ],
+        'subTables': None
     },
     'find_present_items': {
         'id': 'find_present_items',
@@ -5286,7 +5743,6 @@ LOOT_TABLES = {
         ],
         'subTables': [
             {
-                'id': '835c51bd-9159-4568-8262-e4c8865815bc',
                 'weight': 0.2164,
                 'type': 'money',
                 'tableRows': [
@@ -5317,7 +5773,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': '8123ee39-fcaa-4906-b19f-7e483d679631',
                 'weight': 0.2,
                 'type': 'common',
                 'tableRows': [
@@ -5348,7 +5803,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': 'baa8b3c5-5af0-4c3b-8912-11c24e112f9b',
                 'weight': 0.05,
                 'type': 'uncommon',
                 'tableRows': [
@@ -5379,7 +5833,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': '7d0cbde9-e07b-428f-b650-4711409a17d8',
                 'weight': 0.025,
                 'type': 'rare',
                 'tableRows': [
@@ -5422,7 +5875,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': '2c60c6f2-e2e6-45b1-b02a-a5adf7031763',
                 'weight': 0.0075,
                 'type': 'epic',
                 'tableRows': [
@@ -5453,7 +5905,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': 'e303affe-9b78-4ffe-91da-8ec46eeebecd',
                 'weight': 0.001,
                 'type': 'legendary',
                 'tableRows': [
@@ -5472,7 +5923,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': '3bcea375-9737-472a-9a00-050571c03556',
                 'weight': 0.0001,
                 'type': 'ethereal',
                 'tableRows': []
@@ -5770,7 +6220,6 @@ LOOT_TABLES = {
         ],
         'subTables': [
             {
-                'id': '469ddebb-3143-4738-8435-2c33dfcdd55b',
                 'weight': 0.2164,
                 'type': 'money',
                 'tableRows': [
@@ -5801,7 +6250,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': 'ce0fd4d7-85e9-4bb3-8c91-961364477299',
                 'weight': 0.2,
                 'type': 'common',
                 'tableRows': [
@@ -5868,7 +6316,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': 'a51a197f-5b67-4d50-a381-12de68ec1abf',
                 'weight': 0.05,
                 'type': 'uncommon',
                 'tableRows': [
@@ -5911,7 +6358,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': 'f82f6270-fcb7-42dd-857b-c4ecb5d28936',
                 'weight': 0.025,
                 'type': 'rare',
                 'tableRows': [
@@ -5966,7 +6412,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': '4ed9041c-6084-4db8-8365-2df08c162ed8',
                 'weight': 0.0075,
                 'type': 'epic',
                 'tableRows': [
@@ -5997,7 +6442,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': '184a8872-56ce-442e-9c4a-2c914030089e',
                 'weight': 0.001,
                 'type': 'legendary',
                 'tableRows': [
@@ -6016,7 +6460,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': 'b513321a-55cb-4dff-951e-a4273c99f4e5',
                 'weight': 0.0001,
                 'type': 'ethereal',
                 'tableRows': []
@@ -6361,7 +6804,7 @@ LOOT_TABLES = {
         'tableRows': [
             {
                 'rowItemID': 'adventurers_guild_token',
-                'name': "Adventurers' guild token",
+                'name': "Adventurers' Guild token",
                 'icon': 'assets/icons/items/currencies/adventure_guild_token_32.png',
                 'isMoney': False,
                 'linearWeightScaling': True,
@@ -6629,43 +7072,36 @@ LOOT_TABLES = {
         ],
         'subTables': [
             {
-                'id': '0dffb230-e3ad-4c66-a828-b1f9cbae1ab6',
                 'weight': 0.2164,
                 'type': 'money',
                 'tableRows': []
             },
             {
-                'id': '7ae7d0ac-875c-4641-bcd3-cd9ca974f81d',
                 'weight': 0.2,
                 'type': 'common',
                 'tableRows': []
             },
             {
-                'id': '3adaa016-3c84-46d0-a209-f821f9ff13de',
                 'weight': 0.05,
                 'type': 'uncommon',
                 'tableRows': []
             },
             {
-                'id': 'fd0b8d4f-33dc-4d12-a0dd-cd3a1213d9cb',
                 'weight': 0.025,
                 'type': 'rare',
                 'tableRows': []
             },
             {
-                'id': 'cd62393f-caf6-4c3b-8de0-60c7e8e45f66',
                 'weight': 0.0075,
                 'type': 'epic',
                 'tableRows': []
             },
             {
-                'id': 'a80ebc55-8573-44f8-b309-b63095d10668',
                 'weight': 0.001,
                 'type': 'legendary',
                 'tableRows': []
             },
             {
-                'id': 'c04d2f98-0bb8-480c-8e51-8bc006891753',
                 'weight': 0.0001,
                 'type': 'ethereal',
                 'tableRows': []
@@ -7002,13 +7438,11 @@ LOOT_TABLES = {
         ],
         'subTables': [
             {
-                'id': '706c5c4b-0c19-44ca-8016-72540f0a3beb',
                 'weight': 0.2164,
                 'type': 'money',
                 'tableRows': []
             },
             {
-                'id': 'fdb4522c-1a44-4c17-aa71-75bf46d69e3e',
                 'weight': 0.2,
                 'type': 'common',
                 'tableRows': [
@@ -7051,7 +7485,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': 'b188170c-2cfe-419d-8358-986bb0002996',
                 'weight': 0.05,
                 'type': 'uncommon',
                 'tableRows': [
@@ -7082,7 +7515,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': 'ac5064e0-5373-45c0-a25d-bad117470c4a',
                 'weight': 0.025,
                 'type': 'rare',
                 'tableRows': [
@@ -7113,7 +7545,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': '3efc6dd5-91e9-4d00-b380-8eae195e7cce',
                 'weight': 0.0075,
                 'type': 'epic',
                 'tableRows': [
@@ -7144,7 +7575,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': 'ed72abd2-c292-45fd-b2e2-0d434bd8bd40',
                 'weight': 0.001,
                 'type': 'legendary',
                 'tableRows': [
@@ -7163,7 +7593,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': '7ad7dd67-7271-45b7-ab08-dcbd10c0862b',
                 'weight': 0.0001,
                 'type': 'ethereal',
                 'tableRows': [
@@ -7298,6 +7727,27 @@ LOOT_TABLES = {
             }
         ],
         'subTables': []
+    },
+    'hull_repair_sawmantis_egg': {
+        'id': 'hull_repair_sawmantis_egg',
+        'name': 'hull repair sawmantis egg',
+        'category': 'petEgg',
+        'noDropChance': 0.99898,
+        'tableRows': [
+            {
+                'rowItemID': 'sawmantis_egg',
+                'name': 'Sawmantis egg',
+                'icon': 'assets/icons/pets/sawmoth/sawmoth_egg_static.png',
+                'isMoney': False,
+                'linearWeightScaling': True,
+                'rowWeight': 10,
+                'rowMinimumAmount': 1,
+                'rowMaximumAmount': 1,
+                'minWeightScale': 0.05,
+                'requirementsBonuses': []
+            }
+        ],
+        'subTables': None
     },
     'hunting_activity_chest': {
         'id': 'hunting_activity_chest',
@@ -7449,7 +7899,6 @@ LOOT_TABLES = {
         ],
         'subTables': [
             {
-                'id': '3644ee44-64b5-4b5e-89a9-c205fd4f0baa',
                 'weight': 0.2164,
                 'type': 'money',
                 'tableRows': [
@@ -7480,7 +7929,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': '1d196559-f1fe-4454-860d-d333b19e9ad3',
                 'weight': 0.2,
                 'type': 'common',
                 'tableRows': [
@@ -7523,7 +7971,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': '1c9b117d-768e-4736-8be6-fa3f46b9d058',
                 'weight': 0.05,
                 'type': 'uncommon',
                 'tableRows': [
@@ -7554,7 +8001,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': '48b7a7ba-801a-470a-940c-21864ba6cd0c',
                 'weight': 0.025,
                 'type': 'rare',
                 'tableRows': [
@@ -7597,7 +8043,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': 'da4eb19a-4e0f-4c29-9ffb-f14a5c6dcf7b',
                 'weight': 0.0075,
                 'type': 'epic',
                 'tableRows': [
@@ -7628,7 +8073,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': '2c60e31e-8685-4afc-9786-096b12039076',
                 'weight': 0.001,
                 'type': 'legendary',
                 'tableRows': [
@@ -7647,7 +8091,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': '093d2309-9619-44c4-a963-becbc7ac43aa',
                 'weight': 0.0001,
                 'type': 'ethereal',
                 'tableRows': []
@@ -7846,13 +8289,11 @@ LOOT_TABLES = {
         ],
         'subTables': [
             {
-                'id': '94475344-9876-4862-1234-02a8bf0fd1dc',
                 'weight': 0.2164,
                 'type': 'money',
                 'tableRows': []
             },
             {
-                'id': 'reroll-this-id-24807b3e-25d4-4088-ba5a-5e4de01c50d7',
                 'weight': 0.2,
                 'type': 'common',
                 'tableRows': [
@@ -7895,7 +8336,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': 'reroll-this-id-7b0070fe-d6e9-4d9f-adb1-9fae6c46e315',
                 'weight': 0.05,
                 'type': 'uncommon',
                 'tableRows': [
@@ -7926,7 +8366,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': 'reroll-this-id-703e493d-a54b-4f6f-b360-2a4b5ae509a0',
                 'weight': 0.025,
                 'type': 'rare',
                 'tableRows': [
@@ -7957,7 +8396,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': 'reroll-this-id-01e1de76-36e9-4695-bf28-ef8dec819fdc',
                 'weight': 0.0075,
                 'type': 'epic',
                 'tableRows': [
@@ -7988,7 +8426,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': 'reroll-this-id-8f461679-afe3-466f-9380-765b7c887a80',
                 'weight': 0.001,
                 'type': 'legendary',
                 'tableRows': [
@@ -8007,7 +8444,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': 'reroll-this-id-9ec1a1d9-785e-47f4-9a9d-663876e59617',
                 'weight': 0.0001,
                 'type': 'ethereal',
                 'tableRows': [
@@ -9374,7 +9810,6 @@ LOOT_TABLES = {
         ],
         'subTables': [
             {
-                'id': '01437f92-e80b-4b12-9717-a181c283af7c',
                 'weight': 0.2164,
                 'type': 'money',
                 'tableRows': [
@@ -9405,7 +9840,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': '5e18de99-5ff9-44d6-9981-c499ae40e1a3',
                 'weight': 0.2,
                 'type': 'common',
                 'tableRows': [
@@ -9436,7 +9870,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': '22b733af-b722-4c35-85c2-ec5352a9cf02',
                 'weight': 0.05,
                 'type': 'uncommon',
                 'tableRows': [
@@ -9467,7 +9900,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': '5921a175-cd5d-4785-9ef6-5329500abb45',
                 'weight': 0.025,
                 'type': 'rare',
                 'tableRows': [
@@ -9510,7 +9942,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': 'b561d611-10d7-4125-a573-1025e9887c6d',
                 'weight': 0.0075,
                 'type': 'epic',
                 'tableRows': [
@@ -9553,7 +9984,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': '8cd9741e-639a-4cb3-ab8b-ef69bfd1b82d',
                 'weight': 0.001,
                 'type': 'legendary',
                 'tableRows': [
@@ -9572,7 +10002,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': 'a5f0f53c-d655-4ce6-be0f-158ea2e83161',
                 'weight': 0.0001,
                 'type': 'ethereal',
                 'tableRows': []
@@ -10227,13 +10656,11 @@ LOOT_TABLES = {
         ],
         'subTables': [
             {
-                'id': '12575344-3656-7771-aecf-02a8548fd1dc',
                 'weight': 0.2164,
                 'type': 'money',
                 'tableRows': []
             },
             {
-                'id': '60288d8f-dea3-41d6-b5b2-2580b2a6ceaa',
                 'weight': 0.2,
                 'type': 'common',
                 'tableRows': [
@@ -10312,31 +10739,26 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': '35f2e756-ee81-4146-b97d-53254ec6c70a',
                 'weight': 0.05,
                 'type': 'uncommon',
                 'tableRows': []
             },
             {
-                'id': '16b185b3-ec86-47f7-bfb5-f48e68c51fea',
                 'weight': 0.025,
                 'type': 'rare',
                 'tableRows': []
             },
             {
-                'id': 'd75d406e-c10e-476b-8284-42193e1660c2',
                 'weight': 0.0075,
                 'type': 'epic',
                 'tableRows': []
             },
             {
-                'id': 'c8c965b1-42c9-4ea5-8e69-c707e01490e6',
                 'weight': 0.001,
                 'type': 'legendary',
                 'tableRows': []
             },
             {
-                'id': '25f3b8ce-15f7-4113-b09a-ca79d290a130',
                 'weight': 0.0001,
                 'type': 'ethereal',
                 'tableRows': []
@@ -11293,7 +11715,6 @@ LOOT_TABLES = {
         ],
         'subTables': [
             {
-                'id': 'c269806f-d5ee-4968-9669-28ef3272141a',
                 'weight': 0.2164,
                 'type': 'money',
                 'tableRows': [
@@ -11324,7 +11745,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': 'caed4752-d1a9-43f0-840e-a70a6ad917aa',
                 'weight': 0.2,
                 'type': 'common',
                 'tableRows': [
@@ -11355,7 +11775,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': '5227fe46-52b3-4019-ba56-b59c2815ea9f',
                 'weight': 0.05,
                 'type': 'uncommon',
                 'tableRows': [
@@ -11398,7 +11817,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': '589cd0ea-8d96-4766-84a3-ba04eae7c524',
                 'weight': 0.025,
                 'type': 'rare',
                 'tableRows': [
@@ -11453,7 +11871,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': '011d8183-56c4-4b6b-9b3a-0f10922ee317',
                 'weight': 0.0075,
                 'type': 'epic',
                 'tableRows': [
@@ -11484,7 +11901,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': '98a0cac2-b890-4b00-8127-27da55debadd',
                 'weight': 0.001,
                 'type': 'legendary',
                 'tableRows': [
@@ -11503,7 +11919,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': '21d74f2b-584f-410f-b9f6-c6dbbe4b63e6',
                 'weight': 0.0001,
                 'type': 'ethereal',
                 'tableRows': []
@@ -11780,6 +12195,27 @@ LOOT_TABLES = {
         ],
         'subTables': []
     },
+    'stone_quarrying_pet_rock_egg': {
+        'id': 'stone_quarrying_pet_rock_egg',
+        'name': 'stone quarrying pet rock egg',
+        'category': 'petEgg',
+        'noDropChance': 0.9994,
+        'tableRows': [
+            {
+                'rowItemID': 'pet_rock_egg',
+                'name': 'Pet rock egg',
+                'icon': 'assets/icons/pets/rock/rock_egg_static.png',
+                'isMoney': False,
+                'linearWeightScaling': True,
+                'rowWeight': 10,
+                'rowMinimumAmount': 1,
+                'rowMaximumAmount': 1,
+                'minWeightScale': 0.05,
+                'requirementsBonuses': []
+            }
+        ],
+        'subTables': None
+    },
     'summer_cave_foraging': {
         'id': 'summer_cave_foraging',
         'name': 'summer cave foraging',
@@ -11845,6 +12281,27 @@ LOOT_TABLES = {
                 'rowMaximumAmount': 3,
                 'minWeightScale': None,
                 'requirementsBonuses': None
+            }
+        ],
+        'subTables': None
+    },
+    'summer_cave_foraging_termite_egg': {
+        'id': 'summer_cave_foraging_termite_egg',
+        'name': 'summer cave foraging termite egg',
+        'category': 'petEgg',
+        'noDropChance': 0.9967,
+        'tableRows': [
+            {
+                'rowItemID': 'termite_egg',
+                'name': 'Termite egg',
+                'icon': 'assets/icons/pets/woodmunch/woodmunch_egg_static.png',
+                'isMoney': False,
+                'linearWeightScaling': True,
+                'rowWeight': 10,
+                'rowMinimumAmount': 1,
+                'rowMaximumAmount': 1,
+                'minWeightScale': 0.05,
+                'requirementsBonuses': []
             }
         ],
         'subTables': None
@@ -11918,7 +12375,6 @@ LOOT_TABLES = {
         ],
         'subTables': [
             {
-                'id': 'bf9643c0-e798-488a-a409-b9c09f1bce4d',
                 'weight': 0.2164,
                 'type': 'money',
                 'tableRows': [
@@ -11937,7 +12393,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': 'bcedf307-93fc-445c-8cd8-6e7156ac4b49',
                 'weight': 0.2,
                 'type': 'common',
                 'tableRows': [
@@ -11956,7 +12411,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': 'd1a64137-fabe-43d7-8175-d66f7331a45d',
                 'weight': 0.05,
                 'type': 'uncommon',
                 'tableRows': [
@@ -11975,7 +12429,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': 'b50e9ca5-7f4d-41df-9fdc-ca616ca9eb3a',
                 'weight': 0.025,
                 'type': 'rare',
                 'tableRows': [
@@ -12006,19 +12459,16 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': '33124b31-dd99-4a81-8ef1-c37566bbd8a4',
                 'weight': 0.0075,
                 'type': 'epic',
                 'tableRows': []
             },
             {
-                'id': '43b3b87f-d002-4922-a62f-018c58f0a129',
                 'weight': 0.001,
                 'type': 'legendary',
                 'tableRows': []
             },
             {
-                'id': 'fc77d396-1604-495a-a472-105ab7d0d105',
                 'weight': 0.0001,
                 'type': 'ethereal',
                 'tableRows': []
@@ -12083,8 +12533,8 @@ LOOT_TABLES = {
                 'isMoney': False,
                 'linearWeightScaling': True,
                 'rowWeight': 10,
-                'rowMinimumAmount': 1,
-                'rowMaximumAmount': 2,
+                'rowMinimumAmount': 2,
+                'rowMaximumAmount': 3,
                 'minWeightScale': None,
                 'requirementsBonuses': None
             },
@@ -12147,6 +12597,27 @@ LOOT_TABLES = {
                 'rowMaximumAmount': 1,
                 'minWeightScale': None,
                 'requirementsBonuses': None
+            }
+        ],
+        'subTables': None
+    },
+    'swamp_foraging_sawmantis_egg': {
+        'id': 'swamp_foraging_sawmantis_egg',
+        'name': 'swamp foraging sawmantis egg',
+        'category': 'petEgg',
+        'noDropChance': 0.99875,
+        'tableRows': [
+            {
+                'rowItemID': 'sawmantis_egg',
+                'name': 'Sawmantis egg',
+                'icon': 'assets/icons/pets/sawmoth/sawmoth_egg_static.png',
+                'isMoney': False,
+                'linearWeightScaling': True,
+                'rowWeight': 10,
+                'rowMinimumAmount': 1,
+                'rowMaximumAmount': 1,
+                'minWeightScale': 0.05,
+                'requirementsBonuses': []
             }
         ],
         'subTables': None
@@ -12460,13 +12931,11 @@ LOOT_TABLES = {
         ],
         'subTables': [
             {
-                'id': '94473544-d558-2215-aecf-6987bf0fd1dc',
                 'weight': 0.2164,
                 'type': 'money',
                 'tableRows': []
             },
             {
-                'id': 'reroll-this-id-d5455e80-0ac1-43f6-81db-2229043b9a5f',
                 'weight': 0.2,
                 'type': 'common',
                 'tableRows': [
@@ -12497,7 +12966,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': 'reroll-this-id-3a9ad07d-f100-4014-8e1d-6dda32ecc7a5',
                 'weight': 0.05,
                 'type': 'uncommon',
                 'tableRows': [
@@ -12540,7 +13008,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': 'reroll-this-id-e60f1efe-fbb5-4f78-a99c-ceef43ead7aa',
                 'weight': 0.025,
                 'type': 'rare',
                 'tableRows': [
@@ -12571,7 +13038,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': 'reroll-this-id-ce4ad89e-3695-41bf-acb8-fbe476829f25',
                 'weight': 0.0075,
                 'type': 'epic',
                 'tableRows': [
@@ -12602,7 +13068,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': 'reroll-this-id-fc810e79-6b55-43dc-bceb-73c6339fc1d9',
                 'weight': 0.001,
                 'type': 'legendary',
                 'tableRows': [
@@ -12621,7 +13086,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': 'reroll-this-id-e58e2f8b-f8a5-4087-a98d-5b70d5904383',
                 'weight': 0.0001,
                 'type': 'ethereal',
                 'tableRows': [
@@ -12755,7 +13219,6 @@ LOOT_TABLES = {
         ],
         'subTables': [
             {
-                'id': '92132bd7-606a-40f2-87e7-f4c3bd708683',
                 'weight': 0.2164,
                 'type': 'money',
                 'tableRows': [
@@ -12786,7 +13249,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': '22a81c6a-31ef-4b68-b5ff-a61cad19427f',
                 'weight': 0.2,
                 'type': 'common',
                 'tableRows': [
@@ -12829,7 +13291,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': 'c30989ae-2a6c-4537-9b05-0bb02910d4df',
                 'weight': 0.05,
                 'type': 'uncommon',
                 'tableRows': [
@@ -12872,7 +13333,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': '15fce75f-8dbc-4e7e-b0a5-427843afbdb6',
                 'weight': 0.025,
                 'type': 'rare',
                 'tableRows': [
@@ -12903,7 +13363,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': '8a760f00-0d4a-4ae6-878d-7660c88e276f',
                 'weight': 0.0075,
                 'type': 'epic',
                 'tableRows': [
@@ -12934,7 +13393,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': '81c4df09-b76b-4e6e-ba9a-92d6b9bf6303',
                 'weight': 0.001,
                 'type': 'legendary',
                 'tableRows': [
@@ -12953,7 +13411,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': '03f17a48-8514-4310-82b6-86c2f85582e0',
                 'weight': 0.0001,
                 'type': 'ethereal',
                 'tableRows': []
@@ -13515,13 +13972,11 @@ LOOT_TABLES = {
         ],
         'subTables': [
             {
-                'id': '94475344-2815-4862-5484-02a8bf0floki',
                 'weight': 0.2164,
                 'type': 'money',
                 'tableRows': []
             },
             {
-                'id': 'reroll-this-id-99e1cd08-6d58-421b-9b33-410e16e0bdd4',
                 'weight': 0.2,
                 'type': 'common',
                 'tableRows': [
@@ -13564,7 +14019,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': 'reroll-this-id-d8d5ef7a-aab7-4fcf-b11f-7109af241b99',
                 'weight': 0.05,
                 'type': 'uncommon',
                 'tableRows': [
@@ -13595,7 +14049,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': 'reroll-this-id-1d0a4805-2c95-46e7-8207-82a9d9ce20d5',
                 'weight': 0.025,
                 'type': 'rare',
                 'tableRows': [
@@ -13626,7 +14079,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': 'reroll-this-id-52183c8c-99ba-490c-b001-79427b3ce345',
                 'weight': 0.0075,
                 'type': 'epic',
                 'tableRows': [
@@ -13657,7 +14109,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': 'reroll-this-id-86a09802-fc20-4499-a0b7-2375fedd2aaf',
                 'weight': 0.001,
                 'type': 'legendary',
                 'tableRows': [
@@ -13676,7 +14127,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': 'reroll-this-id-a70f6e77-87e8-4b99-810f-ede097f31aa3',
                 'weight': 0.0001,
                 'type': 'ethereal',
                 'tableRows': [
@@ -13906,7 +14356,6 @@ LOOT_TABLES = {
         ],
         'subTables': [
             {
-                'id': '2f383b4c-7fc9-4881-977a-4d237c5e7200',
                 'weight': 0.2164,
                 'type': 'money',
                 'tableRows': [
@@ -13937,7 +14386,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': 'df15fca6-c328-4a55-aacc-55126a7d5134',
                 'weight': 0.2,
                 'type': 'common',
                 'tableRows': [
@@ -13968,13 +14416,12 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': '15278178-a634-4b08-bcc2-2af3a06ccbfa',
                 'weight': 0.05,
                 'type': 'uncommon',
                 'tableRows': [
                     {
                         'rowItemID': 'gem_tipped_tweezers',
-                        'name': 'Gem-tipped tweezers',
+                        'name': 'Gem tipped tweezers',
                         'icon': 'assets/icons/items/gear/gem_tipped_tweezers.png',
                         'isMoney': False,
                         'linearWeightScaling': True,
@@ -14011,7 +14458,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': 'a023588c-735d-49e6-b6c2-eed7839359e0',
                 'weight': 0.025,
                 'type': 'rare',
                 'tableRows': [
@@ -14054,7 +14500,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': '88b2923f-db48-4b0b-9aa0-246b717369af',
                 'weight': 0.0075,
                 'type': 'epic',
                 'tableRows': [
@@ -14097,7 +14542,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': '1698a291-7912-4d04-ade3-1932ec40609f',
                 'weight': 0.001,
                 'type': 'legendary',
                 'tableRows': [
@@ -14116,7 +14560,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': 'f719171c-5cac-4750-8bc3-00fa9f520e71',
                 'weight': 0.0001,
                 'type': 'ethereal',
                 'tableRows': []
@@ -14807,7 +15250,6 @@ LOOT_TABLES = {
         ],
         'subTables': [
             {
-                'id': 'b002192d-321c-4d3a-9205-22e2c2e9b8b2',
                 'weight': 0.2164,
                 'type': 'money',
                 'tableRows': [
@@ -14838,7 +15280,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': '839c74f8-9bfc-43a7-bc41-c44866b01803',
                 'weight': 0.2,
                 'type': 'common',
                 'tableRows': [
@@ -14869,7 +15310,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': 'fc49471e-9494-41c1-8551-f992379ed7db',
                 'weight': 0.05,
                 'type': 'uncommon',
                 'tableRows': [
@@ -14912,7 +15352,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': 'c3625473-017f-4b06-9fd5-a570aed2f58a',
                 'weight': 0.025,
                 'type': 'rare',
                 'tableRows': [
@@ -14943,7 +15382,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': '82d360e7-73a8-46ff-b14c-b9d505b7088c',
                 'weight': 0.0075,
                 'type': 'epic',
                 'tableRows': [
@@ -14998,7 +15436,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': 'c9c85a3c-288c-4603-8055-e9b46191644f',
                 'weight': 0.001,
                 'type': 'legendary',
                 'tableRows': [
@@ -15017,7 +15454,6 @@ LOOT_TABLES = {
                 ]
             },
             {
-                'id': '4b7e7967-9294-489d-811f-830aed9c6645',
                 'weight': 0.0001,
                 'type': 'ethereal',
                 'tableRows': []

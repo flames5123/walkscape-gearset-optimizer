@@ -34,7 +34,7 @@ let readyPromise = null;
 function post(m) { self.postMessage(m); }
 // Build stamp so bug-report debug logs prove WHICH worker script actually ran
 // (stale-worker diagnosis). Keep in sync with WORKER_BUILD in local-compute.js.
-const WORKER_BUILD = 'recycle-8';
+const WORKER_BUILD = 'target-items-11';
 
 // POST JSON with retry/backoff across transient server outages. Local
 // optimization compute is fully client-side, so a brief server blip (a deploy
@@ -127,6 +127,7 @@ def _finite_safe(o):
     pyodide.runPython(CT_OPT_DRIVER);
     pyodide.runPython(SR_DRIVER);
     pyodide.runPython(TRAVEL_DRIVER);
+    pyodide.runPython(FC_DRIVER);
     post({ type: "ready" });
   })();
   return readyPromise;
@@ -294,7 +295,10 @@ const SR_DRIVER = `
 import sys, json, types
 _SR = {}
 
-def _sr_build(params_json, session_json, completed_json, shard_index=0, shard_count=1):
+def _sr_prepare(params_json, session_json, completed_json):
+    # Build the full (global) job list + set up _SR["srw"]/_SR["character"] and
+    # the pet/consumable/hidden pools. Shared by _sr_plan (compute the LPT
+    # assignment once) and _sr_build (filter to this shard). Returns the jobs list.
     params = json.loads(params_json)
     session = json.loads(session_json)
     completed = json.loads(completed_json) if completed_json else []
@@ -325,22 +329,19 @@ def _sr_build(params_json, session_json, completed_json, shard_index=0, shard_co
     sid = params.get("session_uuid")
     # [EXACT XP optimizer] gate the LOCAL path too. run_worker sets
     # _EXACT_XP_MODE on the server; the local path skips run_worker, so mirror it
-    # here via the bundled allowlist helper (works without ui/database.py).
+    # here. PREFER the server-resolved flag (params["exact_xp_enabled"]) when
+    # present -- the server can read the DB, so this makes the admin FAC
+    # (new_optimizer / exact_xp_optimizer) toggle drive local/browser runs. Fall
+    # back to the bundle-embedded allowlist helper when the flag is absent
+    # (older run params / offline).
     try:
-        srw._EXACT_XP_MODE = srw.exact_xp_enabled_for(sid)
+        _server_gate = params.get("exact_xp_enabled", None)
+        if _server_gate is not None:
+            srw._EXACT_XP_MODE = bool(_server_gate)
+        else:
+            srw._EXACT_XP_MODE = srw.exact_xp_enabled_for(sid)
     except Exception:
         srw._EXACT_XP_MODE = False
-    # "Today's changes" old/new toggle (goals-report checkbox, gated session).
-    # exact stays gated by the allowlist above; this only flips ring de-dup on
-    # the XP optimizer. None (absent) -> leave the module default (new/on).
-    try:
-        _exact_new = params.get("exact_new", None)
-        if _exact_new is not None:
-            import util.exact_activity_xp_optimizer as _xpmod
-            _xpmod._DEDUP_RING_ORDER = bool(_exact_new)
-            _xpmod._SLOT_ORDER_STRATEGY = "tools_first" if _exact_new else "constrained"
-    except Exception:
-        pass
     run_id = params.get("run_id")
     categories = params.get("categories") or []
     skills = params.get("skills") or []
@@ -366,18 +367,26 @@ def _sr_build(params_json, session_json, completed_json, shard_index=0, shard_co
     # character without the Charter of the Drowned, and Myriadian Arc activities
     # in chest farming. Mirror run_worker's setup exactly.
     try:
-        from ui.database import DatabaseManager as _DBR
-        _sessR = _DBR(":memory:").get_session(sid) or {}
-        _ccR = _sessR.get("character_config") or {}
-        if isinstance(_ccR, str):
-            _ccR = json.loads(_ccR)
-        from optimize_travel_gearsets import detect_unlocked_regions, detect_locked_locations
-        _riR = detect_unlocked_regions(_ccR)
-        _urR = {r for r, v in (_riR.get("unlocked") or _riR).items() if v} if isinstance(_riR, dict) else set()
-        if "wallisia" in _urR:
-            _urR.update({"ghostly", "spectral"})
-        srw._UNLOCKED_REGIONS = _urR
-        srw._LOCKED_LOCATIONS = detect_locked_locations(_ccR) or set()
+        _srv_regions = params.get("unlocked_regions", "__ABSENT__")
+        if _srv_regions != "__ABSENT__":
+            # Server-resolved region access (preferred): identical to run_worker,
+            # so local and server enumerate the SAME activities. None = no filter.
+            srw._UNLOCKED_REGIONS = set(_srv_regions) if _srv_regions is not None else None
+            srw._LOCKED_LOCATIONS = set(params.get("locked_locations") or [])
+        else:
+            # Legacy fallback (old run params): recompute DB-free in the bundle.
+            from ui.database import DatabaseManager as _DBR
+            _sessR = _DBR(":memory:").get_session(sid) or {}
+            _ccR = _sessR.get("character_config") or {}
+            if isinstance(_ccR, str):
+                _ccR = json.loads(_ccR)
+            from optimize_travel_gearsets import detect_unlocked_regions, detect_locked_locations
+            _riR = detect_unlocked_regions(_ccR)
+            _urR = {r for r, v in (_riR.get("unlocked") or _riR).items() if v} if isinstance(_riR, dict) else set()
+            if "wallisia" in _urR:
+                _urR.update({"ghostly", "spectral"})
+            srw._UNLOCKED_REGIONS = _urR
+            srw._LOCKED_LOCATIONS = detect_locked_locations(_ccR) or set()
     except Exception:
         srw._UNLOCKED_REGIONS = None
         srw._LOCKED_LOCATIONS = set()
@@ -402,11 +411,43 @@ def _sr_build(params_json, session_json, completed_json, shard_index=0, shard_co
     # passes them into execute_job exactly like the server's ThreadPoolExecutor
     # call does. Built once per shard (read-only, identical across shards).
     try:
-        _SR["pet_pool"] = srw._build_pet_items(sid, ":memory:") if params.get("include_pets") else []
+        _SR["pet_pool"] = srw._build_pet_items(sid, ":memory:", bool(params.get("use_pet_ability"))) if params.get("include_pets") else []
     except Exception:
         _SR["pet_pool"] = []
+    # 2026-08-31 (jwbail): mirror the server worker's run-level "use pet
+    # ability" global so _extract_pet_consumable_meta marks the chosen pet's
+    # slot with useAbility (Equip then checks column-2's per-pet ability box).
     try:
-        _SR["consumable_pool"] = srw._collect_owned_consumables(character) if params.get("include_consumables") else []
+        srw._USE_PET_ABILITY = bool(params.get("use_pet_ability"))
+    except Exception:
+        srw._USE_PET_ABILITY = False
+    try:
+        srw._USE_HIDDEN_CONSUMABLES = bool(params.get("consumable_use_hidden", False))
+    except Exception:
+        srw._USE_HIDDEN_CONSUMABLES = False
+    try:
+        srw._USE_FINE_INPUTS = bool(params.get("use_fine_inputs", False))
+    except Exception:
+        srw._USE_FINE_INPUTS = False
+    # 2026-10-01 (jwbail): mirror the server worker's run-level include-unavailable
+    # dimensions so the browser (Pyodide) path gates job building identically. The
+    # server put the EFFECTIVE map (effective[dim] = includeUnavailable && by<Dim>)
+    # into run_params under "include_unavailable". Normalize through the worker's
+    # helper so a missing/partial value falls back to the legacy default (inputs
+    # included-with-warning, everything else hidden).
+    try:
+        srw._INCL_UNAVAIL = srw._normalize_incl_unavail(params.get("include_unavailable"))
+    except Exception:
+        srw._INCL_UNAVAIL = {"level": False, "location": False, "gear": False,
+                             "inputs": True, "other": False}
+    try:
+        _SR["consumable_pool"] = srw._collect_owned_consumables(
+            character,
+            include_fine=params.get("include_fine_consumables", True) is not False,
+            min_owned_enabled=bool(params.get("consumable_min_owned_enabled", False)),
+            min_owned=int(params.get("consumable_min_owned", 5) or 5),
+            min_owned_op=str(params.get("consumable_min_owned_operator", "lt") or "lt").lower(),
+        ) if params.get("include_consumables") else []
     except Exception:
         _SR["consumable_pool"] = []
     # 2026-06-17 (jwbail): respect the user's hide list in the browser path
@@ -443,36 +484,179 @@ def _sr_build(params_json, session_json, completed_json, shard_index=0, shard_co
         jobs += cr
     if "coins" in categories:
         jobs += srw.build_coins_jobs(run_id, sid, _skills_for("coins"), character)
+    if "target_items" in categories:
+        # 2026-08-12 (jwbail): the local worker previously omitted target_items
+        # entirely, so selecting it in the browser built 0 jobs while the
+        # server precount reported N -> "0/N on local" (bug f2b386cf). Mirror
+        # the server run_worker dispatch: build + include_fine + group filter.
+        _incfine = bool(params.get("include_fine"))
+        ti = srw.build_target_items_jobs(run_id, sid, character, include_fine=_incfine)
+        _tgs = params.get("target_categories") or []
+        _tgset = set(_tgs) if isinstance(_tgs, (list, tuple)) else set()
+        if _tgset:
+            ti = [j for j in ti if (j.skill_name or "") in _tgset]
+        jobs += ti
 
     # Resume: drop jobs whose scope already completed (matched by stable
     # identity, since job_id is random per build).
     if completed:
         done_ids = set()
         for c in completed:
-            done_ids.add((c.get("category"), c.get("skill_name"),
-                          c.get("chest_name"), c.get("activity_name")))
+            k = (c.get("category"), c.get("skill_name"),
+                 c.get("chest_name"), c.get("activity_name"))
+            if c.get("category") == "target_items":
+                k = k + (c.get("item_slug"),)
+            done_ids.add(k)
         def _ident(j):
             src = j.activity.name if getattr(j, "activity", None) else getattr(j, "recipe_name", None)
-            return (j.category, j.skill_name, j.chest_name, src)
+            k = (j.category, j.skill_name, j.chest_name, src)
+            if j.category == "target_items":
+                k = k + ((getattr(j, "extras", None) or {}).get("item_slug"),)
+            return k
         jobs = [j for j in jobs if _ident(j) not in done_ids]
 
     _SR["srw"] = srw
     _SR["character"] = character
+    return jobs
 
-    # Shard by a STABLE identity hash (NOT list position). Job-build order is
-    # deterministic today, but relying on cross-process positional order is
-    # fragile (a future set/dict change could reorder, silently overlapping or
-    # dropping scopes across workers). crc32 of the same stable identity used
-    # for the resume filter guarantees a clean, gap-free partition regardless
-    # of build order. shard_count == 1 keeps the whole list (single worker).
+
+# ---------------------------------------------------------------------------
+# Shard partitioning: authoritative LPT assignment (Option 2).
+#
+# HISTORY: an earlier attempt had each worker independently LPT-partition on a
+# locally-computed cost, ASSUMING every worker derived an identical cost map.
+# In the browser that broke -- each shard is a separate Pyodide instance and
+# the cost diverged across processes, so the assignment disagreed and jobs ran
+# on two shards (progress "166/156") or none (lost results). This design
+# removes the assumption entirely: ONE worker computes the assignment once
+# (_sr_plan) and the coordinator broadcasts it to every worker (_sr_build's
+# assignment_json), so there is no cross-worker agreement to break.
+# ---------------------------------------------------------------------------
+
+def _sr_unit_key_str(j):
+    # Stable per-solve-unit key. Chests share one optimal gearset per activity
+    # (chest_finding is universal) and the solve cache reuses it, so an
+    # activity's chests are ONE unit (drop chest_name) -> same shard, counted
+    # once. Byte-identical string in every worker (only stable identity fields).
+    src = j.activity.name if getattr(j, "activity", None) else getattr(j, "recipe_name", None)
+    cn = None if j.category == "chests" else j.chest_name
+    parts = [j.category, j.skill_name, cn, src]
+    if j.category == "target_items":
+        # target_items units are per-ITEM, not per-activity: many items share
+        # (group, activity), so include the item_slug leaf or they collapse to
+        # one unit and ~35 items get dropped from the run (bug 1db9384e).
+        parts.append((getattr(j, "extras", None) or {}).get("item_slug"))
+    return "|".join(str(x) for x in parts)
+
+
+def _sr_lpt_assignment(jobs, shard_count):
+    # Longest-processing-time-first balancing over solve-units. Cost = the tool
+    # BUNDLE-count upper bound C(T_pruned, tool_slots) from
+    # estimate_target_rate_weight (real prep+prune, early-return before the
+    # frontier build -- ~5ms/activity). The tool frontier grows combinatorially
+    # in surviving tools, so this tracks solve time FAR better than a raw tool
+    # count (validated: it correctly ranks the heavy tail -- Bog fishing,
+    # Underwater aqueduct -- that drives the long pole). Computed ONCE here, so
+    # cross-process determinism is irrelevant. Returns {unit_key_str: shard}.
+    srw = _SR["srw"]; character = _SR["character"]
+    try:
+        from util.exact_target_rate_optimizer import estimate_target_rate_weight as _EST
+    except Exception:
+        _EST = None
+    _cost_memo = {}
+    def _unit_cost(j):
+        cat = getattr(j, "category", None)
+        if cat in ("chests", "chests_recipes"):
+            target = getattr(j, "chest_name", None)
+        elif cat == "new_items":
+            target = ((getattr(j, "extras", None) or {}).get("best_drop") or {}).get("item_name")
+        else:
+            return 1   # xp / coins: no target-rate estimate -> round-robin
+        act = getattr(j, "activity", None)
+        if _EST is None or act is None or not target:
+            return 1
+        # T_pruned is target-independent (prune is over the tool pool), so
+        # memoize per (activity, skill) to avoid recompute across an activity's
+        # chests / units.
+        skill = getattr(act, "primary_skill", None)
+        mk = (getattr(act, "name", None), str(skill or "").lower())
+        if mk in _cost_memo:
+            return _cost_memo[mk]
+        try:
+            loc = srw._activity_first_accessible_location(act)
+        except Exception:
+            loc = None
+        loc = None if isinstance(loc, str) else loc
+        try:
+            w = _EST(act, character, target, skill=skill, location=loc)
+        except Exception:
+            w = 1
+        _cost_memo[mk] = w
+        return w
+
+    units = {}
+    for j in jobs:
+        k = _sr_unit_key_str(j)
+        if k not in units:
+            units[k] = j
+    # weights are >= 1 already; equal weights rotate across shards via the
+    # stable-key tiebreak below.
+    weighted = [(_unit_cost(j), k) for k, j in units.items()]
+    weighted.sort(key=lambda t: (-t[0], t[1]))   # cost DESC, stable key tiebreak
+    loads = [0.0] * shard_count
+    assignment = {}
+    for w, k in weighted:
+        b = min(range(shard_count), key=lambda i: (loads[i], i))  # least-loaded, low idx
+        loads[b] += w
+        assignment[k] = b
+    return assignment, loads
+
+
+def _sr_plan(params_json, session_json, completed_json, shard_count):
+    # Phase 1: build the global job list and compute the authoritative LPT
+    # assignment ONCE. Returned to the coordinator, which broadcasts it to all
+    # workers. No jobs are run here.
+    jobs = _sr_prepare(params_json, session_json, completed_json)
+    if shard_count and shard_count > 1:
+        assignment, loads = _sr_lpt_assignment(jobs, shard_count)
+    else:
+        assignment, loads = {}, []
+    # Per-shard unit counts (chests co-locate as one unit) for the balance log.
+    ucounts = [0] * (shard_count or 1)
+    for b in assignment.values():
+        if 0 <= b < len(ucounts):
+            ucounts[b] += 1
+    return json.dumps({"assignment": assignment, "global": len(jobs),
+                       "loads": loads, "unit_counts": ucounts})
+
+
+def _sr_build(params_json, session_json, completed_json,
+              shard_index=0, shard_count=1, assignment_json=None):
+    # Phase 2: build the global job list, then keep only this shard's jobs.
+    #  - assignment_json present  -> use the broadcast authoritative assignment
+    #    (Option 2; every worker filters against the SAME map -> gap-free).
+    #  - assignment_json absent    -> crc32 fallback (single-worker, or a failed
+    #    plan). crc32 of the stable identity string is byte-identical in every
+    #    worker, so it is also a safe gap-free partition.
+    jobs = _sr_prepare(params_json, session_json, completed_json)
     global_count = len(jobs)
     if shard_count and shard_count > 1:
+        assignment = {}
+        if assignment_json:
+            try:
+                assignment = json.loads(assignment_json) or {}
+            except Exception:
+                assignment = {}
         import zlib
-        def _shard_key(j):
-            src = j.activity.name if getattr(j, "activity", None) else getattr(j, "recipe_name", None)
-            ident = (j.category, j.skill_name, j.chest_name, src)
-            return zlib.crc32("|".join(str(x) for x in ident).encode("utf-8"))
-        jobs = [j for j in jobs if _shard_key(j) % shard_count == shard_index]
+        def _crc_bin(k):
+            return zlib.crc32(k.encode("utf-8")) % shard_count
+        def _bin(j):
+            k = _sr_unit_key_str(j)
+            b = assignment.get(k)
+            # Missing key (plan/build job-set mismatch) -> deterministic crc32
+            # fallback so the job is never dropped AND every worker agrees.
+            return b if b is not None else _crc_bin(k)
+        jobs = [j for j in jobs if _bin(j) == shard_index]
 
     _SR["jobs"] = jobs
     return json.dumps({"shard": len(jobs), "global": global_count})
@@ -618,6 +802,42 @@ def _run_travel(request_json):
     return json.dumps(_finite_safe({"result": result}))
 `;
 
+// Steps per Recipe (Fastest Craft) driver. Runs run_fastest_craft(db=None,
+// with_details=True) in Pyodide — the SAME exact B&B solver + cross-item reuse
+// the server uses, with NO DB (every DB import in fastest_craft is
+// function-local; the db-bound persistence/banked/stale layer is applied
+// server-side via POST /api/fastest-craft/local-result). A JS progress callback
+// is passed in and invoked per visible (variant, quality) cell; postMessage
+// from inside the sync solve queues straight to the main thread, so the goals
+// progress bar advances in real time (no 0/0, no 3s server poll).
+const FC_DRIVER = `
+import json
+
+def _run_fastest_craft(payload_json, progress_cb=None):
+    p = json.loads(payload_json)
+    session_data = p.get("session_data") or {}
+    ui_config = p.get("ui_config") or {}
+    selected = p.get("selected_ids")
+    selected = set(selected) if selected else None
+    import ui.fastest_craft as _fc
+
+    def _prog(done, total):
+        if progress_cb is not None:
+            try:
+                progress_cb(done, total)
+            except Exception:
+                pass
+
+    try:
+        res = _fc.run_fastest_craft(
+            p.get("session_uuid"), selected, session_data, ui_config,
+            with_details=True, db=None, progress=_prog)
+    except BaseException as e:
+        import traceback
+        return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
+    return json.dumps(_finite_safe({"result": res}))
+`;
+
 self.onmessage = async (ev) => {
   const data = ev.data || {};
   const id = data.id;
@@ -670,6 +890,45 @@ self.onmessage = async (ev) => {
       }
       return;
     }
+    if (task === "fastest-craft") {
+      // Compute Steps per Recipe on-device. Pass a JS progress callback the
+      // Python solve loop invokes per visible cell; each call posts a progress
+      // message that reaches the main thread in real time. The DB-bound
+      // persistence happens server-side (POST /api/fastest-craft/local-result).
+      const fn = pyodide.globals.get("_run_fastest_craft");
+      const progressCb = (done, total) => post({ type: "progress", id, done, total });
+      let out;
+      try {
+        out = fn(JSON.stringify(data.payload || {}), progressCb);
+      } finally {
+        fn.destroy();
+      }
+      const parsed = JSON.parse(out);
+      if (parsed.error) {
+        post({ type: "error", id, error: parsed.error });
+      } else {
+        post({ type: "result", id, result: parsed.result });
+      }
+      return;
+    }
+    if (task === "stats-report-plan") {
+      // Phase 1 (Option 2): compute the authoritative LPT shard assignment
+      // ONCE on this single worker; the coordinator broadcasts it to all
+      // workers so none independently recompute a (possibly divergent) cost.
+      const plan = pyodide.globals.get("_sr_plan");
+      let out;
+      try {
+        out = plan(
+          JSON.stringify(data.run_params || {}),
+          JSON.stringify(data.session || {}),
+          JSON.stringify(data.completed || []),
+          data.shard_count || 1);
+      } finally {
+        plan.destroy();
+      }
+      post({ type: "result", id, result: JSON.parse(out) });
+      return;
+    }
     if (task === "stats-report") {
       const runId = (data.run_params || {}).run_id;
       post({ type: "log", stream: "stdout", line: "[build] worker=" + WORKER_BUILD + " max_jobs=" + (data.max_jobs || 0) });
@@ -690,7 +949,8 @@ self.onmessage = async (ev) => {
           JSON.stringify(data.run_params || {}),
           JSON.stringify(data.session || {}),
           JSON.stringify(data.completed || []),
-          shardIndex, shardCount));
+          shardIndex, shardCount,
+          data.assignment ? JSON.stringify(data.assignment) : null));
         shardTotal = built.shard || 0;
         globalTotal = built.global || 0;
       } finally {
@@ -733,10 +993,16 @@ self.onmessage = async (ev) => {
         if (parsed && parsed.scope) {
           const s = parsed.scope;
           // Stable identity the resume filter (_sr_build) uses to skip a job
-          // after a worker recycle — must mirror its _ident() tuple.
+          // after a worker recycle — must mirror its _ident() tuple. For
+          // target_items, _ident() appends the item_slug leaf (many items share
+          // category+skill+activity), so it MUST be included here or the
+          // recycle skip never matches: the same chunk re-runs forever, done
+          // climbs by chunk size each recycle while remaining stays fixed, and
+          // the run hangs on "Finishing" (bug 1526bc3d).
           completedIdents.push({
             category: s.category, skill_name: s.skill_name,
             chest_name: s.chest_name, activity_name: s.activity_name,
+            item_slug: s.item_slug,
           });
           buffer.push(s);
           if (buffer.length >= BATCH_SIZE) {

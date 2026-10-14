@@ -19,6 +19,10 @@ import store from '../state.js';
 import api from '../api.js';
 import KeyboardNavigator from '../utils/keyboard-navigation.js';
 import GenericRecipeForm from './generic-recipe-form.js';
+import { heartHtml, favoriteListFor, dragHandleHtml } from '../utils/favorites-ui.js';
+import { attachFavoritesDrag } from '../utils/favorites-reorder.js';
+
+const FAVORITES_KEY = '__favorites__';
 
 class RecipeSelectorDropdown extends Component {
     /**
@@ -44,6 +48,8 @@ class RecipeSelectorDropdown extends Component {
         this.searchText = '';
         this.expandedCategories = new Set();
         this.selectedRecipe = null;
+        // Favorites drag-reorder edit mode (Favorites category only).
+        this.favoritesEditMode = false;
 
         // Data cache
         this.recipesData = null;
@@ -73,6 +79,11 @@ class RecipeSelectorDropdown extends Component {
             this.subscribe('column3.selectedRecipe', () => this.onRecipeChange());
             this.subscribe('column3.selectedActivity', () => this.onActivityChange());
         }
+
+        // Favorites are GLOBAL (not column-3 coupled), so subscribe
+        // unconditionally — the crafting-tree decoupled instance must still
+        // refresh its hearts + Favorites category when favorites change.
+        this.subscribe('ui.favorites', () => this.onFavoritesChange());
 
         // Load recipes data
         this.loadRecipes();
@@ -357,6 +368,7 @@ class RecipeSelectorDropdown extends Component {
             <div class="recipe-item none-option">
                 <span class="recipe-name">None</span>
             </div>
+            ${this.renderFavoritesCategory()}
             ${categories}
         `;
 
@@ -402,6 +414,12 @@ class RecipeSelectorDropdown extends Component {
 
             $categoryHeader.find('.expand-arrow').removeClass('expanded');
 
+            // Favorites: exit edit mode and drop the Reorder button on collapse.
+            if (skill === FAVORITES_KEY) {
+                this.favoritesEditMode = false;
+                $categoryHeader.find('.fav-edit-btn').remove();
+            }
+
             // Slide up and remove recipe items
             $category.find('.recipe-item').slideUp(150, function () {
                 $(this).remove();
@@ -412,29 +430,30 @@ class RecipeSelectorDropdown extends Component {
 
             $categoryHeader.find('.expand-arrow').addClass('expanded');
 
-            // Get recipes for this skill
-            const recipes = this.recipesData.by_skill[skill] || [];
-            const filtered = this.searchText
-                ? recipes.filter(r => r.name.toLowerCase().includes(this.searchText.toLowerCase()))
-                : recipes;
-            const filteredRecipes = this._sortRecipes(filtered);
+            // Favorites: inject the Reorder button now that we're expanding via
+            // the animation path (the header rendered collapsed without it).
+            if (skill === FAVORITES_KEY && !$categoryHeader.find('.fav-edit-btn').length) {
+                $(this._favEditBtnHtml()).insertBefore($categoryHeader.find('.expand-arrow'));
+            }
+
+            // Get recipes for this skill (or the flattened favorites list for
+            // the Favorites pseudo-category).
+            let filteredRecipes;
+            if (skill === FAVORITES_KEY) {
+                filteredRecipes = this.getFavoritedRecipes();
+            } else {
+                const recipes = this.recipesData.by_skill[skill] || [];
+                const filtered = this.searchText
+                    ? recipes.filter(r => r.name.toLowerCase().includes(this.searchText.toLowerCase()))
+                    : recipes;
+                filteredRecipes = this._sortRecipes(filtered);
+            }
 
             // Add recipe items (hidden initially)
-            const recipeItems = filteredRecipes.map(recipe => {
-                const reqLevel = recipe.level || 1;
-                const charSkills = store.state.character?.skills || {};
-                const charLevel = charSkills[recipe.skill?.toLowerCase()] || 1;
-                const canDo = charLevel >= reqLevel;
-                const levelClass = canDo ? 'level-ok' : 'level-too-high';
-
-                return `
-                <div class="recipe-item" data-id="${recipe.id}" style="display: none;">
-                    <img src="${recipe.icon_path}" alt="${recipe.name}" class="recipe-icon" />
-                    <span class="recipe-name">${recipe.name}</span>
-                    <span class="dropdown-level-badge ${levelClass}">Lv. ${reqLevel}</span>
-                </div>
-            `;
-            }).join('');
+            const editable = skill === FAVORITES_KEY && this.favoritesEditMode;
+            const recipeItems = filteredRecipes.map(recipe =>
+                this.renderRecipeItemRow(recipe, { hidden: true, editable })
+            ).join('');
 
             $category.append(recipeItems);
 
@@ -481,6 +500,8 @@ class RecipeSelectorDropdown extends Component {
         store.state.gearsets.gearset2Alternatives = null;
         store.state.gearsets.lockedAlternatives = null;
         store.state.gearsets.gearset2LockedAlternatives = null;
+        store.state.gearsets.hiddenAlternatives = null;
+        store.state.gearsets.gearset2HiddenAlternatives = null;
 
         // Notify subscribers
         store._notifySubscribers('column3.selectedRecipe');
@@ -648,21 +669,7 @@ class RecipeSelectorDropdown extends Component {
             : `<img src="${skillIconPath}" alt="${skill}" class="skill-icon" />`;
 
         // Render recipe items
-        const recipeItems = isExpanded ? recipes.map(recipe => {
-            const reqLevel = recipe.level || 1;
-            const charSkills = store.state.character?.skills || {};
-            const charLevel = charSkills[recipe.skill?.toLowerCase()] || 1;
-            const canDo = charLevel >= reqLevel;
-            const levelClass = canDo ? 'level-ok' : 'level-too-high';
-
-            return `
-            <div class="recipe-item" data-id="${recipe.id}">
-                <img src="${recipe.icon_path}" alt="${recipe.name}" class="recipe-icon" />
-                <span class="recipe-name">${recipe.name}</span>
-                <span class="dropdown-level-badge ${levelClass}">Lv. ${reqLevel}</span>
-            </div>
-        `;
-        }).join('') : '';
+        const recipeItems = isExpanded ? recipes.map(recipe => this.renderRecipeItemRow(recipe)).join('') : '';
 
         return `
             <div class="recipe-category">
@@ -674,6 +681,100 @@ class RecipeSelectorDropdown extends Component {
                 ${recipeItems}
             </div>
         `;
+    }
+
+    /**
+     * Render a single recipe row (shared by skill categories, the Favorites
+     * category, and the expand-animation path). Includes the heart toggle.
+     * @param {Object} recipe
+     * @param {Object} [opts]
+     * @param {boolean} [opts.hidden] - render with display:none (slide-down animation)
+     * @param {boolean} [opts.editable] - favorites edit mode: draggable + drag handle
+     */
+    renderRecipeItemRow(recipe, opts = {}) {
+        const { hidden = false, editable = false } = opts;
+        const reqLevel = recipe.level || 1;
+        const charSkills = store.state.character?.skills || {};
+        const charLevel = charSkills[recipe.skill?.toLowerCase()] || 1;
+        const canDo = charLevel >= reqLevel;
+        const levelClass = canDo ? 'level-ok' : 'level-too-high';
+        const hiddenStyle = hidden ? ' style="display: none;"' : '';
+        const heart = heartHtml('recipe', recipe.id, store.isFavorite('recipe', recipe.id));
+        const dragAttrs = editable
+            ? ` draggable="true" data-fav-type="recipe" data-fav-id="${recipe.id}"`
+            : '';
+        const handle = editable ? dragHandleHtml() : '';
+        return `
+            <div class="recipe-item${editable ? ' fav-editable' : ''}" data-id="${recipe.id}"${dragAttrs}${hiddenStyle}>
+                ${handle}
+                <img src="${recipe.icon_path}" alt="${recipe.name}" class="recipe-icon" />
+                <span class="recipe-name">${recipe.name}</span>
+                ${heart}
+                <span class="dropdown-level-badge ${levelClass}">Lv. ${reqLevel}</span>
+            </div>
+        `;
+    }
+
+    /**
+     * Favorited recipes in MANUAL (favorites-list) order. Search-filtered unless
+     * in edit mode (edit mode shows the full set so a reorder can't drop hidden
+     * entries).
+     */
+    getFavoritedRecipes() {
+        if (!this.recipesData) return [];
+        const orderedIds = favoriteListFor(store.state.ui?.favorites, 'recipe');
+        if (orderedIds.length === 0) return [];
+        const byId = {};
+        for (const recipes of Object.values(this.recipesData.by_skill)) {
+            for (const recipe of recipes) byId[recipe.id] = recipe;
+        }
+        const search = (!this.favoritesEditMode && this.searchText) ? this.searchText.toLowerCase() : '';
+        const out = [];
+        for (const id of orderedIds) {
+            const recipe = byId[id];
+            if (!recipe) continue;
+            if (search && !recipe.name.toLowerCase().includes(search)) continue;
+            out.push(recipe);
+        }
+        return out;
+    }
+
+    /**
+     * Render the Favorites pseudo-category (collapsed by default, below "None").
+     * When expanded, shows a Reorder toggle that turns on drag-to-reorder.
+     */
+    _favEditBtnHtml() {
+        return `<button class="fav-edit-btn${this.favoritesEditMode ? ' active' : ''}" title="Drag to reorder favorites">${this.favoritesEditMode ? 'Done' : 'Reorder'}</button>`;
+    }
+
+    renderFavoritesCategory() {
+        const favorites = this.getFavoritedRecipes();
+        if (favorites.length === 0) return '';
+        const isExpanded = this.expandedCategories.has(FAVORITES_KEY);
+        const arrowIcon = `<span class="expand-arrow ${isExpanded ? 'expanded' : ''}">▼</span>`;
+        const editBtn = isExpanded ? this._favEditBtnHtml() : '';
+        const editable = this.favoritesEditMode;
+        const items = isExpanded ? favorites.map(r => this.renderRecipeItemRow(r, { editable })).join('') : '';
+        return `
+            <div class="recipe-category favorites-category${editable ? ' fav-edit-active' : ''}">
+                <div class="category-header favorites-category-header" data-skill="${FAVORITES_KEY}">
+                    <span class="fav-cat-icon">♥</span>
+                    <span class="skill-name">Favorites</span>
+                    ${editBtn}
+                    ${arrowIcon}
+                </div>
+                ${items}
+            </div>
+        `;
+    }
+
+    /**
+     * Favorites changed (toggle, reorder, or undo/redo): refresh the open list.
+     */
+    onFavoritesChange() {
+        if (this.isOpen) {
+            this.updateRecipeList();
+        }
     }
 
     /**
@@ -719,6 +820,7 @@ class RecipeSelectorDropdown extends Component {
                 <div class="recipe-item none-option">
                     <span class="recipe-name">None</span>
                 </div>
+                ${this.renderFavoritesCategory()}
                 ${categories}
                 ${window._featureFlags?.generic ? `
                 <div class="recipe-item generic-option" data-id="generic">
@@ -816,6 +918,32 @@ class RecipeSelectorDropdown extends Component {
         this.$element.on('click', '.none-option', (e) => {
             e.stopPropagation();
             this.clearSelection();
+        });
+
+        // Heart click — toggle favorite without selecting the row
+        this.$element.on('click', '.dropdown-fav-heart', (e) => {
+            e.stopPropagation();
+            const $h = $(e.currentTarget);
+            store.toggleFavorite($h.attr('data-fav-type'), $h.attr('data-fav-id'));
+        });
+
+        // Favorites "Edit" toggle — enter/exit drag-reorder mode
+        this.$element.on('click', '.fav-edit-btn', (e) => {
+            e.stopPropagation();
+            this.favoritesEditMode = !this.favoritesEditMode;
+            if (this.favoritesEditMode) this.expandedCategories.add(FAVORITES_KEY);
+            this.updateRecipeList();
+        });
+        this.$element.on('click', '.fav-drag-handle', (e) => e.stopPropagation());
+
+        // Drag-to-reorder wiring (delegated; survives list re-renders)
+        attachFavoritesDrag(this.$element, {
+            ns: '.favdrag-recipe',
+            isActive: () => this.favoritesEditMode,
+            onReorder: (entries) => {
+                const ids = entries.filter(e => e.type === 'recipe').map(e => e.id);
+                store.reorderFavoriteType('recipe', ids);
+            }
         });
 
         // Click outside to close dropdown

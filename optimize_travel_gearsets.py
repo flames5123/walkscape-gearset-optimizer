@@ -479,13 +479,44 @@ def meets_segments_requirements(gearset_dict: dict, segments: List[dict]) -> boo
 # reward-roll count per segment stays at 10.
 TRAVEL_ACTIONS_PER_SEGMENT = 10
 
-# Base chest drop chance per reward roll (percentage points), matching the
-# activity optimizer's primary_chest handling in
-# optimize_activity_gearsets._compute_spr_for_target.
+# Base chest drop chance per reward roll (percentage points). Legacy flat rate,
+# retained ONLY as the fallback when a route's Base Steps are unavailable (e.g.
+# the aggregate optimizer metric, which has no single per-route base steps).
+# Per-route travel chest chance now uses the wiki Base-Steps formula below.
 TRAVEL_BASE_CHEST_RATE_PCT = 0.4
 
+# Travelling Chest Chance formula (wiki, "Release of the Beast" update):
+#   Chest Chance per Action (%) = max(0.1, Base Steps / 2510.04)
+# This is UNIQUE to travelling — the per-action chest chance scales with the
+# route's raw Base Steps (the unmodified route distance, NOT the efficiency-/
+# step-reduction-adjusted step count) and has a 0.1% per-action floor.
+# https://wiki.walkscape.app/wiki/Travelling_(Mechanics)#Travelling_Chest_Chance
+TRAVEL_CHEST_STEPS_DIVISOR = 2510.04
+TRAVEL_CHEST_MIN_RATE_PCT = 0.1
 
-def _compute_travel_steps_per_target(target, base_spr: float, stats: dict) -> float:
+
+def _travel_chest_base_rate_pct(base_steps) -> float:
+    """Per-action Agility (Travelling) chest chance in PERCENT for a route with
+    the given raw Base Steps, per the wiki Travelling Chest Chance formula:
+
+        Chest Chance per Action (%) = max(0.1, Base Steps / 2510.04)
+
+    `base_steps` is the route's Base Steps (the ``distance`` field of RAW_ROUTES),
+    NOT the efficiency-adjusted step count shown on the route bubble. A None or
+    non-positive value falls back to the legacy flat rate so non-route callers
+    (and the aggregate optimizer metric) keep their prior behavior.
+    """
+    try:
+        bs = float(base_steps)
+    except (TypeError, ValueError):
+        return TRAVEL_BASE_CHEST_RATE_PCT
+    if bs <= 0:
+        return TRAVEL_BASE_CHEST_RATE_PCT
+    return max(TRAVEL_CHEST_MIN_RATE_PCT, bs / TRAVEL_CHEST_STEPS_DIVISOR)
+
+
+def _compute_travel_steps_per_target(target, base_spr: float, stats: dict,
+                                     base_chest_rate_pct: float = None) -> float:
     """Expected steps to find one of `target` over the route, given a travel
     base steps-per-reward-roll.
 
@@ -493,7 +524,11 @@ def _compute_travel_steps_per_target(target, base_spr: float, stats: dict) -> fl
     item-finding branches so travel and activity optimization agree on the
     rate math. `target` is the raw UI category string:
 
-      - 'cat:chests'  -> chest_finding-driven skilling-chest yield (0.4% base)
+      - 'cat:chests'  -> chest_finding-driven Agility chest yield. The per-action
+                         base chest chance is route-dependent: pass
+                         `base_chest_rate_pct` (computed from the route's Base
+                         Steps via _travel_chest_base_rate_pct). When omitted it
+                         falls back to the legacy flat TRAVEL_BASE_CHEST_RATE_PCT.
       - 'cat:if:<CAT>' -> ItemFindingCategory.<CAT> stat (percentage points
                           per reward roll); the '_fine' suffix layers a 1%
                           base modified by fine_material_finding.
@@ -507,7 +542,8 @@ def _compute_travel_steps_per_target(target, base_spr: float, stats: dict) -> fl
 
     if target == 'cat:chests':
         cf_pct = stats.get('chest_finding', 0.0)
-        effective_rate = TRAVEL_BASE_CHEST_RATE_PCT * (1 + cf_pct)
+        base_rate = base_chest_rate_pct if base_chest_rate_pct is not None else TRAVEL_BASE_CHEST_RATE_PCT
+        effective_rate = base_rate * (1 + cf_pct)
         if effective_rate > 0:
             return (base_spr * 100) / effective_rate
         return 999999999.0
@@ -550,19 +586,26 @@ def _travel_target_entries():
         yield raw.target, composite
 
 
-def compute_travel_segment_drops(stats: dict, steps_avg: float) -> list:
+def compute_travel_segment_drops(stats: dict, steps_avg: float, base_steps=None) -> list:
     """Expected steps-to-find for every APPLICABLE travel drop on ONE segment.
 
-    Lists agility (skilling) chests (chest_finding-driven, 0.4% base rate) plus
-    every item-finding category the gear/location provides a non-zero chance for
-    on this segment ("all item finding drops that apply"). Uses the same rate
-    math as the "Steps / Target Item" optimization metric
-    (_compute_travel_steps_per_target) so the display and the optimizer agree.
+    Lists agility (skilling) chests plus every item-finding category the gear/
+    location provides a non-zero chance for on this segment ("all item finding
+    drops that apply"). Uses the same rate math as the "Steps / Target Item"
+    optimization metric (_compute_travel_steps_per_target).
+
+    The Agility chest's per-action base chance follows the wiki Travelling Chest
+    Chance formula — max(0.1%, Base Steps / 2510.04), route-dependent — when
+    `base_steps` (the route's raw Base Steps) is provided. This is unique to
+    travelling; other activities keep their own drop-table chest rates. When
+    `base_steps` is omitted the legacy flat rate is used as a fallback.
 
     Args:
         stats: aggregated travel stats for the segment's START location
                (as produced by aggregate_gearset_stats(skill='travel', ...)).
         steps_avg: the segment's expected step count (what the bubble shows).
+        base_steps: the route's raw Base Steps (RAW_ROUTES distance) for this
+               segment, used for the route-dependent chest chance.
 
     Returns:
         List of {target, name, steps_per_item, chance_percent} dicts, sorted
@@ -595,12 +638,16 @@ def compute_travel_segment_drops(stats: dict, steps_avg: float) -> list:
             'expected_count': expected,
         }
 
-    # Agility / skilling chests — always applicable (0.4% base + chest_finding).
-    chest_spi = _compute_travel_steps_per_target('cat:chests', base_spr, stats)
+    # Agility / Travelling chests — always applicable. Per-action base chance is
+    # route-dependent: max(0.1%, Base Steps / 2510.04), then boosted by
+    # chest_finding. Falls back to the legacy flat rate if base_steps is unknown.
+    chest_rate_pct = _travel_chest_base_rate_pct(base_steps)
+    chest_spi = _compute_travel_steps_per_target('cat:chests', base_spr, stats,
+                                                 base_chest_rate_pct=chest_rate_pct)
     if chest_spi and chest_spi < 999999999.0:
         cf = stats.get('chest_finding', 0.0) or 0.0
         drops.append(_finish('cat:chests', 'Agility Chest', chest_spi,
-                             TRAVEL_BASE_CHEST_RATE_PCT * (1.0 + cf)))
+                             chest_rate_pct * (1.0 + cf)))
 
     for stat_key, val in stats.items():
         if not isinstance(stat_key, str) or not stat_key.startswith('ItemFindingCategory.'):
@@ -668,7 +715,9 @@ def compute_travel_drops_summary(segments):
     1k steps, for the column-3 travel DROPS section.
 
     Args:
-        segments: list of dicts, each {steps_avg, stats, start_name?, end_name?}.
+        segments: list of dicts, each {steps_avg, stats, start_name?, end_name?,
+                  base_steps?}. base_steps (route Base Steps) drives the
+                  route-dependent Agility chest chance per the wiki formula.
 
     Returns:
         {
@@ -693,7 +742,8 @@ def compute_travel_drops_summary(segments):
     agg = {}  # target -> aggregate across segments
     for seg in segments or []:
         steps_avg = seg.get('steps_avg', 0) or 0
-        drops = compute_travel_segment_drops(seg.get('stats') or {}, steps_avg)
+        drops = compute_travel_segment_drops(seg.get('stats') or {}, steps_avg,
+                                             base_steps=seg.get('base_steps'))
         coins_1k, agt_1k = _currency_per_1k(drops, steps_avg)
         seg_out.append({
             'start_name': seg.get('start_name', ''),

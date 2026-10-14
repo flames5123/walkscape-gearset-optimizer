@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
 """
+DEPRECATED — wiki scraper for recipes.
+
+Recipes are now ingested from the tools API via
+util/scrapers/ingest_recipes_from_tools_api.py (wired into
+ingest_all_from_tools_api.py). The tools API is the source of truth;
+this wiki scraper is retained only for historical reference / fallback
+and is NOT part of the standard ingest pipeline.
+
+--------------------------------------------------------------------
 Scrape recipes from the Walkscape wiki Recipes page.
 Generates recipes.py with all recipe data.
 """

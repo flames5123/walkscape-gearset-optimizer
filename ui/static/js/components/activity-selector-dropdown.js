@@ -19,6 +19,10 @@ import store from '../state.js';
 import api from '../api.js';
 import KeyboardNavigator from '../utils/keyboard-navigation.js';
 import GenericActivityForm from './generic-activity-form.js';
+import { heartHtml, favoriteListFor, hasAnyFavorite, dragHandleHtml } from '../utils/favorites-ui.js';
+import { attachFavoritesDrag } from '../utils/favorites-reorder.js';
+
+const FAVORITES_KEY = '__favorites__';
 
 class ActivitySelectorDropdown extends Component {
     /**
@@ -35,6 +39,8 @@ class ActivitySelectorDropdown extends Component {
         this.searchText = '';
         this.expandedCategories = new Set();
         this.selectedActivity = null;
+        // Favorites drag-reorder edit mode (Favorites category only).
+        this.favoritesEditMode = false;
 
         // Data cache
         this.activitiesData = null;
@@ -59,6 +65,9 @@ class ActivitySelectorDropdown extends Component {
         // Subscribe to state changes
         this.subscribe('column3.selectedActivity', () => this.onActivityChange());
         this.subscribe('column3.selectedRecipe', () => this.onRecipeChange());
+        // Favorites (account-synced) drive the heart states + the Favorites
+        // pseudo-category. Refresh the open list when they change (incl. undo/redo).
+        this.subscribe('ui.favorites', () => this.onFavoritesChange());
 
         // Load activities data
         this.loadActivities();
@@ -303,6 +312,7 @@ class ActivitySelectorDropdown extends Component {
             <div class="activity-item none-option">
                 <span class="activity-name">None</span>
             </div>
+            ${this.renderFavoritesCategory()}
             ${categories}
         `;
 
@@ -348,6 +358,12 @@ class ActivitySelectorDropdown extends Component {
 
             $categoryHeader.find('.expand-arrow').removeClass('expanded');
 
+            // Favorites: exit edit mode and drop the Reorder button on collapse.
+            if (skill === FAVORITES_KEY) {
+                this.favoritesEditMode = false;
+                $categoryHeader.find('.fav-edit-btn').remove();
+            }
+
             // Slide up and remove activity items
             $category.find('.activity-item').slideUp(150, function () {
                 $(this).remove();
@@ -358,29 +374,30 @@ class ActivitySelectorDropdown extends Component {
 
             $categoryHeader.find('.expand-arrow').addClass('expanded');
 
-            // Get activities for this skill
-            const activities = this.activitiesData.by_skill[skill] || [];
-            const filtered = this.searchText
-                ? activities.filter(a => a.name.toLowerCase().includes(this.searchText.toLowerCase()))
-                : activities;
-            const filteredActivities = this._sortActivities(filtered);
+            // Favorites: the header was rendered collapsed (no Reorder button),
+            // so inject it now that we're expanding via the animation path.
+            if (skill === FAVORITES_KEY && !$categoryHeader.find('.fav-edit-btn').length) {
+                $(this._favEditBtnHtml()).insertBefore($categoryHeader.find('.expand-arrow'));
+            }
+
+            // Get activities for this skill (or the flattened favorites list for
+            // the Favorites pseudo-category).
+            let filteredActivities;
+            if (skill === FAVORITES_KEY) {
+                filteredActivities = this.getFavoritedActivities();
+            } else {
+                const activities = this.activitiesData.by_skill[skill] || [];
+                const filtered = this.searchText
+                    ? activities.filter(a => a.name.toLowerCase().includes(this.searchText.toLowerCase()))
+                    : activities;
+                filteredActivities = this._sortActivities(filtered);
+            }
 
             // Add activity items (hidden initially)
-            const activityItems = filteredActivities.map(activity => {
-                const reqLevel = activity.requirements?.skill_requirements?.[activity.primary_skill] || 1;
-                const charSkills = store.state.character?.skills || {};
-                const charLevel = charSkills[activity.primary_skill?.toLowerCase()] || 1;
-                const canDo = charLevel >= reqLevel;
-                const levelClass = canDo ? 'level-ok' : 'level-too-high';
-
-                return `
-                <div class="activity-item" data-id="${activity.id}" style="display: none;">
-                    <img src="${activity.icon_path}" alt="${activity.name}" class="activity-icon" />
-                    <span class="activity-name">${activity.name}</span>
-                    <span class="dropdown-level-badge ${levelClass}">Lv. ${reqLevel}</span>
-                </div>
-            `;
-            }).join('');
+            const editable = skill === FAVORITES_KEY && this.favoritesEditMode;
+            const activityItems = filteredActivities.map(activity =>
+                this.renderActivityItemRow(activity, { hidden: true, editable })
+            ).join('');
 
             $category.append(activityItems);
 
@@ -427,6 +444,8 @@ class ActivitySelectorDropdown extends Component {
         store.state.gearsets.gearset2Alternatives = null;
         store.state.gearsets.lockedAlternatives = null;
         store.state.gearsets.gearset2LockedAlternatives = null;
+        store.state.gearsets.hiddenAlternatives = null;
+        store.state.gearsets.gearset2HiddenAlternatives = null;
 
         // Notify subscribers
         store._notifySubscribers('column3.selectedActivity');
@@ -617,6 +636,110 @@ class ActivitySelectorDropdown extends Component {
      * @param {Array} activities - Activities in this skill
      * @returns {string} HTML for category
      */
+    /**
+     * Compute the required level for an activity.
+     */
+    _activityLevel(activity) {
+        return activity.requirements?.skill_requirements?.[activity.primary_skill] || 1;
+    }
+
+    /**
+     * Render a single activity row (shared by skill categories, the Favorites
+     * category, and the expand-animation path). Includes the heart toggle.
+     * @param {Object} activity
+     * @param {Object} [opts]
+     * @param {boolean} [opts.hidden] - render with display:none (slide-down animation)
+     * @param {boolean} [opts.editable] - favorites edit mode: draggable + drag handle
+     */
+    renderActivityItemRow(activity, opts = {}) {
+        const { hidden = false, editable = false } = opts;
+        const reqLevel = this._activityLevel(activity);
+        const charSkills = store.state.character?.skills || {};
+        const charLevel = charSkills[activity.primary_skill?.toLowerCase()] || 1;
+        const canDo = charLevel >= reqLevel;
+        const levelClass = canDo ? 'level-ok' : 'level-too-high';
+        const hiddenStyle = hidden ? ' style="display: none;"' : '';
+        const heart = heartHtml('activity', activity.id, store.isFavorite('activity', activity.id));
+        const dragAttrs = editable
+            ? ` draggable="true" data-fav-type="activity" data-fav-id="${activity.id}"`
+            : '';
+        const handle = editable ? dragHandleHtml() : '';
+        return `
+            <div class="activity-item${editable ? ' fav-editable' : ''}" data-id="${activity.id}"${dragAttrs}${hiddenStyle}>
+                ${handle}
+                <img src="${activity.icon_path}" alt="${activity.name}" class="activity-icon" />
+                <span class="activity-name">${activity.name}</span>
+                ${heart}
+                <span class="dropdown-level-badge ${levelClass}">Lv. ${reqLevel}</span>
+            </div>
+        `;
+    }
+
+    /**
+     * Favorited activities in MANUAL (favorites-list) order. Search-filtered
+     * unless in edit mode (edit mode always shows the full set so a reorder
+     * can't drop hidden entries).
+     * @returns {Array}
+     */
+    getFavoritedActivities() {
+        if (!this.activitiesData) return [];
+        const orderedIds = favoriteListFor(store.state.ui?.favorites, 'activity');
+        if (orderedIds.length === 0) return [];
+        const byId = {};
+        for (const activities of Object.values(this.activitiesData.by_skill)) {
+            for (const activity of activities) byId[activity.id] = activity;
+        }
+        const search = (!this.favoritesEditMode && this.searchText) ? this.searchText.toLowerCase() : '';
+        const out = [];
+        for (const id of orderedIds) {
+            const activity = byId[id];
+            if (!activity) continue;
+            if (search && !activity.name.toLowerCase().includes(search)) continue;
+            out.push(activity);
+        }
+        return out;
+    }
+
+    /** Reorder toggle button HTML for the Favorites header. */
+    _favEditBtnHtml() {
+        return `<button class="fav-edit-btn${this.favoritesEditMode ? ' active' : ''}" title="Drag to reorder favorites">${this.favoritesEditMode ? 'Done' : 'Reorder'}</button>`;
+    }
+
+    /**
+     * Render the Favorites pseudo-category (collapsed by default, below "None").
+     * Returns '' when there are no matching favorites. When expanded, shows a
+     * Reorder toggle that turns on drag-to-reorder.
+     */
+    renderFavoritesCategory() {
+        const favorites = this.getFavoritedActivities();
+        if (favorites.length === 0) return '';
+        const isExpanded = this.expandedCategories.has(FAVORITES_KEY);
+        const arrowIcon = `<span class="expand-arrow ${isExpanded ? 'expanded' : ''}">▼</span>`;
+        const editBtn = isExpanded ? this._favEditBtnHtml() : '';
+        const editable = this.favoritesEditMode;
+        const items = isExpanded ? favorites.map(a => this.renderActivityItemRow(a, { editable })).join('') : '';
+        return `
+            <div class="activity-category favorites-category${editable ? ' fav-edit-active' : ''}">
+                <div class="category-header favorites-category-header" data-skill="${FAVORITES_KEY}">
+                    <span class="fav-cat-icon">♥</span>
+                    <span class="skill-name">Favorites</span>
+                    ${editBtn}
+                    ${arrowIcon}
+                </div>
+                ${items}
+            </div>
+        `;
+    }
+
+    /**
+     * Favorites changed (toggle, reorder, or undo/redo): refresh the open list.
+     */
+    onFavoritesChange() {
+        if (this.isOpen) {
+            this.updateActivityList();
+        }
+    }
+
     renderCategory(skill, activities) {
         const isExpanded = this.expandedCategories.has(skill);
         const arrowIcon = `<span class="expand-arrow ${isExpanded ? 'expanded' : ''}">▼</span>`;
@@ -631,22 +754,7 @@ class ActivitySelectorDropdown extends Component {
             : `<img src="${skillIconPath}" alt="${skill}" class="skill-icon" />`;
 
         // Render activity items
-        const activityItems = isExpanded ? activities.map(activity => {
-            // Get the primary skill level requirement
-            const reqLevel = activity.requirements?.skill_requirements?.[activity.primary_skill] || 1;
-            const charSkills = store.state.character?.skills || {};
-            const charLevel = charSkills[activity.primary_skill?.toLowerCase()] || 1;
-            const canDo = charLevel >= reqLevel;
-            const levelClass = canDo ? 'level-ok' : 'level-too-high';
-
-            return `
-            <div class="activity-item" data-id="${activity.id}">
-                <img src="${activity.icon_path}" alt="${activity.name}" class="activity-icon" />
-                <span class="activity-name">${activity.name}</span>
-                <span class="dropdown-level-badge ${levelClass}">Lv. ${reqLevel}</span>
-            </div>
-        `;
-        }).join('') : '';
+        const activityItems = isExpanded ? activities.map(activity => this.renderActivityItemRow(activity)).join('') : '';
 
         return `
             <div class="activity-category">
@@ -703,6 +811,7 @@ class ActivitySelectorDropdown extends Component {
                 <div class="activity-item none-option">
                     <span class="activity-name">None</span>
                 </div>
+                ${this.renderFavoritesCategory()}
                 ${categories}
                 ${window._featureFlags?.generic ? `
                 <div class="activity-item generic-option" data-id="generic">
@@ -800,6 +909,33 @@ class ActivitySelectorDropdown extends Component {
         this.$element.on('click', '.none-option', (e) => {
             e.stopPropagation();
             this.clearSelection();
+        });
+
+        // Heart click — toggle favorite without selecting the row
+        this.$element.on('click', '.dropdown-fav-heart', (e) => {
+            e.stopPropagation();
+            const $h = $(e.currentTarget);
+            store.toggleFavorite($h.attr('data-fav-type'), $h.attr('data-fav-id'));
+        });
+
+        // Favorites "Edit" toggle — enter/exit drag-reorder mode
+        this.$element.on('click', '.fav-edit-btn', (e) => {
+            e.stopPropagation();
+            this.favoritesEditMode = !this.favoritesEditMode;
+            if (this.favoritesEditMode) this.expandedCategories.add(FAVORITES_KEY);
+            this.updateActivityList();
+        });
+        // Drag handle: don't let a tap select the row
+        this.$element.on('click', '.fav-drag-handle', (e) => e.stopPropagation());
+
+        // Drag-to-reorder wiring (delegated; survives list re-renders)
+        attachFavoritesDrag(this.$element, {
+            ns: '.favdrag-activity',
+            isActive: () => this.favoritesEditMode,
+            onReorder: (entries) => {
+                const ids = entries.filter(e => e.type === 'activity').map(e => e.id);
+                store.reorderFavoriteType('activity', ids);
+            }
         });
 
         // Click outside to close dropdown

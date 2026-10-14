@@ -300,9 +300,14 @@ DEFAULT_RECIPE_ORDER: List[str] = [
     'xp_per_material',          # hidden
 ]
 
-# Valid axis values (keep in sync with craftingpoll.js AXIS_OPTIONS).
+# Valid axis values (keep in sync with xy-recipe-priority-list.js AXIS_OPTIONS).
+# `xp` is valid on BOTH axes (AXIS_OPTIONS marks it yOnly:false, xOnly:false),
+# so it belongs in _VALID_Y_AXES too. Omitting it previously caused any
+# "Steps / XP" (or any XP-on-Y) recipe entry to be dropped on save/load even
+# though the UI let the user pick it and the scoring bridge (_resolve_xy_pair)
+# resolves it via the inverse pair to XP_PER_STEP.
 _VALID_X_AXES = {'materials', 'total_crafts', 'expected_steps', 'displayed_steps', 'xp', 'action'}
-_VALID_Y_AXES = {'materials', 'craft', 'step', 'action', 'quality', 'target_item'}
+_VALID_Y_AXES = {'materials', 'craft', 'step', 'action', 'quality', 'target_item', 'xp'}
 _VALID_QUALITIES = {'Normal', 'Good', 'Great', 'Excellent', 'Perfect', 'Eternal'}
 
 
@@ -683,7 +688,14 @@ DEFAULT_ACTIVITY_ORDER: List[Tuple[str, Optional[str]]] = [
 # BEFORE this validation runs, so reward_roll never reaches the
 # validity check.
 _VALID_ACTIVITY_X_AXES = {'action', 'steps', 'xp', 'total_xp'}
-_VALID_ACTIVITY_Y_AXES = {'action', 'steps', 'target_item'}
+# `xp` (Primary XP) and `total_xp` (Total XP) are valid on BOTH axes in the
+# UI (AXIS_OPTIONS marks them yOnly:false, xOnly:false), so they must be
+# accepted on Y here too. Omitting them previously dropped any XP-on-Y
+# activity entry (e.g. "Steps / Primary XP", "Steps / Total XP") on
+# save/load even though the user could pick it in the dropdown. The scoring
+# bridge (_resolve_xy_pair) resolves these via the inverse pair to
+# XP_PER_STEP / TOTAL_XP_PER_STEP, so widening the allow-set is safe.
+_VALID_ACTIVITY_Y_AXES = {'action', 'steps', 'target_item', 'xp', 'total_xp'}
 
 
 def _make_activity_entry(

@@ -609,6 +609,8 @@ def apply_dumb_stat_upgrade(
     locked_slots: Optional[set] = None,
     skip_empty_slot_fill: bool = False,
     irrelevant_stats: Optional[set] = None,
+    pet_candidates: Optional[list] = None,
+    allow_occupied_tier3_swap: bool = False,
     verbose: bool = True,
 ) -> dict:
     """
@@ -652,6 +654,22 @@ def apply_dumb_stat_upgrade(
             have. Bug 0c92a9e8: 2x Silver sun stone ring (FMF=2) won
             over 2x Gold sun stone ring (chest_finding=5) because every
             gold candidate dropped the silver's FMF, blocking the swap.
+        pet_candidates: Optional list of owned PetInfo objects (the pet
+            pool the optimizer used). When provided and the gearset's
+            'pet' slot is EMPTY, the pass fills it with a never-worse pet
+            (same dominance rule as gear empty-fills, inventory_space
+            allowed to trigger). A currently-occupied pet slot is never
+            touched. Sourced separately because pets are not in
+            character.items.
+        allow_occupied_tier3_swap: When True, a tier-3 (inventory_space)
+            strict improvement can trigger a swap on an OCCUPIED slot, not
+            just fill an empty one — but only after the never-worse check
+            passes on every other stat, so the swap is always a strict Pareto
+            improvement. Goals-report callers (activity / recipe / stats
+            worker) opt in so a strictly-dominant inventory/FMF ring (e.g. the
+            Collection ring) displaces an otherwise-equal owned ring
+            (bug feaa0b46). Travel leaves this False so inventory_space stays
+            last-ditch on routes (bugs b1e44232 / 0c92a9e8).
         verbose: Print swap decisions.
 
     Returns:
@@ -697,9 +715,62 @@ def apply_dumb_stat_upgrade(
         if slot == 'consumable':
             continue
 
-        # Skip pet slot — pets have their own optimization logic and level
-        # effects that this dumb pass doesn't model.
+        # Pet slot: the exact optimizer scores pets on the metric only, so a
+        # metric-neutral pet (e.g. Reindeer's global +inventory_space on a
+        # crafting recipe) ties on the metric — the optimizer may leave the
+        # slot EMPTY or pick an arbitrary metric-neutral pet (e.g. Camel +1
+        # inventory) over a strictly-better one (Reindeer +3). Handle BOTH:
+        #   • empty slot  -> fill with the best never-worse pet from the pool.
+        #   • occupied slot -> UPGRADE to a never-worse pet that is strictly
+        #     better on a trigger stat (inventory_space counts, tier-3).
+        # The never-worse dominance rule keeps this safe: a candidate that
+        # LOWERS any stat for this skill (e.g. dropping a Camel's desert
+        # work_efficiency, or a Tortoise's agility WE penalty) is rejected, so
+        # an occupied pet is only ever replaced by a genuine free upgrade.
+        # Pets carry no keywords and their level effects are fully captured by
+        # get_stats_for_skill, so the comparison at the current level is exact.
+        # (Bug: reindeer +3 inventory not filled for crafting, and camel +1
+        # chosen over reindeer +3; Thread 2026-07-29.)
         if slot == 'pet':
+            if (skip_empty_slot_fill and current_item is None) or not pet_candidates:
+                continue
+            _cur_pet_stats = (_get_item_stats(current_item, skill, location,
+                                              character, set_piece_counts)
+                              if current_item is not None else {})
+            _cur_pet_name = _item_name_lower(current_item) if current_item is not None else ''
+            _pet_cache = {}
+            _pet_union = set(_cur_pet_stats.keys())
+            for _pet in pet_candidates:
+                _ps = _get_item_stats(_pet, skill, location, character,
+                                      set_piece_counts)
+                _pet_cache[id(_pet)] = _ps
+                _pet_union.update(_ps.keys())
+            if not _pet_union:
+                continue
+            _pt1, _pt2, _pt3 = _get_compare_stat_keys(include_nmc, _pet_union)
+            _pet_dom = []
+            for _pet in pet_candidates:
+                # Never compare the pet already in-slot against itself.
+                if current_item is not None and (
+                        _pet is current_item
+                        or (_cur_pet_name and _item_name_lower(_pet) == _cur_pet_name)):
+                    continue
+                _ps = _pet_cache[id(_pet)]
+                if not _ps:
+                    continue
+                # allow_tier3_strict=True so a higher-inventory pet can trigger
+                # the fill/upgrade even against an occupied slot.
+                _isd, _sk, _t3 = _dominates(
+                    _ps, _cur_pet_stats, _pt1, _pt2, _pt3, True,
+                    irrelevant_stats=irrelevant_stats)
+                if _isd:
+                    _pet_dom.append((_pet, _ps, _sk, _t3))
+            if not _pet_dom:
+                continue
+            _pw = max(_pet_dom,
+                      key=lambda t: _tiebreak_key(t[1], t[0], _pt1, _pt2, _pt3))
+            result[slot] = _pw[0]
+            swaps.append((slot, current_item, _pw[0], _cur_pet_stats, _pw[1], _pw[2], _pw[3]))
             continue
 
         # Block swapping a current item that matches a specific-item-name
@@ -730,10 +801,23 @@ def apply_dumb_stat_upgrade(
 
         tier1, tier2, tier3 = _get_compare_stat_keys(include_nmc, stats_union)
 
-        # Allow tier3 (inventory_space) to contribute "strictly greater" only
-        # when the current slot is empty — per user spec, inv_space is
-        # last-ditch.
-        allow_tier3_strict = current_item is None
+        # Allow tier3 (inventory_space) to contribute "strictly greater" when
+        # the current slot is empty (fill it) OR — for callers that opt in via
+        # allow_occupied_tier3_swap — when the slot is occupied but the
+        # candidate is never-worse on EVERY other stat. Because _dominates only
+        # returns True after the never-worse check passes on all stats, a
+        # tier3-triggered swap on an occupied slot is always a strict Pareto
+        # improvement (more inventory_space, nothing lost) — the same reasoning
+        # the pet branch above uses unconditionally.
+        #
+        # Bug feaa0b46: for a collectible target the Collection ring
+        # (find_collectibles + chest_finding equal to an owned Gold jade ring,
+        # PLUS fine_material_finding + inventory_space) could not displace the
+        # occupied Gold jade ring because its only edges (FMF, inventory_space)
+        # are non-trigger stats — so the goals report kept a strictly-dominated
+        # ring. Travel keeps the old empty-only behavior (it never opts in), so
+        # inventory_space stays "last-ditch" on routes (bugs b1e44232/0c92a9e8).
+        allow_tier3_strict = (current_item is None) or allow_occupied_tier3_swap
 
         # Special handling: if current_item is None, we still check the rule
         # but there's no keyword containment to enforce (nothing to preserve).

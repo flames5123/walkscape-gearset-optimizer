@@ -1,3 +1,4 @@
+import { rewardSourceGroupsHtml, openAchievementFromSource } from '../utils/reward-sources.js';
 /**
  * NonOwnedUpgradesSection Component
  *
@@ -35,6 +36,8 @@ import store from '../state.js';
 import api from '../api.js';
 import { renderRequirementsRow } from '../utils/requirements.js';
 import { wikiDarkModeSuffix } from '../utils/wiki-link.js';
+import { unhideAlt } from '../utils/unhide-item.js';
+import { tradingButtonsHTML } from '../trading-buttons.js';
 
 // Slot identifier -> display name. Mirrors GearSlotGrid.getSlotDisplayName
 // (that map lives on GearSlotGrid instances, which aren't globally exposed).
@@ -75,10 +78,31 @@ function altIdentity(alt) {
     return `${base}\u0000${alt.quality || ''}`;
 }
 
+// ---- bulk-wishlist helpers (mirror trading-buttons.js so the item key we POST
+// matches the single-item "+ Wishlist" button exactly) --------------------
+const _WL_CANON_TYPE = {
+    material: 'material', crafted_item: 'crafted', consumable: 'consumable',
+    egg: 'pet_egg', item: 'item', coins: 'coins',
+};
+const _WL_QTOKENS = new Set(['', 'common', 'uncommon', 'rare', 'epic', 'legendary', 'ethereal', 'fine']);
+const _WL_WORD_TO_QTOKEN = {
+    normal: 'common', good: 'uncommon', great: 'rare', excellent: 'epic',
+    perfect: 'legendary', eternal: 'ethereal', fine: 'fine', none: '',
+};
+function wlSlug(name) {
+    return String(name || '').toLowerCase().replace(/ /g, '_')
+        .replace(/[()]/g, '').replace(/-/g, '_').replace(/'/g, '');
+}
+function wlQualityToken(q) {
+    const s = String(q == null ? '' : q).toLowerCase().trim();
+    if (_WL_QTOKENS.has(s)) return s;
+    return Object.prototype.hasOwnProperty.call(_WL_WORD_TO_QTOKEN, s) ? _WL_WORD_TO_QTOKEN[s] : '';
+}
+
 class NonOwnedUpgradesSection extends CollapsibleSection {
     constructor(element, props = {}) {
         super(element, {
-            title: 'Non-owned/Locked Upgrades',
+            title: 'Non-owned/Locked/Hidden Upgrades',
             icon: null,
             count: '',
             defaultExpanded: true,
@@ -88,20 +112,25 @@ class NonOwnedUpgradesSection extends CollapsibleSection {
         // Which sub-group + row is expanded, e.g. "nonowned-2". Tolerated as
         // undefined during the base constructor's first render() call.
         this._expandedRowKey = null;
-        // Per-group collapsed state (both open by default).
-        this._groupCollapsed = { nonowned: false, locked: false };
+        // Per-group collapsed state (all open by default).
+        this._groupCollapsed = { nonowned: false, locked: false, hidden: false };
         // Populated each render so click handlers can resolve a row -> entry.
-        this._rows = { nonowned: [], locked: [] };
+        this._rows = { nonowned: [], locked: [], hidden: [] };
 
         // Re-render when the optimizer publishes fresh alternatives, when the
         // active comparison slot switches, or when comparison mode toggles.
         const rerender = () => this._rerender();
         this.subscribe('gearsets.alternatives', rerender);
         this.subscribe('gearsets.lockedAlternatives', rerender);
+        this.subscribe('gearsets.hiddenAlternatives', rerender);
         this.subscribe('gearsets.gearset2Alternatives', rerender);
         this.subscribe('gearsets.gearset2LockedAlternatives', rerender);
+        this.subscribe('gearsets.gearset2HiddenAlternatives', rerender);
         this.subscribe('gearsets.activeGearsetSlot', rerender);
         this.subscribe('gearsets.comparisonMode', rerender);
+        // Re-render when a goals-report equip's background alternatives fetch
+        // starts/finishes, so the empty state flips to/from "Finding upgrades…".
+        this.subscribe('gearsets.alternativesComputing', rerender);
         // The optimizer writes gearsets.alternatives/lockedAlternatives but only
         // fires _notifySubscribers('gearsets.current') (state.js) — so without
         // this the section never refreshes after a re-optimize (only a page
@@ -130,6 +159,7 @@ class NonOwnedUpgradesSection extends CollapsibleSection {
         return {
             alternatives: (slot2 ? g.gearset2Alternatives : g.alternatives) || null,
             locked: (slot2 ? g.gearset2LockedAlternatives : g.lockedAlternatives) || null,
+            hidden: (slot2 ? g.gearset2HiddenAlternatives : g.hiddenAlternatives) || null,
         };
     }
 
@@ -179,29 +209,49 @@ class NonOwnedUpgradesSection extends CollapsibleSection {
     }
 
     renderContent() {
-        const { alternatives, locked } = this._activeAlternatives();
+        const { alternatives, locked, hidden } = this._activeAlternatives();
+
+        // A goals-report equip's background alternatives fetch is in flight —
+        // show the spinner (over any stale/empty state) until it resolves.
+        // Checked FIRST so selector timing (which nulls alternatives at a
+        // different moment than the flag flip) can't leave us on the wrong
+        // affordance. Cleared by the equip's .then/.catch.
+        if (store.state.gearsets && store.state.gearsets.alternativesComputing) {
+            this._rows = { nonowned: [], locked: [], hidden: [] };
+            return `<div class="combined-stats-empty"><p><span class="spinner">⏳</span> Finding upgrades…</p></div>`;
+        }
 
         // No optimization has produced alternatives yet.
-        if (!alternatives && !locked) {
-            this._rows = { nonowned: [], locked: [] };
+        if (!alternatives && !locked && !hidden) {
+            this._rows = { nonowned: [], locked: [], hidden: [] };
             return `<div class="combined-stats-empty"><p>Run an optimization to see gear upgrades</p></div>`;
         }
 
         const nonowned = this._aggregate(alternatives);
         const lockedRows = this._aggregate(locked);
-        this._rows = { nonowned, locked: lockedRows };
+        const hiddenRows = this._aggregate(hidden);
+        this._rows = { nonowned, locked: lockedRows, hidden: hiddenRows };
 
-        const total = nonowned.length + lockedRows.length;
+        const total = nonowned.length + lockedRows.length + hiddenRows.length;
         if (total === 0) {
             return `<div class="combined-stats-empty"><p>No better alternatives found</p></div>`;
         }
 
         let html = '<div class="nonowned-upgrades-groups">';
+        // Bulk "Add to wishlist…" toolbar — eligible = items you don't own
+        // (non-owned group, plus hidden rows that aren't owned). Owned-but-locked
+        // rows are excluded since you can't wishlist what you already own.
+        const eligible = nonowned.length
+            + hiddenRows.filter((e) => !(e.alt && e.alt.is_owned)).length;
+        html += this._wishBarHtml(eligible);
         if (nonowned.length > 0) {
             html += this._renderGroup('nonowned', 'Non-owned', nonowned);
         }
         if (lockedRows.length > 0) {
             html += this._renderGroup('locked', 'Owned but locked', lockedRows);
+        }
+        if (hiddenRows.length > 0) {
+            html += this._renderGroup('hidden', 'Hidden', hiddenRows);
         }
         html += '</div>';
         return html;
@@ -215,7 +265,8 @@ class NonOwnedUpgradesSection extends CollapsibleSection {
         // restored alternatives). Default to expanded.
         const collapsed = !!(this._groupCollapsed && this._groupCollapsed[group]);
         const arrowClass = collapsed ? '' : 'expanded';
-        const lockedCls = group === 'locked' ? ' locked-subheader' : '';
+        const lockedCls = group === 'locked' ? ' locked-subheader'
+            : (group === 'hidden' ? ' hidden-subheader' : '');
         const rowsHtml = rows.map((entry, idx) => this._renderRow(group, entry, idx)).join('');
         return `
             <div class="popup-alternatives-section nou-group" data-group="${group}">
@@ -236,7 +287,8 @@ class NonOwnedUpgradesSection extends CollapsibleSection {
         const { alt } = entry;
         const rowKey = `${group}-${idx}`;
         const rarityClass = alt.rarity ? `rarity-${alt.rarity}` : '';
-        const lockedItemCls = group === 'locked' ? ' alt-item-locked' : '';
+        const lockedItemCls = group === 'locked' ? ' alt-item-locked'
+            : (group === 'hidden' ? ' alt-item-hidden' : '');
 
         // Icon path — same derivation as the slot popup's _renderAltItemRow.
         let baseName = alt.name;
@@ -249,9 +301,24 @@ class NonOwnedUpgradesSection extends CollapsibleSection {
         const arrowClass = expanded ? 'expanded' : '';
         const improvementHtml = this._renderImprovement(alt);
 
+        // Bulk-wishlist checkbox (hidden until "Add to wishlist…" mode is on).
+        // Eligible only for items you don't own; owned-but-locked rows get none.
+        const notOwned = (group === 'nonowned') || (group === 'hidden' && !alt.is_owned);
+        const fullItem = this._resolveCatalogItem(alt.name, alt.uuid)
+            || this._resolveCatalogItem(baseName, null);
+        const wlTradable = fullItem ? (fullItem.tradable !== false) : true;
+        const checkHtml = (notOwned && wlTradable)
+            ? `<input type="checkbox" class="nou-wish-check" title="Select for wishlist"`
+                + ` data-slug="${this._escape(wlSlug(baseName))}"`
+                + ` data-type="${this._escape(_WL_CANON_TYPE[fullItem && fullItem.type] || (fullItem && fullItem.type) || 'item')}"`
+                + ` data-quality="${this._escape(wlQualityToken(alt.quality))}"`
+                + ` style="display:none;margin-right:6px;flex-shrink:0;cursor:pointer;" onclick="event.stopPropagation();">`
+            : '';
+
         return `
             <div class="popup-alt-item ${rarityClass}${lockedItemCls}" data-row-key="${rowKey}" data-group="${group}" data-row-idx="${idx}">
                 <div class="popup-alt-item-main">
+                    ${checkHtml}
                     <img src="${iconPath}" alt="${alt.name}" class="popup-item-icon" onerror="this.style.display='none'">
                     <span class="popup-item-name">${alt.name}</span>
                     ${improvementHtml}
@@ -374,16 +441,29 @@ class NonOwnedUpgradesSection extends CollapsibleSection {
         const wikiUrl = `https://wiki.walkscape.app/wiki/${encodeURIComponent(wikiName).replace(/%2F/g, '/').replace(/%5F/g, '_')}${wikiDarkModeSuffix()}`;
         const dataAttrs = `data-item-name="${this._escape(alt.name)}" data-item-uuid="${alt.uuid || ''}" data-item-quality="${alt.quality || ''}" data-slot="${slot}"`;
         const rowKey = `${group}-${idx}`;
-        const equipLinks = group === 'locked' ? '' : `
+        // Equip only when the item is actually equippable: non-owned rows (the
+        // handler toasts if not in inventory) and owned hidden rows. Owned-but-
+        // locked and non-owned hidden rows omit Equip.
+        const showEquip = group === 'nonowned' || (group === 'hidden' && alt.is_owned);
+        const equipLinks = showEquip ? `
                 <a href="#" class="wiki-link nou-equip-btn" ${dataAttrs} onclick="event.preventDefault();">Equip</a>
-                <a href="#" class="wiki-link nou-equip-compare-btn" ${dataAttrs} onclick="event.preventDefault();">Equip &amp; Compare</a>`;
+                <a href="#" class="wiki-link nou-equip-compare-btn" ${dataAttrs} onclick="event.preventDefault();">Equip &amp; Compare</a>` : '';
+        const unhideLink = group === 'hidden'
+            ? `<a href="#" class="wiki-link nou-unhide-btn" data-item-name="${this._escape(alt.name)}" data-item-uuid="${alt.uuid || ''}" onclick="event.preventDefault();">Unhide</a>`
+            : '';
+        const notOwned = (group === 'nonowned') || (group === 'hidden' && !alt.is_owned);
+        const tradeHtml = tradingButtonsHTML(
+            { name: baseName, type: (fullItem && fullItem.type) || 'item', quality: alt.quality, tradable: fullItem ? fullItem.tradable : undefined },
+            { owned: !notOwned });
         const actionsHtml = `
             <div class="alt-action-links">
                 <a href="${wikiUrl}" target="_blank" rel="noopener noreferrer" class="wiki-link" onclick="event.stopPropagation()">Wiki</a>
                 <a href="#" class="wiki-link nou-sources-btn" data-row-key="${rowKey}" data-item-name="${this._escape(baseName)}" onclick="event.preventDefault();">Sources <span class="source-arrow">▼</span></a>
                 ${equipLinks}
+                ${unhideLink}
             </div>
-            <div class="alt-sources-container nou-sources-container" data-row-key="${rowKey}" style="display: none;"></div>`;
+            <div class="alt-sources-container nou-sources-container" data-row-key="${rowKey}" style="display: none;"></div>
+            ${tradeHtml}`;
 
         // Keywords (hide the internal shiny_* set, matching the popup).
         let keywordsHtml = '';
@@ -583,11 +663,66 @@ class NonOwnedUpgradesSection extends CollapsibleSection {
                     html += `<div class="source-item source-item-no-click source-item-chest"><div class="source-item-main"><span class="source-name">${esc(src.name)}</span><span class="source-badge source-badge-chest ${rarityClass}">${rarityLabel}</span></div><div class="source-item-details"><span>Chance per chest: ${dr}</span>${qty ? `<span>${qty}</span>` : ''}</div></div>`;
                 }
             }
+            html += rewardSourceGroupsHtml(sources);
             html += '</div>';
             $container.html(html);
         } catch (_e) {
             $container.html('<div class="source-empty">Failed to load sources</div>');
         }
+    }
+
+    // ---- bulk wishlist -----------------------------------------------------
+
+    /** Toolbar shown above the groups when there are wishlist-eligible rows. */
+    _wishBarHtml(eligible) {
+        if (!eligible) return '';
+        const bs = 'padding:4px 10px;border-radius:6px;border:1px solid #3fa65a;background:#3fa65a;color:#fff;cursor:pointer;font-size:12px;';
+        const bs2 = 'padding:4px 10px;border-radius:6px;border:1px solid var(--border-color);background:var(--bg-tertiary);color:var(--text-primary);cursor:pointer;font-size:12px;';
+        return `<div class="nou-wishbar" style="display:flex;gap:8px;align-items:center;justify-content:center;margin:2px 0 8px;flex-wrap:wrap;">`
+            + `<button type="button" class="nou-wish-start" style="${bs}">+ Add to wishlist…</button>`
+            + `<button type="button" class="nou-wish-all" style="display:none;${bs2}">Check all</button>`
+            + `<button type="button" class="nou-wish-none" style="display:none;${bs2}">Uncheck all</button>`
+            + `<button type="button" class="nou-wish-commit" style="display:none;${bs}">Add selected (0)</button>`
+            + `<button type="button" class="nou-wish-cancel" style="display:none;${bs2}">Cancel</button>`
+            + `</div>`;
+    }
+
+    _updateWishCount() {
+        const n = this.$element.find('.nou-wish-check:checked').length;
+        this.$element.find('.nou-wish-commit').text(`Add selected (${n})`);
+    }
+
+    _exitWishMode() {
+        this.$element.find('.nou-wish-check').prop('checked', false).hide();
+        this.$element.find('.nou-wish-commit, .nou-wish-cancel, .nou-wish-all, .nou-wish-none').hide();
+        this.$element.find('.nou-wish-start').show();
+        this._updateWishCount();
+    }
+
+    async _commitWishlist($btn) {
+        const checks = this.$element.find('.nou-wish-check:checked').toArray();
+        if (!checks.length) { this._exitWishMode(); return; }
+        $btn.prop('disabled', true);
+        let ok = 0; let fail = 0;
+        for (const el of checks) {
+            const slug = el.getAttribute('data-slug');
+            const type = el.getAttribute('data-type');
+            const quality = el.getAttribute('data-quality') || '';
+            try {
+                const resp = await fetch('/api/trading/wishlist', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ item: { slug, type }, quality_rule: 'exact', quality_floor: quality }),
+                });
+                if (!resp.ok) throw new Error();
+                ok += 1;
+            } catch (_e) { fail += 1; }
+        }
+        $btn.prop('disabled', false);
+        this._exitWishMode();
+        const msg = fail
+            ? `Added ${ok} to wishlist · ${fail} failed`
+            : `Added ${ok} ${ok === 1 ? 'item' : 'items'} to wishlist`;
+        try { api.showInfo(msg); } catch (_e) { /* best-effort */ }
     }
 
     // ---- events ------------------------------------------------------------
@@ -680,6 +815,8 @@ class NonOwnedUpgradesSection extends CollapsibleSection {
             } else if ((sourceType === 'recipe_output' || sourceType === 'recipe_drop' || sourceType === 'recipe_input') && sourceId) {
                 store.update('column3.selectedRecipe', sourceId);
                 store.update('column3.selectedActivity', null);
+            } else if (sourceType === 'achievement_reward' && sourceId) {
+                openAchievementFromSource(sourceId);
             }
         });
 
@@ -699,6 +836,55 @@ class NonOwnedUpgradesSection extends CollapsibleSection {
             e.stopPropagation();
             const $btn = $(e.currentTarget);
             this._equipCompareToSlot($btn.data('item-name'), $btn.data('item-uuid'), $btn.data('item-quality'), $btn.data('slot'));
+        });
+
+        // Unhide — flip the item's hide flag off and drop it from the Hidden
+        // group (the store prune + notify re-renders this section).
+        this.$element.off('click', '.nou-unhide-btn');
+        this.$element.on('click', '.nou-unhide-btn', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const $btn = $(e.currentTarget);
+            unhideAlt({ name: $btn.data('item-name'), uuid: $btn.data('item-uuid'), quality: '' });
+        });
+
+        // Bulk wishlist: start → reveal checkboxes + swap to Add selected/Cancel.
+        this.$element.off('click', '.nou-wish-start');
+        this.$element.on('click', '.nou-wish-start', (e) => {
+            e.preventDefault(); e.stopPropagation();
+            // Reveal checkboxes with ALL pre-checked by default, plus the
+            // check-all / uncheck-all / commit / cancel controls.
+            this.$element.find('.nou-wish-check').prop('checked', true).show();
+            this.$element.find('.nou-wish-start').hide();
+            this.$element.find('.nou-wish-commit, .nou-wish-cancel, .nou-wish-all, .nou-wish-none').show();
+            this._updateWishCount();
+        });
+        this.$element.off('click', '.nou-wish-all');
+        this.$element.on('click', '.nou-wish-all', (e) => {
+            e.preventDefault(); e.stopPropagation();
+            this.$element.find('.nou-wish-check').prop('checked', true);
+            this._updateWishCount();
+        });
+        this.$element.off('click', '.nou-wish-none');
+        this.$element.on('click', '.nou-wish-none', (e) => {
+            e.preventDefault(); e.stopPropagation();
+            this.$element.find('.nou-wish-check').prop('checked', false);
+            this._updateWishCount();
+        });
+        this.$element.off('change', '.nou-wish-check');
+        this.$element.on('change', '.nou-wish-check', (e) => {
+            e.stopPropagation();
+            this._updateWishCount();
+        });
+        this.$element.off('click', '.nou-wish-cancel');
+        this.$element.on('click', '.nou-wish-cancel', (e) => {
+            e.preventDefault(); e.stopPropagation();
+            this._exitWishMode();
+        });
+        this.$element.off('click', '.nou-wish-commit');
+        this.$element.on('click', '.nou-wish-commit', (e) => {
+            e.preventDefault(); e.stopPropagation();
+            this._commitWishlist($(e.currentTarget));
         });
     }
 }

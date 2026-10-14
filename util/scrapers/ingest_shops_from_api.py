@@ -168,6 +168,13 @@ def build_shops(client: ToolsAPIClient):
         # sell-back lists). soldItems is the shop's authoritative sell list.
         sold = set(detail.get('soldItems') or [])
 
+        # Currency reconciliation: the tools API has no currency field, so buys
+        # default to coins. But Adventurers' Guild shops (outpost / miragepost /
+        # swampost) sell for Adventurers' Guild Tokens — confirmed against the
+        # wiki (e.g. Zorre's desert gourdpack = 750 AG tokens at the Cactus
+        # Canyon Miragepost; every guild-shop item in the wiki is token-priced).
+        buy_currency = 'adventurers_guild_token' if 'adventurers_guild' in sid.lower() else 'coins'
+
         inventory = []
         seen = set()
         for sl in detail.get('shoppingLists', []) or []:
@@ -185,7 +192,7 @@ def build_shops(client: ToolsAPIClient):
                     'item_name': info['name'],
                     'stock': int(entry.get('quantity') or 1),  # API has no stock; use bundle qty
                     'price': price,
-                    'currency': 'coins',  # API has no currency field (see warnings)
+                    'currency': buy_currency,
                     'item_type': item_type,
                     'item_ref': item_ref,
                 })
@@ -199,11 +206,47 @@ def build_shops(client: ToolsAPIClient):
                 'item_name': info['name'],
                 'stock': 1,
                 'price': 0,
-                'currency': 'coins',
+                'currency': buy_currency,
                 'item_type': ITEM_TYPE_MAP.get(info['type'], info['type'].capitalize()),
                 'item_ref': resolve_item_reference(info['name'], lookups),
             })
             warnings.append(f"{humanize(stub['name'])}: '{info['name']}' in soldItems has no price entry (set to 0)")
+
+        # Sell-back / exchange lists (sellingList=True): items the player GIVES
+        # to the shop in exchange for Adventurers' Guild Tokens (e.g. mysterious
+        # chitin, strange fur at the guild). These are NOT in soldItems, so the
+        # buy loops above skip them. Surface them as sell_to_shop entries so the
+        # item's "sold at <guild>" vendor shows in /api/item-sources. Dedup by
+        # item id (the list repeats each item per quality); keep the first
+        # (lowest / common) token price.
+        sell_seen = set()
+        for sl in detail.get('shoppingLists', []) or []:
+            if not sl.get('sellingList'):
+                continue
+            for entry in sl.get('items', []) or []:
+                item = entry.get('item') or {}
+                iid = item.get('id')
+                if not iid or iid in sell_seen:
+                    continue
+                sell_seen.add(iid)
+                info = get_item(iid)
+                inventory.append({
+                    'item_name': info['name'],
+                    'stock': 1,
+                    'price': int(entry.get('fixedPrice') or 0),
+                    'currency': 'adventurers_guild_token',
+                    'item_type': ITEM_TYPE_MAP.get(info['type'], info['type'].capitalize()),
+                    'item_ref': resolve_item_reference(info['name'], lookups),
+                    'sell_to_shop': True,
+                })
+
+        # Sellability: the player can sell at a shop unless it is purchase-only.
+        # onlyPurchaseSellingListItems=True marks purchase-only shops, but the
+        # Adventurers' Guild outposts also set it while exposing a sellingList
+        # (exchange for tokens) — those ARE sellable. So: sellable unless
+        # onlyPurchaseSellingListItems AND no sellingList=True list.
+        has_sell_back = any(sl.get('sellingList') for sl in (detail.get('shoppingLists') or []))
+        can_sell = (not detail.get('onlyPurchaseSellingListItems')) or has_sell_back
 
         shops.append({
             'name': detail.get('name') and humanize(detail['name']) or humanize(sid),
@@ -211,6 +254,7 @@ def build_shops(client: ToolsAPIClient):
             'location': location,
             'region': region,
             'inventory': inventory,
+            'can_sell': can_sell,
         })
 
     return shops, warnings
@@ -241,6 +285,7 @@ def render_module(shops) -> str:
         "    currency: str  # 'coins' or 'adventurers_guild_token' or material name",
         '    item_type: str  # Loot, Tool, Consumable, Material, Container, Collectible, Cosmetic',
         '    item_ref: Optional[str] = None',
+        '    sell_to_shop: bool = False  # True = player GIVES item to shop for the price (exchange/sell-back)',
         '',
         '',
         '@dataclass',
@@ -252,6 +297,7 @@ def render_module(shops) -> str:
         '    region: str',
         '    requirements: List[str] = field(default_factory=list)',
         '    inventory: List[ShopItem] = field(default_factory=list)',
+        '    can_sell: bool = True  # False = purchase-only shop; the player cannot sell items here',
         '',
         '',
         '# ============================================================================',
@@ -277,11 +323,14 @@ def render_module(shops) -> str:
                 lines.append('    inventory=[')
                 for it in inv:
                     ref = f"'{it['item_ref']}'" if it.get('item_ref') else 'None'
+                    sell = ', True' if it.get('sell_to_shop') else ''
                     lines.append(
                         f"        ShopItem('{escape_str(it['item_name'])}', {it['stock']}, "
-                        f"{it['price']}, '{it['currency']}', '{it['item_type']}', {ref}),"
+                        f"{it['price']}, '{it['currency']}', '{it['item_type']}', {ref}{sell}),"
                     )
                 lines.append('    ],')
+            if not shop.get('can_sell', True):
+                lines.append('    can_sell=False,')
             lines.append(')')
             lines.append('')
 

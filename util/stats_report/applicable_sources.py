@@ -9,6 +9,25 @@ from typing import Set, Tuple
 from .normalize import normalize_item_id
 from .state_snapshot import CharacterStateSnapshot
 
+# Container.* drops that are NOT chest-farming chests. These loot bags are
+# found via their own dedicated stats (Bird nest -> find_bird_nests, Coin pouch
+# -> coins, Gem pouch -> find_gems), NOT chest_finding, so the chests report
+# never optimizes or stores them. Enumerating them as chest scopes left the
+# stale header (!) stuck forever with no clearing path and no child chip (bug
+# cf46e08f). Matched by the Container.<SUFFIX>. Mirrors the intent of the
+# chest_finding classifier in optimize_activity_gearsets.FINDING_STAT_DROP_CHECKS
+# (which already excludes BIRD_NEST). (Thread 2026-07-29.)
+#
+# 2026-09-28 (jwbail): Gem pouch + Coin pouch are now first-class "Best Chest
+# Farming" chips (added to ALL_CHEST_NAMES / MISC_CHESTS in the goals-report UI,
+# commit ffc5c1ca). build_chest_jobs already stores a row per (pouch, activity)
+# via the Container.* ref, so they now HAVE both a visible chip and a stored
+# result — enumerating them is correct and REQUIRED (otherwise they never flag
+# new/stale on first appearance and the (!) never appears; user report). Only
+# Bird nest remains excluded: it has no chip, so enumerating it would strand a
+# headerless (!) exactly as cf46e08f describes.
+_NON_CHEST_CONTAINERS = {"BIRD_NEST"}
+
 
 def _is_unlocked(item, state: CharacterStateSnapshot) -> bool:
     """Reuse the unlock check from effective_bitmap."""
@@ -76,6 +95,80 @@ def _activity_applicable(activity, state: CharacterStateSnapshot) -> bool:
                 return False
         except (TypeError, ValueError):
             pass
+    return True
+
+
+def _activity_gear_feasible(activity, state: CharacterStateSnapshot) -> bool:
+    """Return False iff the character provably can't meet the activity's
+    `keyword_counts` gear requirement from OWNED items.
+
+    Mirror of stats_report_worker._activity_required_gear_owned so the
+    applicable set (stale detection) AGREES with the job set (the build_*_jobs
+    gate). Without this, an ungeared activity — e.g. Casbrant's Grave Wreck
+    Diving / Sea fishing (Spear), which need `advanced diving gear: 3` — is
+    enumerated as applicable while the worker (correctly) never builds a job or
+    writes a result for it. detect_stale_scopes then sees an applicable scope
+    with no fresh result and strands it at a red (!) that NEVER clears: re-running
+    Optimize just yields "0/0 optimizations" because no valid gearset can be
+    built (bug: read-path (!) persists even after re-optimize).
+
+    `_activity_applicable` deliberately skips keyword_counts (they normally
+    need an equipped gearset and the optimizer equips the required gear) — but
+    that only holds when the gear is OWNABLE. This gate closes the gap for the
+    not-owned case only.
+
+    Necessary-condition: counts DISTINCT owned item slugs carrying each required
+    keyword (via the shared catalog + item_satisfies_required_keyword, matching
+    the worker's keyword logic). distinct-count <= the worker's qty-count, so the
+    applicable set stays a SUBSET of what the worker builds — an activity is never
+    enumerated-applicable without a corresponding job, which is precisely the
+    invariant that avoids ghosting. Owned-but-custom-stat-locked gear counts as
+    owned (matches the build gate). input_items keywords are credited 1.
+    """
+    reqs = getattr(activity, "requirements", None) or {}
+    kc = reqs.get("keyword_counts", {}) if isinstance(reqs, dict) else {}
+    if not kc:
+        return True
+    try:
+        from util.optimization_utils import item_satisfies_required_keyword
+    except Exception:
+        return True  # can't evaluate -> be permissive (keep prior behavior)
+
+    # Keywords the activity's input_items can pre-satisfy (credit 1 each),
+    # mirroring meets_activity_requirements' input pre-satisfaction.
+    input_kw = set()
+    for ii in (getattr(activity, "input_items", None) or []):
+        if getattr(ii, "type", "") == "keyword":
+            ref = (getattr(ii, "reference", "") or "").lower()
+            if ref:
+                input_kw.add(ref)
+
+    catalog = _catalog_lookup_cache()
+    owned_slugs = {s for (s, _q) in (getattr(state, "owned_items", None) or ())}
+
+    for keyword, required in kc.items():
+        try:
+            need = int(required or 0)
+        except (TypeError, ValueError):
+            need = 0
+        need -= 1 if str(keyword).lower() in input_kw else 0
+        if need <= 0:
+            continue
+        cap = 0
+        for slug in owned_slugs:
+            it = catalog.get(slug)
+            if it is None:
+                continue
+            try:
+                if item_satisfies_required_keyword(it, keyword, activity):
+                    cap += 1
+                    if cap >= need:
+                        break
+            except Exception:
+                cap = need  # unevaluable -> permissive for this keyword
+                break
+        if cap < need:
+            return False
     return True
 
 
@@ -296,11 +389,98 @@ def representative_recipe_service_location(
     return (loc_slug, svc_slug)
 
 
+def _iu_enabled(dim, cfg):
+    """True if the include-unavailable dimension is enabled. Only the activity-
+    level dims (level/location/gear/other) are relevant here — 'inputs' is a
+    per-row worker gate, not an enumeration gate. Default off (legacy)."""
+    return bool(isinstance(cfg, dict) and cfg.get(dim))
+
+
+def _classify_applicable_fail(activity, state):
+    """Classify WHY ``_activity_applicable`` returned False into include-
+    unavailable dimensions. Returns a subset of {'level','other'}. Only call
+    this when ``_activity_applicable`` already said False — it just attributes
+    the failure (skill level -> 'level'; reputation / achievement points /
+    character level -> 'other')."""
+    dims = set()
+    sr = getattr(activity, "skill_requirements", None) or {}
+    if isinstance(sr, dict):
+        for skill, lvl in sr.items():
+            sk = (skill if isinstance(skill, str) else getattr(skill, "name", "")).lower()
+            try:
+                need = int(lvl)
+            except (TypeError, ValueError):
+                need = 0
+            if sk and state.skill_levels.get(sk, 1) < need:
+                dims.add('level')
+                break
+    reqs = getattr(activity, "requirements", None)
+    if isinstance(reqs, list):
+        for req in reqs:
+            if not isinstance(req, dict):
+                continue
+            if req.get("type") == "skill":
+                skill = (req.get("skill") or "").lower()
+                if state.skill_levels.get(skill, 1) < req.get("level", 0):
+                    dims.add('level')
+            elif req.get("type") == "character_level":
+                if state.character_level < req.get("level", 0):
+                    dims.add('other')
+    elif isinstance(reqs, dict):
+        rep_req = reqs.get("reputation") or {}
+        if isinstance(rep_req, dict) and rep_req:
+            rep_have = {str(k).lower(): v for k, v in (state.reputation or {}).items()}
+            for faction, amount in rep_req.items():
+                try:
+                    need = int(amount)
+                except (TypeError, ValueError):
+                    need = 0
+                if need > 0 and int(rep_have.get(str(faction).lower(), 0) or 0) < need:
+                    dims.add('other')
+                    break
+        try:
+            ap_req = int(reqs.get("achievement_points") or 0)
+            if ap_req > 0 and state.achievement_points < ap_req:
+                dims.add('other')
+        except (TypeError, ValueError):
+            pass
+    return dims
+
+
+def _activity_unavailable_dims(activity, state, unlocked_regions, locked_locations):
+    """Set of include-unavailable dimensions ({'level','location','gear','other'})
+    that currently gate this activity out of the applicable set. Empty => the
+    activity is fully available today.
+
+    Delegates to the SAME legacy primitives the enumerator always used
+    (_activity_applicable, _activity_gear_feasible, _first_accessible_location)
+    so a caller/test that monkeypatches any of them is honored and the applicable
+    set stays byte-identical when no dimension is enabled. The failure of
+    _activity_applicable is then classified into 'level' vs 'other'."""
+    dims = set()
+    if not _activity_applicable(activity, state):
+        cls = _classify_applicable_fail(activity, state)
+        dims |= (cls or {'other'})
+    if not _activity_gear_feasible(activity, state):
+        dims.add('gear')
+    if _first_accessible_location(activity, unlocked_regions, locked_locations) is None:
+        dims.add('location')
+    return dims
+
+
 def enumerate_applicable_sources(
-    state: CharacterStateSnapshot, db=None, char_config: dict = None
+    state: CharacterStateSnapshot, db=None, char_config: dict = None,
+    include_unavailable: dict = None
 ) -> Set[Tuple[str, str, str, str, str]]:
     """Return set of (category, subcategory, source_name, location, service) tuples
-    currently applicable to the character."""
+    currently applicable to the character.
+
+    include_unavailable: optional EFFECTIVE include-unavailable dimensions dict
+    ({level,location,gear,other} booleans). When provided, this mirror of the
+    worker's _sr_gate_activity surfaces activities gated ONLY by the enabled
+    dimension(s) so the applicable set stays in lockstep with the job set the
+    worker builds under the same flags. None (default) = legacy behavior
+    (every gated activity excluded), byte-identical to before this feature."""
     import util.walkscape_constants  # noqa: F401
     from util.autogenerated.activities import ACTIVITIES_BY_NAME
     from util.autogenerated.recipes import RECIPES_BY_NAME
@@ -311,6 +491,29 @@ def enumerate_applicable_sources(
 
     applicable: Set[Tuple[str, str, str, str, str]] = set()
 
+    # 2026-09-28 (jwbail [fix:termite-effort]): a level>=4 Termite's "Terminate"
+    # ability converts logs -> Carpentry XP, so build_xp_jobs emits an extra
+    # ('xp','carpentry',<woodcutting activity>) job for every log-cutting
+    # activity when one is owned. This enumerator MUST emit the identical scope
+    # or the two diverge: the carpentry rows the worker writes would never map
+    # to an applicable scope (stranding a perpetual "N more optimizing" /
+    # newly-unlocked badge that never clears), and on stale_only re-runs the
+    # carpentry jobs would be dropped because their key isn't in the applicable
+    # set. Gate identically to build_xp_jobs: ownership of a lvl>=4 Termite +
+    # Woodcutting primary + the activity actually dropping a convertible
+    # logs-keyword material (activity_has_logs_drop, the SAME helper the worker
+    # uses, so the eligible set matches exactly).
+    _owns_l4_termite = any(
+        str(sp).lower() == "termite" and int(lvl) >= 4
+        for (sp, lvl) in (getattr(state, "owned_pets", None) or ())
+    )
+    _activity_has_logs_drop = None
+    if _owns_l4_termite:
+        try:
+            from ui.pet_effort import activity_has_logs_drop as _activity_has_logs_drop
+        except Exception:
+            _activity_has_logs_drop = None
+
     # 2026-05-29: resolve accessibility once so we pick the same first
     # accessible location the worker writes under. Without this, every
     # additional activity.locations entry produced a phantom NEWLY_UNLOCKED
@@ -319,7 +522,14 @@ def enumerate_applicable_sources(
 
     # ── Activities ─────────────────────────────────────────────────────
     for activity in ACTIVITIES_BY_NAME.values():
-        if not _activity_applicable(activity, state):
+        # Include-unavailable gate: compute the dimensions gating this activity
+        # and apply union semantics against the EFFECTIVE flags. With
+        # include_unavailable=None (default) every gated activity is excluded —
+        # byte-identical to the prior _activity_applicable + _activity_gear_feasible
+        # guards. When a dimension is enabled, an activity gated ONLY by enabled
+        # dimensions is enumerated so the applicable set matches the job set.
+        _dims = _activity_unavailable_dims(activity, state, unlocked_regions, locked_locations)
+        if _dims and not all(_iu_enabled(d, include_unavailable) for d in _dims):
             continue
         primary_skill_obj = getattr(activity, "skill", None) or getattr(activity, "primary_skill", None)
         if not primary_skill_obj:
@@ -345,7 +555,15 @@ def enumerate_applicable_sources(
         # the worker didn't write a row under.
         loc = _first_accessible_location(activity, unlocked_regions, locked_locations)
         if loc is None:
-            continue
+            # Location-gated but surfaced via the include-unavailable 'location'
+            # dimension — fall back to the first listed location so the scope
+            # key matches what the worker writes (_sr_job_location). When the
+            # location dim is off, loc stays None and we skip as before.
+            if _iu_enabled('location', include_unavailable):
+                _locs = getattr(activity, "locations", None) or []
+                loc = _locs[0] if _locs else None
+            if loc is None:
+                continue
         loc_str = loc if isinstance(loc, str) else getattr(loc, "name", str(loc))
         loc_slug = loc_str.lower().replace(" ", "_").replace("'", "")
 
@@ -364,34 +582,83 @@ def enumerate_applicable_sources(
                 sec_str = (sec if isinstance(sec, str) else getattr(sec, "name", "")).lower()
                 if sec_str:
                     xp_skills.add(sec_str)
+        # Termite Terminate -> informational Carpentry on log-cutting activities
+        # (see the _owns_l4_termite note above). Mirrors build_xp_jobs exactly.
+        if (_owns_l4_termite and primary_skill == "woodcutting"
+                and _activity_has_logs_drop is not None
+                and _activity_has_logs_drop(activity)):
+            xp_skills.add("carpentry")
         # 2026-06-19 (jwbail): one-time activities are not repeatable XP
         # farming targets — build_xp_jobs skips them, so the applicable set
         # must not emit an xp scope for them either, or detect_stale_scopes
         # flags the row as REASON_NEWLY_UNLOCKED forever once it unlocks
-        # (user report: "Repair the bank shows up in XP"). coins / chests /
-        # new_items are still emitted below — a one-time activity remains a
-        # legitimate one-off source of its chest and collectible drops.
-        if not getattr(activity, "one_time", False):
+        # (user report: "Repair the bank shows up in XP").
+        #
+        # 2026-07-29: extend the skip to coins + chests too (but NOT new_items,
+        # see below). A one-time activity (Repair the bank, Ventures, etc.) is
+        # NOT a repeatable coins/chest farming target — the worker's
+        # build_coins_jobs / build_chest_jobs never store a result for one
+        # (verified on a live session: repeatable Brig/Hull/sail repairs ARE
+        # stored, one-time "Repair the bank" is not). But enumerate emitted a
+        # coins scope UNCONDITIONALLY and a chests scope per Container.* drop,
+        # so detect_stale_scopes stranded both at REASON_NEWLY_UNLOCKED forever:
+        # header (!) stuck on, no child chip clears, "run all" produces nothing
+        # (user report: "Repair the bank" stale on carpentry after its custom
+        # stat was checked, never clears). enumerate_applicable_sources only
+        # drives STALE detection (never the displayed rows), so skipping
+        # one-time here can only remove false (!) flags. new_items is left
+        # UNCONDITIONAL below: it is already gated on _kinds_with_unowned_drops
+        # (matching what the worker stores), so a one-time activity remains a
+        # legitimate ONE-OFF collectible source (e.g. Venture into the bog ->
+        # Essence of the swamp) without stranding. (Thread 2026-07-29.)
+        _is_one_time = getattr(activity, "one_time", False)
+        if not _is_one_time:
             for sk in xp_skills:
                 applicable.add(("xp", sk, activity.name, loc_slug, "NONE"))
 
-        # coins under primary skill only
-        applicable.add(("coins", primary_skill, activity.name, loc_slug, "NONE"))
+            # coins under primary skill only
+            applicable.add(("coins", primary_skill, activity.name, loc_slug, "NONE"))
 
-        # chests: enumerate Container.* refs in the drop tables.
-        for d in all_drops:
-            ref = getattr(d, "item_ref", "") or ""
-            if not ref.startswith("Container."):
-                continue
-            chest_name = getattr(d, "item_name", "") or ""
-            chest_slug = chest_name.lower().replace(" ", "_").replace("'", "")
-            if chest_slug:
-                applicable.add(("chests", chest_slug, activity.name, loc_slug, "NONE"))
+            # chests: enumerate Container.* refs in the drop tables.
+            for d in all_drops:
+                ref = getattr(d, "item_ref", "") or ""
+                if not ref.startswith("Container."):
+                    continue
+                # Skip loot bags (Bird nest / Coin pouch / Gem pouch) — not
+                # chest-farming chests; the report never stores them, so flagging
+                # them stranded the header (!) permanently (bug cf46e08f).
+                if ref.rsplit(".", 1)[-1].upper() in _NON_CHEST_CONTAINERS:
+                    continue
+                chest_name = getattr(d, "item_name", "") or ""
+                chest_slug = chest_name.lower().replace(" ", "_").replace("'", "")
+                if chest_slug:
+                    applicable.add(("chests", chest_slug, activity.name, loc_slug, "NONE"))
 
-        # new_items: one row per kind that has unowned drops
+        # new_items: one row per kind that has unowned drops. Emitted for ALL
+        # activities (including one-time): already gated on unowned drops, which
+        # matches what build_new_items_jobs stores, so no stranding. A one-time
+        # activity is a legitimate one-off source of its collectible drops.
         kinds_with_drops = _kinds_with_unowned_drops(all_drops, state)
         for kind in kinds_with_drops:
             applicable.add(("new_items", kind, activity.name, loc_slug, "NONE"))
+
+        # target_items v2: one scope per classifiable droppable item (regardless
+        # of ownership — target_items runs for ALL droppable materials/currency).
+        # Key: ('target_items', group_slug, item_slug, 'NONE', 'NONE')
+        # location and service are literal 'NONE' so the key is stable regardless
+        # of which activity is fastest for a given item.
+        # Always emit both normal AND fine leaves for fine-capable items so a fine
+        # row is never orphaned when include_fine toggles on/off.
+        from .target_items import classify_drop_entry_all, CURRENCY_GROUPS
+        for d in all_drops:
+            for classification in classify_drop_entry_all(d, include_fine=True):
+                group_slug, item_slug, _name, _ref, _is_fine = classification
+                applicable.add(("target_items", group_slug, item_slug, "NONE", "NONE"))
+        # Currency groups: one scope per currency (leaf_slug = currency_slug)
+        # Emit unconditionally — the worker will compute 0 if no AGT/shell drops
+        # exist for this character, but the scope must exist to avoid orphan.
+        for currency_slug in CURRENCY_GROUPS:
+            applicable.add(("target_items", currency_slug, currency_slug, "NONE", "NONE"))
 
     # ── Recipes (chests_recipes) ───────────────────────────────────────
     for recipe in RECIPES_BY_NAME.values():

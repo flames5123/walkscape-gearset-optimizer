@@ -41,7 +41,7 @@ class ItemFindingCategory:
     ADVENTURERS_GUILD_TOKENS = CategoryInstance(
         name="Adventurers' Guild Tokens",
         drops=[
-            DropEntry(item_name="Adventurers' guild token", item_ref='Currency.ADVENTURERS_GUILD_TOKEN', quantity=Quantity(min_qty=1, max_qty=1), chance_percent=100.0),
+            DropEntry(item_name="Adventurers' Guild token", item_ref='Currency.ADVENTURERS_GUILD_TOKEN', quantity=Quantity(min_qty=1, max_qty=1), chance_percent=100.0),
         ]
     )
 

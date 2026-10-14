@@ -5,7 +5,7 @@
  * and toast notifications.
  */
 
-import { runLocalCompute, isLocalComputeEnabled, runStatsReportLocal, runCraftingTreeOptimizeLocal, runCraftingTreeOptimizeLocalParallel } from './local-compute.js';
+import { runLocalCompute, isLocalComputeEnabled, runStatsReportLocal, runCraftingTreeOptimizeLocal, runCraftingTreeOptimizeLocalParallel, runFastestCraftLocal } from './local-compute.js';
 
 class ApiClient {
     constructor() {
@@ -785,6 +785,17 @@ class ApiClient {
         }).fail((xhr) => this.handleError(xhr, 'Failed to get optimization status'));
     }
 
+    cancelCraftingTreeOptimize(sessionUuid) {
+        // Cooperative cancel — the server flips task["cancelled"] and the core
+        // stops at the next node boundary (see /api/crafting-tree/optimize-cancel).
+        return $.ajax({
+            url: `${this.baseUrl}/crafting-tree/optimize-cancel`,
+            method: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({ session_uuid: sessionUuid })
+        }).fail((xhr) => this.handleError(xhr, 'Failed to cancel optimization'));
+    }
+
     listSavedCraftingTrees(sessionUuid) {
         return $.ajax({
             url: `${this.baseUrl}/crafting-tree/saved`,
@@ -820,6 +831,58 @@ class ApiClient {
         }).fail((xhr) => this.handleError(xhr, 'Failed to delete crafting tree'));
     }
 
+    // ---- Item Upgrades Tracker (FAC: upgrades_tracker) --------------------
+
+    getUpgradesTrackerWorking(sessionUuid) {
+        return $.ajax({
+            url: `${this.baseUrl}/upgrades-tracker/working`,
+            method: 'GET',
+            data: { session_uuid: sessionUuid }
+        });
+    }
+
+    saveUpgradesTrackerWorking(sessionUuid, entries) {
+        return $.ajax({
+            url: `${this.baseUrl}/upgrades-tracker/working`,
+            method: 'PUT',
+            contentType: 'application/json',
+            data: JSON.stringify({ session_uuid: sessionUuid, entries })
+        }).fail(() => {});  // silent: FAC-gated feature — never surface a "not enabled" toast
+    }
+
+    listUpgradesTrackers(sessionUuid) {
+        return $.ajax({
+            url: `${this.baseUrl}/upgrades-tracker/list`,
+            method: 'GET',
+            data: { session_uuid: sessionUuid }
+        }).fail(() => {});
+    }
+
+    saveUpgradesTracker(sessionUuid, name, entries, id = null) {
+        return $.ajax({
+            url: `${this.baseUrl}/upgrades-tracker/save`,
+            method: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({ session_uuid: sessionUuid, name, entries, id })
+        }).fail(() => {});
+    }
+
+    loadUpgradesTracker(trackerId, sessionUuid) {
+        return $.ajax({
+            url: `${this.baseUrl}/upgrades-tracker/load/${trackerId}`,
+            method: 'GET',
+            data: { session_uuid: sessionUuid }
+        }).fail(() => {});
+    }
+
+    deleteUpgradesTracker(trackerId, sessionUuid) {
+        const qs = $.param({ session_uuid: sessionUuid });
+        return $.ajax({
+            url: `${this.baseUrl}/upgrades-tracker/${trackerId}?${qs}`,
+            method: 'DELETE'
+        }).fail(() => {});
+    }
+
     getDuplicateGearSets(uuid) {
         return $.ajax({
             url: `${this.baseUrl}/gear-sets/${uuid}/duplicates`,
@@ -834,6 +897,14 @@ class ApiClient {
             contentType: 'application/json',
             data: JSON.stringify({ ids })
         }).fail((xhr) => this.handleError(xhr, 'Failed to clean up gear sets'));
+    }
+
+    dismissGearSetSuggest(uuid, gearSetId) {
+        return $.ajax({
+            url: `${this.baseUrl}/session/${uuid}/gearsets/${gearSetId}/suggest-dismiss`,
+            method: 'POST',
+            contentType: 'application/json'
+        }).fail((xhr) => this.handleError(xhr, 'Failed to dismiss gear set suggestion'));
     }
 
     // Color theme presets
@@ -878,11 +949,45 @@ class ApiClient {
             notify_on_complete: notify,
             include_pets: !!(opts && opts.include_pets),
             include_consumables: !!(opts && opts.include_consumables),
+            // 2026-09-23 (jwbail): report-local Consumable Options. These were
+            // passed in `opts` by stats-report-page but never copied into the
+            // run body, so both the server (/stats-report/run) and the local
+            // Pyodide worker fell back to their defaults (min-owned DISABLED),
+            // and the "ignore < X owned" filter silently did nothing — it
+            // selected consumables the user owns fewer than X of (e.g. Fried
+            // noodles at 4 owned with threshold 5). Forward all five so the
+            // optimizer's _collect_owned_consumables actually applies them.
+            include_fine_consumables: (opts && opts.include_fine_consumables !== undefined)
+                ? !!opts.include_fine_consumables : true,
+            consumable_min_owned_enabled: !!(opts && opts.consumable_min_owned_enabled),
+            consumable_min_owned: (opts && Number.isFinite(opts.consumable_min_owned))
+                ? opts.consumable_min_owned : 5,
+            consumable_min_owned_operator: (opts && opts.consumable_min_owned_operator === 'lte')
+                ? 'lte' : 'lt',
+            consumable_use_hidden: !!(opts && opts.consumable_use_hidden),
+            // 2026-08-31 (jwbail): "Always use active applicable pet ability"
+            // toggle. Merges each candidate pet's active adult-level ability
+            // stats into scoring and marks the equipped pet for column-2's
+            // "use ability" box. Default false for older clients.
+            use_pet_ability: !!(opts && opts.use_pet_ability),
             stale_only: !!(opts && opts.stale_only),
             // 2026-05-22 (T17 follow-up): WTO sub-filter for new_items.
             // Subset of ['gear','tools','eggs','collectibles']. Worker
             // filters new_items jobs to only the selected kinds.
             kinds: (opts && Array.isArray(opts.kinds)) ? opts.kinds : ['gear', 'tools', 'eggs', 'collectibles'],
+            // 2026-08-11 (jwbail): WTO sub-filter for target_items. List of
+            // target-category slugs (gems, normal_items, fine_items, etc.)
+            // selected in the "Fastest Target Item Activities" panel. Worker
+            // filters build_target_items_jobs to only the requested categories.
+            // null/missing = all categories (preserves prior behavior).
+            target_categories: (opts && Array.isArray(opts.target_categories)) ? opts.target_categories : null,
+            // 2026-08-12 (jwbail): v2 include_fine toggle. When true, target_items
+            // includes fine variants as separate leaves and adds fine sell value
+            // to currency groups.
+            include_fine: !!(opts && opts.include_fine),
+            // Fastest Craft: crafted pill categories to solve (empty = all).
+            fastest_craft_categories: (opts && Array.isArray(opts.fastest_craft_categories))
+                ? opts.fastest_craft_categories : [],
             // 2026-06-02 (jwbail): WTO chest filter. List of chest names
             // selected in the chests / chests_recipes WTO panels. Worker
             // filters build_chest_jobs and build_chests_recipes_jobs
@@ -904,6 +1009,18 @@ class ApiClient {
             // session 20a57b65). Boolean when the checkbox is shown; null means
             // "not provided" so the optimizer keeps its default.
             exact_new: (opts && typeof opts.exact_new === 'boolean') ? opts.exact_new : null,
+            // 2026-10-01 (jwbail): report-local "Include unavailable" dimensions.
+            // Raw master + per-dimension sub-flags; the server (/stats-report/run)
+            // derives the EFFECTIVE map and both the server worker and the local
+            // Pyodide worker gate on it. Defaults preserve legacy behavior
+            // (inputs included-with-warning, everything else hidden).
+            include_unavailable: !!(opts && opts.include_unavailable),
+            unavail_by_level: !!(opts && opts.unavail_by_level),
+            unavail_by_location: !!(opts && opts.unavail_by_location),
+            unavail_by_gear: !!(opts && opts.unavail_by_gear),
+            unavail_by_inputs: (opts && opts.unavail_by_inputs !== undefined)
+                ? !!opts.unavail_by_inputs : true,
+            unavail_by_other: !!(opts && opts.unavail_by_other),
         };
         if (isLocalComputeEnabled()) {
             return this._startStatsReportRunLocal(body);
@@ -941,28 +1058,57 @@ class ApiClient {
             return resp; // server ran it (FAC off server-side)
         }
 
-        // Fire-and-forget the local run. The worker POSTs each scope to
-        // /stats-report/local-scope, which drives the existing /status polling.
+        // Fire-and-forget the local run(s). The regular goals-report worker
+        // POSTs each scope to /stats-report/local-scope; Steps per Recipe
+        // (fastest_craft) computes on-device and POSTs its details to
+        // /api/fastest-craft/local-result. Both run CONCURRENTLY in Pyodide,
+        // each with its own (done,total); we sum them into ONE progress bar so
+        // an FC-only run never shows the regular pass's 0/0, and a mixed run
+        // advances across both. statsReportLocalRunFinished fires once BOTH
+        // settle, so the page's final reconcile picks up the persisted FC rows.
         // `completed` carries the NON-stale scopes the server already filtered
-        // out (stale_only parity) — the worker's _sr_build drops these, so the
-        // browser runs only the stale / newly-unlocked subset instead of every
-        // scope on every click.
-        runStatsReportLocal(
+        // out (stale_only parity); the worker's _sr_build drops these.
+        const _fcChips = Array.isArray(body.fastest_craft_categories) ? body.fastest_craft_categories : [];
+        const _hasFC = Array.isArray(body.categories)
+            && body.categories.indexOf('fastest_craft') !== -1 && _fcChips.length > 0;
+        let _regDone = 0, _regTotal = 0, _fcDone = 0, _fcTotal = 0;
+        const _emitCombined = () => {
+            try {
+                window.dispatchEvent(new CustomEvent('statsReportLocalProgress',
+                    { detail: { done: _regDone + _fcDone, total: _regTotal + _fcTotal } }));
+            } catch (e) { /* ignore */ }
+        };
+
+        const _regularP = runStatsReportLocal(
             { run_params: resp.run_params, session: resp.session, completed: resp.completed || [], jobCountHint: resp.total_jobs },
-            (done, total) => {
-                try {
-                    window.dispatchEvent(new CustomEvent('statsReportLocalProgress', { detail: { done, total } }));
-                } catch (e) { /* ignore */ }
-            }
+            (done, total) => { _regDone = done; _regTotal = total; _emitCombined(); }
         ).catch((e) => {
             console.error('[local-goals] run failed:', e);
             if (this.showError) this.showError('Local goals report failed: ' + (e && e.message ? e.message : e));
-        }).finally(() => {
-            // Tell the goals-report page the local run has settled (all shards
-            // drained + finalize attempted). If a transient server blip (e.g. a
-            // deploy 502) had stopped /status polling, the page resumes polling
-            // on this event and picks up the now-complete run — so the user can
-            // keep optimizing without a manual reload.
+        });
+
+        let _fcP = Promise.resolve();
+        if (_hasFC) {
+            const _sess = resp.session || {};
+            _fcP = runFastestCraftLocal(
+                {
+                    session_uuid: _sess.session_uuid || _sess.uuid || '',
+                    selected_ids: _fcChips,
+                    session_data: _sess.character_config || {},
+                    ui_config: _sess.ui_config || {},
+                },
+                (done, total) => { _fcDone = done; _fcTotal = total; _emitCombined(); }
+            ).catch((e) => {
+                console.error('[local-fc] run failed:', e);
+                if (this.showError) this.showError('Local Steps per Recipe failed: ' + (e && e.message ? e.message : e));
+            });
+        }
+
+        Promise.all([_regularP, _fcP]).finally(() => {
+            // Both the regular goals worker and FC have drained their POSTs
+            // (incl. FC's /local-result persist). The page resumes polling and
+            // reconciles, so the complete report — including the now-persisted
+            // FC rows — paints without a manual reload.
             try { window.dispatchEvent(new CustomEvent('statsReportLocalRunFinished')); } catch (_) { /* ignore */ }
         });
 
@@ -975,13 +1121,16 @@ class ApiClient {
      * @param {string} uuid - Session UUID (unused, session from cookie)
      * @returns {Promise} { success, run_id, status, total_jobs, completed_jobs, failed_jobs, is_complete, is_stale, started_at, completed_at }
      */
-    getStatsReportStatus(uuid) {
+    getStatsReportStatus(uuid, runId) {
         // No .fail() toast: this is polled every couple seconds, so a transient
         // server blip (e.g. a deploy 502) must NOT spam error toasts. Callers
         // (_pollProgress / _loadInitialStatus) handle failures gracefully and
         // show a single "Lost connection ... will retry" message after several
         // misses.
-        return $.get(`${this.baseUrl}/stats-report/status`);
+        // runId (optional): scope the status to the run the caller is tracking
+        // so a stale prior run (e.g. an old failed run) can't hijack the UI.
+        const q = runId ? ('?run_id=' + encodeURIComponent(runId)) : '';
+        return $.get(`${this.baseUrl}/stats-report/status${q}`);
     }
 
     /**
@@ -1035,6 +1184,19 @@ class ApiClient {
     }
 
     /**
+     * Save a gear set directly from an export string + display name. Used by
+     * the Alternative locations/services rows, which have no stored result row.
+     */
+    saveGearsetFromExport(exportStr, name) {
+        return $.ajax({
+            url: `${this.baseUrl}/stats-report/save-gearset`,
+            method: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({ gearset_export: exportStr, name: name || '' })
+        }).fail((xhr) => this.handleError(xhr, 'Failed to save gearset'));
+    }
+
+    /**
      * Add new jobs to an existing stats report run (merge mode).
      * @param {string} uuid - Session UUID (unused, session from cookie)
      * @param {string} runId - Existing run ID to merge into
@@ -1077,7 +1239,10 @@ class ApiClient {
      * row's current gearset, ranked by improvement to the row's
      * metric (XP/step for XP rows, steps-per-reward for chest/coin).
      *
-     * @param {object} args - { activity_name, skill_name, category, chest_name, gearset_slots }
+     * @param {object} args - { activity_name, skill_name, category, chest_name, gearset_slots, result_id? }
+     *   result_id (optional): goals-report row id — when passed, the server
+     *   caches the computed alternatives into that row's metrics_json so a
+     *   reload serves them from the DB instead of recomputing.
      * @returns {Promise} { success, alternatives, locked_alternatives }
      */
     getStatsReportSlotAlternatives(args) {

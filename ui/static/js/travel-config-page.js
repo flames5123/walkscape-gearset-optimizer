@@ -812,6 +812,8 @@ export default class TravelConfigPage {
             const gs = this._travelConfig.exceptions[routeId].gearset || {};
             gs.export_string = taskInfo.export_string;
             gs.stats = taskInfo.stats;
+            gs._opt_pet = taskInfo.pet || null;
+            gs._opt_consumable = taskInfo.consumable || null;
             delete gs._task_status;
             // Build name from route name (check cross-region routes for flipped names)
             let routeName = null;
@@ -859,6 +861,8 @@ export default class TravelConfigPage {
                     if (!regionCfg.gearsets[gsSlot]) regionCfg.gearsets[gsSlot] = {};
                     regionCfg.gearsets[gsSlot].export_string = gs.gearset_export;
                     regionCfg.gearsets[gsSlot].stats = gs.stats;
+                    regionCfg.gearsets[gsSlot]._opt_pet = gs.pet || null;
+                    regionCfg.gearsets[gsSlot]._opt_consumable = gs.consumable || null;
                     // Build name from route names if available
                     const gsRouteIds = gs.route_ids || [];
                     const gsRouteNames = gsRouteIds.map(rid => {
@@ -911,6 +915,14 @@ export default class TravelConfigPage {
                 if (!regionCfg.gearsets[slot]) regionCfg.gearsets[slot] = {};
                 regionCfg.gearsets[slot].export_string = taskInfo.export_string;
                 regionCfg.gearsets[slot].stats = taskInfo.stats;
+                // Phase B: stash computed slot alternatives for the slot popup.
+                regionCfg.gearsets[slot]._alternatives = taskInfo.alternatives || {};
+                regionCfg.gearsets[slot]._locked_alternatives = taskInfo.locked_alternatives || {};
+                // Optimizer-picked pet/consumable can't ride in the gear export
+                // string (gear+tools only), so carry them as a display overlay
+                // the preview reads. (optimize pets/consumables fix)
+                regionCfg.gearsets[slot]._opt_pet = taskInfo.pet || null;
+                regionCfg.gearsets[slot]._opt_consumable = taskInfo.consumable || null;
                 // Build a readable slot label
                 let slotLabel = '';
                 if (slot === 'single') {
@@ -979,6 +991,14 @@ export default class TravelConfigPage {
     async _startOptimization(taskKey, payload) {
         console.log('[TravelConfigPage] Starting optimization:', taskKey);
 
+        // Item 3: forward the region-wide "Optimize Pets / Consumables" toggles so
+        // the worker builds owned candidate pools and equips the best pet/consumable
+        // for the route instead of pinning the equipped one. All region-card,
+        // Generate All, Optimize All, and cross-region optimize paths funnel through
+        // here, so setting the flags once covers every task.
+        payload.include_pets = !!this._travelConfig.optimize_pets;
+        payload.include_consumables = !!this._travelConfig.optimize_consumables;
+
         // Add locked slots data to payload from per-slot locks + global toggle.
         // Bug 0ca4acab: previously only the global "Lock current gear" toggle
         // was honored, ignoring per-slot locks set via the lock icon.
@@ -1021,10 +1041,18 @@ export default class TravelConfigPage {
             }
         }
 
-        if (Object.keys(lockedSlots).length > 0) {
-            payload.locked_slots = lockedSlots;
-            console.log('[TravelConfigPage] Locked slots:', lockedSlots);
+        // Merge global "lock current gear" locks with any per-gearset slot
+        // locks already on the payload (set by the slot popup). Per-gearset
+        // locks win so a slot the user pinned in the popup is honored.
+        const mergedLocks = { ...lockedSlots, ...(payload.locked_slots || {}) };
+        if (Object.keys(mergedLocks).length > 0) {
+            payload.locked_slots = mergedLocks;
+            console.log('[TravelConfigPage] Locked slots:', mergedLocks);
         }
+
+        // Phase B: request non-owned/locked alternatives so the slot popup can
+        // surface upgrade suggestions like the crafting tree / goals report.
+        payload.show_non_owned_alternatives = true;
 
         // Mark the gearset slot as running in config (clears old data)
         this._markTaskRunning(taskKey, true);

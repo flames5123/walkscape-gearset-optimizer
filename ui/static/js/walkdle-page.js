@@ -248,6 +248,8 @@ export class WalkdlePage {
         this._el.classList.remove('closing');
         this._el.classList.add('opening');
         document.body.classList.add('walkdle-open');
+        // Body-scroll (mobile): open at top even if a column was scrolled.
+        if (window.innerWidth <= 768) window.scrollTo(0, 0);
         document.getElementById('walkdle-nav-btn')?.classList.add('active');
         this._ensureCatalogThenLoad();
     }
@@ -585,26 +587,26 @@ export class WalkdlePage {
         const isToday = this._date === utcDateString();
         const atStart = this._date <= WALKDLE_START_DATE;
         const navBtn = (id, label, disabled, title) =>
-            `<button id="${id}" title="${_esc(title)}" ${disabled ? 'disabled' : ''} style="background:var(--bg-secondary,#23272e);border:1px solid var(--border-color,#3a3f47);color:inherit;border-radius:6px;padding:5px 10px;cursor:${disabled ? 'default' : 'pointer'};opacity:${disabled ? '.4' : '1'};font-size:.9rem;">${label}</button>`;
+            `<button id="${id}" title="${_esc(title)}" ${disabled ? 'disabled' : ''} style="background:var(--bg-secondary,#23272e);border:1px solid var(--border-color,#3a3f47);color:inherit;border-radius:6px;padding:5px 10px;cursor:${disabled ? 'default' : 'pointer'};opacity:${disabled ? '.4' : '1'};font-size: max(var(--min-text, 5px), calc(.9rem * var(--text-scale, 1)));">${label}</button>`;
         return `
         <div style="max-width:900px;margin:0 auto;padding:14px 14px 80px;">
           <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px;flex-wrap:wrap;">
             <div style="display:flex;align-items:center;gap:10px;">
               <span style="display:inline-block;width:22px;height:22px;border-radius:5px;background:#4caf50;"></span>
-              <h2 style="margin:0;font-size:1.25rem;">Walkdle <span style="opacity:.6;font-weight:400;">${this._seed ? 'Random' : '#' + num}</span></h2>
-              <button id="walkdle-help" aria-label="How to play" title="How to play" style="background:var(--bg-secondary,#23272e);border:1px solid var(--border-color,#3a3f47);color:inherit;border-radius:50%;width:24px;height:24px;padding:0;line-height:1;cursor:pointer;font-size:.9rem;font-weight:700;">?</button>
-              ${this._seed ? '' : `<span style="opacity:.6;font-size:.85rem;">${_esc(this._date)}</span>`}
+              <h2 style="margin:0;font-size: max(var(--min-text, 5px), calc(1.25rem * var(--text-scale, 1)));">Walkdle <span style="opacity:.6;font-weight:400;">${this._seed ? 'Random' : '#' + num}</span></h2>
+              <button id="walkdle-help" aria-label="How to play" title="How to play" style="background:var(--bg-secondary,#23272e);border:1px solid var(--border-color,#3a3f47);color:inherit;border-radius:50%;width:24px;height:24px;padding:0;line-height:1;cursor:pointer;font-size: max(var(--min-text, 5px), calc(.9rem * var(--text-scale, 1)));font-weight:700;">?</button>
+              ${this._seed ? '' : `<span style="opacity:.6;font-size: max(var(--min-text, 5px), calc(.85rem * var(--text-scale, 1)));">${_esc(this._date)}</span>`}
             </div>
-            <button id="walkdle-close" aria-label="Close" style="background:none;border:none;color:inherit;font-size:1.6rem;cursor:pointer;line-height:1;">&times;</button>
+            <button id="walkdle-close" aria-label="Close" style="background:none;border:none;color:inherit;font-size: max(var(--min-text, 5px), calc(1.6rem * var(--text-scale, 1)));cursor:pointer;line-height:1;">&times;</button>
           </div>
           <div style="display:flex;align-items:center;gap:6px;margin-bottom:12px;flex-wrap:wrap;">
             ${this._seed ? `
-              <span style="opacity:.7;font-size:.85rem;">Seed:</span>
-              <input id="walkdle-seed-input" type="text" maxlength="8" value="${_esc(this._seed)}" placeholder="seed" autocomplete="off" style="width:96px;box-sizing:border-box;padding:5px 8px;border-radius:6px;border:1px solid var(--border-color,#3a3f47);background:var(--bg-secondary,#23272e);color:inherit;font-size:.9rem;">
+              <span style="opacity:.7;font-size: max(var(--min-text, 5px), calc(.85rem * var(--text-scale, 1)));">Seed:</span>
+              <input id="walkdle-seed-input" type="text" maxlength="8" value="${_esc(this._seed)}" placeholder="seed" autocomplete="off" style="width:96px;box-sizing:border-box;padding:5px 8px;border-radius:6px;border:1px solid var(--border-color,#3a3f47);background:var(--bg-secondary,#23272e);color:inherit;font-size: max(var(--min-text, 5px), calc(.9rem * var(--text-scale, 1)));">
               ${navBtn('walkdle-seed-go', 'Go', false, 'Load this seed')}
               ${navBtn('walkdle-random-new', '🎲', false, 'New random puzzle')}
               ${navBtn('walkdle-daily', '📅 Daily', false, 'Back to the daily puzzle')}
-              <button id="walkdle-archive" title="Browse the random seed archive" style="background:${this._archiveOpen ? 'rgba(74,158,255,.15)' : 'var(--bg-secondary,#23272e)'};border:1px solid ${this._archiveOpen ? '#4a9eff' : 'var(--border-color,#3a3f47)'};color:inherit;border-radius:6px;padding:5px 10px;cursor:pointer;font-size:.9rem;transition:border-color .2s ease, background-color .2s ease;">🗂 Seeds</button>
+              <button id="walkdle-archive" title="Browse the random seed archive" style="background:${this._archiveOpen ? 'rgba(74,158,255,.15)' : 'var(--bg-secondary,#23272e)'};border:1px solid ${this._archiveOpen ? '#4a9eff' : 'var(--border-color,#3a3f47)'};color:inherit;border-radius:6px;padding:5px 10px;cursor:pointer;font-size: max(var(--min-text, 5px), calc(.9rem * var(--text-scale, 1)));transition:border-color .2s ease, background-color .2s ease;">🗂 Seeds</button>
             ` : `
               ${navBtn('walkdle-prev', '◀', atStart, 'Previous day')}
               ${navBtn('walkdle-today', 'Today', isToday, 'Jump to today')}
@@ -664,26 +666,26 @@ export class WalkdlePage {
         const remaining = MAX_GUESSES - this._guesses.length;
         return `
         <div style="position:relative;margin-bottom:14px;">
-          <label style="display:inline-flex;align-items:center;gap:6px;font-size:.82rem;margin-bottom:8px;cursor:pointer;opacity:.9;">
+          <label style="display:inline-flex;align-items:center;gap:6px;font-size: max(var(--min-text, 5px), calc(.82rem * var(--text-scale, 1)));margin-bottom:8px;cursor:pointer;opacity:.9;">
             <input type="checkbox" id="walkdle-showstats" ${this._showStats ? 'checked' : ''}> Show stats
           </label>
-          <label style="display:inline-flex;align-items:center;gap:6px;font-size:.82rem;margin-bottom:8px;margin-left:14px;cursor:pointer;opacity:.9;">
+          <label style="display:inline-flex;align-items:center;gap:6px;font-size: max(var(--min-text, 5px), calc(.82rem * var(--text-scale, 1)));margin-bottom:8px;margin-left:14px;cursor:pointer;opacity:.9;">
             <input type="checkbox" id="walkdle-advanced" ${this._advancedEnabled ? 'checked' : ''}> Enable advanced filters
             <span class="travel-info-icon" data-info-title="Advanced filters" data-info-html="${this._advancedInfoHtml()}" role="button" tabindex="0" aria-label="About advanced filters" style="font-style:normal;cursor:pointer;">ⓘ</span>
           </label>
-          <label style="display:inline-flex;align-items:center;gap:6px;font-size:.82rem;margin-bottom:8px;margin-left:14px;cursor:pointer;opacity:.9;">
+          <label style="display:inline-flex;align-items:center;gap:6px;font-size: max(var(--min-text, 5px), calc(.82rem * var(--text-scale, 1)));margin-bottom:8px;margin-left:14px;cursor:pointer;opacity:.9;">
             <input type="checkbox" id="walkdle-hc" ${this._highContrast ? 'checked' : ''}> High contrast
           </label>
           <div style="margin-bottom:8px;display:flex;gap:8px;flex-wrap:wrap;">
-            <button id="walkdle-random-item" title="Fill the search with a random item to start from (does not submit)" style="padding:5px 10px;border-radius:6px;border:1px solid var(--border-color,#3a3f47);background:var(--bg-secondary,#23272e);color:inherit;font-size:.82rem;cursor:pointer;">Random item</button>
+            <button id="walkdle-random-item" title="Fill the search with a random item to start from (does not submit)" style="padding:5px 10px;border-radius:6px;border:1px solid var(--border-color,#3a3f47);background:var(--bg-secondary,#23272e);color:inherit;font-size: max(var(--min-text, 5px), calc(.82rem * var(--text-scale, 1)));cursor:pointer;">Random item</button>
             ${this._guesses.length ? `
-            <button id="walkdle-fill-last" title="Fill the search with your last guess so you can tweak a few letters" style="padding:5px 10px;border-radius:6px;border:1px solid var(--border-color,#3a3f47);background:var(--bg-secondary,#23272e);color:inherit;font-size:.82rem;cursor:pointer;">Fill last guess</button>
-            ${this._advancedEnabled ? `<button id="walkdle-smart-filter" title="Turn every clue from your guesses so far into a search filter" style="padding:5px 10px;border-radius:6px;border:1px solid #4caf50;background:var(--bg-secondary,#23272e);color:#4caf50;font-size:.82rem;cursor:pointer;">Make smart filter</button>` : ''}` : ''}
+            <button id="walkdle-fill-last" title="Fill the search with your last guess so you can tweak a few letters" style="padding:5px 10px;border-radius:6px;border:1px solid var(--border-color,#3a3f47);background:var(--bg-secondary,#23272e);color:inherit;font-size: max(var(--min-text, 5px), calc(.82rem * var(--text-scale, 1)));cursor:pointer;">Fill last guess</button>
+            ${this._advancedEnabled ? `<button id="walkdle-smart-filter" title="Turn every clue from your guesses so far into a search filter" style="padding:5px 10px;border-radius:6px;border:1px solid #4caf50;background:var(--bg-secondary,#23272e);color:#4caf50;font-size: max(var(--min-text, 5px), calc(.82rem * var(--text-scale, 1)));cursor:pointer;">Make smart filter</button>` : ''}` : ''}
           </div>
           <div style="display:flex;gap:8px;position:relative;">
             <input id="walkdle-input" type="text" autocomplete="off" placeholder="Type an item name… (${remaining} left)"
-              style="flex:1;min-width:0;box-sizing:border-box;padding:10px 12px;border-radius:8px;border:1px solid var(--border-color,#3a3f47);background:var(--bg-secondary,#23272e);color:inherit;font-size:1rem;">
-            <button id="walkdle-guess-btn" style="flex:0 0 auto;padding:0 18px;border-radius:8px;border:none;background:#6a1b9a;color:#fff;font-size:.95rem;font-weight:600;cursor:pointer;">Guess</button>
+              style="flex:1;min-width:0;box-sizing:border-box;padding:10px 12px;border-radius:8px;border:1px solid var(--border-color,#3a3f47);background:var(--bg-secondary,#23272e);color:inherit;font-size: max(var(--min-text, 5px), calc(1rem * var(--text-scale, 1)));">
+            <button id="walkdle-guess-btn" style="flex:0 0 auto;padding:0 18px;border-radius:8px;border:none;background:#6a1b9a;color:#fff;font-size: max(var(--min-text, 5px), calc(.95rem * var(--text-scale, 1)));font-weight:600;cursor:pointer;">Guess</button>
             <div id="walkdle-suggest" style="position:absolute;left:0;right:0;top:calc(100% + 4px);z-index:10;max-height:240px;overflow-y:auto;background:var(--bg-secondary,#23272e);border:1px solid var(--border-color,#3a3f47);border-radius:8px;display:none;box-shadow:0 6px 16px rgba(0,0,0,0.4);"></div>
           </div>
         </div>`;
@@ -693,7 +695,7 @@ export class WalkdlePage {
         const cols = WALKDLE_COLUMNS;
         const gridCols = `display:grid;grid-template-columns:repeat(${cols.length},1fr);gap:4px;`;
         const header = `<div style="${gridCols}margin-bottom:4px;">`
-            + cols.map((c) => `<div style="font-size:.52rem;text-transform:uppercase;opacity:.6;font-weight:600;text-align:center;">${_esc(c.label)}</div>`).join('')
+            + cols.map((c) => `<div style="font-size: max(var(--min-text, 5px), calc(.52rem * var(--text-scale, 1)));text-transform:uppercase;opacity:.6;font-weight:600;text-align:center;">${_esc(c.label)}</div>`).join('')
             + `</div>`;
         const cards = this._guesses.map((g) => this._rowHtml(g)).join('');
         // Always show the column headers (even before the first guess) so the
@@ -711,7 +713,7 @@ export class WalkdlePage {
         const nameRow = `
           <div style="display:flex;align-items:center;gap:5px;padding:1px 2px 2px;">
             ${g.icon ? `<img src="${_esc(g.icon)}" alt="" width="16" height="16" style="${_rarityIconFilter(rar)}" onerror="this.style.display='none'">` : ''}
-            <span style="font-size:.78rem;">${_esc(g.name)}</span>
+            <span style="font-size: max(var(--min-text, 5px), calc(.78rem * var(--text-scale, 1)));">${_esc(g.name)}</span>
           </div>`;
         // Row 2: the hint cells.
         const colors = this._highContrast ? STATE_COLORS_HC : STATE_COLORS;
@@ -726,13 +728,13 @@ export class WalkdlePage {
             let content = dispHtml;
             if (cell.kind === 'ordinal' && cell.dir) {
                 const arrow = cell.dir === 'up' ? '▲' : '▼';
-                const a = `<div style="line-height:1;font-size:.62rem;">${arrow}</div>`;
+                const a = `<div style="line-height:1;font-size: max(var(--min-text, 5px), calc(.62rem * var(--text-scale, 1)));">${arrow}</div>`;
                 const v = `<div style="line-height:1;">${dispHtml}</div>`;
                 content = cell.dir === 'up' ? a + v : v + a;
             }
             const cls = animate ? ' class="walkdle-flip-cell"' : '';
             const delay = animate ? `animation-delay:${(ci * 0.5).toFixed(2)}s;` : '';
-            return `<div${cls} style="display:flex;flex-direction:column;align-items:center;justify-content:center;padding:3px 2px;border-radius:5px;background:${bg};color:#fff;font-size:.62rem;text-align:center;${delay}">${content}</div>`;
+            return `<div${cls} style="display:flex;flex-direction:column;align-items:center;justify-content:center;padding:3px 2px;border-radius:5px;background:${bg};color:#fff;font-size: max(var(--min-text, 5px), calc(.62rem * var(--text-scale, 1)));text-align:center;${delay}">${content}</div>`;
         }).join('');
         const cardCls = animate ? ' class="walkdle-card-in"' : '';
         return `<div${cardCls} style="margin-bottom:6px;">${nameRow}<div style="${gridCols}">${cells}</div></div>`;
@@ -745,11 +747,11 @@ export class WalkdlePage {
         return `
         <div style="margin-top:18px;text-align:center;">
           ${msg}
-          <label style="display:inline-flex;align-items:center;gap:6px;margin-top:12px;font-size:.85rem;cursor:pointer;opacity:.9;">
+          <label style="display:inline-flex;align-items:center;gap:6px;margin-top:12px;font-size: max(var(--min-text, 5px), calc(.85rem * var(--text-scale, 1)));cursor:pointer;opacity:.9;">
             <input type="checkbox" id="walkdle-include-scoredle" ${this._includeScoredle ? 'checked' : ''}> Include Scoredle
           </label>
           <div style="margin-top:8px;display:flex;gap:8px;justify-content:center;flex-wrap:wrap;">
-            <button id="walkdle-share" style="padding:9px 18px;border-radius:8px;border:none;background:#4caf50;color:#fff;font-size:.95rem;cursor:pointer;">Share result</button>
+            <button id="walkdle-share" style="padding:9px 18px;border-radius:8px;border:none;background:#4caf50;color:#fff;font-size: max(var(--min-text, 5px), calc(.95rem * var(--text-scale, 1)));cursor:pointer;">Share result</button>
           </div>
           <div id="walkdle-scoreboard" style="margin-top:16px;"></div>
         </div>`;
@@ -760,7 +762,7 @@ export class WalkdlePage {
         if (!el) return;
         const key = this._seed ? this._seed : this._date;
         const mode = this._seed ? 'random' : MODE;
-        el.innerHTML = '<div style="opacity:.55;font-size:.82rem;">Loading scoreboard…</div>';
+        el.innerHTML = '<div style="opacity:.55;font-size: max(var(--min-text, 5px), calc(.82rem * var(--text-scale, 1)));">Loading scoreboard…</div>';
         try {
             const res = await fetch(`/api/walkdle/stats?date=${encodeURIComponent(key)}&mode=${mode}`, { credentials: 'same-origin' });
             if (!res.ok) throw new Error('stats ' + res.status);
@@ -828,13 +830,13 @@ export class WalkdlePage {
             // neutral otherwise. Per-mode counts live in the coloured numbers.
             const pct = Math.round((count / maxBar) * 100);
             const bar = `<div style="height:12px;width:${pct}%;min-width:${count ? 6 : 0}px;background:${highlight ? '#4caf50' : 'var(--border-color,#3a3f47)'};border-radius:6px;"></div>`;
-            return `<div style="display:flex;align-items:center;gap:8px;margin:2px 0;font-size:.74rem;${highlight ? 'font-weight:700;' : ''}">
+            return `<div style="display:flex;align-items:center;gap:8px;margin:2px 0;font-size: max(var(--min-text, 5px), calc(.74rem * var(--text-scale, 1)));${highlight ? 'font-weight:700;' : ''}">
                 <span style="width:18px;text-align:right;opacity:.8;">${label}</span>
                 <div style="flex:1;display:flex;align-items:center;">${bar}</div>
                 <span style="${NUMW}">${quartet(count, h, n, e)}</span>
               </div>`;
         };
-        const colHeader = `<div style="display:flex;align-items:center;gap:8px;margin:0 0 4px;font-size:.56rem;text-transform:uppercase;letter-spacing:.02em;">
+        const colHeader = `<div style="display:flex;align-items:center;gap:8px;margin:0 0 4px;font-size: max(var(--min-text, 5px), calc(.56rem * var(--text-scale, 1)));text-transform:uppercase;letter-spacing:.02em;">
             <span style="width:18px;"></span>
             <div style="flex:1;"></div>
             <span style="${NUMW}">${quartet('total', 'hard', 'normal', 'easy')}</span>
@@ -846,11 +848,11 @@ export class WalkdlePage {
         if (s.failed) rows.push(row('X', s.failed, failedByMode.hard, failedByMode.normal, failedByMode.easy, this._failed));
         return `
         <div style="max-width:380px;margin:0 auto;padding:12px 14px;border:1px solid var(--border-color,#3a3f47);border-radius:10px;background:var(--bg-secondary,#23272e);text-align:left;">
-          <div style="font-weight:600;font-size:.9rem;margin-bottom:8px;text-align:center;">${isRandom ? "This puzzle's" : "Today's"} scoreboard</div>
-          <div style="font-size:.82rem;opacity:.9;margin-bottom:10px;text-align:center;">${headline}</div>
+          <div style="font-weight:600;font-size: max(var(--min-text, 5px), calc(.9rem * var(--text-scale, 1)));margin-bottom:8px;text-align:center;">${isRandom ? "This puzzle's" : "Today's"} scoreboard</div>
+          <div style="font-size: max(var(--min-text, 5px), calc(.82rem * var(--text-scale, 1)));opacity:.9;margin-bottom:10px;text-align:center;">${headline}</div>
           ${colHeader}
           ${rows.join('')}
-          <div style="font-size:.7rem;opacity:.55;margin-top:8px;text-align:center;">Guesses to solve across ${total} players (X = didn't solve). Columns: total, hard, normal, easy.</div>
+          <div style="font-size: max(var(--min-text, 5px), calc(.7rem * var(--text-scale, 1)));opacity:.55;margin-top:8px;text-align:center;">Guesses to solve across ${total} players (X = didn't solve). Columns: total, hard, normal, easy.</div>
         </div>`;
     }
 
@@ -893,22 +895,22 @@ export class WalkdlePage {
             const disabled = future || before;
             const ring = ds === this._date ? 'box-shadow:0 0 0 2px #4caf50;' : '';
             const star = starColor
-                ? `<span style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:2.5rem;line-height:1;color:${starColor};opacity:.95;pointer-events:none;z-index:0;">★</span>`
+                ? `<span style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size: max(var(--min-text, 5px), calc(2.5rem * var(--text-scale, 1)));line-height:1;color:${starColor};opacity:.95;pointer-events:none;z-index:0;">★</span>`
                 : '';
             const dateStyle = starColor ? 'color:#1a1a1a;font-weight:700;' : '';
             cells += `<div class="walkdle-day" data-date="${ds}" style="position:relative;text-align:center;padding:7px 0;border-radius:6px;background:${bg};${ring}cursor:${disabled ? 'default' : 'pointer'};opacity:${disabled ? '.3' : '1'};border:1px solid var(--border-color,#3a3f47);">${star}<span style="position:relative;z-index:1;${dateStyle}">${d}</span></div>`;
         }
         const dow = ['S', 'M', 'T', 'W', 'T', 'F', 'S']
-            .map((x) => `<div style="text-align:center;opacity:.5;font-size:.7rem;">${x}</div>`).join('');
+            .map((x) => `<div style="text-align:center;opacity:.5;font-size: max(var(--min-text, 5px), calc(.7rem * var(--text-scale, 1)));">${x}</div>`).join('');
         return `
         <div id="walkdle-calendar" style="${this._calendarJustOpened ? 'display:none;' : ''}margin-bottom:14px;padding:12px;border:1px solid var(--border-color,#3a3f47);border-radius:10px;background:var(--bg-secondary,#23272e);max-width:340px;">
           <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
-            <button id="walkdle-cal-prev" ${atStartMonth ? 'disabled' : ''} style="background:none;border:none;color:inherit;font-size:1.1rem;cursor:${atStartMonth ? 'default' : 'pointer'};opacity:${atStartMonth ? '.3' : '1'};">‹</button>
+            <button id="walkdle-cal-prev" ${atStartMonth ? 'disabled' : ''} style="background:none;border:none;color:inherit;font-size: max(var(--min-text, 5px), calc(1.1rem * var(--text-scale, 1)));cursor:${atStartMonth ? 'default' : 'pointer'};opacity:${atStartMonth ? '.3' : '1'};">‹</button>
             <span style="font-weight:600;">${MONTH_NAMES[m - 1]} ${y}</span>
-            <button id="walkdle-cal-next" ${atTodayMonth ? 'disabled' : ''} style="background:none;border:none;color:inherit;font-size:1.1rem;cursor:${atTodayMonth ? 'default' : 'pointer'};opacity:${atTodayMonth ? '.3' : '1'};">›</button>
+            <button id="walkdle-cal-next" ${atTodayMonth ? 'disabled' : ''} style="background:none;border:none;color:inherit;font-size: max(var(--min-text, 5px), calc(1.1rem * var(--text-scale, 1)));cursor:${atTodayMonth ? 'default' : 'pointer'};opacity:${atTodayMonth ? '.3' : '1'};">›</button>
           </div>
           <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:4px;">${dow}${cells}</div>
-          <div style="display:flex;gap:12px;margin-top:10px;font-size:.72rem;opacity:.8;">
+          <div style="display:flex;gap:12px;margin-top:10px;font-size: max(var(--min-text, 5px), calc(.72rem * var(--text-scale, 1)));opacity:.8;">
             <span><span style="display:inline-block;width:10px;height:10px;background:${solvedColor};border-radius:2px;"></span> solved</span>
             <span><span style="display:inline-block;width:10px;height:10px;background:${failedColor};border-radius:2px;"></span> failed</span>
             <span><span style="display:inline-block;width:10px;height:10px;background:transparent;border:1px solid #3a3f47;border-radius:2px;"></span> not played</span>
@@ -1069,7 +1071,7 @@ export class WalkdlePage {
                 else if (st.mode === 'normal') starColor = '#c9ccd1';
             }
             const star = starColor
-                ? `<span style="position:absolute;top:2px;right:4px;font-size:.8rem;line-height:1;color:${starColor};pointer-events:none;">★</span>`
+                ? `<span style="position:absolute;top:2px;right:4px;font-size: max(var(--min-text, 5px), calc(.8rem * var(--text-scale, 1)));line-height:1;color:${starColor};pointer-events:none;">★</span>`
                 : '';
             const textStyle = s === 'none' ? '' : 'color:#fff;font-weight:600;';
             return `<div class="walkdle-seed-chip" data-seed="${_esc(w)}" title="${_esc(w)}" `
@@ -1083,28 +1085,28 @@ export class WalkdlePage {
             return `<button class="walkdle-arch-tab" data-filter="${id}" style="padding:5px 12px;border-radius:6px;`
                 + `border:1px solid ${active ? '#4caf50' : 'var(--border-color,#3a3f47)'};`
                 + `background:${active ? 'rgba(76,175,80,.15)' : 'var(--bg-secondary,#23272e)'};`
-                + `color:inherit;cursor:pointer;font-size:.82rem;">${label}</button>`;
+                + `color:inherit;cursor:pointer;font-size: max(var(--min-text, 5px), calc(.82rem * var(--text-scale, 1)));">${label}</button>`;
         };
 
         const grid = shown.length
             ? `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(92px,1fr));gap:6px;`
                 + `max-height:52vh;overflow-y:auto;padding-right:4px;">${shown.map(chip).join('')}</div>`
-            : `<div style="padding:24px;text-align:center;opacity:.6;font-size:.85rem;">No seeds match this filter yet.</div>`;
+            : `<div style="padding:24px;text-align:center;opacity:.6;font-size: max(var(--min-text, 5px), calc(.85rem * var(--text-scale, 1)));">No seeds match this filter yet.</div>`;
 
         const dot = (c) => `<span style="display:inline-block;width:10px;height:10px;background:${c};border-radius:2px;"></span>`;
         return `
         <div id="walkdle-archive-panel" style="margin-bottom:14px;padding:12px 14px;border:1px solid var(--border-color,#3a3f47);border-radius:10px;background:var(--bg-secondary,#23272e);">
           <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;flex-wrap:wrap;">
-            <span style="font-weight:600;font-size:.95rem;">Random seed archive <span style="opacity:.6;font-weight:400;">(${shown.length}/${words.length})</span></span>
+            <span style="font-weight:600;font-size: max(var(--min-text, 5px), calc(.95rem * var(--text-scale, 1)));">Random seed archive <span style="opacity:.6;font-weight:400;">(${shown.length}/${words.length})</span></span>
             <div style="display:flex;gap:6px;flex-wrap:wrap;">
               ${tab('all', 'All')}
               ${tab('solved', 'Solved')}
               ${tab('unsolved', 'Unsolved only')}
             </div>
           </div>
-          <div style="font-size:.75rem;opacity:.7;margin-bottom:10px;">Tap a seed to play it.</div>
+          <div style="font-size: max(var(--min-text, 5px), calc(.75rem * var(--text-scale, 1)));opacity:.7;margin-bottom:10px;">Tap a seed to play it.</div>
           ${grid}
-          <div style="display:flex;gap:12px;margin-top:12px;font-size:.72rem;opacity:.8;flex-wrap:wrap;">
+          <div style="display:flex;gap:12px;margin-top:12px;font-size: max(var(--min-text, 5px), calc(.72rem * var(--text-scale, 1)));opacity:.8;flex-wrap:wrap;">
             <span>${dot(solvedColor)} solved</span>
             <span>${dot(progressColor)} in progress</span>
             <span>${dot(failedColor)} failed</span>
@@ -1162,7 +1164,7 @@ export class WalkdlePage {
                 + 'z-index:3000;max-width:88%;padding:10px 16px;border-radius:8px;'
                 + 'background:var(--bg-secondary,#23272e);color:var(--text-primary,#fff);'
                 + 'border:1px solid var(--border-color,#3a3f47);box-shadow:0 4px 16px rgba(0,0,0,.4);'
-                + 'font-size:.9rem;text-align:center;pointer-events:none;opacity:0;transition:opacity .18s;';
+                + 'font-size: max(var(--min-text, 5px), calc(.9rem * var(--text-scale, 1)));text-align:center;pointer-events:none;opacity:0;transition:opacity .18s;';
             document.body.appendChild(t);
             requestAnimationFrame(() => { t.style.opacity = '1'; });
             setTimeout(() => {
@@ -1248,10 +1250,10 @@ export class WalkdlePage {
         const partialName = this._highContrast ? 'light blue' : 'yellow';
         const sw = (color) => `<span style="display:inline-block;width:14px;height:14px;border-radius:3px;background:${color};vertical-align:middle;margin-right:6px;border:1px solid rgba(255,255,255,.15);"></span>`;
         return `
-        <div id="walkdle-help-panel" style="margin-bottom:14px;padding:14px 16px;border:1px solid var(--border-color,#3a3f47);border-radius:10px;background:var(--bg-secondary,#23272e);max-width:560px;line-height:1.5;font-size:.9rem;">
+        <div id="walkdle-help-panel" style="margin-bottom:14px;padding:14px 16px;border:1px solid var(--border-color,#3a3f47);border-radius:10px;background:var(--bg-secondary,#23272e);max-width:560px;line-height:1.5;font-size: max(var(--min-text, 5px), calc(.9rem * var(--text-scale, 1)));">
           <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
-            <strong style="font-size:1.05rem;">How to play</strong>
-            <button id="walkdle-help-close" aria-label="Close help" style="background:none;border:none;color:inherit;font-size:1.3rem;cursor:pointer;line-height:1;">&times;</button>
+            <strong style="font-size: max(var(--min-text, 5px), calc(1.05rem * var(--text-scale, 1)));">How to play</strong>
+            <button id="walkdle-help-close" aria-label="Close help" style="background:none;border:none;color:inherit;font-size: max(var(--min-text, 5px), calc(1.3rem * var(--text-scale, 1)));cursor:pointer;line-height:1;">&times;</button>
           </div>
           <p style="margin:0 0 10px;">Guess the hidden item in <b>${MAX_GUESSES}</b> tries. Type in the search box to find an item by its <b>name</b>, or by any attribute like a <b>keyword</b>, <b>rarity/quality</b>, <b>source</b>, <b>slot</b>, or <b>skill</b>, then pick one to submit it.</p>
           <p style="margin:0 0 10px;opacity:.85;">Want operators (<code>!word</code>, <code>field&gt;N</code>, exact compares)? Tick <b>Enable advanced filters</b> below the grid and read its <b>ⓘ</b>. Heads up: advanced filters flag the solve as <b>Easy mode</b> when you share.</p>
@@ -1261,6 +1263,7 @@ export class WalkdlePage {
             <div style="margin-bottom:4px;">${sw(c.yellow)}<b>${partialName}</b>: partial match (shares at least one value).</div>
             <div>${sw(c.absent)}<b>gray</b>: no match.</div>
           </div>
+          <p style="margin:0 0 10px;"><b>The Skills column</b> also matches by category: a skill and its parent category count as a ${partialName} partial match (e.g. guessing an <b>artisan</b>-scoped item when the answer is a <b>cooking</b> item, or vice versa). <b>global</b> (applies to all skills) is a partial match against any skill or category.</p>
           <p style="margin:0 0 6px;"><b>Number columns</b> (Rarity/Quality, Stats, Level, Value) use arrows:</p>
           <div style="margin:0 0 10px;padding-left:4px;">
             <div style="margin-bottom:4px;">⬆️ means the answer's value is <b>higher</b> than your guess.</div>
@@ -1297,14 +1300,14 @@ export class WalkdlePage {
         const optionHtml = (it) => {
             const rar = _effectiveRarity(it);
             const statsLine = this._showStats
-                ? `<div style="font-size:.66rem;opacity:.85;margin-top:3px;line-height:1.25;">${_esc(WALKDLE_COLUMNS.map((c) => c.display(it)).join(' | '))}</div>`
+                ? `<div style="font-size: max(var(--min-text, 5px), calc(.66rem * var(--text-scale, 1)));opacity:.85;margin-top:3px;line-height:1.25;">${_esc(WALKDLE_COLUMNS.map((c) => c.display(it)).join(' | '))}</div>`
                 : '';
             return `
                 <div class="walkdle-opt" data-id="${_esc(it.id)}" style="display:flex;flex-direction:column;align-items:stretch;padding:7px 10px;cursor:pointer;background:var(--rarity-${rar});transition:filter .12s ease;">
                   <div style="display:flex;align-items:center;gap:8px;">
                     ${it.icon ? `<img src="${_esc(it.icon)}" alt="" width="16" height="16" style="${_rarityIconFilter(rar)}" onerror="this.style.display='none'">` : ''}
                     <span>${_esc(displayName(it))}</span>
-                    <span style="margin-left:auto;opacity:.65;font-size:.75rem;color:var(--rarity-${rar}-border);">${_esc(it.quality || it.rarity)}</span>
+                    <span style="margin-left:auto;opacity:.65;font-size: max(var(--min-text, 5px), calc(.75rem * var(--text-scale, 1)));color:var(--rarity-${rar}-border);">${_esc(it.quality || it.rarity)}</span>
                   </div>
                   ${statsLine}
                 </div>`;

@@ -27,6 +27,8 @@ import re
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from util.wiki_value_corrections import WIKI_VALUE_CORRECTIONS
+
 
 # ────────────────────────────────────────────────────────────────────────
 # Paths
@@ -555,6 +557,57 @@ _FACTION_TO_REGION = {
 }
 
 
+# Realm identifiers on `exploreRealm` requirements arrive in several forms:
+#   'jarvonia'                                    (clean faction slug)
+#   'grand_duchy_of_trellin_erdwise'              (clean faction slug)
+#   'faction-jarvonia-<uuid>'                     (prefixed + trailing UUID)
+#   'faction-grand_duchy_of_trellin-erdwise-<uuid>'
+#   'dc03a305-4f5e-40b6-a450-1b1482057354'        (bare internal realm UUID)
+# Normalize to the region code the rest of the app uses (jarvonia, gdte,
+# syrenthia, wallisia, wrentmark) so the gate's custom-stat key is stable and
+# human-readable. Bare UUIDs have no name in the factions cache (factions are
+# keyed by slug, not UUID), so they pass through unchanged rather than being
+# guessed — the gate still works, only its toggle label is the raw id.
+_REALM_UUID_RE = re.compile(
+    r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
+    re.IGNORECASE,
+)
+
+# Some exploreRealm gates key the realm by a bare internal UUID instead of a
+# faction slug. These resolve to their region via the co-located `realm` SCOPE
+# requirement on the SAME itemAttr (Quickdraw map): the dc03a305 gate scopes
+# its bonus to Empire of Wallisia, the 6b745921 gate to Wrentmark. Verified in
+# the item cache (exploreRealm-UUID paired 1:1 with the realm scope in the same
+# attr), not guessed. New UUIDs not in this map pass through unchanged.
+_REALM_UUID_TO_REGION = {
+    'dc03a305-4f5e-40b6-a450-1b1482057354': 'wallisia',
+    '6b745921-462b-437c-ac0b-38d8f922b40d': 'wrentmark',
+}
+
+
+def _normalize_realm_slug(realm: str) -> str:
+    """Normalize an ``exploreRealm`` realm identifier to a region code.
+
+    Returns the mapped region code (via ``_FACTION_TO_REGION`` for slugs or
+    ``_REALM_UUID_TO_REGION`` for known bare UUIDs), or the raw value unchanged
+    for unmapped UUIDs / slugs.
+    """
+    if not realm:
+        return ''
+    s = str(realm)
+    # Bare UUID with no faction prefix — resolve if known, else pass through.
+    if _REALM_UUID_RE.fullmatch(s):
+        return _REALM_UUID_TO_REGION.get(s, s)
+    if s.startswith('faction-'):
+        # Strip the 'faction-' prefix and the trailing '-<uuid>'. In this
+        # form the faction slug's words are '-'-separated
+        # (e.g. 'grand_duchy_of_trellin-erdwise'); the clean slug uses '_'.
+        s = s[len('faction-'):]
+        s = _REALM_UUID_RE.sub('', s).rstrip('-')
+        s = s.replace('-', '_')
+    return _FACTION_TO_REGION.get(s, s)
+
+
 def _api_icon_to_legacy(icon: Optional[str]) -> Optional[str]:
     """`assets/icons/locations/castle_green.png` → `castle_green_icon.svg`.
 
@@ -923,6 +976,18 @@ _CURRENCY_API_TO_LEGACY_REF = {
     'adventurers_guild_token': 'Currency.ADVENTURERS_GUILD_TOKEN',
 }
 
+# Durable special-sell overrides for items the tools-API can't express. Keyed by
+# item id -> {tier: (qty, 'Material.X'|'Currency.X')}, tier in {'common','fine'}.
+# The tools-API reports these as a plain `money` value and never encodes the
+# alternative sell-back, so we supply the authoritative game value here.
+#   - sea_shell (Fine): sells for 10 normal sea shells. Previously this 10x was
+#     hardcoded in util/shell_value.py and ui/app.py; sourcing it here makes it
+#     data-driven (the shell optimizer now reads the field instead of a const,
+#     so there is no double-count — the value is 10 either way).
+_SPECIAL_SELL_OVERRIDES = {
+    'sea_shell': {'fine': (10, 'Material.SEA_SHELL')},
+}
+
 
 def _material_keywords(detail: Dict[str, Any]) -> List[str]:
     """Reproduce the legacy material keywords list from API keywords.
@@ -960,36 +1025,101 @@ def _material_keywords(detail: Dict[str, Any]) -> List[str]:
     return out
 
 
-def _material_value(item_value: Dict[str, Any], fine: bool) -> int:
-    """Pull the (maybe-fine) coin value from an API itemValue dict."""
+def _material_value(item_value: Dict[str, Any], fine: bool, item_id: str = None) -> int:
+    """Pull the (maybe-fine) coin value from an API itemValue dict.
+
+    The wiki (auto-synced from the live game) is authoritative; where the
+    tools-API itemValue is stale/wrong, util/wiki_value_corrections overrides
+    it (e.g. ectoplasm Fine Value is 5 in-game but the API reports 6).
+    """
+    tier = 'fine' if fine else 'common'
+    if item_id:
+        corr = WIKI_VALUE_CORRECTIONS.get(item_id)
+        if corr and tier in corr:
+            return int(corr[tier])
     val = item_value.get('value')
     if val is None:
         return 0
     if isinstance(val, dict):
         # nested {common, fine}
-        v = val.get('fine' if fine else 'common', 0) or 0
+        v = val.get(tier, 0) or 0
         return int(v)
     # scalar
     return int(val)
 
 
+# Adventurers' Guild sell-back (sellingList) values, keyed by item id ->
+# {'common': agt_qty, 'fine': agt_qty}. Only guild shops (id contains
+# 'adventurers_guild') pay Adventurers' Guild Tokens for sell-back. The fine
+# variant is flagged by item.tag == 'fine'. Cached across material builds.
+_AGT_SELLBACK_CACHE: Optional[Dict[str, Dict[str, int]]] = None
+
+
+def _agt_sellback_map() -> Dict[str, Dict[str, int]]:
+    global _AGT_SELLBACK_CACHE
+    if _AGT_SELLBACK_CACHE is not None:
+        return _AGT_SELLBACK_CACHE
+    out: Dict[str, Dict[str, int]] = {}
+    try:
+        shops = load_all_details('shops')
+    except Exception:
+        shops = {}
+    for sid, shop in (shops or {}).items():
+        if 'adventurers_guild' not in (str(shop.get('id') or sid or '')).lower():
+            continue
+        for sl in shop.get('shoppingLists') or []:
+            if not sl.get('sellingList'):
+                continue
+            for entry in sl.get('items') or []:
+                itm = entry.get('item') or {}
+                iid = itm.get('id') if isinstance(itm, dict) else itm
+                price = entry.get('fixedPrice')
+                if not iid or price is None:
+                    continue
+                is_fine = isinstance(itm, dict) and itm.get('tag') == 'fine'
+                out.setdefault(iid, {})['fine' if is_fine else 'common'] = int(price)
+    _AGT_SELLBACK_CACHE = out
+    return out
+
+
 def _material_special_sell(detail: Dict[str, Any], fine: bool) -> Optional[Tuple[int, str]]:
     """Build a (qty, 'Currency.X') tuple if this item sells for a non-money currency."""
+    # Durable manual overrides win first (tools-API can't express these).
+    mid = detail.get('id')
+    if mid:
+        ov = _SPECIAL_SELL_OVERRIDES.get(mid)
+        if ov:
+            key = 'fine' if fine else 'common'
+            if key in ov:
+                return ov[key]
     iv = detail.get('itemValue') or {}
     cur = iv.get('currency')
-    if not cur or cur in ('money', 'none'):
-        return None
-    legacy_ref = _CURRENCY_API_TO_LEGACY_REF.get(cur)
-    if not legacy_ref:
-        return None
-    val = iv.get('value')
-    if val is None:
-        return None
-    if isinstance(val, dict):
-        qty = val.get('fine' if fine else 'common', 0) or 0
-    else:
-        qty = val
-    return (int(qty), legacy_ref)
+    if cur and cur not in ('money', 'none'):
+        legacy_ref = _CURRENCY_API_TO_LEGACY_REF.get(cur)
+        if legacy_ref:
+            val = iv.get('value')
+            if val is not None:
+                if isinstance(val, dict):
+                    qty = val.get('fine' if fine else 'common', 0) or 0
+                else:
+                    qty = val
+                return (int(qty), legacy_ref)
+
+    # Fallback: Adventurers' Guild sell-back (sellingList) value. For items like
+    # Strange fur (1/5 AGT) and Mysterious chitin (10/50 AGT), the tools API
+    # itemValue is 'money' (coins: 0 common / 6 fine) — the AGT the player
+    # actually earns lives only in the guild shop's `sellingList`. Without
+    # folding it into special_sell, get_drop_ag_token_value returns 0 and the
+    # AGT/1k drop income is massively undercounted (bug: Twophointoh hunt showed
+    # 0.08 AGT/1k instead of ~1.01).
+    mid = detail.get('id')
+    if mid:
+        agt = _agt_sellback_map().get(mid)
+        if agt:
+            key = 'fine' if fine else 'common'
+            if key in agt:
+                return (int(agt[key]), 'Currency.ADVENTURERS_GUILD_TOKEN')
+    return None
 
 
 def emit_materials(out_path: Optional[Path] = None) -> Path:
@@ -1009,7 +1139,8 @@ def emit_materials(out_path: Optional[Path] = None) -> Path:
     seen_enum: set = set()
 
     def _push(enum_name: str, name: str, keywords: List[str], value: int,
-              special_sell, stats: Dict[str, Any], requirements: List[Dict[str, Any]]):
+              special_sell, stats: Dict[str, Any], requirements: List[Dict[str, Any]],
+              effort: Optional[int] = None):
         base = enum_name
         n = 1
         while enum_name in seen_enum:
@@ -1023,19 +1154,24 @@ def emit_materials(out_path: Optional[Path] = None) -> Path:
             'special_sell': special_sell,
             'stats': stats,
             'requirements': requirements,
+            'effort': effort,
         }))
 
     for d in materials:
         mid = d.get('id') or ''
         name = d.get('name') or mid
         keywords = _material_keywords(d)
-        value_common = _material_value(d.get('itemValue') or {}, fine=False)
+        value_common = _material_value(d.get('itemValue') or {}, fine=False, item_id=mid)
         special_common = _material_special_sell(d, fine=False)
         # Stats come from the API's materialAttrs (per-material skill stats
         # the wiki used to attach by hand); skill-level gate comes from the
         # item's top-level requirements.
         stats = _extract_attribute_stats(d.get('materialAttrs'), 'global')
         reqs = _legacy_requirements_from_api(d.get('requirements'))
+        # `effort` (new 2026-09 field): integer XP-effort weight on the raw
+        # material. Drives the Termite pet's Terminate ability (logs -> Carpentry
+        # XP = effort * modifier). Absent on most items (None then).
+        effort_val = d.get('effort')
 
         _push(
             to_enum_name(mid),
@@ -1045,12 +1181,13 @@ def emit_materials(out_path: Optional[Path] = None) -> Path:
             special_common,
             stats,
             reqs,
+            effort_val,
         )
 
         # Fine variant
         if d.get('canBeFine'):
             fine_name = f'{name} (Fine)'
-            value_fine = _material_value(d.get('itemValue') or {}, fine=True)
+            value_fine = _material_value(d.get('itemValue') or {}, fine=True, item_id=mid)
             special_fine = _material_special_sell(d, fine=True)
             _push(
                 to_enum_name(mid) + '_FINE',
@@ -1060,6 +1197,7 @@ def emit_materials(out_path: Optional[Path] = None) -> Path:
                 special_fine,
                 stats,
                 reqs,
+                effort_val,
             )
 
     # ── Render file ────────────────────────────────────────────────────
@@ -1078,10 +1216,12 @@ def emit_materials(out_path: Optional[Path] = None) -> Path:
     lines.append('    """Base class for material instances. Optionally has stats (e.g., arrows with WE)."""')
     lines.append('    def __init__(self, name: str, keywords: List[str], value: int, '
                  'special_sell: Optional[Tuple[int, str]] = None, '
-                 'stats: Optional[Dict] = None, requirements: Optional[List] = None):')
+                 'stats: Optional[Dict] = None, requirements: Optional[List] = None, '
+                 'effort: Optional[int] = None):')
     lines.append('        self.name = name')
     lines.append('        self.keywords = keywords')
     lines.append('        self.value = value')
+    lines.append('        self.effort = effort')
     lines.append('        self._stats = stats or {}')
     lines.append('        self.gated_stats = {}')
     lines.append('        self.requirements = requirements or []')
@@ -1118,6 +1258,8 @@ def emit_materials(out_path: Optional[Path] = None) -> Path:
         kw_lines.append(f'        name={py_str(kwargs["name"])}')
         kw_lines.append(f'        keywords={_format_keywords(kwargs["keywords"])}')
         kw_lines.append(f'        value={kwargs["value"]}')
+        if kwargs.get('effort') is not None:
+            kw_lines.append(f'        effort={kwargs["effort"]}')
         if kwargs['special_sell'] is not None:
             qty, ref = kwargs['special_sell']
             kw_lines.append(f'        special_sell=({qty}, {py_str(ref)})')
@@ -1205,7 +1347,7 @@ def emit_consumables(out_path: Optional[Path] = None) -> Path:
 
         # Common
         attrs_common = _extract_buff_stats(d.get('buffs'), fine=False)
-        value_common = _material_value(d.get('itemValue') or {}, fine=False)
+        value_common = _material_value(d.get('itemValue') or {}, fine=False, item_id=cid)
         _push(
             to_enum_name(cid),
             name,
@@ -1218,7 +1360,7 @@ def emit_consumables(out_path: Optional[Path] = None) -> Path:
         # Fine
         if d.get('canBeFine'):
             attrs_fine = _extract_buff_stats(d.get('buffs'), fine=True)
-            value_fine = _material_value(d.get('itemValue') or {}, fine=True)
+            value_fine = _material_value(d.get('itemValue') or {}, fine=True, item_id=cid)
             _push(
                 to_enum_name(cid) + '_FINE',
                 f'{name} (Fine)',
@@ -1831,16 +1973,19 @@ def _legacy_keyword_for_set(keyword_id: str) -> str:
 
 
 # The tools-API exposes the Cape of (Half) Achiever achievement-point unlock
-# gate as a PERCENTAGE of the game's total achievement points (1% / 0.5%),
-# but the legacy data stored the resolved ABSOLUTE amount. The game's total
-# AP is not available in the tools-API cache (achievements carry only a
-# difficulty, not points), so we pin the two known items to their
-# legacy-resolved values. These are the ONLY items in the game with a
-# top-level achievementPoint requirement. Update if the game's total AP
-# (and thus the resolved threshold) changes.
+# gate as a FRACTION of the game's total achievement points (API value 1.0 =
+# 100% of total, 0.5 = 50% of total; the wiki renders these as "100% of total"
+# and "50% of total"), but the legacy data stored the resolved ABSOLUTE amount.
+# The game's total AP is not available in the tools-API cache (achievements
+# carry only a difficulty, not points), so we pin the two known items to their
+# resolved values. These are the ONLY items in the game with a top-level
+# achievementPoint requirement. Update if the game's total AP (and thus the
+# resolved threshold) changes.
+#
+# Total game AP is currently 263 (half rounds half-up: 263 * 0.5 = 131.5 -> 132).
 _ACHIEVEMENT_POINT_REQ_AMOUNTS: Dict[str, int] = {
-    'cape_of_achiever': 265,       # 1% of total AP
-    'cape_of_half_achiever': 133,  # 0.5% of total AP
+    'cape_of_achiever': 263,       # 100% of total AP
+    'cape_of_half_achiever': 132,  # 50% of total AP (131.5 rounded half-up)
 }
 
 
@@ -1970,6 +2115,13 @@ def _is_gated_attr_requirement(r: Dict[str, Any]) -> bool:
         return True
     if rt == 'totalSkillLevel':
         return True
+    if rt == 'collectiblesOwned':
+        # +stat per collectibles-owned threshold (cumulative), e.g. Collection
+        # ring: +1 find/chest/… at each of 10/20/…/60 collectibles owned.
+        # -> legacy `total_collectibles` gated_stats. Previously unhandled, so
+        # the tiers were summed into unconditional base stats (every character
+        # got the max bonus as if owning 60+ collectibles).
+        return True
     if rt == 'itemAnywhere':
         # Stats that apply only while owning another item (e.g. Map of
         # Arenum's per-region double action while owning that region's map)
@@ -1979,9 +2131,22 @@ def _is_gated_attr_requirement(r: Dict[str, Any]) -> bool:
         # Stats that apply only while doing a specific activity (e.g. Zippy
         # kicksled's -5 steps while sledding) -> legacy `activity` gated_stats.
         return True
+    if rt == 'exploreRealm':
+        # Global bonus gated on having fully explored a realm (e.g.
+        # Globetrotter's backpack / Quickdraw map). A character-wide fact the
+        # user toggles, NOT a location scope -> legacy `explore_realm`
+        # gated_stats. Previously unhandled, so the stat fell under
+        # global/global and applied unconditionally.
+        return True
     if rt == 'historyData':
         cat = (r.get('requirement') or {}).get('category')
         return cat in ('actionCompleted', 'stepsWalkedTraveling')
+    if rt == 'distinctKeywordItemInInventory':
+        # Stats that apply only while a keyword-bearing item is in the
+        # inventory (e.g. Bolstered/Quaint quiver: bonus while an 'arrows'
+        # item is carried) -> legacy `keyword_in_inventory` gated_stats.
+        # Previously unhandled, so the bonus applied unconditionally.
+        return True
     return False
 
 
@@ -2042,6 +2207,15 @@ def _build_attr_gated_stats(gated_attrs: List[Dict[str, Any]]) -> Dict[str, Any]
                     root = out.setdefault('total_skill_level', {})
                     _merge_gate_payload(root, int(levels), payload)
                 break
+            if rt == 'collectiblesOwned':
+                # +stat per collectibles-owned threshold (cumulative: the
+                # consumer adds every threshold <= the player's collectible
+                # count). e.g. Collection ring at 10/20/30/40/50/60.
+                amount = rd.get('amount')
+                if amount is not None:
+                    root = out.setdefault('total_collectibles', {})
+                    _merge_gate_payload(root, int(amount), payload)
+                break
             if rt == 'historyData':
                 cat = rd.get('category')
                 if cat == 'actionCompleted':
@@ -2068,6 +2242,15 @@ def _build_attr_gated_stats(gated_attrs: List[Dict[str, Any]]) -> Dict[str, Any]
                     root = out.setdefault('item_ownership', {})
                     _merge_gate_payload(root, str(item).replace('_', ' '), payload)
                 break
+            if rt == 'distinctKeywordItemInInventory':
+                # keyword_in_inventory has no threshold: {keyword: {skill:{loc:{stat}}}}.
+                # Consumer checks whether any owned item carries the keyword
+                # (quantity is 1 in all current data). e.g. quivers + 'arrows'.
+                kws = rd.get('keywords') or []
+                if kws:
+                    root = out.setdefault('keyword_in_inventory', {})
+                    _merge_gate_payload(root, str(kws[0]).lower(), payload)
+                break
             if rt == 'activityType':
                 # activity has no threshold: {activity_name: {skill:{loc:{stat}}}}.
                 # Consumer looks up by activity.lower() (e.g. 'sledding').
@@ -2075,6 +2258,22 @@ def _build_attr_gated_stats(gated_attrs: List[Dict[str, Any]]) -> Dict[str, Any]
                 if act:
                     root = out.setdefault('activity', {})
                     _merge_gate_payload(root, str(act).lower(), payload)
+                break
+            if rt == 'exploreRealm':
+                # explore_realm has no threshold: {realm_slug: {skill:{loc:{stat}}}}.
+                # Consumer gates on the character custom-stat
+                # `explored_realm_<slug>`. All current data is opposite:false
+                # ("explored"); an opposite:true ("not explored") variant is
+                # keyed the same and would need consumer inversion if it ever
+                # ships. An attr may ALSO carry a `realm` SCOPE requirement
+                # (Quickdraw map), which `_extract_attribute_stats` already
+                # folds into the payload's location axis — so scope + gate
+                # compose here without extra handling.
+                realm = rd.get('realm')
+                slug = _normalize_realm_slug(str(realm)) if realm else ''
+                if slug:
+                    root = out.setdefault('explore_realm', {})
+                    _merge_gate_payload(root, slug, payload)
                 break
     return out
 
@@ -2245,32 +2444,6 @@ def _load_legacy_equipment_uuids() -> Dict[str, str]:
     return {name.lower(): uuid for _enum, name, uuid in matches}
 
 
-def _load_legacy_equipment_values() -> Dict[str, int]:
-    """Extract `value=N` from every ItemInstance in the legacy equipment.py.
-
-    Used as a fallback when the API publishes `itemValue.value=null` and
-    we'd otherwise emit value=0. Only the ItemInstance variant has a
-    plain `value=N` field — CraftedItem stores per-quality values.
-    Returns a dict mapping lowercased item NAME → legacy value.
-    """
-    import subprocess
-    try:
-        text = subprocess.check_output(
-            ['git', '-P', 'show', 'origin/testing:util/autogenerated/equipment.py'],
-            text=True,
-        )
-    except Exception:
-        return {}
-    pattern = re.compile(
-        r'(\w+) = ItemInstance\(\s*name="([^"]+)"[^)]*?value=(\d+)',
-        re.DOTALL,
-    )
-    return {
-        name.lower(): int(v)
-        for _enum, name, v in pattern.findall(text)
-    }
-
-
 def _synthesize_uuid(api_id: str) -> str:
     """Generate a stable synthetic UUID for items not in the legacy file."""
     return f'item-{api_id}-from-api'
@@ -2303,8 +2476,8 @@ def emit_equipment(out_path: Optional[Path] = None) -> Path:
     equipment.sort(key=lambda d: d.get('id') or '')
 
     legacy_uuids = _load_legacy_equipment_uuids()
-    legacy_values = _load_legacy_equipment_values()
     internal_ids = _load_internal_ids()
+    abilities_by_id = load_all_details('abilities')
 
     rendered: List[str] = []
     container_enum_attrs: List[Tuple[str, str]] = []
@@ -2373,18 +2546,19 @@ def emit_equipment(out_path: Optional[Path] = None) -> Path:
             # gate (e.g. activity_completion) never collides with set_pieces.
             for gk, gv in _build_attr_gated_stats(gated_attrs).items():
                 gated_stats[gk] = gv
+            # The API is the single source of truth for sell value. When
+            # itemValue.value is null the API is telling us the item has no
+            # coin value (non-sellable loot / cosmetics / achievement
+            # rewards), so we emit 0 — no legacy backfill. Re-injecting old
+            # wiki-era values here is what over-inflated bank value.
             value = _equipment_value(d)
-            # Backfill from legacy when API publishes itemValue.value=null
-            # entirely. Only kicks in when API gave 0 AND legacy has a
-            # non-zero value (e.g. achievement-rewarded items, named
-            # capes that the wiki tracked but the API doesn't).
-            if value == 0:
-                legacy_v = legacy_values.get(name.lower()) or 0
-                if legacy_v != 0:
-                    value = legacy_v
+            item_ability_dicts = [
+                _build_ability_dict(a, abilities_by_id)
+                for a in (d.get('abilities') or [])
+            ]
             rendered.append(_render_item_instance(
                 enum_attr, name, uuid, slot, keywords, value, api_quality,
-                stats, gated_stats, item_reqs,
+                stats, gated_stats, item_reqs, item_ability_dicts,
             ))
         container_enum_attrs.append((enum_attr, name))
 
@@ -2447,6 +2621,7 @@ def _render_item_instance(
     enum_attr: str, name: str, uuid: str, slot: str, keywords: List[str],
     value: int, rarity: str, stats: Dict[str, Any],
     gated_stats: Dict[str, Any], requirements: List[Dict[str, Any]],
+    abilities: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     lines: List[str] = []
     lines.append(f'    {enum_attr} = ItemInstance(')
@@ -2459,7 +2634,11 @@ def _render_item_instance(
     lines.append(f'        rarity={py_str(rarity)},')
     lines.append('        location_reqs=[],')
     lines.append(f'        gated_stats={_format_stats_dict(gated_stats)},')
-    lines.append(f'        requirements={_format_requirements(requirements)}')
+    if abilities:
+        lines.append(f'        requirements={_format_requirements(requirements)},')
+        lines.append(f'        abilities={abilities!r}')
+    else:
+        lines.append(f'        requirements={_format_requirements(requirements)}')
     lines.append('    )')
     lines.append('')
     return '\n'.join(lines)
@@ -2509,7 +2688,7 @@ def _render_achievement_item(
 # generated file self-contained — same approach the legacy file uses.
 _LEGACY_EQUIPMENT_CLASS_DEFS = '''class ItemInstance(StatsMixin):
     """Base class for item instances"""
-    def __init__(self, name: str, uuid: str, stats: Dict, slot: str = None, keywords: list = None, value: int = 0, rarity: str = None, location_reqs: list = None, gated_stats: Dict = None, requirements: list = None):
+    def __init__(self, name: str, uuid: str, stats: Dict, slot: str = None, keywords: list = None, value: int = 0, rarity: str = None, location_reqs: list = None, gated_stats: Dict = None, requirements: list = None, abilities: list = None):
         self.name = name
         self.uuid = uuid
         self.slot = slot
@@ -2520,6 +2699,7 @@ _LEGACY_EQUIPMENT_CLASS_DEFS = '''class ItemInstance(StatsMixin):
         self._stats = stats
         self.gated_stats = gated_stats or {}
         self.requirements = requirements or []
+        self.abilities = abilities or []
 
     @property
     def da(self) -> float:
@@ -2588,9 +2768,22 @@ class AchievementItem(StatsMixin):
         return f"{self.name} ({ap} AP)"
 
     def get_instance(self, **kwargs):
+        # Resolve AP-gated stats from the ACTUAL character's achievement points,
+        # NOT the mutable thread-local global (walkscape_globals.ACHIEVEMENT_POINTS).
+        # That global reflects whichever Character was last initialized on the
+        # thread and can be clobbered mid-scoring (e.g. an intermediate build
+        # reset it 265 -> 164 during a crafting-tree decode, silently dropping the
+        # Omni-tool's AP-200 double_action and making the node metric
+        # non-deterministic -- bug d773a4d7). Prefer an explicit achievement_points
+        # kwarg, then the passed character's AP, then the global as a last resort.
         import util.walkscape_globals
-        achievement_points = int(util.walkscape_globals.ACHIEVEMENT_POINTS)
-        return self._get_stats_for_ap(achievement_points)
+        achievement_points = kwargs.get('achievement_points')
+        if achievement_points is None:
+            _ch = kwargs.get('character')
+            achievement_points = getattr(_ch, 'achievement_points', None) if _ch is not None else None
+        if achievement_points is None:
+            achievement_points = util.walkscape_globals.ACHIEVEMENT_POINTS
+        return self._get_stats_for_ap(int(achievement_points))
 
     def __repr__(self):
         import util.walkscape_globals
@@ -2670,8 +2863,13 @@ _PET_RARE_METADATA: Dict[str, Tuple[str, str]] = {
     'chicken':  ('Lovestruck Chicken',  'lovestruck_chicken'),
     'dolphin':  ('Trick Dolphin',       'trick_dolphin'),
     'gecko':    ('Garnet Gecko',        'garnet_gecko'),
+    'golden_frog': ('Silver Frog',      'silver_frog'),
     'mummy':    ('Silky Mummy',         'silky_mummy'),
+    'pet_rock': ('Pet Rock Rock Pet',   'pet_rock_rock_pet'),
+    'pixie':    ('Party Pixie',         'party_pixie'),
     'reindeer': ('Festive Reindeer',    'festive_reindeer'),
+    'sawmantis':('Psycho Sawmantis',    'psycho_sawmantis'),
+    'termite':  ('Terminal mite',       'terminal_mite'),
     'tiger':    ('Regal Tiger',         'regal_tiger'),
     'tortoise': ('Precious Tortoise',   'precious_tortoise'),
 }
@@ -2693,6 +2891,26 @@ _PET_XP_REQUIREMENT: Dict[str, str] = {
     'tiger':    'While doing Hunting.',
     'tortoise': 'Not doing Agility.',
 }
+
+
+def _pet_xp_requirement(pid: str, pet: Dict[str, Any]) -> Optional[str]:
+    """The pet's 'how to gain XP' text. Prefer the curated wiki string; else
+    derive from the API ``xpRequirements`` so new pets aren't left blank.
+    Handles mainSkill (e.g. pet_rock -> Trinketry), totalWealth (golden_frog),
+    and locationHasKeywords."""
+    hard = _PET_XP_REQUIREMENT.get(pid)
+    if hard:
+        return hard
+    for req in pet.get('xpRequirements') or []:
+        rt = req.get('type')
+        rd = req.get('requirement') or {}
+        if rt == 'mainSkill' and rd.get('skill'):
+            return f"While doing {str(rd['skill']).capitalize()}."
+        if rt == 'totalWealth' and rd.get('amount') is not None:
+            return f"While your total wealth is at least {int(rd['amount']):,} coins."
+        if rt == 'locationHasKeywords' and (rd.get('keywords') or []):
+            return f"While in a {str(rd['keywords'][0])} location."
+    return None
 
 # Full per-ability dicts the API doesn't publish in a reconstructable
 # form. The API ability detail only carries a partial name/desc/cooldown;
@@ -2778,6 +2996,47 @@ _PET_ABILITY_OVERRIDE: Dict[str, Dict[str, Any]] = {
         'instant_actions': True,
         'instant_actions_skill': 'smelting',
         'instant_actions_count': 5,
+    },
+    # Living Flame's Flambé. Like Shell Forge, it is a passive "optimize for
+    # ability": it completes 3 Cooking recipe actions instantly (zeroing step
+    # stats) and grants +3% fine recipe outcome. `not_underwater` tells the
+    # optimizer to exclude underwater services (the ability can't be used in an
+    # Underwater location). These custom keys are not emitted from the API data
+    # shape, so pin them here so a re-scrape regenerates the wiring.
+    'flambé': {
+        'name': 'Flambé',
+        'effect': 'Completes 3 Cooking recipe actions instantly with a small chance to give fine results.',
+        'requirements': 'While doing a Cooking recipe. Not in an Underwater location.',
+        'cooldown': '2,500 steps',
+        'charges': 15,
+        'duration': 3,
+        'duration_unit': 'actions',
+        'instant_actions': True,
+        'instant_actions_skill': 'cooking',
+        'instant_actions_count': 3,
+        'not_underwater': True,
+        'fine_recipe_outcome': 3.0,
+    },
+    # Termite's passive. The API publishes an `item_swap` stat under the
+    # ability's `attributes[]` (NOT `data[]`), so _build_ability_dict can't
+    # reconstruct it — capture it verbatim here. Mechanic: while doing
+    # Woodcutting, `chance`% of the `logs` items you find are swapped into
+    # Carpentry XP equal to the log's `effort` * `xp_effort_modifier`
+    # (see MaterialInstance.effort). scopes=activityLoot means it applies to
+    # activity loot rolls only.
+    'terminate': {
+        'name': 'Terminate',
+        'effect': 'Chance to turn a log you find into Carpentry experience.',
+        'icon': 'terminate',
+        'passive': True,
+        'item_swap': {
+            'chance': 15.0,
+            'skill': 'woodcutting',
+            'from_keywords': ['logs'],
+            'to_skill': 'carpentry',
+            'xp_effort_modifier': 0.5,
+            'scopes': ['activityLoot'],
+        },
     },
 }
 
@@ -2932,43 +3191,137 @@ def _extract_pet_attribute_stats(level_attrs: List[Dict[str, Any]]) -> Dict[str,
     return out
 
 
+def _build_ability_dict(aid: Optional[str],
+                        abilities_by_id: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    """Build one legacy ability dict. Known abilities come verbatim from
+    _PET_ABILITY_OVERRIDE (the API can't reconstruct their charge text /
+    instant-action metadata); otherwise derive name/effect/icon and, when the
+    API publishes it, ability_stats/duration/charges/cooldown. Used for both
+    pet abilities and item-equipped abilities (e.g. Hat of Wisdom)."""
+    override = _PET_ABILITY_OVERRIDE.get(aid)
+    if override is not None:
+        info = dict(override)
+        # Backfill the ability icon from the API when the override omits it, so
+        # overridden abilities (Clever Climber, Torpedo Away, Shell Forge, …)
+        # still render an icon in the pet-ability popover.
+        if 'icon' not in info:
+            api_icon = (abilities_by_id.get(aid) or {}).get('icon')
+            if api_icon:
+                info['icon'] = os.path.splitext(os.path.basename(api_icon))[0]
+        return info
+    ability = abilities_by_id.get(aid) or {}
+    name = ability.get('name') or (aid.replace('_', ' ').title() if aid else '')
+    info: Dict[str, Any] = {
+        'name': name,
+        'effect': _strip_html(ability.get('desc') or ''),
+    }
+    icon = ability.get('icon')
+    if icon:
+        info['icon'] = os.path.splitext(os.path.basename(icon))[0]
+    eff_attrs: List[Dict[str, Any]] = []
+    duration: Optional[int] = None
+    for block in ability.get('data') or []:
+        for action in block.get('actions') or []:
+            if action.get('type') == 'effect':
+                eff_attrs.extend(action.get('attributes') or [])
+                dur = (action.get('duration') or {}).get('actions')
+                if dur is not None:
+                    duration = int(dur)
+    cd = ability.get('cooldown') or {}
+    charges = cd.get('charges')
+    if charges is not None:
+        info['charges'] = charges
+    if duration is not None:
+        info['duration'] = duration
+    if eff_attrs:
+        ability_stats = _extract_attribute_stats(eff_attrs, 'global')
+        if ability_stats:
+            info['ability_stats'] = ability_stats
+    cd_str = _format_cooldown(cd)
+    if cd_str:
+        info['cooldown'] = cd_str
+
+    # Loot-rolling abilities (e.g. Hat of Wisdom's Study Time rolls the
+    # find_memospheres table). Capture the rolled table id, roll amount, the
+    # step-charge cadence, and the resolved drop rows so the UI can surface the
+    # memospheres in the drops table when the item is equipped. Auto-detected
+    # here so future loot-rolling item/pet abilities work with no manual edits.
+    loot_table_id = None
+    loot_rolls = None
+    for block in ability.get('data') or []:
+        for action in block.get('actions') or []:
+            if action.get('type') == 'rollLootTable':
+                for t in action.get('tables') or []:
+                    for tid in t.get('tables') or []:
+                        loot_table_id = tid
+                        loot_rolls = t.get('rollAmount')
+    if loot_table_id:
+        info['loot_table'] = loot_table_id
+        if loot_rolls is not None:
+            info['loot_rolls'] = int(loot_rolls)
+        steps = cd.get('steps')
+        if steps is not None:
+            info['charge_steps'] = int(steps)
+        drops = _resolve_loot_table_drops(loot_table_id)
+        if drops:
+            info['loot_drops'] = drops
+    return info
+
+
+# Lazily-loaded loot table details, shared across ability builds.
+_LOOT_TABLES_CACHE: Optional[Dict[str, Any]] = None
+
+
+def _resolve_loot_table_drops(table_id: str) -> List[Dict[str, Any]]:
+    """Resolve a loot table id (e.g. 'find_memospheres') into a flat list of
+    drop rows [{item_name, icon}] for embedding on a loot-rolling ability. The
+    icon path is normalised to the served .svg under /assets."""
+    global _LOOT_TABLES_CACHE
+    if _LOOT_TABLES_CACHE is None:
+        try:
+            _LOOT_TABLES_CACHE = load_all_details('loot_tables')
+        except Exception:
+            _LOOT_TABLES_CACHE = {}
+    tbl = _LOOT_TABLES_CACHE.get(table_id) or {}
+    out: List[Dict[str, Any]] = []
+    for row in tbl.get('tableRows') or []:
+        if row.get('isMoney'):
+            continue
+        row_id = row.get('rowItemID') or ''
+        name = row.get('name') or row_id.replace('_', ' ')
+        raw_icon = row.get('icon') or ''
+        # The raw API icon path uses the game's asset layout, which does NOT
+        # match our on-disk convention. e.g. the API gives
+        #   assets/icons/items/consumables/memospheres/memosphere_woodcutting.png
+        # but our icons live directly under
+        #   /assets/icons/items/<type>/<export_id>.svg   (no nested category
+        # subdir, filename == the item's export id). The API filename is also
+        # sometimes reversed (memosphere_woodcutting vs our woodcutting_memosphere),
+        # so trusting it verbatim yields broken icons. Rebuild the path from the
+        # item-type dir declared in the API path + rowItemID (which equals the
+        # export id and thus the real filename).
+        icon = ''
+        if raw_icon:
+            m = re.search(r'items/([^/]+)/', raw_icon)
+            type_dir = m.group(1) if m else 'consumables'
+            base = row_id or os.path.splitext(os.path.basename(raw_icon))[0]
+            icon = f'/assets/icons/items/{type_dir}/{base}.svg'
+        out.append({'item_name': name, 'icon': icon})
+    return out
+
+
 def _ability_dict_for_level(
     pet_abilities: List[Dict[str, Any]],
     abilities_by_id: Dict[str, Dict[str, Any]],
     level: int,
 ) -> List[Dict[str, Any]]:
-    """Build the legacy abilities list for a pet at a given level.
-
-    Includes every ability whose ``unlockLevel <= level`` (the API still
-    supplies the unlock gating). For known abilities the full legacy dict
-    comes from ``_PET_ABILITY_OVERRIDE`` (the API can't reconstruct the
-    charge text, duration, ability_stats, instant-action metadata, or
-    passive flags). A best-effort dict is built from the API detail for
-    any ability not in the overlay (e.g. a future pet).
-    """
+    """Build the legacy abilities list for a pet at a given level — every
+    ability whose ``unlockLevel <= level`` (the API supplies the gating)."""
     out: List[Dict[str, Any]] = []
     for entry in pet_abilities or []:
-        unlock = entry.get('unlockLevel') or 1
-        if unlock > level:
+        if (entry.get('unlockLevel') or 1) > level:
             continue
-        aid = entry.get('ability')
-        override = _PET_ABILITY_OVERRIDE.get(aid)
-        if override is not None:
-            # Copy so each level gets an independent dict (preserves the
-            # overlay's key order for rendering).
-            out.append(dict(override))
-            continue
-        # Fallback: best-effort dict from the API ability detail.
-        ability = abilities_by_id.get(aid) or {}
-        name = ability.get('name') or (aid.replace('_', ' ').title() if aid else '')
-        info: Dict[str, Any] = {
-            'name': name,
-            'effect': _strip_html(ability.get('desc') or ''),
-        }
-        cd_str = _format_cooldown(ability.get('cooldown'))
-        if cd_str:
-            info['cooldown'] = cd_str
-        out.append(info)
+        out.append(_build_ability_dict(entry.get('ability'), abilities_by_id))
     return out
 
 
@@ -3038,7 +3391,7 @@ def emit_pets(out_path: Optional[Path] = None) -> Path:
             lines.append(f'                level={lvl},')
             lines.append(f'                egg_name={py_str(egg_name)},')
             lines.append(f'                xp_required={xp},')
-            req_xp = _PET_XP_REQUIREMENT.get(pid)
+            req_xp = _pet_xp_requirement(pid, pet)
             if req_xp:
                 lines.append(
                     f'                requirement_to_gain_xp={py_str(req_xp)},'
@@ -4574,14 +4927,14 @@ _PROGRESS_AP_REWARDS_HARDCODED = [
         'item_name': 'Cape of Half-Achiever',
         'quantity': 1,
         'item_type': 'Loot',
-        'ap_required': 133,
+        'ap_required': 132,
         'item_ref': 'Item.CAPE_OF_HALF_ACHIEVER',
     },
     {
         'item_name': 'Cape of Achiever',
         'quantity': 1,
         'item_type': 'Loot',
-        'ap_required': 265,
+        'ap_required': 263,
         'item_ref': 'Item.CAPE_OF_ACHIEVER',
     },
 ]
@@ -4628,8 +4981,15 @@ def emit_ap_rewards(out_path: Optional[Path] = None) -> Path:
     rewards_list = load_list('rewards')
     items = load_all_details('items')
 
-    # Filter rewards by ID prefix `reward_progress-achievements-`
-    pattern = re.compile(r'^reward_progress-achievements-(\d+)$')
+    # Filter rewards by ID prefix `reward_progress-achievements-`. The AP
+    # threshold is the trailing number. The 2026-08-05 patch introduced a
+    # `new` prefix on the number for newly-added AP rewards (e.g.
+    # `reward_progress-achievements-new220` = Quickdraw map at 220 AP), so the
+    # `new` prefix is optional. Without accepting it, all 11 patch AP rewards
+    # (Quickdraw map, Hat of Wisdom, Collection ring, Globetrotter's backpack,
+    # etc.) were silently dropped and mis-filed under generic achievement
+    # rewards instead of Achievement Point Rewards.
+    pattern = re.compile(r'^reward_progress-achievements-(?:new)?(\d+)$')
     checkpoint_rewards: List[Dict[str, Any]] = []
     for r in rewards_list:
         rid = r.get('id') or ''

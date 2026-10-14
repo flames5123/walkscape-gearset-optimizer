@@ -105,6 +105,9 @@ export class SellForChipsPage {
         this._el.classList.remove('closing');
         this._el.classList.add('opening');
         document.body.classList.add('sell-for-chips-open');
+        // Body-scroll (mobile): overlay opens at the top even if a column was
+        // scrolled (the window is the shared scroller now).
+        if (window.innerWidth <= 768) window.scrollTo(0, 0);
         document.getElementById('sell-for-chips-nav-btn')?.classList.add('active');
         this._wireDelegation();
         this._render();
@@ -207,7 +210,7 @@ export class SellForChipsPage {
                         <button class="button button-secondary" data-sfc-action="close" title="Close (Esc)">✕</button>
                     </div>
                 </div>
-                <div style="opacity:.7;font-size:13px;margin-bottom:16px">
+                <div style="opacity:.7;font-size: max(var(--min-text, 5px), calc(13px * var(--text-scale, 1)));margin-bottom:16px">
                     Projects chips earned by selling loot to the Mysterious Merchant, and what you could buy back.
                     Held back by default: your last copy (2 for rings) and anything Upgradeable.
                 </div>
@@ -294,7 +297,7 @@ export class SellForChipsPage {
                             border-bottom:1px solid var(--border-color,#444);padding-bottom:6px">
                     <span class="sfc-caret">▶</span>
                     <h3 style="margin:0;flex:1">${_esc(section.display_name)}</h3>
-                    <span style="opacity:.7;font-size:13px">${section.chip_types.length} chip types · ${_num(sectionTotal)} chips</span>
+                    <span style="opacity:.7;font-size: max(var(--min-text, 5px), calc(13px * var(--text-scale, 1)))">${section.chip_types.length} chip types · ${_num(sectionTotal)} chips</span>
                 </div>
                 <div class="sfc-section-body"${collapsed ? ' style="display:none"' : ''}>
                     <div style="display:flex;flex-wrap:wrap;gap:12px;margin-top:10px">${cards}</div>
@@ -317,8 +320,8 @@ export class SellForChipsPage {
     _renderCard(card) {
         const icon = _chipIcon(card.icon_path);
         const sellingRows = (card.selling || []).map(r => this._renderSellingRow(r)).join('')
-            || `<div style="opacity:.6;font-size:13px">Nothing to sell</div>`;
-        const sellingBlock = `<div style="opacity:.7;font-size:12px;font-weight:600;margin:4px 0 2px">Selling</div>${sellingRows}`;
+            || `<div style="opacity:.6;font-size: max(var(--min-text, 5px), calc(13px * var(--text-scale, 1)))">Nothing to sell</div>`;
+        const sellingBlock = `<div style="opacity:.7;font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)));font-weight:600;margin:4px 0 2px">Selling</div>${sellingRows}`;
 
         const held = card.held_back || [];
         const heldBlock = held.length
@@ -340,7 +343,7 @@ export class SellForChipsPage {
         const buyingBlock = cartRows.length ? `
             <div class="sfc-buying-block" data-chip="${_esc(card.chip_type)}"
                  style="margin-top:8px;border-top:1px dashed var(--border-color,#444);padding-top:6px">
-                <div style="opacity:.7;font-size:12px;font-weight:600;margin-bottom:2px">Buying</div>
+                <div style="opacity:.7;font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)));font-weight:600;margin-bottom:2px">Buying</div>
                 ${cartRows.map(r => this._renderCartRow(r)).join('')}
             </div>` : '';
 
@@ -371,7 +374,7 @@ export class SellForChipsPage {
                 title="Remove one"
                 style="padding:1px 9px;font-weight:700;border:1px solid var(--error-color,#e57373);
                        color:var(--error-color,#e57373);background:transparent;border-radius:4px;flex-shrink:0;cursor:pointer">−</button>`;
-        return `<div class="sfc-cart-row" data-slug="${_esc(r.item_id)}" style="display:flex;align-items:center;gap:8px;padding:2px 4px;font-size:13px">
+        return `<div class="sfc-cart-row" data-slug="${_esc(r.item_id)}" style="display:flex;align-items:center;gap:8px;padding:2px 4px;font-size: max(var(--min-text, 5px), calc(13px * var(--text-scale, 1)))">
                     <span style="flex:1">${count}× ${this._nameHtml(r)}</span>
                     <span style="opacity:.8" title="Chips spent">-${_num(count * r.buy_price)}</span>
                     ${minusBtn}
@@ -409,7 +412,7 @@ export class SellForChipsPage {
     _renderSellingRow(r) {
         // Always "Keep" -- clicking moves it to Held back.
         const btn = `<button class="button button-secondary sfc-action-btn sfc-btn-keep" data-sfc-action="keep" data-slug="${_esc(r.item_id)}"
-                       style="padding:2px 8px;font-size:12px;flex-shrink:0">Keep</button>`;
+                       style="padding:2px 8px;font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)));flex-shrink:0">Keep</button>`;
         return `<div class="sfc-row" data-slug="${_esc(r.item_id)}" style="display:flex;align-items:center;gap:8px;padding:2px 4px">
                     <span style="flex:1">${r.qty}× ${this._ownedBadge(r.owned)}${this._nameHtml(r)}
                         <span style="opacity:.6">→ ${_num(r.subtotal)}</span></span>
@@ -422,8 +425,8 @@ export class SellForChipsPage {
         // Always "Sell" -- clicking moves it to Selling. No owned (#) badge here
         // (the qty already shows how many are held).
         const btn = `<button class="button button-secondary sfc-action-btn sfc-btn-sell" data-sfc-action="sell" data-slug="${_esc(r.item_id)}"
-                       style="padding:2px 8px;font-size:12px;flex-shrink:0">Sell</button>`;
-        return `<div class="sfc-row" data-slug="${_esc(r.item_id)}" style="display:flex;align-items:center;gap:8px;padding:2px 4px;font-size:13px">
+                       style="padding:2px 8px;font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)));flex-shrink:0">Sell</button>`;
+        return `<div class="sfc-row" data-slug="${_esc(r.item_id)}" style="display:flex;align-items:center;gap:8px;padding:2px 4px;font-size: max(var(--min-text, 5px), calc(13px * var(--text-scale, 1)))">
                     <span style="flex:1">${r.qty}× ${this._nameHtml(r)}
                         <span style="opacity:.6">— ${_esc(reason)}</span></span>
                     ${btn}
@@ -444,10 +447,10 @@ export class SellForChipsPage {
                        color:var(--success-color,#81c784);background:transparent;border-radius:4px;flex-shrink:0;
                        ${canAfford ? 'cursor:pointer' : 'opacity:.35;cursor:not-allowed'}">+</button>`;
         const cartBadge = inCart
-            ? `<span style="color:var(--success-color,#81c784);font-size:12px" title="In your buy cart">×${inCart}</span>`
+            ? `<span style="color:var(--success-color,#81c784);font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)))" title="In your buy cart">×${inCart}</span>`
             : '';
         const nameStyle = covered ? 'opacity:.55;font-style:italic' : '';
-        return `<div class="sfc-row" data-slug="${_esc(r.item_id)}" style="display:flex;align-items:center;gap:8px;padding:2px 4px;font-size:13px">
+        return `<div class="sfc-row" data-slug="${_esc(r.item_id)}" style="display:flex;align-items:center;gap:8px;padding:2px 4px;font-size: max(var(--min-text, 5px), calc(13px * var(--text-scale, 1)))">
                     <span style="flex:1">${this._ownedBadge(owned)}<span style="${nameStyle}">${this._nameHtml(r)}</span>
                         <span style="opacity:.7">(${_num(r.buy_price)})</span></span>
                     ${cartBadge}
@@ -470,7 +473,7 @@ export class SellForChipsPage {
             const icon = _chipIcon(card.icon_path);
             const spentHtml = spent
                 ? ` · <span style="color:var(--error-color,#e57373)">-${_num(spent)} bought</span>` : '';
-            return `<div style="display:flex;align-items:center;gap:6px;padding:2px 0;font-size:13px">
+            return `<div style="display:flex;align-items:center;gap:6px;padding:2px 0;font-size: max(var(--min-text, 5px), calc(13px * var(--text-scale, 1)))">
                         <img src="${icon}" width="18" height="18" alt=""
                              onerror="this.src='/assets/icons/chips/_unknown_chip.svg'">
                         <span style="flex:1">${_esc(card.display_name)}</span>

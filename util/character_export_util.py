@@ -69,6 +69,24 @@ class Character:
         # Consumables
         self._consumables_raw = data.get('consumables', {})
         self.consumables = self._parse_items(self._consumables_raw)  # TODO: Parse consumables
+
+        # Total wealth (value of all items) = coins + Σ item.value × qty across
+        # inventory + bank + gear. Mirrors the session inventory_value the
+        # frontend displays and gates on, so the optimizer's total_wealth gate
+        # (e.g. Golden Frog: WE@100k / chest@250k / xp@500k / steps@1M) matches
+        # the col2 combined stats + slot popup. Uses get_item_from_export_name
+        # (.value) — the same source the session's inventory_value uses.
+        _total_wealth = self.coins or 0
+        for _raw in (self._inventory_raw, self._bank_raw):
+            for _ex, _qty in (_raw or {}).items():
+                _it = get_item_from_export_name(_ex)
+                if _it and getattr(_it, 'value', None):
+                    _total_wealth += _it.value * (_qty or 0)
+        for _ex in (self._gear_raw or {}).values():
+            _it = get_item_from_export_name(_ex)
+            if _it and getattr(_it, 'value', None):
+                _total_wealth += _it.value
+        walkscape_globals.set_total_wealth(_total_wealth)
         
         # Collectibles - parse to CollectibleInstance objects
         self._collectibles_raw = data.get('collectibles', [])
@@ -205,9 +223,15 @@ class Character:
                     if pet_levels:
                         found_via_rare_name = True
                 if pet_levels:
-                    # Found via rare name — fix species to the canonical name
-                    species = pet_levels.name.lower()
-            
+                    # Found via rare name — fix species to the canonical slug so
+                    # the frontend-derived pet id (from pet.species) matches the
+                    # catalog pet id. e.g. the rare Pet Rock exports species
+                    # "pet_rock_rock_pet" (rare name "Pet Rock Rock Pet"); the
+                    # catalog species/id is "pet_rock" (bug 799e0a55). Using
+                    # .species (not name.lower()) also avoids a space for
+                    # multi-word pets like "Pet Rock" -> "pet rock".
+                    species = pet_levels.species
+
             # Detect rare variant:
             # - If the pet's name matches the rare display name (e.g. "Regal Tiger"), OR
             # - If the species field in the export was a rare export name (e.g. "regal_tiger" for an egg)

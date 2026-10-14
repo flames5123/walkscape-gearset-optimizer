@@ -22,12 +22,70 @@ const SOURCE_ICON_PATHS = {
     shop: '/assets/icons/items/coins.svg',
 };
 
+// --- Location -> region-tag resolution -------------------------------------
+// A crafting-tree node has a fixed location (worker-resolved service location
+// or user-pinned). Location-scoped gear stats — notably the Quickdraw map's
+// per-realm WE/DA, keyed by REGION ('wallisia', 'gdte', ...) — only register
+// as APPLICABLE in the slot popup when the popup's locationMatches() sees that
+// region. The popup does exact string matching, so passing the bare location
+// NAME ('Wraithwater') never matched the region key and the item was hidden
+// under "Show N/A" (unlike column 2, which resolves its location to region
+// tags first). Resolve the node location to its region tags the same way here.
+let _ctLocationRegionsMap = null;
+let _ctLocationRegionsPromise = null;
+
+function _ctNormalizeLoc(loc) {
+    return String(loc || '').toLowerCase().replace(/ /g, '_').replace(/'/g, '');
+}
+
+function _ctWarmLocationRegionsMap() {
+    if (_ctLocationRegionsMap || _ctLocationRegionsPromise) return _ctLocationRegionsPromise;
+    _ctLocationRegionsPromise = fetch('/api/locations')
+        .then(r => (r.ok ? r.json() : { regions: [] }))
+        .then(resp => {
+            const map = {};
+            for (const region of (resp.regions || [])) {
+                for (const loc of (region.locations || [])) {
+                    if (!loc || !loc.id) continue;
+                    const regions = (loc.regions && loc.regions.length) ? loc.regions : [loc.id];
+                    const tags = regions.map(x => String(x).toLowerCase());
+                    // Key by both id ('wraithwater') and display name
+                    // ('Wraithwater') normalized — the tree stores the name.
+                    map[_ctNormalizeLoc(loc.id)] = tags;
+                    if (loc.name) map[_ctNormalizeLoc(loc.name)] = tags;
+                }
+            }
+            _ctLocationRegionsMap = map;
+            return map;
+        })
+        .catch(() => { _ctLocationRegionsMap = {}; return {}; });
+    return _ctLocationRegionsPromise;
+}
+
+function _ctResolveLocationContext(rawLoc) {
+    // Expand a node location to [normalized-location, ...region tags] so the
+    // popup's applicable-stats filter matches region-scoped stats. Falls back
+    // to the bare location when the map isn't warm yet (exact-location and
+    // 'global' stats still match; region-scoped ones resolve once warm).
+    if (!rawLoc) return null;
+    const norm = _ctNormalizeLoc(rawLoc);
+    const regions = _ctLocationRegionsMap && _ctLocationRegionsMap[norm];
+    if (regions && regions.length) {
+        return Array.from(new Set([norm, ...regions]));
+    }
+    return rawLoc;
+}
+
 class TreeNodeCard extends Component {
     constructor(element, props = {}) {
         super(element, props);
         this.childComponents = [];
         this.sourceDropdownOpen = false;
         this.matDropdownOpen = false;
+        // Warm the location->regions map so the slot popup's applicable-stats
+        // filter can resolve region-scoped gear (Quickdraw map, etc.) by the
+        // time the user opens a slot.
+        _ctWarmLocationRegionsMap();
         this.render();
         this.attachEvents();
     }
@@ -403,6 +461,79 @@ class TreeNodeCard extends Component {
         `;
     }
 
+    /**
+     * Pin the node's optimizer-picked pet + consumable into a lock map
+     * that was built by decoding a gearset export string.
+     *
+     * The gearset export (encode_gearset) only serializes gear/tools/
+     * rings — the Gearset class has no _pet/_consumable attribute — so a
+     * lock map derived purely from `_decodeGearsetSlots` silently omits
+     * the pet and consumable. Both bulk-lock entry points (Import from
+     * clipboard and Select-existing of an optimized gearset) build their
+     * lock map that way, so before this merge they locked all 15 gear
+     * slots yet left the pet/consumable UNLOCKED — even though the gear
+     * preview still SHOWS the node's optimized_pet/consumable via the
+     * effectiveOverlay merge in _renderGearPreview. The result: the user
+     * imports/selects a gearset (an explicit "use exactly this" act that
+     * locks everything else), sees a fully-locked gearset including the
+     * pet tile, but the next Optimize re-picks the pet and drops it
+     * because it was never actually pinned. Bug 9a4a1768: "Camel not
+     * sticking even ... locking the slot."
+     *
+     * Mirrors the same optimized_pet/consumable merge already done in
+     * _renderGearPreview (effectiveOverlay), the popup equippedSlots
+     * build, and the Equip path's extraSlots. Only fills a slot that
+     * isn't already present so a gearset that genuinely carries its own
+     * pet/consumable (regular saved gearsets round-trip them via `slots`)
+     * still wins. Emits the canonical locked_slots shape the slot popup
+     * writes and optimize_worker.py resolves.
+     *
+     * @param {object} targetNode - the tree node being locked
+     * @param {object} locks - the decode-derived lock map (mutated)
+     */
+    _mergeOptimizedPetConsumableLocks(targetNode, locks) {
+        if (!targetNode || !locks) return;
+        const gc = targetNode.gear_config || {};
+        const optPet = gc.optimized_pet;
+        const optCons = gc.optimized_consumable;
+        if (optPet && !locks.pet) {
+            const petItemId = optPet.itemId
+                || (optPet.name ? optPet.name.toLowerCase().replace(/ /g, '_').replace(/'/g, '') : null);
+            if (petItemId) {
+                locks.pet = {
+                    itemId: petItemId,
+                    name: optPet.name || null,
+                    level: optPet.level !== undefined ? optPet.level : undefined,
+                    variant: optPet.variant || 'normal',
+                    max_level: optPet.max_level !== undefined ? optPet.max_level : undefined,
+                    rarity: optPet.rarity || 'common',
+                    icon_path: optPet.icon_path || null,
+                    quality: null,
+                    is_generic: !!optPet.is_generic,
+                    is_fine: !!optPet.is_fine,
+                    type: 'pet',
+                };
+            }
+        }
+        if (optCons && !locks.consumable) {
+            const consItemId = optCons.itemId
+                || optCons.id
+                || (optCons.name ? optCons.name.toLowerCase().replace(/ /g, '_').replace(/'/g, '') : null);
+            if (consItemId) {
+                locks.consumable = {
+                    itemId: consItemId,
+                    name: optCons.name || null,
+                    icon_path: optCons.icon_path || null,
+                    rarity: optCons.rarity || 'common',
+                    quality: optCons.is_fine ? 'Fine' : (optCons.quality || null),
+                    is_generic: !!optCons.is_generic,
+                    is_fine: !!optCons.is_fine,
+                    type: 'consumable',
+                };
+            }
+        }
+    }
+
     _decodeGearsetSlots(exportString) {
         if (!exportString || typeof window.pako === 'undefined') return null;
         const catalog = window.api?._catalogCache;
@@ -509,6 +640,59 @@ class TreeNodeCard extends Component {
         } catch (e) {
             return null;
         }
+    }
+
+    /**
+     * Resolve the EQUIPPED pet (column-2 currentGear) if, at its current
+     * level, it has an active ability that carries stats. The crafting-tree
+     * optimizer applies the pet ability from ui_config.currentGear.pet (fix
+     * 0973370e), so the equipped pet is the one whose "Use ability" flag the
+     * whole tree honors. Prefers the pet's inline `levels`; falls back to the
+     * pet catalog when the serialized pet lacks them. Returns the pet or null.
+     */
+    _treeEquippedAbilityPet() {
+        const pet = store.state?.gearsets?.current?.pet;
+        if (!pet || !pet.level) return null;
+        let levelData = (pet.levels && pet.levels[String(pet.level)]) || null;
+        if (!levelData || !levelData.abilities) {
+            const petCatalog = (window.optimizeButton && window.optimizeButton._petCatalog) || [];
+            const petId = String(pet.itemId || pet.petId || pet.id || pet.name || '').toLowerCase();
+            const petEntry = petCatalog.find(p =>
+                (p.id && p.id.toLowerCase() === petId) ||
+                (p.name && p.name.toLowerCase() === String(pet.name || '').toLowerCase())
+            );
+            levelData = (petEntry && petEntry.levels && petEntry.levels[String(pet.level)]) || levelData;
+        }
+        const abilities = (levelData && levelData.abilities) || [];
+        const hasStats = abilities.some(a => a && a.ability_stats && Object.keys(a.ability_stats).length > 0);
+        return hasStats ? pet : null;
+    }
+
+    /**
+     * Render the inline "Use <pet>'s ability" checkbox for the crafting-tree
+     * node gear preview. Empty string when the equipped pet has no
+     * ability-with-stats. Mirrors the column-2 per-pet checkbox — it is the
+     * SAME equipped-pet flag, surfaced here so the user can toggle it without
+     * leaving the tree. Applies on the next Optimize.
+     */
+    _renderTreePetAbilityToggle() {
+        const pet = this._treeEquippedAbilityPet();
+        if (!pet) return '';
+        const checked = (window.getEffectivePetUseAbility
+            ? window.getEffectivePetUseAbility(pet)
+            : (pet.useAbility || (window.isUsePetAbilityEnabled && window.isUsePetAbilityEnabled()))) ? ' checked' : '';
+        const petName = String(pet.name || 'pet').replace(/[&<>"']/g, c => (
+            { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+        ));
+        return `
+            <div class="tree-pet-ability-toggle">
+                <label class="tree-pet-ability-label">
+                    <input type="checkbox" class="tree-pet-ability-checkbox"${checked}>
+                    <span class="tree-pet-ability-text">Use ${petName}'s ability</span>
+                </label>
+                <span class="tree-pet-ability-hint">applies on Optimize</span>
+            </div>
+        `;
     }
 
     _renderGearPreview(exportString, node) {
@@ -819,11 +1003,21 @@ class TreeNodeCard extends Component {
                         ${lockOverlay}
                     </div>`;
                 }
-                const rarityClass = equipped.rarity ? (QUALITY_TO_RARITY[equipped.rarity] || '') : '';
+                // Fine handling mirrors the gear/tool slot render above:
+                // is_fine forces the rarity-fine tile background/border AND
+                // the cyan `.fine` drop-shadow on the icon. Without this the
+                // input tile showed the base (common) color and no fine
+                // outline even when a Fine variant was equipped (bugs 3/6).
+                let rarityClass = equipped.rarity ? (QUALITY_TO_RARITY[equipped.rarity] || '') : '';
+                const isFineEquipped = !!equipped.is_fine
+                    || rarityClass === 'rarity-fine'
+                    || / \(Fine\)$/.test(equipped.name || '');
+                if (isFineEquipped && rarityClass !== 'rarity-fine') rarityClass = 'rarity-fine';
                 const iconPath = equipped.icon_path || '';
                 const title = equipped.name || ii.name || 'Input item';
+                const fineIconClass = isFineEquipped ? ' fine' : '';
                 return `<div class="travel-gear-mini-slot tree-gear-mini-slot tree-gear-mini-slot--input ${rarityClass}" ${dataAttrs} title="${title}">
-                    ${iconPath ? `<img src="${iconPath}" alt="${title}" class="travel-gear-mini-icon" loading="lazy" />` : ''}
+                    ${iconPath ? `<img src="${iconPath}" alt="${title}" class="travel-gear-mini-icon${fineIconClass}" loading="lazy" />` : ''}
                     ${lockOverlay}
                 </div>`;
             }).join('');
@@ -832,6 +1026,7 @@ class TreeNodeCard extends Component {
         return `
             <div class="travel-gear-preview-row">${gearHtml}</div>
             <div class="travel-gear-preview-row tools-row">${toolHtml}${extraHtml}${inputHtml}</div>
+            ${this._renderTreePetAbilityToggle()}
         `;
     }
 
@@ -1300,7 +1495,22 @@ class TreeNodeCard extends Component {
                             const effInt = Math.ceil(eff);
                             effStr = Math.round(effInt).toLocaleString();
                         }
-                        return `<span class="tree-node-qty">×${effStr}</span>`;
+                        // "Use banked materials": when owned stock covers part
+                        // of this (non-root) node's demand, show a
+                        // "N total, M owned" note next to the reduced ×qty so
+                        // the user sees why the number dropped. Root is never
+                        // reduced, so it never shows the note.
+                        const ownedQty = Number(node.owned_quantity || 0);
+                        const totalQty = (node.total_quantity != null)
+                            ? node.total_quantity : eff;
+                        let ownedNote = '';
+                        if (!isRootChip && ownedQty > 0
+                                && totalQty != null && totalQty !== Infinity) {
+                            const totalStr = Math.round(Math.ceil(totalQty)).toLocaleString();
+                            const ownedStr = Math.round(ownedQty).toLocaleString();
+                            ownedNote = ` <span class="tree-node-owned-note" title="You already own ${ownedStr}; the tree only plans the remaining ${effStr}.">${totalStr} total, ${ownedStr} owned</span>`;
+                        }
+                        return `<span class="tree-node-qty">×${effStr}</span>${ownedNote}`;
                     })()}
                     ${
                         // (preview) tag + recipe-name commit link.
@@ -1339,6 +1549,53 @@ class TreeNodeCard extends Component {
                         </span>
                         <div class="lock-warning-text">
                             <span class="lock-warning-header">Requirements not met</span>
+                            <span class="lock-warning-detail">${detail.replace(/</g, '&lt;')}</span>
+                        </div>
+                    </div>`;
+                })() : ''}
+
+                ${node.gear_config?.source_warning ? (() => {
+                    // Skip Chests / Skip Shops forced-fallback notice: this
+                    // item has no craftable/farmable source, so the auto
+                    // resolver had to use a chest/shop the user asked to skip
+                    // (shop preferred over chest). Same yellow ⚠️ box as the
+                    // lock warning above.
+                    const detail = String(node.gear_config.source_warning);
+                    return `<div class="tree-node-lock-warning-box" role="alert">
+                        <span class="lock-warning-icon" aria-hidden="true">
+                            <svg viewBox="0 0 24 24" aria-hidden="true">
+                                <path d="M 13.5 3.2 L 21.5 19.3 Q 23 22 20 22 L 4 22 Q 1 22 2.5 19.3 L 10.5 3.2 Q 12 0.5 13.5 3.2 Z" fill="#4a3a08" stroke="#facc15" stroke-width="2" stroke-linejoin="round"/>
+                                <rect x="10.5" y="8" width="3" height="7" rx="1.5" fill="#facc15"/>
+                                <rect x="10.5" y="16" width="3" height="3" rx="1.5" fill="#facc15"/>
+                            </svg>
+                        </span>
+                        <div class="lock-warning-text">
+                            <span class="lock-warning-header">Skipped source used</span>
+                            <span class="lock-warning-detail">${detail.replace(/</g, '&lt;')}</span>
+                        </div>
+                    </div>`;
+                })() : ''}
+
+                ${(node.gear_config?.requirement_warning || node.metrics?.requirement_warning) ? (() => {
+                    // "Does not meet requirements" note — shown whenever the
+                    // character can't actually perform this node's activity/
+                    // recipe with their level or owned/equipped tools (e.g.
+                    // needs a WC50+ hatchet). Applies in ALL modes: auto-
+                    // optimized AND when the user equips/selects their own gear.
+                    // Red variant of the warning box to distinguish it from the
+                    // yellow lock/source (advisory) warnings.
+                    const detail = String(node.gear_config?.requirement_warning
+                        || node.metrics?.requirement_warning);
+                    return `<div class="tree-node-lock-warning-box tree-node-req-warning-box" role="alert">
+                        <span class="lock-warning-icon" aria-hidden="true">
+                            <svg viewBox="0 0 24 24" aria-hidden="true">
+                                <path d="M 13.5 3.2 L 21.5 19.3 Q 23 22 20 22 L 4 22 Q 1 22 2.5 19.3 L 10.5 3.2 Q 12 0.5 13.5 3.2 Z" fill="#4a1010" stroke="#ef4444" stroke-width="2" stroke-linejoin="round"/>
+                                <rect x="10.5" y="8" width="3" height="7" rx="1.5" fill="#ef4444"/>
+                                <rect x="10.5" y="16" width="3" height="3" rx="1.5" fill="#ef4444"/>
+                            </svg>
+                        </span>
+                        <div class="lock-warning-text">
+                            <span class="lock-warning-header">Does not meet requirements</span>
                             <span class="lock-warning-detail">${detail.replace(/</g, '&lt;')}</span>
                         </div>
                     </div>`;
@@ -1716,6 +1973,21 @@ class TreeNodeCard extends Component {
         const self = this;
         const { node } = this.props;
         if (!node) return;
+
+        // Inline "Use <pet>'s ability" toggle in the crafting-tree node gear
+        // preview. It flips the EQUIPPED pet's useAbility — the single flag the
+        // crafting-tree optimizer reads from ui_config.currentGear.pet (fix
+        // 0973370e) — so it mirrors the column-2 per-pet checkbox rather than
+        // inventing per-node ability state. The change takes effect on the next
+        // Optimize (the hint text says so). store.updateGearSlot persists +
+        // notifies exactly like the column-2 handler.
+        this.$element.on('change', '.tree-pet-ability-checkbox', (e) => {
+            const isChecked = !!e.target.checked;
+            const pet = store.state?.gearsets?.current?.pet;
+            if (pet) {
+                store.updateGearSlot('pet', { ...pet, useAbility: isChecked });
+            }
+        });
 
         // Custom dropdown toggle (source and material)
         this.$element.on('click', '.tree-dropdown-button', function (e) {
@@ -2308,6 +2580,7 @@ class TreeNodeCard extends Component {
                         equippedSlots,
                         alternatives: alts.alternatives || {},
                         lockedAlternatives: alts.locked_alternatives || {},
+                        hiddenAlternatives: alts.hidden_alternatives || {},
                         lockedSlots: targetNode?.locked_slots || {},
                         // Skill of the underlying recipe/activity. Lets the
                         // applicable-stat filter scope to skill-relevant items
@@ -2316,14 +2589,17 @@ class TreeNodeCard extends Component {
                         skill: _treeNodeSkill,
                         sourceType: _treeNodeSourceType,
                         // The tree node's effective location (worker-resolved
-                        // or user-pinned) so location-scoped stats also match
-                        // when relevant. Falls back to null if the node has
-                        // no resolved location yet — global-only stats still
-                        // match in that case.
-                        location: targetNode?.selected_location_id
+                        // or user-pinned), expanded to its region tags so
+                        // region-scoped gear (Quickdraw map's per-realm WE/DA,
+                        // keyed by 'wallisia' etc.) registers as applicable in
+                        // the popup filter — matching column 2. Falls back to
+                        // the bare location if the region map isn't warm yet;
+                        // global-only stats still match either way.
+                        location: _ctResolveLocationContext(
+                            targetNode?.selected_location_id
                             || targetNode?.last_auto_resolved_location
                             || (targetNode?.metrics?.stats_used?.location)
-                            || null,
+                            || null),
                         // Step-count metric to display next to non-owned
                         // items: 'total steps for this node if I locked
                         // this item' (precomputed by the optimizer in
@@ -2401,6 +2677,10 @@ class TreeNodeCard extends Component {
                         if (!item || !item.itemId) continue;
                         locks[slotName] = item;
                     }
+                    // Pin the optimizer's pet/consumable too — the export
+                    // can't carry them, so a decode-derived lock map omits
+                    // them and the next Optimize drops them (bug 9a4a1768).
+                    self._mergeOptimizedPetConsumableLocks(targetNode, locks);
                     targetNode.locked_slots = locks;
                     if (self.props.onRecalculate) self.props.onRecalculate();
                     if (window.api) window.api.showSuccess(`Applied "${gs.name || 'Unnamed'}"`);
@@ -2452,6 +2732,10 @@ class TreeNodeCard extends Component {
                     if (!item || !item.itemId) continue;
                     locks[slotName] = item;
                 }
+                // Pin the optimizer's pet/consumable too — the export
+                // can't carry them, so a decode-derived lock map omits
+                // them and the next Optimize drops them (bug 9a4a1768).
+                self._mergeOptimizedPetConsumableLocks(targetNode, locks);
                 targetNode.locked_slots = locks;
                 if (self.props.onImport) {
                     self.props.onImport(nodeId);

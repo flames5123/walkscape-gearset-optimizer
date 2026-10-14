@@ -2515,6 +2515,24 @@ CORAL_PLANK = RecipeInstance(
     ],
 )
 
+MAHOGANY_PLANK = RecipeInstance(
+    name='Cut a mahogany plank',
+    output_item='Material.MAHOGANY_PLANK',
+    skill='Carpentry',
+    level=70,
+    service='Advanced Sawmill',
+    quantity=1,
+    materials=[
+        [(2, Material.MAHOGANY_LOGS)],
+    ],
+    base_xp=146.0,
+    base_steps=199,
+    max_efficiency=1.4,
+    drop_table=[
+        {'item_name': 'Carpentry chest', 'item_ref': 'Container.CARPENTRY_CHEST', 'item_type': 'Container', 'quantity': 1, 'quantity_min': 1, 'quantity_max': 1, 'chance_percent': 0.4},
+    ],
+)
+
 MANGROVE_PLANK = RecipeInstance(
     name='Cut a mangrove plank',
     output_item='Material.MANGROVE_PLANK',
@@ -5145,6 +5163,7 @@ class Recipe:
     LINEN_CLOTH = RECIPES_BY_NAME['Make linen cloth']
     LOBSTER = RECIPES_BY_NAME['Fry a lobster']
     LOBSTER_POT = RECIPES_BY_NAME['Craft a lobster pot']
+    MAHOGANY_PLANK = RECIPES_BY_NAME['Cut a mahogany plank']
     MANGROVE_BASKET = RECIPES_BY_NAME['Craft a mangrove basket']
     MANGROVE_PLANK = RECIPES_BY_NAME['Cut a mangrove plank']
     MAPLE_PLANK = RECIPES_BY_NAME['Cut a maple plank']

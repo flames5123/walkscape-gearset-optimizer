@@ -298,6 +298,41 @@ def _chest_target_name_for_node(node):
     return "cat:chests"
 
 
+def _default_sorting_priority(default_metric, node_source_type,
+                              node_chest_target, use_fine, user_target_quality):
+    """Pick the default per-node optimization target when the node declares no
+    explicit optimization_targets.
+
+    Split out so the branch ordering is unit-testable without the optimizer
+    subprocess (bug a0fddc30).
+
+    Precedence:
+      1. Non-Normal quality recipe target  -> steps_for_target::<quality>
+      2. Chest-source node                 -> steps_per_reward_roll::<chest>
+      3. Fine mode on a gather activity    -> steps_per_reward_roll::cat:fine
+      4. Everything else                   -> bare default_metric
+
+    The chest branch MUST outrank the fine branch. Chest loot is a fixed drop
+    table — fine material finding (FMF) does not change what a chest yields — so
+    a chest-source node with fine mode on must NOT be optimized for 'cat:fine'
+    (which picks useless FMF gear, bug a0fddc30). `node_chest_target` is truthy
+    only for chest nodes (which are remapped to node_source_type=="activity"
+    before this is called), so ordering it first routes chests to
+    chests-per-step and leaves genuine gather activities on the fine default.
+    """
+    if default_metric == "steps_for_target":
+        return [[default_metric, 100, user_target_quality]]
+    if node_chest_target:
+        # Chest-source node: target the specific chest so the scorer optimizes
+        # chests-per-step (values chest_finding + DA/DR for THIS chest via the
+        # steps_per_reward_roll::<chest> composite), matching the standalone
+        # cat:chests path the user had to fall back to. Bug b24a13f8.
+        return [[default_metric, 100, node_chest_target]]
+    if node_source_type in ("activity", "chest") and use_fine:
+        return [[default_metric, 100, "cat:fine"]]
+    return [[default_metric, 100]]
+
+
 def optimize_crafting_tree(
     session_uuid: str,
     nodes: list,
@@ -310,6 +345,7 @@ def optimize_crafting_tree(
     *,
     node_executor,
     log,
+    exact_executor=None,
 ):
     """Shared crafting-tree node-optimization core (server + local Pyodide).
 
@@ -329,7 +365,114 @@ def optimize_crafting_tree(
     """
     import subprocess  # noqa: F401  (used by `except subprocess.TimeoutExpired`)
 
-    # --- Gear-aware Best(auto) route resolution (bug 9b3527ef) ----------------
+    # Part 3: "temporarily enable all stats" override. When set (carried in
+    # global_settings from the frontend), force every custom-stat gate satisfied
+    # for this run so gated gear/tools are considered. Non-destructive — rebinds
+    # the local ui_config to a per-run copy; the stored session is untouched.
+    # Applied once here so BOTH the exact driver and the normal per-node
+    # executor (which each read this ui_config) see the override.
+    if global_settings.get("all_custom_stats_enabled") or global_settings.get("unlock_all"):
+        from util.custom_stats_catalog import apply_all_stats_override
+        ui_config = dict(ui_config or {})
+        ui_config["custom_stats"] = apply_all_stats_override(ui_config.get("custom_stats"), True)
+
+    # "Unlock all": max the character's gating attributes (AP/reputation/skills/
+    # steps/wealth) for this run so every requirement passes and every gated
+    # stat resolves at max. Rebinds session_data to a per-run copy (the stored
+    # session is untouched); both the exact driver and normal per-node executor
+    # build their Character from this session_data.
+    if global_settings.get("unlock_all"):
+        from util.unlock_all import apply_unlock_all_to_character_config
+        session_data = apply_unlock_all_to_character_config(session_data)
+
+    # --- PROTOTYPE: exact bottom-up solver (gated, default OFF) ---------------
+    # When global_settings['exact_tree'] is set, delegate to the exact per-node
+    # B&B driver (leaves via target-rate, recipes via downstream-weighted
+    # steps-to-output) instead of the heuristic per-node + route-trial pass.
+    # Solves each node once bottom-up (no route-trial fan-out) — validated ~10s
+    # on trees that time out at 2m+ on the heuristic. The heuristic remains the
+    # default; this branch is entered ONLY when the flag is explicitly on.
+    if global_settings.get("exact_tree"):
+        try:
+            _eligible_x = [n for n in nodes
+                           if n.get("source_type") != "bank"
+                           and n.get("gear_config", {}).get("mode") == "auto"
+                           and (not node_ids or n["node_id"] in node_ids)]
+            task["total"] = len(_eligible_x)
+            task["pending"] = len(_eligible_x)
+            _exact_budget = int(global_settings.get("exact_node_budget", 400_000))
+            if exact_executor is not None:
+                # Server path (2026-10-09): the exact bottom-up B&B solver is a
+                # pure-Python, GIL-bound CPU loop. Running it inline here (in a
+                # Starlette threadpool thread inside the web process) starved
+                # the event loop for tens of seconds per node and took the main
+                # site down. Delegate to a SEPARATE, reniced process
+                # (ui/exact_tree_worker.py) so the web process keeps serving
+                # requests and the solve yields CPU under contention. The worker
+                # runs the SAME optimize_tree_exact + calculate_tree sequence as
+                # the inline branch below and returns the solved nodes + diag.
+                _res = exact_executor({
+                    "session_uuid": session_uuid,
+                    "nodes": nodes,
+                    "global_settings": global_settings,
+                    "session_data": session_data,
+                    "ui_config": ui_config,
+                    "node_budget": _exact_budget,
+                })
+                _solved = _res.get("nodes")
+                if _solved is not None:
+                    # Replace list contents in place so task["final_nodes"] =
+                    # nodes (below) reflects the solved state the worker wrote.
+                    nodes[:] = _solved
+                diag = _res.get("diag") or {}
+                for _line in (_res.get("stdout") or "").splitlines():
+                    if _line.strip():
+                        log(_line, session_uuid)
+            else:
+                # Local/native path: run inline (unchanged). The exact driver is
+                # not in the Pyodide bundle, so this in-process branch is only
+                # reached by the native local runner; the server always passes
+                # an exact_executor.
+                from ui.crafting_tree_exact_driver import optimize_tree_exact
+                from ui.crafting_tree import (calculate_tree as _ct_calc_x,
+                                              _load_game_data as _ct_load_x)
+                diag = optimize_tree_exact(session_uuid, nodes, global_settings,
+                                           session_data, ui_config,
+                                           node_budget=_exact_budget, log=log)
+                # Authoritative metrics from the tree's own display path.
+                try:
+                    _ct_calc_x(nodes, global_settings, _ct_load_x(), session_data)
+                except Exception as _cx:
+                    log(f"Crafting tree exact: calculate_tree refresh failed: {_cx!r}", session_uuid)
+            for _n in nodes:
+                _gc = _n.get("gear_config", {}) or {}
+                task["completed_nodes"].append({
+                    "node_id": _n["node_id"],
+                    "gearset_export": _gc.get("optimized_export"),
+                    "stats": _gc.get("optimized_stats", {}),
+                    "metrics": _n.get("metrics", {}),
+                    # Surface the exact driver's computed item upgrades so the
+                    # tree-node slot popup renders them (bug: alternatives not
+                    # calculated under the exact optimizer). Mirrors the
+                    # heuristic path, which carries slot_alternatives on each
+                    # completed-node entry.
+                    "slot_alternatives": _gc.get("slot_alternatives"),
+                    "exact": True,
+                })
+            task["pending"] = 0
+            task["final_nodes"] = nodes
+            task["exact_diagnostics"] = diag
+            task["status"] = "cancelled" if task.get("cancelled") else "complete"
+            log(f"Crafting tree EXACT solve complete in {diag.get('wall_time')}s "
+                f"({len(diag.get('per_node', []))} nodes)", session_uuid)
+            return
+        except Exception as _ex_err:
+            # Fail safe: fall through to the heuristic path on any driver error.
+            import traceback
+            log(f"Crafting tree exact driver failed ({_ex_err!r}); falling back "
+                f"to heuristic. {traceback.format_exc()}", session_uuid)
+
+
     # The per-node optimize loop is wrapped in a reusable pass so it can run
     # over the real tree AND over trial deepcopies of a single Best(auto)
     # node's candidate-route subtrees. `record` gates progress / completed-node
@@ -344,14 +487,28 @@ def optimize_crafting_tree(
             if record:
                 task["pending"] = max(0, task.get("pending", 1) - 1)
         for node in eligible:
+            # Cooperative cancellation: /api/crafting-tree/optimize-cancel sets
+            # task["cancelled"] on this shared dict. Stop at the next node
+            # boundary so the in-flight per-node subprocess finishes cleanly
+            # rather than being orphaned mid-write. Applies to trial (route-
+            # resolution) passes too — a cancelled run should short-circuit.
+            if task.get("cancelled"):
+                break
             try:
                 # Determine the activity/recipe ID for the worker
                 node_source_type = node.get("source_type", "activity")
                 # Resolve 'best' to the underlying source type
                 if node_source_type == "best":
                     node_source_type = node.get("underlying_source_type", "activity")
-                # Skip shop/bank nodes — nothing to optimize
-                if node_source_type in ("bank", "shop"):
+                # Skip shop/bank nodes — nothing to optimize. Also skip a node
+                # that is STILL 'best' after the remap: a shop-only Best(auto)
+                # node under skip_shops (e.g. Simple wrench) never resolves to a
+                # concrete source (its underlying_source_type is itself 'best'),
+                # so there's nothing to gear-optimize. Sending source_type=best
+                # to the worker fails with "Invalid crafting_tree_node config:
+                # source_type=best" and surfaces as an optimization error (bug
+                # d9272bd4). Treat it like bank/shop — it's bought, not farmed.
+                if node_source_type in ("bank", "shop", "best"):
                     _dec_pending()
                     continue
                 node_activity_id = None
@@ -451,7 +608,24 @@ def optimize_crafting_tree(
                     global_settings.get("optimize_pets",
                         ui_config.get("include_pets", False))
                 )
-                cache_key = (node_source_type, node_recipe_id or node_activity_id, node_location or '', node_service_id or '', _locked_key, _include_pets_for_cache, _include_consumables_for_cache, node_chest_target or '')
+                # Equipped pet's per-pet "Use ability" pin (e.g. the Golden
+                # Frog's Lucky Day = +20 artisan quality_outcome). Passed through
+                # to the per-node optimizer below (request_data["equipped_pet"])
+                # so the ability is actually applied to quality-bearing tree
+                # nodes. Previously the tree worker omitted equipped_pet, so the
+                # recipe branch never pinned the ability pet and the ability was
+                # silently dropped — the frog looked ignored for quality crafts
+                # (frog-ability bug). Part of the cache key so toggling the pin
+                # produces distinct cached gearsets.
+                _equipped_pet_cfg = (ui_config.get("currentGear") or {}).get("pet")
+                _use_ability_pet_key = (
+                    _equipped_pet_cfg.get("itemId")
+                    if isinstance(_equipped_pet_cfg, dict)
+                    and _equipped_pet_cfg.get("useAbility")
+                    and _equipped_pet_cfg.get("itemId")
+                    else ''
+                )
+                cache_key = (node_source_type, node_recipe_id or node_activity_id, node_location or '', node_service_id or '', _locked_key, _include_pets_for_cache, _include_consumables_for_cache, node_chest_target or '', _use_ability_pet_key)
                 if cache_key in _optimization_cache:
                     cached = _optimization_cache[cache_key]
                     node["gear_config"]["optimized_export"] = cached.get("gearset_export")
@@ -553,20 +727,13 @@ def optimize_crafting_tree(
                 # recipe.output_item regardless of fine, so the existing
                 # quality-aware default is correct.
                 if not sorting_priority:
-                    if default_metric == "steps_for_target":
-                        sorting_priority = [[default_metric, 100, _user_target_quality]]
-                    elif (node_source_type in ("activity", "chest")
-                            and global_settings.get("use_fine")):
-                        sorting_priority = [[default_metric, 100, "cat:fine"]]
-                    elif node_chest_target:
-                        # Chest-source node: target the specific chest so the
-                        # scorer optimizes chests-per-step (values chest_finding
-                        # + DA/DR for THIS chest via the steps_per_reward_roll::
-                        # <chest> composite), matching the standalone cat:chests
-                        # path the user had to fall back to. Bug b24a13f8.
-                        sorting_priority = [[default_metric, 100, node_chest_target]]
-                    else:
-                        sorting_priority = [[default_metric, 100]]
+                    # Default target selection (extracted + unit-tested as
+                    # _default_sorting_priority). Chest nodes are routed to the
+                    # chest target ahead of the use_fine 'cat:fine' default so
+                    # they never pick useless FMF gear (bug a0fddc30).
+                    sorting_priority = _default_sorting_priority(
+                        default_metric, node_source_type, node_chest_target,
+                        global_settings.get("use_fine"), _user_target_quality)
 
                 request_data = {
                     "type": "crafting_tree_node",
@@ -595,6 +762,15 @@ def optimize_crafting_tree(
                     # effect on tree optimization.
                     "include_consumables": _include_consumables_for_cache,
                     "include_pets": _include_pets_for_cache,
+                    # Equipped pet + its per-pet "Use ability" flag. The recipe
+                    # branch (optimize_worker) pins this pet with its ability
+                    # stats merged when useAbility is set, so an artisan quality
+                    # ability (e.g. the Golden Frog's Lucky Day = +20
+                    # quality_outcome) is applied to quality-bearing tree nodes
+                    # instead of being dropped. The resolver no-ops when
+                    # useAbility is false or no pet is equipped, so this is inert
+                    # for the common case. (frog-ability bug.)
+                    "equipped_pet": _equipped_pet_cfg,
                     # Tree-node opt-in toggles (Optimize Pets / Optimize
                     # Consumables in the crafting-tree global settings).
                     # Kept for back-compat with any worker code that still
@@ -626,7 +802,17 @@ def optimize_crafting_tree(
                     # run a fast greedy estimate (no deep 2/4-swap search) so we
                     # can RANK Best(auto) routes cheaply. The winning route is
                     # re-optimized at full depth afterward (bug f5a30d6b).
-                    "fast_rank": bool(fast_rank),
+                    #
+                    # "Use fast chests" (global_settings.fast_chests): when on,
+                    # chest-source nodes ALSO run the fast greedy pass so the
+                    # (usually many, low-value) chest gearsets don't pay the
+                    # full deep-search cost. node_chest_target is truthy only
+                    # for chest-source nodes. Only relevant when Skip Chests is
+                    # off (the UI hides the toggle otherwise). Read from
+                    # global_settings (always in closure scope) rather than a
+                    # later-assigned local, so this is safe regardless of pass
+                    # ordering.
+                    "fast_rank": bool(fast_rank or (global_settings.get("fast_chests", False) and node_chest_target is not None)),
                 }
 
                 # Tree-aware downstream cost specs for recipe nodes. Builds
@@ -726,8 +912,14 @@ def optimize_crafting_tree(
                             merged.update(user_inputs_by_idx)
                             if merged:
                                 request_data["input_items"] = {str(k): v for k, v in merged.items()}
+                                # Wire the crafting-tree "Use fine inputs" toggle
+                                # (global_settings.use_fine_inputs) to the per-node
+                                # optimizer so it selects the fine input variant.
+                                # NOTE: the settings key is `use_fine_inputs`; the
+                                # old `use_fine_materials` key was never written by
+                                # the frontend, so fine inputs were always off.
                                 request_data["use_fine_inputs"] = bool(
-                                    global_settings.get("use_fine_materials", False)
+                                    global_settings.get("use_fine_inputs", False)
                                 )
                                 _src = []
                                 for k, v in merged.items():
@@ -908,10 +1100,12 @@ def optimize_crafting_tree(
                         # from "alternatives never computed".
                         _opt_alts = opt_result.get("alternatives")
                         _opt_locked_alts = opt_result.get("locked_alternatives")
-                        if _opt_alts is not None or _opt_locked_alts is not None:
+                        _opt_hidden_alts = opt_result.get("hidden_alternatives")
+                        if _opt_alts is not None or _opt_locked_alts is not None or _opt_hidden_alts is not None:
                             node["gear_config"]["slot_alternatives"] = {
                                 "alternatives": _opt_alts or {},
                                 "locked_alternatives": _opt_locked_alts or {},
+                                "hidden_alternatives": _opt_hidden_alts or {},
                             }
                         else:
                             node["gear_config"]["slot_alternatives"] = None
@@ -1066,6 +1260,13 @@ def optimize_crafting_tree(
     )
     _game_data = _ct_load()
     _skip_shops = global_settings.get("skip_shops", True)
+    # Skip Chests (auto): drop chest routes from Best(auto) route resolution
+    # (mirrors skip_shops). Forced fallback to chest/shop is handled inside
+    # route_candidates() when an item has no other source.
+    _skip_chests = global_settings.get("skip_chests", True)
+    # "Use fast chests (greedy; not optimal)" is read directly from
+    # global_settings["fast_chests"] inside _optimize_pass (chest-source nodes
+    # run the fast greedy pass). Only meaningful when skip_chests is off.
 
     def _eligible_filter(n):
         if n.get("source_type") == "bank":
@@ -1130,6 +1331,27 @@ def optimize_crafting_tree(
         _optimize_pass(_trial, _sub_elig, _tcbp, {}, record=False, fast_rank=fast_rank)
         _ct_calc(_trial, global_settings, _game_data, session_data)
         _tbn = next((n for n in _trial if n["node_id"] == _bn_id), None)
+        # Feasibility gate (bug 65a22653 / Option A): if any node in this
+        # candidate route's subtree can't actually be performed with the
+        # character's level or owned tools (e.g. "Cut ectoplasm trees" needs a
+        # WC50+ hatchet the player lacks), calculate_node_metrics stamps a
+        # `requirement_warning` on it. Treat the whole route as INFEASIBLE
+        # (steps/item = inf) so auto Best(auto) routing skips it — matching the
+        # exact optimizer, which excludes such routes via
+        # filter_items_failing_keyword_level_requirements. Without this the
+        # heuristic recommends an in-game-impossible route (e.g. crafting logs
+        # with a WC40 hatchet).
+        try:
+            _sub = _ct_descendant_ids(_trial, _bn_id) | {_bn_id}
+            for _sn in _trial:
+                if _sn["node_id"] not in _sub:
+                    continue
+                _rw = ((_sn.get("gear_config") or {}).get("requirement_warning")
+                       or (_sn.get("metrics") or {}).get("requirement_warning"))
+                if _rw:
+                    return float("inf")
+        except Exception:
+            pass
         _spi = (_tbn or {}).get("metrics", {}).get("steps_per_item")
         try:
             return float(_spi) if _spi is not None else float("inf")
@@ -1137,11 +1359,97 @@ def optimize_crafting_tree(
             return float("inf")
 
     resolved_ids = set()  # node_ids already gear-optimized via a winning trial
+
+    # --- Cross-node route cache (bug d9272bd4) --------------------------------
+    # A tree can contain the SAME Best(auto) material at multiple depths (e.g.
+    # two `Material.KELP` nodes feeding different recipes). Each one used to run
+    # the full Phase-1 cheap-rank over ALL its candidate routes independently —
+    # so an item with 15 candidate sources appearing twice cost 2×15 route
+    # trials. On the in-browser (Pyodide) path each trial is a real per-node
+    # optimize, and this fan-out blew past the 120s poll budget on mobile.
+    #
+    # Identical Best(auto) nodes resolve to the same route, so cache the winning
+    # candidate by a signature over (item, candidate set, the global settings
+    # that affect the pick, and the node's locks). A cache hit skips Phase 1
+    # entirely and only runs a single full optimize for the known winner — the
+    # gearset is still computed fresh against THIS node's own subtree, so route
+    # correctness (bug 9b3527ef) is preserved.
+    _route_cache = {}  # sig -> winning candidate identity key
+
+    def _cand_key(_c):
+        return (_c.get("type"), _c.get("source_id"),
+                _c.get("parent_activity_id"), _c.get("chest_source"),
+                _c.get("material_group_index"))
+
+    def _route_sig(_node, _cands_for_node):
+        _locks = _node.get("locked_slots") or {}
+        _lock_sig = tuple(sorted(
+            (str(slot), str(info.get("itemId") if isinstance(info, dict) else info))
+            for slot, info in _locks.items()
+        ))
+        # Sort candidate keys by a None-safe stringified form (keys mix str and
+        # None, e.g. material_group_index/chest_source), then keep the raw keys.
+        _cand_keys = sorted(
+            (_cand_key(c) for c in _cands_for_node),
+            key=lambda k: tuple("" if v is None else str(v) for v in k),
+        )
+        return (
+            _node.get("item_id"),
+            tuple(_cand_keys),
+            _skip_shops,
+            global_settings.get("target_quality", "Normal"),
+            bool(global_settings.get("use_fine", False)),
+            bool(global_settings.get("optimize_pets", False)),
+            bool(global_settings.get("optimize_consumables", False)),
+            _lock_sig,
+        )
+
+    # --- Candidate cap (bug d9272bd4) -----------------------------------------
+    # A raw material is best sourced from its direct recipe/activity — NOT by
+    # farming chests that only incidentally drop it. Some materials surface a
+    # dozen+ "chest" routes (e.g. Material.KELP had 14), and route resolution
+    # would gear-optimize EVERY one. Even server-side that fan-out took >200s
+    # for the reported tree. Cap it: keep all direct (recipe/activity) routes so
+    # gear-aware route correctness (bug 9b3527ef) is preserved, and keep at most
+    # one chest route as a fallback. When a material has ONLY chest routes, keep
+    # a few. Hard-ceiling the total so no single node can explode.
+    MAX_CHEST_ROUTE_CANDIDATES = 1
+    MAX_ROUTE_CANDIDATES = 6
+
+    def _cap_route_candidates(_cands_in):
+        _non_chest = [c for c in _cands_in if c.get("type") != "chest"]
+        _chests = [c for c in _cands_in if c.get("type") == "chest"]
+        if _non_chest:
+            _capped = _non_chest + _chests[:MAX_CHEST_ROUTE_CANDIDATES]
+        else:
+            _capped = _chests[:3]
+        return _capped[:MAX_ROUTE_CANDIDATES]
+
     for _bn in route_best_nodes:
         _bn_id = _bn["node_id"]
-        _cands = _ct_route_candidates(_bn.get("available_sources") or [], skip_shops=_skip_shops)
+        _cands = _ct_route_candidates(_bn.get("available_sources") or [], skip_shops=_skip_shops, skip_chests=_skip_chests)
+        _cands = _cap_route_candidates(_cands)
         if len(_cands) <= 1:
             continue
+
+        # Cross-node cache: an identical Best(auto) node already resolved this
+        # exact route decision. Skip the full candidate ranking and only trial
+        # the known winner for this node (bug d9272bd4).
+        _sig = _route_sig(_bn, _cands)
+        _cached_key = _route_cache.get(_sig)
+        if _cached_key is not None:
+            _match = next((c for c in _cands if _cand_key(c) == _cached_key), None)
+            if _match is not None:
+                log(f"  [ct-route] {_bn.get('item_id')}: reusing cached route "
+                    f"{_match.get('type')}:{_match.get('source_id')} "
+                    f"(shared with earlier identical node)", session_uuid)
+                _finalists = [_match]
+                _from_cache = True
+            else:
+                _cached_key = None  # candidate not present here — fall through
+                _from_cache = False
+        else:
+            _from_cache = False
 
         # --- Phase 1: cheap, gear-aware ranking of EVERY candidate route. ----
         # A greedy (swaps-off, single-iteration) optimize is fast and good
@@ -1152,22 +1460,23 @@ def optimize_crafting_tree(
         # preserved: the estimate is gear-aware, and near-ties are settled by a
         # full optimize in Phase 2.
         _cheap = []  # (cheap_spi, _cand)
-        for _cand in _cands:
-            _built = _build_route_trial(_bn_id, _cand)
-            if _built is None:
-                continue
-            try:
-                _spi = _trial_steps_per_item(_built[0], _built[1], _built[2], _bn_id, True)
-            except Exception as _e:
-                log(f"  [ct-route] cheap-rank failed for {_bn_id} "
-                    f"cand={_cand.get('type')}:{_cand.get('source_id')}: {_e!r}", session_uuid)
-                continue
-            log(f"  [ct-route] {_bn.get('item_id')} via "
-                f"{_cand.get('type')}:{_cand.get('source_id')} -> cheap steps/item={_spi:.1f}",
-                session_uuid)
-            _cheap.append((_spi, _cand))
+        if not _from_cache:
+            for _cand in _cands:
+                _built = _build_route_trial(_bn_id, _cand)
+                if _built is None:
+                    continue
+                try:
+                    _spi = _trial_steps_per_item(_built[0], _built[1], _built[2], _bn_id, True)
+                except Exception as _e:
+                    log(f"  [ct-route] cheap-rank failed for {_bn_id} "
+                        f"cand={_cand.get('type')}:{_cand.get('source_id')}: {_e!r}", session_uuid)
+                    continue
+                log(f"  [ct-route] {_bn.get('item_id')} via "
+                    f"{_cand.get('type')}:{_cand.get('source_id')} -> cheap steps/item={_spi:.1f}",
+                    session_uuid)
+                _cheap.append((_spi, _cand))
 
-        _finalists = _select_route_finalists(_cheap, ROUTE_FINALIST_BAND)
+            _finalists = _select_route_finalists(_cheap, ROUTE_FINALIST_BAND)
         if not _finalists:
             continue
 
@@ -1213,6 +1522,9 @@ def optimize_crafting_tree(
                      if n["node_id"] != _bn_id and n["node_id"] not in _old_sub_ids]
                     + [_win_bn] + _win_children)
         resolved_ids |= ({_bn_id} | _win_sub_ids)
+        # Remember this route decision so an identical Best(auto) node later in
+        # the tree skips the full candidate ranking (bug d9272bd4).
+        _route_cache[_sig] = _cand_key(_best_cand)
         log(f"  [ct-route] {_bn.get('item_id')}: chose "
             f"{_best_cand.get('type')}:{_best_cand.get('source_id')} "
             f"(steps/item={_best_spi:.1f})", session_uuid)
@@ -1260,5 +1572,8 @@ def optimize_crafting_tree(
     # Route resolution rebuilds subtrees (new node_ids), so the frontend can't
     # merge by node_id alone — hand it the full updated tree to adopt.
     task["final_nodes"] = nodes
-    task["status"] = "complete"
+    # Preserve a cancellation: if /api/crafting-tree/optimize-cancel flipped the
+    # flag while we were mid-run, the loop broke early — report "cancelled" so
+    # the frontend's poll stops and shows the cancel toast instead of "complete".
+    task["status"] = "cancelled" if task.get("cancelled") else "complete"
 

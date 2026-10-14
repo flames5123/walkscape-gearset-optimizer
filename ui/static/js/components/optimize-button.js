@@ -17,10 +17,13 @@ import Component from './base.js';
 import store from '../state.js';
 import api from '../api.js';
 import { wireInfoIcons } from '../info-popover.js';
+import { SettingsPanel, Toggle } from './settings-panel.js';
+import { createStandardOptimizerChips } from './optimizer-chips.js';
 import { runLocalCompute } from '../local-compute.js';
 import { runTravelOptimizeLocal, isLocalComputeEnabled } from '../local-compute.js';
 import { maybeShowLocalSpeedWarning } from '../local-speed-warning.js';
 import { getInstantActionsPet, getAbilityStatsPet, SMELTING_RECIPE_NAMES } from '../utils/pet-utils.js';
+import { abilityExtraLines } from '../utils/ability-detail.js';
 import { mountXyPriorityList, defaultRecipeEntries, ensureXyStyles } from './xy-recipe-priority-list.js';
 import { mountXyActivityPriorityList, defaultActivityEntries } from './xy-activity-priority-list.js';
 import { mountTravelPriorityList, defaultTravelEntries } from './travel-priority-list.js';
@@ -79,8 +82,44 @@ class OptimizeButton extends Component {
         // modal, goals report, crafting-tree settings).
         window.addEventListener('runLocalOptimizationChanged', () => {
             const enabled = !!(window.settingsModal && window.settingsModal.runLocalOptimization);
-            const $cb = this.$element && this.$element.find && this.$element.find('.opt-run-local-checkbox');
-            if ($cb && $cb.length) $cb.prop('checked', enabled);
+            if (this.$element && this.$element.find) {
+                this.$element.find('.opt-runlocal-chip').toggleClass('selected', enabled).attr('aria-pressed', enabled ? 'true' : 'false');
+            }
+            if (this._settingsPanel) this._settingsPanel.syncState();
+        });
+
+        // Keep the Column 3 "Optimize services" chip in sync when the toggle is
+        // changed from the settings modal (or the other panel).
+        window.addEventListener('optimizeServicesChanged', (ev) => {
+            const enabled = !!(ev && ev.detail ? ev.detail.enabled
+                : (window.settingsModal && window.settingsModal.optimizeServices));
+            if (this.$element && this.$element.find) {
+                this.$element.find('.opt-services-chip').toggleClass('selected', enabled).attr('aria-pressed', enabled ? 'true' : 'false');
+            }
+            if (this._settingsPanel) this._settingsPanel.syncState();
+        });
+
+        // Keep the Column 3 "Include consumables" quick toggle (both designs)
+        // in sync when the global include_consumables setting is changed from
+        // another surface (settings modal, goals report).
+        window.addEventListener('includeConsumablesChanged', (ev) => {
+            const enabled = !!(ev && ev.detail ? ev.detail.enabled
+                : (window.settingsModal && window.settingsModal.includeConsumables));
+            this._syncIncludeConsumablesUI(enabled);
+            if (this._settingsPanel) this._settingsPanel.syncState();
+        });
+
+        // Keep the Column 3 "Use pets" chip + "Use Ability" sub-chip in sync
+        // when include_pets / use_pet_ability are changed from another surface.
+        window.addEventListener('includePetsChanged', (ev) => {
+            const enabled = !!(ev && ev.detail ? ev.detail.enabled
+                : (window.settingsModal && window.settingsModal.includePets));
+            this._syncIncludePetsUI(enabled);
+            if (this._settingsPanel) this._settingsPanel.syncState();
+        });
+        window.addEventListener('usePetAbilityChanged', () => {
+            this._syncPetSuboptsUI();
+            if (this._settingsPanel) this._settingsPanel.syncState();
         });
 
         // Listen for show item finding drops checkbox change
@@ -109,6 +148,27 @@ class OptimizeButton extends Component {
         window.addEventListener('optimizationSettingsLoaded', () => {
             // Don't re-render if we're animating a duplicate/remove (we handle our own render)
             if (this._skipSettingsRerender) return;
+
+            // A consumable-options quick toggle persists via this same
+            // save→optimizationSettingsLoaded path. A full render() here would
+            // replace the chip DOM mid-transition and kill the CSS animation
+            // (and the sub-opts slide) — intermittently, since the save is
+            // async. During the brief post-toggle window, keep the chips in
+            // sync via class toggles only (which animate) and skip the render.
+            if (this._suppressConsumableRerenderUntil && Date.now() < this._suppressConsumableRerenderUntil) {
+                this._syncIncludeConsumablesUI(!!(window.settingsModal && window.settingsModal.includeConsumables));
+                if (this._settingsPanel) this._settingsPanel.syncState();
+                return;
+            }
+            if (this._suppressPetsRerenderUntil && Date.now() < this._suppressPetsRerenderUntil) {
+                this._syncIncludePetsUI(!!(window.settingsModal && window.settingsModal.includePets));
+                if (this._settingsPanel) this._settingsPanel.syncState();
+                return;
+            }
+            if (this._suppressSimpleRerenderUntil && Date.now() < this._suppressSimpleRerenderUntil) {
+                if (this._settingsPanel) this._settingsPanel.syncState();
+                return;
+            }
 
             if (this.inlineSettingsOpen) {
                 // Inline panel is open — always re-render the panel when settings load,
@@ -201,6 +261,29 @@ class OptimizeButton extends Component {
         this.instantActionsSmelting = !!sessionConfig.instant_actions_smelting;
 
         this.render();
+
+        // Bug: the collectibles-target N/A grey-out and its (ⓘ) items popover
+        // did not refresh when the ACTIVITY changed (only on comparison /
+        // detailed toggles, which re-mount the panels). render() re-mounts the
+        // Quick panel with fresh dropTableData, but the inline Detailed panel
+        // (and the Settings-modal panel) persist. Push the new drop table into
+        // every mounted activity priority controller so N/A + (ⓘ) recompute.
+        this._refreshMountedActivityDropTables();
+    }
+
+    /**
+     * Push the current activity drop table into every mounted X-per-Y activity
+     * priority controller (Column 3 Quick, Column 3 inline Detailed, Settings
+     * modal Detailed) so each recomputes target availability (N/A greying) and
+     * the per-target (ⓘ) items popover. Safe no-op for controllers that aren't
+     * mounted. See setActivityDropTable in xy-activity-priority-list.js.
+     */
+    _refreshMountedActivityDropTables() {
+        const dt = this.dropTableData || null;
+        const push = (c) => { try { c && c.setActivityDropTable && c.setActivityDropTable(dt); } catch (e) { /* noop */ } };
+        push(this._xyActivityQuickController);
+        push(this._xyActivityInlineController);
+        try { push(window.settingsModal && window.settingsModal._xyActivityController); } catch (e) { /* noop */ }
     }
 
     /**
@@ -263,6 +346,17 @@ class OptimizeButton extends Component {
             }
         } catch (error) {
             console.error('Failed to load drop table:', error);
+        } finally {
+            // Authoritative refresh: push the freshly-loaded drop table into the
+            // mounted target dropdowns HERE, where this.dropTableData is
+            // guaranteed current. onSelectionChange's post-render refresh can
+            // race ahead of this async load — proven by bug c69089e8, where the
+            // refresh ran with the PREVIOUS activity's table (dtLen/hasCollectible
+            // of the old activity) so collectibles N/A never appeared on switching
+            // to a non-collectible activity. Running it in this finally guarantees
+            // the target dropdown recomputes N/A + (ⓘ) against the current
+            // activity's drops. Safe no-op when no activity panels are mounted.
+            try { this._refreshMountedActivityDropTables(); } catch (e) { /* noop */ }
         }
     }
 
@@ -513,6 +607,10 @@ class OptimizeButton extends Component {
         this.isOptimizing = true;
         this.showEquipButton = false;
         this.optimizedGearsetId = null;
+        // Comparison mode: which gear set (1 or 2) this run targets. Drives the
+        // per-slot spinner and which slot the result equips to. null in single
+        // mode (equips to the active/only gear set, slot 1).
+        this._optimizingSlot = options.targetSlot || null;
         this._suppressResultUI = !!options.suppressResultUI;
         this._findAlternativesOnly = !!options.findOnly;
         this._wasCancelled = false;
@@ -526,13 +624,19 @@ class OptimizeButton extends Component {
 
         try {
             const payload = { start, end };
+            // In comparison mode, the target slot's own gear seeds the fixed
+            // (pet/consumable) + locked slots so "Optimize Set 2" respects
+            // Set 2's equipped pet/consumable/locks rather than Set 1's.
+            const sourceGear = (this._optimizingSlot === 2)
+                ? (store.state.gearsets?.gearset2 || {})
+                : (store.state.gearsets?.current || {});
             // Build locked_slots from per-slot locks + global lock toggle.
             // Bug 0ca4acab: previously only options.overrideLocks was passed,
             // so per-slot locks (e.g. user locked Primary to Farganite sword
             // Eternal) were silently ignored by the travel optimizer.
             const lockedSlots = options.overrideLocks
                 ? { ...options.overrideLocks }
-                : this._buildTravelLockedSlots();
+                : this._buildTravelLockedSlots(sourceGear);
             if (lockedSlots && Object.keys(lockedSlots).length > 0) {
                 payload.locked_slots = lockedSlots;
             }
@@ -545,7 +649,7 @@ class OptimizeButton extends Component {
             // Travel info display. Pet level resolved the same way Combined Stats /
             // encodeCurrentGearset do (user_overrides -> store.items -> slot) to
             // keep optimizer scoring and the displayed stats consistent.
-            const fixedSlots = this._buildTravelFixedSlots();
+            const fixedSlots = this._buildTravelFixedSlots(sourceGear);
             if (fixedSlots) {
                 payload.fixed_slots = fixedSlots;
             }
@@ -556,6 +660,10 @@ class OptimizeButton extends Component {
             // one). Same toggles the activity/recipe optimizers read.
             payload.include_pets = !!(window.settingsModal && window.settingsModal.includePets);
             payload.include_consumables = !!(window.settingsModal && window.settingsModal.includeConsumables);
+            // Part 3: transient "enable all custom stats" override (from the custom-stats popup).
+            payload.all_custom_stats_enabled = !!(window.isAllCustomStatsEnabled && window.isAllCustomStatsEnabled());
+            // "Unlock all": treat every item/stat as fully unlocked (max attributes).
+            payload.unlock_all = !!(window.isUnlockAllEnabled && window.isUnlockAllEnabled());
 
             // Local (Pyodide) travel optimization: when the FAC + user toggle are
             // on, ask the server to return the worker request_data instead of
@@ -657,8 +765,8 @@ class OptimizeButton extends Component {
      *
      * @returns {Object|null} { pet?: {species, level}, consumable?: {id, is_fine} }
      */
-    _buildTravelFixedSlots() {
-        const gear = store.state.gearsets?.current || {};
+    _buildTravelFixedSlots(sourceGear = null) {
+        const gear = sourceGear || store.state.gearsets?.current || {};
         const fixed = {};
 
         const pet = gear['pet'];
@@ -688,9 +796,9 @@ class OptimizeButton extends Component {
         return (fixed.pet || fixed.consumable) ? fixed : null;
     }
 
-    _buildTravelLockedSlots() {
+    _buildTravelLockedSlots(sourceGear = null) {
         const lockedSlots = {};
-        const currentGear = store.state.gearsets?.current || {};
+        const currentGear = sourceGear || store.state.gearsets?.current || {};
         const perSlotLocks = store.state.gearsets?.lockedSlots || {};
 
         // [TRAVEL-DIAG] Capture raw lock state. If perSlotLocks is empty/null
@@ -965,10 +1073,17 @@ class OptimizeButton extends Component {
                 // Discovery only ("Find alternatives") — the popup extracts the
                 // computed alternatives off the result gearset and never equips,
                 // so the user's current gear is left untouched.
-            } else if (autoEquip || this._suppressResultUI) {
+            } else if (autoEquip || this._suppressResultUI || this._optimizingSlot) {
                 // When suppressed (popup flow) we always equip the result so the
-                // popup can re-render with the new gear + alternatives.
-                await store.loadGearSet(newGs.id);
+                // popup can re-render with the new gear + alternatives. In
+                // comparison mode (this._optimizingSlot set) we auto-equip to the
+                // targeted gear set — mirroring the activity/recipe comparison
+                // flow — so "Optimize Set 2" lands in Set 2, not Set 1.
+                if (this._optimizingSlot === 2) {
+                    await store.loadGearSetToSlot2(newGs.id);
+                } else {
+                    await store.loadGearSet(newGs.id);
+                }
                 // [TRAVEL-DIAG] After equip — what does store.state.gearsets.current
                 // actually have now? If primary is now null/different from what the
                 // optimizer returned, the equip step is the bug.
@@ -985,7 +1100,8 @@ class OptimizeButton extends Component {
                     console.warn('[TRAVEL-DIAG][equip] post-load diag log failed:', e);
                 }
                 if (!this._suppressResultUI) {
-                    api.showSuccess(`Travel optimization complete! Equipped: ${newGs.name}`, { duration: 5000 });
+                    const _slotLabel = this._optimizingSlot ? ` to Set ${this._optimizingSlot}` : '';
+                    api.showSuccess(`Travel optimization complete! Equipped${_slotLabel}: ${newGs.name}`, { duration: 5000 });
                 }
             } else {
                 this.optimizedGearsetId = newGs.id;
@@ -1057,6 +1173,9 @@ class OptimizeButton extends Component {
             if ($budgetSection.length && $budgetSection.is(':visible')) {
                 $budgetSection.slideUp(250);
             }
+            // NOTE: .opt-extra-controls (pet-ability + run-local) intentionally
+            // stays visible above the Optimize button when the detailed panel
+            // opens — do NOT slide it up.
 
             // Render the inline settings. _renderInlineSettings now
             // calls _ensureInlineOptWrapper() internally so the
@@ -1151,8 +1270,27 @@ class OptimizeButton extends Component {
         // Validate activity sorting targets against current drop table
         if (this.selectedActivity && this.dropTableData) {
             for (const entry of settingsModal.activitySorting) {
-                const [key, weight, target] = entry;
-                if (targetDropKeys.has(key) && target) {
+                // Entries come in two shapes:
+                //   • legacy array  [key, weight, target]
+                //   • current XY object { mode, x, y, weight, targetItem, ... }
+                // Array-destructuring an object entry throws "entry is not
+                // iterable" (unhandledrejection on every selection change), so
+                // branch on the shape and read/write the target accordingly.
+                let isDropTargetEntry, target, setTarget;
+                if (Array.isArray(entry)) {
+                    const [key, , t] = entry;
+                    isDropTargetEntry = targetDropKeys.has(key);
+                    target = t;
+                    setTarget = (v) => { entry[2] = v; };
+                } else if (entry && typeof entry === 'object') {
+                    // XY drop-target rows are ratios with y === 'target_item'.
+                    isDropTargetEntry = entry.y === 'target_item';
+                    target = entry.targetItem;
+                    setTarget = (v) => { entry.targetItem = v; };
+                } else {
+                    continue;
+                }
+                if (isDropTargetEntry && target) {
                     // Category values (cat:*) are always valid — they're not activity-specific
                     if (target.startsWith('cat:')) continue;
                     // Legacy item name values: validate against drop table
@@ -1168,7 +1306,7 @@ class OptimizeButton extends Component {
                         }
                         if (!validDropNames.has(target)) {
                             console.log(`[validateTargets] Resetting invalid legacy target "${target}" to null`);
-                            entry[2] = null;
+                            setTarget(null);
                             changed = true;
                         }
                     }
@@ -1251,6 +1389,21 @@ class OptimizeButton extends Component {
      * @param {'quick'|'inline'} panel
      * @returns {string} HTML string
      */
+    _renderOptimizeServicesCheckbox(panel) {
+        // Recipe-only toggle. Shared state lives on window.settingsModal
+        // (.optimizeServices); all mounts render/sync the same value.
+        const checked = !!(window.settingsModal && window.settingsModal.optimizeServices);
+        return `
+            <div class="optimize-services-checkbox-row" data-panel="${panel}">
+                <label class="instant-actions-label" style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+                    <input type="checkbox" class="optimize-services-checkbox" ${checked ? 'checked' : ''}>
+                    Optimize services
+                    <span class="travel-info-icon optimize-services-info-icon" role="button" tabindex="0" aria-label="About optimize services" data-info-html="Try every service you've unlocked and can reach (region access respected — e.g. Myriadian Arc needs the Charter of the drowned) and pick the one whose optimized gear set scores best. Gear-gated services (e.g. 3&times; diving gear) are included and the optimizer equips the required gear. When off, the optimizer uses the service selected in Column 3.">ⓘ</span>
+                </label>
+            </div>
+        `;
+    }
+
     _renderInstantActionsCheckbox(panel) {
         const petInfo = this._getEligibleInstantActionsPet();
         if (!petInfo) {
@@ -1275,7 +1428,7 @@ class OptimizeButton extends Component {
             <div class="instant-actions-checkbox-row" data-panel="${panel}" data-skill="${skillType}">
                 <label class="instant-actions-label">
                     <input type="checkbox" class="instant-actions-checkbox" data-skill="${skillType}" ${checkedAttr}>
-                    For ${petInfo.displayName}'s ability (${petInfo.species})
+                    For ${petInfo.displayName}'s ability (${String(petInfo.species || '').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())})
                     <span class="travel-info-icon instant-actions-info-icon" role="button" tabindex="0" aria-label="About this ability">ⓘ</span>
                 </label>
             </div>
@@ -1335,7 +1488,7 @@ class OptimizeButton extends Component {
             <div class="instant-actions-checkbox-row ability-stats-checkbox-row" data-panel="${panel}" data-skill="${skillType}">
                 <label class="instant-actions-label">
                     <input type="checkbox" class="ability-stats-checkbox" data-skill="${skillType}" ${checkedAttr}>
-                    Use ${petInfo.displayName}'s ability (${petInfo.species})
+                    Use ${petInfo.displayName}'s ability (${String(petInfo.species || '').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())})
                     <span class="travel-info-icon instant-actions-info-icon" role="button" tabindex="0" aria-label="About this ability">ⓘ</span>
                 </label>
             </div>
@@ -1362,6 +1515,552 @@ class OptimizeButton extends Component {
     }
 
     /**
+     * Render the "separated" extra controls that used to live inside
+     * .quick-opt-settings-content — the pet ability / instant-actions
+     * checkbox and the "Run optimization locally" checkbox. Per user
+     * direction (2026-08-19) these now sit OUTSIDE the collapsible
+     * Quick Settings content, as their own row directly under it.
+     *
+     * NOTE: _renderInstantActionsCheckbox has the side effect of setting
+     * this._instantActionsPopoverHtml, which the post-render popover wiring
+     * (near the end of render()) relies on — so it must still be called here.
+     * @returns {string} HTML string ('' when neither control applies)
+     */
+    _renderExtraControls() {
+        const instant = this._renderInstantActionsCheckbox('quick');
+        // The four optimizer chips (consumables + pets + services + run-locally)
+        // now live in ONE SettingsPanel mounted here, OUTSIDE Quick Optimization
+        // Settings. Consumables + pets always apply, so the slot always renders;
+        // _mountSettingsPanel() fills it after html() (append, no rebuild).
+        return `
+            <div class="opt-extra-controls">
+                <div class="opt-settings-panel-slot"></div>
+                ${instant}
+            </div>
+        `;
+    }
+
+    /**
+     * Render "Optimize services" (recipe-only) + "Run optimization locally" as
+     * a chips row (mirrors the consumables/pets chips). Each keeps its (i) info
+     * icon inside the chip; the icon desaturates when unselected but the (i)
+     * does not.
+     * @returns {string} HTML string ('' when neither applies)
+     */
+    _renderServiceLocalChips() {
+        const sm = window.settingsModal || {};
+        const showServices = !!this.selectedRecipe;
+        const showLocal = !!(window._featureFlags && window._featureFlags.local_optimization);
+        if (!showServices && !showLocal) return '';
+        const servicesOn = !!sm.optimizeServices;
+        const localOn = !!sm.runLocalOptimization;
+        const servicesChip = showServices ? `
+            <div class="stats-report-skill-chip opt-simple-chip opt-services-chip ${servicesOn ? 'selected' : ''}"
+                 data-simple-chip="services" role="button" tabindex="0" aria-pressed="${servicesOn ? 'true' : 'false'}"
+                 title="Optimize services">
+                <img src="/assets/icons/keywords/services.svg" alt="" onerror="this.style.display='none'">
+                <span>Optimize services</span>
+                <span class="travel-info-icon opt-simple-chip-info" role="button" tabindex="0" aria-label="About optimize services" data-info-html="Try every service you've unlocked and can reach (region access respected — e.g. Myriadian Arc needs the Charter of the drowned) and pick the one whose optimized gear set scores best. Gear-gated services (e.g. 3&times; diving gear) are included and the optimizer equips the required gear. When off, the optimizer uses the service selected in Column 3.">ⓘ</span>
+            </div>` : '';
+        const localChip = showLocal ? `
+            <div class="stats-report-skill-chip opt-simple-chip opt-runlocal-chip ${localOn ? 'selected' : ''}"
+                 data-simple-chip="runlocal" role="button" tabindex="0" aria-pressed="${localOn ? 'true' : 'false'}"
+                 title="Run optimization locally">
+                <img src="/assets/icons/keywords/run_locally.svg" alt="" onerror="this.style.display='none'">
+                <span>Run locally</span>
+                <span class="travel-info-icon opt-simple-chip-info" role="button" tabindex="0" aria-label="About running locally" data-info="Runs the optimizer in your browser instead of on the server. On a reasonably modern phone or computer this is usually faster, and it reduces server load. Older or low-end devices may be slower than the server. Results are identical to a server run, and once finished they're saved to the server, so they're available on all your devices.">ⓘ</span>
+            </div>` : '';
+        return `<div class="opt-simple-chips">${servicesChip}${localChip}</div>`;
+    }
+
+    /**
+     * Build (once per applicable-chip signature) the unified SettingsPanel that
+     * holds all four optimizer chips — Use consumables + Use pets (with their
+     * option sub-chips) on line 1, and Optimize services (recipe-only) + Run
+     * locally (feature-flagged) on line 2. State mutations DELEGATE to the
+     * existing _set/_toggle helper methods so every side-effect (checkbox
+     * mirroring, correctly-shaped events, suppress-render windows) is preserved;
+     * the framework only owns the visual chip state + layout/animation.
+     * @returns {SettingsPanel}
+     */
+    _buildSettingsPanel() {
+        const ST = 'optimization-settings';
+        const sm = window.settingsModal || {};
+        const panel = new SettingsPanel({
+            settingType: ST,
+            onCollapseChange: (key, collapsed) => {
+                if (key === 'consumables') this._persistConsumablesCollapsed(collapsed);
+                else if (key === 'pets') this._persistPetsCollapsed(collapsed);
+            },
+        });
+
+        // Consumables + pets + run-local come from the shared factory (one
+        // definition, reused by the goals report too). Column 3 binds to the
+        // GLOBAL settingsModal (readOn omitted -> framework Persistence) and
+        // delegates writes to the existing _set/_toggle methods.
+        const { consumables, pets, runLocal } = createStandardOptimizerChips({
+            settingType: ST,
+            consumables: {
+                settingName: 'includeConsumables',
+                onToggle: (on) => this._setIncludeConsumables(on),
+                collapsed: this._getConsumablesCollapsed(),
+                minOwned: {
+                    value: Number.isFinite(sm.consumableMinOwned) ? sm.consumableMinOwned : 5,
+                    operator: sm.consumableMinOwnedOperator,
+                },
+                sub: {
+                    fine: { settingName: 'includeFineConsumables', onToggle: () => this._toggleConsumableSubopt('fine') },
+                    minOwned: { settingName: 'consumableMinOwnedEnabled', onToggle: () => this._toggleConsumableSubopt('minowned') },
+                    hidden: { settingName: 'consumableUseHidden', onToggle: () => this._toggleConsumableSubopt('hidden') },
+                },
+            },
+            pets: {
+                settingName: 'includePets',
+                onToggle: (on) => this._setIncludePets(on),
+                collapsed: this._getPetsCollapsed(),
+                ability: { settingName: 'usePetAbility', onToggle: () => this._togglePetSubopt('ability') },
+            },
+            runLocal: (window._featureFlags && window._featureFlags.local_optimization)
+                ? { settingName: 'runLocalOptimization', onToggle: () => this._toggleSimpleChip('runlocal') }
+                : null,
+        });
+
+        panel.addToggle(consumables, pets);
+
+        // --- line 2: Optimize services (recipe-only, Column-3 specific) + Run locally ---
+        const line2 = [];
+        if (this.selectedRecipe) {
+            const span = `Optimize services <span class="travel-info-icon opt-simple-chip-info" role="button" tabindex="0" aria-label="About optimize services" data-info-html="Try every service you've unlocked and can reach (region access respected — e.g. Myriadian Arc needs the Charter of the drowned) and pick the one whose optimized gear set scores best. Gear-gated services (e.g. 3&times; diving gear) are included and the optimizer equips the required gear. When off, the optimizer uses the service selected in Column 3.">ⓘ</span>`;
+            line2.push(new Toggle('/assets/icons/keywords/services.svg', span, '#DBA463', ST, 'optimizeServices',
+                { onToggle: () => this._toggleSimpleChip('services') }));
+        }
+        if (runLocal) line2.push(runLocal);
+        if (line2.length) { panel.addNewLine(); panel.addToggle(...line2); }
+
+        return panel;
+    }
+
+    /**
+     * Signature of which optional chips apply, so the persistent panel is
+     * rebuilt only when the applicable set changes (recipe<->activity, flag).
+     * @returns {string}
+     */
+    _panelSignature() {
+        const s = this.selectedRecipe ? 'S' : '';
+        const l = (window._featureFlags && window._featureFlags.local_optimization) ? 'L' : '';
+        return s + l;
+    }
+
+    /**
+     * Re-mount the persistent panel into this render's slot: append the cached
+     * element (never rebuild — so in-place state + animations survive the host
+     * component's full re-render). Rebuild only when _panelSignature changes.
+     */
+    _mountSettingsPanel() {
+        if (!this.$element || !this.$element.find) return;
+        const slot = this.$element.find('.opt-settings-panel-slot')[0];
+        if (!slot) return;
+        const sig = this._panelSignature();
+        if (!this._settingsPanel || this._panelSig !== sig) {
+            this._settingsPanel = this._buildSettingsPanel();
+            this._panelSig = sig;
+        }
+        this._settingsPanel.mount(slot);
+        this._settingsPanel.syncState();
+        try { wireInfoIcons(this._settingsPanel.element); } catch (_) { /* non-fatal */ }
+    }
+
+    /** Persist the consumables-options collapsed (caret) state to session ui_config. */
+    _persistConsumablesCollapsed(collapsed) {
+        this._consumablesCollapsed = collapsed;
+        try {
+            if (store && store.state) { if (!store.state.ui) store.state.ui = {}; store.state.ui.consumablesOptionsCollapsed = collapsed; }
+            const uuid = store && store.state && store.state.session && store.state.session.uuid;
+            if (uuid && api && typeof api.updateConfig === 'function') api.updateConfig(uuid, 'ui.consumablesOptionsCollapsed', collapsed);
+        } catch (_) { /* non-fatal */ }
+    }
+
+    /** Persist the pets-options collapsed (caret) state to session ui_config. */
+    _persistPetsCollapsed(collapsed) {
+        this._petsCollapsed = collapsed;
+        try {
+            if (store && store.state) { if (!store.state.ui) store.state.ui = {}; store.state.ui.petsOptionsCollapsed = collapsed; }
+            const uuid = store && store.state && store.state.session && store.state.session.uuid;
+            if (uuid && api && typeof api.updateConfig === 'function') api.updateConfig(uuid, 'ui.petsOptionsCollapsed', collapsed);
+        } catch (_) { /* non-fatal */ }
+    }
+
+    /**
+     * Toggle the "Optimize services" or "Run locally" chip, persist, sync the
+     * chip + any settings-modal checkbox, and broadcast the change.
+     * @param {'services'|'runlocal'} kind
+     */
+    _toggleSimpleChip(kind) {
+        const sm = window.settingsModal;
+        if (!sm) return;
+        // Suppress the settings-loaded full re-render for the async save this
+        // triggers, so the chip's select/deselect animation plays out (the
+        // panel is synced in-place via syncState during the suppress window).
+        this._suppressSimpleRerenderUntil = Date.now() + 800;
+        if (kind === 'services') {
+            const v = !sm.optimizeServices;
+            sm.optimizeServices = v;
+            try { sm.saveGlobalOptimizationSettings(); } catch (_) { /* non-fatal */ }
+            if (this.$element && this.$element.find) this.$element.find('.opt-services-chip').toggleClass('selected', v).attr('aria-pressed', v ? 'true' : 'false');
+            try { document.querySelectorAll('.optimize-services-checkbox').forEach(cb => { cb.checked = v; }); } catch (_) { /* non-fatal */ }
+            try { window.dispatchEvent(new CustomEvent('optimizeServicesChanged', { detail: { enabled: v } })); } catch (_) { /* non-fatal */ }
+        } else if (kind === 'runlocal') {
+            const v = !sm.runLocalOptimization;
+            sm.runLocalOptimization = v;
+            try { sm.saveGlobalOptimizationSettings(); } catch (_) { /* non-fatal */ }
+            if (this.$element && this.$element.find) this.$element.find('.opt-runlocal-chip').toggleClass('selected', v).attr('aria-pressed', v ? 'true' : 'false');
+            try { document.querySelectorAll('.opt-run-local-checkbox').forEach(cb => { cb.checked = v; }); } catch (_) { /* non-fatal */ }
+            try { window.dispatchEvent(new CustomEvent('runLocalOptimizationChanged', { detail: { enabled: v } })); } catch (_) { /* non-fatal */ }
+        }
+    }
+
+    /**
+     * Render the "Include consumables" quick toggle. This mirrors the GLOBAL
+     * `include_consumables` setting (window.settingsModal.includeConsumables)
+     * that also appears in Settings ▸ Global Optimization Settings, and stays
+     * in sync across surfaces via the `includeConsumablesChanged` event.
+     *
+     * Styled as a goals-report chip (green/"selected" when on).
+     * @returns {string} HTML string
+     */
+    _renderIncludeConsumablesRow() {
+        const sm = window.settingsModal || {};
+        const on = !!sm.includeConsumables;
+        const fineOn = sm.includeFineConsumables !== false; // default ON
+        const minOn = !!sm.consumableMinOwnedEnabled;
+        const minVal = Number.isFinite(sm.consumableMinOwned) ? sm.consumableMinOwned : 5;
+        const minOp = (sm.consumableMinOwnedOperator === 'lte') ? 'lte' : 'lt';
+        const hiddenOn = !!sm.consumableUseHidden;
+        const icon = '/assets/icons/slots/consumable.svg';
+        const collapsed = this._getConsumablesCollapsed();
+        return `
+            <div class="opt-consumables-row ${on ? 'consumables-open' : ''} ${collapsed ? 'subopts-collapsed' : ''}">
+                <div class="stats-report-skill-chip opt-consumables-chip ${on ? 'selected' : ''}"
+                     role="button" tabindex="0" aria-pressed="${on ? 'true' : 'false'}"
+                     title="Include consumables in optimization">
+                    <img src="${icon}" alt="" width="32" height="32" onerror="this.style.display='none'">
+                    <span>Use consumables</span>
+                    <span class="opt-consumables-caret expand-arrow" role="button" tabindex="0" aria-label="Collapse or expand consumable options" title="Collapse / expand options">▼</span>
+                </div>
+                <div class="opt-consumable-subopts">
+                    <div class="opt-consumable-subopts-inner">
+                    <div class="opt-consumable-subopts-box">
+                    <div class="stats-report-skill-chip opt-consumable-subchip opt-subchip-fine ${fineOn ? 'selected' : ''}"
+                         data-subopt="fine" role="button" tabindex="0" aria-pressed="${fineOn ? 'true' : 'false'}"
+                         title="Include Fine consumables in optimization">
+                        <img src="/assets/icons/keywords/fine_material.svg" alt="" onerror="this.style.display='none'">
+                        <span>Include Fine</span>
+                    </div>
+                    <div class="stats-report-skill-chip opt-consumable-subchip opt-subchip-minowned ${minOn ? 'selected' : ''}"
+                         data-subopt="minowned" role="button" tabindex="0" aria-pressed="${minOn ? 'true' : 'false'}"
+                         title="Ignore consumables you own fewer than this many of">
+                        <img src="/assets/icons/attributes/inventory_space.svg" alt="" onerror="this.style.display='none'">
+                        <span>Ignore&nbsp;<select class="opt-consumable-minowned-op" aria-label="Comparator"><option value="lt" ${minOp !== 'lte' ? 'selected' : ''}>&lt;</option><option value="lte" ${minOp === 'lte' ? 'selected' : ''}>≤</option></select>&nbsp;<input type="number" class="opt-consumable-minowned-input" inputmode="numeric" pattern="[0-9]*" min="1" max="100" step="1" value="${minVal}" size="3" aria-label="Minimum owned quantity">&nbsp;owned</span>
+                    </div>
+                    <div class="stats-report-skill-chip opt-consumable-subchip opt-subchip-hidden ${hiddenOn ? 'selected' : ''}"
+                         data-subopt="hidden" role="button" tabindex="0" aria-pressed="${hiddenOn ? 'true' : 'false'}"
+                         title="Also use consumables you've hidden">
+                        <svg class="opt-subchip-hidden-eye" viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+                            <circle cx="12" cy="12" r="3"></circle>
+                        </svg>
+                        <span>Use hidden</span>
+                    </div>
+                    </div>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
+    /**
+     * Render the "Use pets" quick toggle + its "Use Ability" sub-option.
+     * Mirrors the consumables chip: maps to the GLOBAL include_pets /
+     * use_pet_ability settings, slides its sub-option open/closed via the
+     * caret, and persists the collapsed state to the session ui_config.
+     * @returns {string} HTML string
+     */
+    _renderIncludePetsRow() {
+        const sm = window.settingsModal || {};
+        const on = !!sm.includePets;
+        const abilityOn = !!sm.usePetAbility;
+        const collapsed = this._getPetsCollapsed();
+        return `
+            <div class="opt-pets-row ${on ? 'pets-open' : ''} ${collapsed ? 'subopts-collapsed' : ''}">
+                <div class="stats-report-skill-chip opt-pets-chip ${on ? 'selected' : ''}"
+                     role="button" tabindex="0" aria-pressed="${on ? 'true' : 'false'}"
+                     title="Include pets in optimization">
+                    <img src="/assets/icons/keywords/pet_egg.svg" alt="" width="32" height="32" onerror="this.style.display='none'">
+                    <span>Use pets</span>
+                    <span class="opt-pets-caret expand-arrow" role="button" tabindex="0" aria-label="Collapse or expand pet options" title="Collapse / expand options">▼</span>
+                </div>
+                <div class="opt-pet-subopts">
+                    <div class="opt-pet-subopts-inner">
+                    <div class="opt-pet-subopts-box">
+                    <div class="stats-report-skill-chip opt-pet-subchip opt-subchip-ability ${abilityOn ? 'selected' : ''}"
+                         data-subopt="ability" role="button" tabindex="0" aria-pressed="${abilityOn ? 'true' : 'false'}"
+                         title="Assume each pet's active applicable ability is charged">
+                        <img src="/assets/icons/keywords/ability.svg" alt="" onerror="this.style.display='none'">
+                        <span>Use Ability</span>
+                    </div>
+                    </div>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
+    /**
+     * Flip the global `include_pets` setting, persist, sync the chip, mirror
+     * the settings-modal checkbox, and broadcast `includePetsChanged`.
+     * @param {boolean} checked
+     */
+    _setIncludePets(checked) {
+        this._suppressPetsRerenderUntil = Date.now() + 4000;
+        if (window.settingsModal) {
+            window.settingsModal.includePets = checked;
+            try { window.settingsModal.saveGlobalOptimizationSettings(); } catch (_) { /* non-fatal */ }
+        }
+        this._syncIncludePetsUI(checked);
+        try {
+            document.querySelectorAll('.include-pets-checkbox').forEach(cb => { cb.checked = checked; });
+            // Keep the settings-modal ability sub-slide in lockstep.
+            document.querySelectorAll('.use-pet-ability-slide').forEach(s => s.classList.toggle('open', checked));
+        } catch (_) { /* non-fatal */ }
+        try {
+            window.dispatchEvent(new CustomEvent('includePetsChanged', { detail: { enabled: checked } }));
+        } catch (_) { /* non-fatal */ }
+    }
+
+    /**
+     * Reflect the current include-pets state into the quick chip without
+     * firing change events.
+     * @param {boolean} checked
+     */
+    _syncIncludePetsUI(checked) {
+        if (!this.$element || !this.$element.find) return;
+        this.$element.find('.opt-pets-chip')
+            .toggleClass('selected', checked)
+            .attr('aria-pressed', checked ? 'true' : 'false');
+        this.$element.find('.opt-pets-row').toggleClass('pets-open', checked);
+        this._syncPetSuboptsUI();
+    }
+
+    /**
+     * Toggle the "Use Ability" pet sub-option on window.settingsModal, persist,
+     * mirror the settings-modal checkbox, and broadcast the change.
+     * @param {'ability'} sub
+     */
+    _togglePetSubopt(sub) {
+        const sm = window.settingsModal;
+        if (!sm) return;
+        this._suppressPetsRerenderUntil = Date.now() + 4000;
+        if (sub === 'ability') {
+            sm.usePetAbility = !sm.usePetAbility;
+            try { localStorage.setItem('usePetAbility', sm.usePetAbility ? 'true' : 'false'); } catch (_) { /* non-fatal */ }
+            try { document.querySelectorAll('.use-pet-ability-checkbox').forEach(cb => { cb.checked = sm.usePetAbility; }); } catch (_) { /* non-fatal */ }
+        } else {
+            return;
+        }
+        try { sm.saveGlobalOptimizationSettings(); } catch (_) { /* non-fatal */ }
+        this._syncPetSuboptsUI();
+        try { window.dispatchEvent(new CustomEvent('usePetAbilityChanged', { detail: { enabled: sm.usePetAbility } })); } catch (_) { /* non-fatal */ }
+    }
+
+    /**
+     * Reflect the current pet sub-options into the Column 3 sub-chips.
+     */
+    _syncPetSuboptsUI() {
+        if (!this.$element || !this.$element.find) return;
+        const sm = window.settingsModal || {};
+        const abilityOn = !!sm.usePetAbility;
+        this.$element.find('.opt-subchip-ability').toggleClass('selected', abilityOn).attr('aria-pressed', abilityOn ? 'true' : 'false');
+    }
+
+    /**
+     * Collapse/expand the pet sub-options via the caret, persisted to the
+     * session ui_config (under `ui.petsOptionsCollapsed`).
+     */
+    _togglePetsCollapsed() {
+        const next = !this._getPetsCollapsed();
+        this._petsCollapsed = next;
+        if (this.$element && this.$element.find) {
+            this.$element.find('.opt-pets-row').toggleClass('subopts-collapsed', next);
+        }
+        try {
+            if (store && store.state) {
+                if (!store.state.ui) store.state.ui = {};
+                store.state.ui.petsOptionsCollapsed = next;
+            }
+            const uuid = store && store.state && store.state.session && store.state.session.uuid;
+            if (uuid && api && typeof api.updateConfig === 'function') {
+                api.updateConfig(uuid, 'ui.petsOptionsCollapsed', next);
+            }
+        } catch (_) { /* non-fatal */ }
+    }
+
+    /**
+     * Read the persisted pet-options collapsed preference from the session
+     * ui_config, falling back to the in-memory value / expanded default.
+     * @returns {boolean}
+     */
+    _getPetsCollapsed() {
+        try {
+            if (store && store.state && store.state.ui &&
+                typeof store.state.ui.petsOptionsCollapsed === 'boolean') {
+                this._petsCollapsed = store.state.ui.petsOptionsCollapsed;
+                return this._petsCollapsed;
+            }
+        } catch (_) { /* fall through */ }
+        return !!this._petsCollapsed;
+    }
+
+    /**
+     * Flip the global `include_consumables` setting, persist it, sync every
+     * surface's UI, and broadcast the change so other surfaces (settings
+     * modal, goals report) update live.
+     * @param {boolean} checked
+     */
+    _setIncludeConsumables(checked) {
+        // Suppress the settings-loaded re-render for the async save this
+        // triggers, so the sub-opts slide + chip transitions play out.
+        this._suppressConsumableRerenderUntil = Date.now() + 4000;
+        if (window.settingsModal) {
+            window.settingsModal.includeConsumables = checked;
+            try { window.settingsModal.saveGlobalOptimizationSettings(); } catch (_) { /* non-fatal */ }
+        }
+        this._syncIncludeConsumablesUI(checked);
+        // Keep the global settings-modal checkbox (if mounted) in lockstep.
+        try {
+            document.querySelectorAll('.include-consumables-checkbox').forEach(cb => { cb.checked = checked; });
+        } catch (_) { /* non-fatal */ }
+        try {
+            window.dispatchEvent(new CustomEvent('includeConsumablesChanged', { detail: { enabled: checked } }));
+        } catch (_) { /* non-fatal */ }
+    }
+
+    /**
+     * Reflect the current include-consumables state into the quick chip
+     * without firing change events.
+     * @param {boolean} checked
+     */
+    _syncIncludeConsumablesUI(checked) {
+        if (!this.$element || !this.$element.find) return;
+        this.$element.find('.opt-consumables-chip')
+            .toggleClass('selected', checked)
+            .attr('aria-pressed', checked ? 'true' : 'false');
+        // Slide + green group border are both driven by `consumables-open` on
+        // the row. Do NOT toggle a `.hidden` class here — the global
+        // `.hidden { display:none !important }` rule would snap the group
+        // instantly and defeat the grid-rows slide transition.
+        this.$element.find('.opt-consumables-row').toggleClass('consumables-open', checked);
+        this._syncConsumableSuboptsUI();
+    }
+
+    /**
+     * Collapse/expand the sub-options group via the chip's caret, independently
+     * of whether consumables are on. Class-only toggle so the grid-rows slide
+     * animates (never touches the global `.hidden` display:none class). The
+     * collapsed state is a pure UI preference persisted to the SESSION ui_config
+     * (under `ui.consumablesOptionsCollapsed`), mirroring goalsReportCollapse,
+     * so a reload keeps it collapsed. It does NOT affect any optimizer setting.
+     */
+    _toggleConsumablesCollapsed() {
+        const next = !this._getConsumablesCollapsed();
+        this._consumablesCollapsed = next;
+        if (this.$element && this.$element.find) {
+            this.$element.find('.opt-consumables-row')
+                .toggleClass('subopts-collapsed', next);
+        }
+        try {
+            if (store && store.state) {
+                if (!store.state.ui) store.state.ui = {};
+                store.state.ui.consumablesOptionsCollapsed = next;
+            }
+            const uuid = store && store.state && store.state.session && store.state.session.uuid;
+            if (uuid && api && typeof api.updateConfig === 'function') {
+                // Best-effort persist to the session ui_config.
+                api.updateConfig(uuid, 'ui.consumablesOptionsCollapsed', next);
+            }
+        } catch (_) { /* non-fatal — in-memory state still applies this session */ }
+    }
+
+    /**
+     * Read the persisted "sub-options collapsed" UI preference from the session
+     * ui_config (loaded into store.state.ui on session load), falling back to
+     * the in-memory value / expanded default.
+     * @returns {boolean}
+     */
+    _getConsumablesCollapsed() {
+        try {
+            if (store && store.state && store.state.ui &&
+                typeof store.state.ui.consumablesOptionsCollapsed === 'boolean') {
+                this._consumablesCollapsed = store.state.ui.consumablesOptionsCollapsed;
+                return this._consumablesCollapsed;
+            }
+        } catch (_) { /* fall through */ }
+        return !!this._consumablesCollapsed;
+    }
+
+    /**
+     * Toggle a Consumable Options sub-toggle (Include Fine / min-owned / Use
+     * hidden) on window.settingsModal, persist, keep the settings-modal
+     * checkboxes in lockstep, and broadcast the change.
+     * @param {'fine'|'minowned'|'hidden'} sub
+     */
+    _toggleConsumableSubopt(sub) {
+        const sm = window.settingsModal;
+        if (!sm) return;
+        // Suppress the settings-loaded re-render for the async save below so
+        // the chip's colour/border/background transition actually plays.
+        this._suppressConsumableRerenderUntil = Date.now() + 4000;
+        if (sub === 'fine') {
+            sm.includeFineConsumables = !(sm.includeFineConsumables !== false);
+            try { document.querySelectorAll('.include-fine-consumables-checkbox').forEach(cb => { cb.checked = sm.includeFineConsumables; }); } catch (_) { /* non-fatal */ }
+        } else if (sub === 'minowned') {
+            sm.consumableMinOwnedEnabled = !sm.consumableMinOwnedEnabled;
+            if (sm.consumableMinOwnedEnabled) {
+                const cur = parseInt(sm.consumableMinOwned, 10);
+                if (!Number.isFinite(cur) || cur < 1 || cur > 100) sm.consumableMinOwned = 5;
+            }
+            try { document.querySelectorAll('.consumable-min-owned-checkbox').forEach(cb => { cb.checked = sm.consumableMinOwnedEnabled; }); } catch (_) { /* non-fatal */ }
+        } else if (sub === 'hidden') {
+            sm.consumableUseHidden = !sm.consumableUseHidden;
+            try { document.querySelectorAll('.consumable-use-hidden-checkbox').forEach(cb => { cb.checked = sm.consumableUseHidden; }); } catch (_) { /* non-fatal */ }
+        } else {
+            return;
+        }
+        try { sm.saveGlobalOptimizationSettings(); } catch (_) { /* non-fatal */ }
+        this._syncConsumableSuboptsUI();
+        try { window.dispatchEvent(new CustomEvent('consumableOptionsChanged')); } catch (_) { /* non-fatal */ }
+    }
+
+    /**
+     * Reflect the current Consumable Options into the Column 3 sub-chips
+     * (selected state + the numeric threshold value) without firing events.
+     */
+    _syncConsumableSuboptsUI() {
+        if (!this.$element || !this.$element.find) return;
+        const sm = window.settingsModal || {};
+        const fineOn = sm.includeFineConsumables !== false;
+        const minOn = !!sm.consumableMinOwnedEnabled;
+        const hiddenOn = !!sm.consumableUseHidden;
+        this.$element.find('.opt-subchip-fine').toggleClass('selected', fineOn).attr('aria-pressed', fineOn ? 'true' : 'false');
+        this.$element.find('.opt-subchip-minowned').toggleClass('selected', minOn).attr('aria-pressed', minOn ? 'true' : 'false');
+        this.$element.find('.opt-subchip-hidden').toggleClass('selected', hiddenOn).attr('aria-pressed', hiddenOn ? 'true' : 'false');
+        const mv = Number.isFinite(sm.consumableMinOwned) ? sm.consumableMinOwned : 5;
+        // Don't clobber the field while the user is typing in it.
+        this.$element.find('.opt-consumable-minowned-input').each((_, el) => { if (document.activeElement !== el) el.value = mv; });
+        const mop = (sm.consumableMinOwnedOperator === 'lte') ? 'lte' : 'lt';
+        this.$element.find('.opt-consumable-minowned-op').each((_, el) => { if (document.activeElement !== el) el.value = mop; });
+    }
+
+    /**
      * Build rich HTML for the instant-actions ability info popover.
      * Matches the Tiger ability popup style.
      */
@@ -1370,6 +2069,10 @@ class OptimizeButton extends Component {
 
         // Effect line
         html += `<div class="pet-popover-duration">${petInfo.effect}</div>`;
+
+        // Effect duration / +fine recipe outcome / usage requirements.
+        const _extra = abilityExtraLines(petInfo, 'pet-popover-inputs-header');
+        if (_extra) html += `<div class="pet-popover-inputs">${_extra}</div>`;
 
         // Cooldown
         if (petInfo.cooldown) {
@@ -1506,8 +2209,25 @@ class OptimizeButton extends Component {
                     html += `<div class="pet-popover-condition">${conditionText}</div>`;
                 }
                 for (const [stat, value] of Object.entries(statVals)) {
-                    const iconFile = iconMap[stat] || stat;
-                    const name = formatName(stat);
+                    // ItemFindingCategory.* keys (e.g. Pet Rock's Rockslide ->
+                    // ItemFindingCategory.RANDOM_GEM) are raw enums; render a
+                    // friendly name + category icon like combined-stats-section.
+                    const isItemFinding = stat.startsWith('ItemFindingCategory.');
+                    let iconSrc, name;
+                    if (isItemFinding) {
+                        const categoryConst = stat.split('.')[1] || '';
+                        const cat = (window.itemFindingCategories || {})[categoryConst];
+                        name = (cat && cat.display_name_singular)
+                            ? cat.display_name_singular
+                            : categoryConst.split('_')
+                                .map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+                                .join(' ');
+                        const iconName = (cat && cat.icon_name) ? cat.icon_name : ('find_' + categoryConst.toLowerCase());
+                        iconSrc = `/assets/icons/attributes/${iconName}.svg`;
+                    } else {
+                        iconSrc = `/assets/icons/attributes/${iconMap[stat] || stat}.svg`;
+                        name = formatName(stat);
+                    }
                     const isPercent = percentageStats.includes(stat);
                     const sign = value > 0 ? '+' : '';
                     const suffix = isPercent ? '%' : '';
@@ -1518,7 +2238,7 @@ class OptimizeButton extends Component {
                     html += `
                         <div class="pet-popover-stat-row">
                             <span class="${colorClass}">${sign}${value}${suffix}</span>
-                            <img src="/assets/icons/attributes/${iconFile}.svg" class="pet-popover-stat-icon" alt="${name}">
+                            <img src="${iconSrc}" class="pet-popover-stat-icon" alt="${name}">
                             <span>${name}</span>
                         </div>
                     `;
@@ -1714,6 +2434,13 @@ class OptimizeButton extends Component {
                 }, 50);
             },
         });
+
+        // "Optimize services" now renders in .opt-extra-controls above the
+        // Optimize button (see _renderExtraControls); strip any legacy copy
+        // that may have been appended inside the quick content.
+        try {
+            this.$element.find('.quick-opt-settings-content .optimize-services-checkbox-row').remove();
+        } catch (_) { /* non-fatal */ }
     }
 
     /**
@@ -1951,22 +2678,10 @@ class OptimizeButton extends Component {
                 this.$element.find('.optimize-container').append(html);
             }
 
-            // Inject instant-actions checkbox into the wrapper (same logic as
-            // the activity path below, kept in sync for recipe).
-            const instantActionsHtmlInline = this._renderInstantActionsCheckbox('inline');
+            // Instant-actions / run-local now render ABOVE the Optimize button
+            // (see _renderExtraControls), not inside this wrapper. Strip any
+            // legacy instant-actions row that might still be in the wrapper.
             this.$element.find('.inline-opt-wrapper .instant-actions-checkbox-row').remove();
-            if (instantActionsHtmlInline) {
-                const $wrapper = this.$element.find('.inline-opt-wrapper');
-                if ($wrapper.length) {
-                    $wrapper.find('.open-global-opt-settings-btn').before($(instantActionsHtmlInline));
-                    if (this._instantActionsPopoverHtml) {
-                        $wrapper.find('.instant-actions-info-icon').each((_, el) => {
-                            el.dataset.infoHtml = this._instantActionsPopoverHtml;
-                        });
-                        wireInfoIcons($wrapper[0]);
-                    }
-                }
-            }
 
             // Mount the XY Detailed component into the placeholder.
             this._mountXyRecipeInlinePanel();
@@ -1978,6 +2693,11 @@ class OptimizeButton extends Component {
             // by _renderInlineSettings without the wrapper, so the global
             // button goes missing (bug report item #5). Idempotent.
             this._ensureInlineOptWrapper();
+
+            // "Optimize services" now renders in .opt-extra-controls above the
+            // Optimize button (see _renderExtraControls); strip any legacy copy
+            // that may still be in the wrapper.
+            this.$element.find('.inline-opt-wrapper .optimize-services-checkbox-row').remove();
 
             // Wire the shared inline-panel events (preset bar save/load,
             // export/import, reset button). The activity path calls this
@@ -2014,21 +2734,9 @@ class OptimizeButton extends Component {
                 this.$element.find('.optimize-container').append(html);
             }
 
-            // Instant-actions checkbox (same as recipe path).
-            const instantActionsHtmlInline = this._renderInstantActionsCheckbox('inline');
+            // Instant-actions / run-local now render above the Optimize button
+            // (see _renderExtraControls); strip any legacy wrapper instance.
             this.$element.find('.inline-opt-wrapper .instant-actions-checkbox-row').remove();
-            if (instantActionsHtmlInline) {
-                const $wrapper = this.$element.find('.inline-opt-wrapper');
-                if ($wrapper.length) {
-                    $wrapper.find('.open-global-opt-settings-btn').before($(instantActionsHtmlInline));
-                    if (this._instantActionsPopoverHtml) {
-                        $wrapper.find('.instant-actions-info-icon').each((_, el) => {
-                            el.dataset.infoHtml = this._instantActionsPopoverHtml;
-                        });
-                        wireInfoIcons($wrapper[0]);
-                    }
-                }
-            }
 
             this._mountXyActivityInlinePanel();
             this._ensureInlineOptWrapper();
@@ -2168,27 +2876,9 @@ class OptimizeButton extends Component {
             this.$element.find('.optimize-container').append(html);
         }
 
-        // Inject instant-actions checkbox into the wrapper (between optimize button and global settings btn)
-        // The wrapper may already exist (from gear icon toggle) or may be created here.
-        // We always ensure the checkbox is present and up-to-date.
-        const instantActionsHtmlInline = this._renderInstantActionsCheckbox('inline');
-        // Remove any existing instant-actions row in the wrapper to avoid duplicates
+        // Instant-actions / run-local now render above the Optimize button
+        // (see _renderExtraControls); strip any legacy wrapper instance.
         this.$element.find('.inline-opt-wrapper .instant-actions-checkbox-row').remove();
-        if (instantActionsHtmlInline) {
-            const $wrapper = this.$element.find('.inline-opt-wrapper');
-            if ($wrapper.length) {
-                // Wrapper exists — prepend checkbox before the global settings button
-                $wrapper.find('.open-global-opt-settings-btn').before($(instantActionsHtmlInline));
-                // Wire info icons on the newly injected element
-                if (this._instantActionsPopoverHtml) {
-                    $wrapper.find('.instant-actions-info-icon').each((_, el) => {
-                        el.dataset.infoHtml = this._instantActionsPopoverHtml;
-                    });
-                    wireInfoIcons($wrapper[0]);
-                }
-            }
-            // If no wrapper yet (will be created by gear icon toggle), it's handled there
-        }
 
         // Initialize slider tracks
         this.$element.find('.inline-opt-settings .weight-slider').each(function () {
@@ -2222,21 +2912,36 @@ class OptimizeButton extends Component {
 
         const $wrapper = $('<div class="inline-opt-wrapper"></div>');
         const $globalBtn = $('<button class="open-global-opt-settings-btn" title="Open the full optimization settings in the Settings modal">Open Global Optimization Settings</button>');
-        const instantActionsHtmlInline = this._renderInstantActionsCheckbox('inline');
-        const $instantActions = instantActionsHtmlInline ? $(instantActionsHtmlInline) : null;
+        // Instant-actions / run-local render above the Optimize button now
+        // (see _renderExtraControls), so the wrapper holds only the global
+        // button + the detailed panel.
         $panel.before($wrapper);
-        if ($instantActions) $wrapper.append($instantActions);
         $wrapper.append($globalBtn);
         $wrapper.append($panel);
-
-        // Wire info icons on the instant-actions row if we inserted one.
-        if ($instantActions && this._instantActionsPopoverHtml) {
-            $wrapper.find('.instant-actions-info-icon').each((_, el) => {
-                el.dataset.infoHtml = this._instantActionsPopoverHtml;
-            });
-            wireInfoIcons($wrapper[0]);
-        }
     }
+    /**
+     * Sync every "Skip collectibles when all obtained" checkbox in the DOM to
+     * the given state, and refresh each label's green/italic styling. The skip
+     * flag is a single session variable (skip_obtained_collectibles), but it is
+     * surfaced under every collectibles sorting target across the quick,
+     * detailed, and inline (edit) views. When the user toggles one, the rest
+     * must reflect it. `origin` is the checkbox the user actually clicked; it is
+     * skipped for the `.checked` write (its state is already correct and jQuery
+     * would otherwise fire a redundant change).
+     */
+    _syncSkipCollectiblesCheckboxes(checked, origin = null) {
+        $('.skip-obtained-collectibles').each(function () {
+            if (this !== origin && this.checked !== checked) {
+                this.checked = checked;
+            }
+        });
+        const labelCss = checked
+            ? { color: '#27ae60', fontStyle: 'italic' }
+            : { color: 'var(--text-muted)', fontStyle: 'normal' };
+        $('.skip-obtained-collectibles').closest('label')
+            .find('.optimizer-checkbox-label').css(labelCss);
+    }
+
 
     /**
      * Render inline target drop selector (for embedding in sort items)
@@ -2254,9 +2959,10 @@ class OptimizeButton extends Component {
             : '';
         const controlId = 'target-drop-' + sortIndex;
 
-        // Skip collectibles checkbox for inline panel
+        // Skip collectibles checkbox for inline panel — only when the target is
+        // collectibles AND the activity actually drops collectibles (hide on N/A).
         let skipCollectiblesInline = '';
-        if (displayTarget === 'cat:collectibles') {
+        if (displayTarget === 'cat:collectibles' && this._isCategoryValidForActivity('cat:collectibles')) {
             const skipEnabled = window.settingsModal?.skipObtainedCollectibles || false;
             const skipChecked = skipEnabled ? 'checked' : '';
             const labelStyle = skipEnabled
@@ -2748,12 +3454,10 @@ class OptimizeButton extends Component {
                 localStorage.setItem('skipObtainedCollectibles', e.target.checked.toString());
                 window.settingsModal.saveOptimizationSettings();
             }
-            const $label = $(e.target).closest('label').find('.optimizer-checkbox-label');
-            if (e.target.checked) {
-                $label.css({ color: '#27ae60', fontStyle: 'italic' });
-            } else {
-                $label.css({ color: 'var(--text-muted)', fontStyle: 'normal' });
-            }
+            // Sync every other skip-obtained-collectibles checkbox (multiple
+            // collectibles targets + quick/detailed/inline views all reflect
+            // the one session variable).
+            this._syncSkipCollectiblesCheckboxes(e.target.checked, e.target);
         });
 
         // Target drop rate input
@@ -3165,9 +3869,36 @@ class OptimizeButton extends Component {
             let includeConsumables = window.settingsModal?.includeConsumables || false;
             requestData.include_consumables = includeConsumables;
             console.log('includeConsumables:', includeConsumables);
+            // Consumable Options (global) — send the LIVE settings-modal values
+            // in the request so the optimize never races the debounced settings
+            // save (the worker reads these, not a possibly-stale session copy).
+            requestData.include_fine_consumables = window.settingsModal ? window.settingsModal.includeFineConsumables !== false : true;
+            requestData.consumable_min_owned_enabled = !!(window.settingsModal && window.settingsModal.consumableMinOwnedEnabled);
+            requestData.consumable_min_owned = (window.settingsModal && Number.isFinite(window.settingsModal.consumableMinOwned)) ? window.settingsModal.consumableMinOwned : 5;
+            requestData.consumable_min_owned_operator = (window.settingsModal && window.settingsModal.consumableMinOwnedOperator === 'lte') ? 'lte' : 'lt';
+            requestData.consumable_use_hidden = !!(window.settingsModal && window.settingsModal.consumableUseHidden);
 
             // Get include_pets from settings
             requestData.include_pets = window.settingsModal?.includePets || false;
+
+            // Part 2: optimize using ALL game items when the global setting is on
+            // AND "only show owned items" (Column 2) is unchecked. Default
+            // optimizer only — travel/crafting-tree/stats-report do not send this.
+            requestData.optimize_all_items =
+                (window.settingsModal?.optimizeAllItems !== false)
+                && !store.state.ui?.column2?.showOwnedOnly;
+            // Part 4: assume active applicable pet ability is charged (default on).
+            requestData.use_pet_ability = window.settingsModal?.usePetAbility !== false;
+            // Part 3: transient "enable all custom stats" override (from the
+            // custom-stats popup control). Sent to every optimizer when on.
+            requestData.all_custom_stats_enabled =
+                !!(window.isAllCustomStatsEnabled && window.isAllCustomStatsEnabled());
+            // "Unlock all": treat every item/stat as fully unlocked (max attributes).
+            requestData.unlock_all = !!(window.isUnlockAllEnabled && window.isUnlockAllEnabled());
+            // "Optimize services": try every unlocked + reachable service valid
+            // for the recipe and keep the best-scoring service+gearset. Shared
+            // toggle lives on the settings modal (all mounts write to it).
+            requestData.optimize_services = !!(window.settingsModal && window.settingsModal.optimizeServices);
 
             // Non-owned alternatives are always enabled for everyone
             requestData.show_non_owned_alternatives = true;
@@ -3202,8 +3933,18 @@ class OptimizeButton extends Component {
                             for (let idx = 0; idx < validInputItems.length; idx++) {
                                 const ii = validInputItems[idx];
                                 if (ii.type !== 'keyword') continue; // Only auto-select keyword slots
-                                if (selectedInputItems[idx]) continue; // Already filled
                                 const kw = (ii.reference || ii.name || '').toLowerCase().replace(/_/g, ' ');
+                                // Equip an input IFF the slot is (effectively) blank. An item
+                                // whose keywords don't match this activity's input keyword is a
+                                // stale selection from another activity — treat it as blank and
+                                // replace it. A valid, matching item is left untouched.
+                                const existingInput = selectedInputItems[idx];
+                                if (existingInput) {
+                                    const existingKws = (existingInput.keywords || [])
+                                        .map(k => k.toLowerCase().replace(/_/g, ' '));
+                                    if (existingKws.includes(kw)) continue; // valid item already equipped
+                                    delete selectedInputItems[idx]; // stale/mismatched -> re-select
+                                }
                                 const minLevel = ii.level || 0;
 
                                 // Find owned items matching this keyword
@@ -3944,6 +4685,62 @@ class OptimizeButton extends Component {
         this._suppressResultUI = false; // Reset for next optimization
         this._findAlternativesOnly = false;
 
+        // "Optimize services" winner reflection: switch the service selector to
+        // the service/location the optimizer chose so the displayed service, its
+        // stats, and the red/green requirements panel match the saved gear set.
+        //   • Single view  -> recipeInfoSection.applyOptimizedService (Column 3).
+        //   • Comparison    -> the targeted gearset's per-gearset selector via
+        //     gearsetComparisonSection.applyOptimizedServiceForGearset. Without
+        //     this, the optimizer equips the gear best for the winning service
+        //     but the per-gearset service stays pinned to the old one — so the
+        //     service "doesn't swap" (bug: optimize-services no-op in comparison).
+        try {
+            const optSvc = gearset.slots_json?._optimized_service;
+            const inComparison = !!store.state.gearsets?.comparisonMode;
+            if (optSvc && optSvc.grouped_id) {
+                if (inComparison) {
+                    const gsNum = targetSlot || store.state.gearsets?.activeGearsetSlot || 1;
+                    const cmp = window.gearsetComparisonSection;
+                    if (cmp && typeof cmp.applyOptimizedServiceForGearset === 'function') {
+                        await cmp.applyOptimizedServiceForGearset(
+                            gsNum, optSvc.grouped_id, optSvc.location_id);
+                    }
+                } else if (window.recipeInfoSection
+                    && typeof window.recipeInfoSection.applyOptimizedService === 'function') {
+                    await window.recipeInfoSection.applyOptimizedService(
+                        optSvc.grouped_id, optSvc.location_id);
+                }
+            }
+        } catch (e) {
+            console.error('Optimize-services winner reflection failed:', e);
+        }
+
+        // No-service "optimize location" winner reflection: a recipe that needs
+        // no station has no service to swap — only a winning ZONE — so point the
+        // location selector at it (single view) or the targeted gearset's
+        // context (comparison) so Column 2 gear bonuses re-scope to that zone.
+        // Report 30c7ea11.
+        try {
+            const optLoc = gearset.slots_json?._optimized_location;
+            const inComparison = !!store.state.gearsets?.comparisonMode;
+            if (optLoc && optLoc.location_id) {
+                if (inComparison) {
+                    const gsNum = targetSlot || store.state.gearsets?.activeGearsetSlot || 1;
+                    const cmp = window.gearsetComparisonSection;
+                    if (cmp && typeof cmp.applyOptimizedLocationForGearset === 'function') {
+                        await cmp.applyOptimizedLocationForGearset(
+                            gsNum, optLoc.location_id, optLoc.region_tags, optLoc.all_regions);
+                    }
+                } else if (window.recipeInfoSection
+                    && typeof window.recipeInfoSection.applyOptimizedLocation === 'function') {
+                    await window.recipeInfoSection.applyOptimizedLocation(
+                        optLoc.location_id, optLoc.region_tags, optLoc.all_regions);
+                }
+            }
+        } catch (e) {
+            console.error('Optimize-location winner reflection failed:', e);
+        }
+
         if (suppressUI) {
             // Triggered from popup's "Optimize Slot & Equip" — the popup handles
             // equipping and re-rendering itself, so just refresh gearsets silently
@@ -4014,6 +4811,11 @@ class OptimizeButton extends Component {
         // Check for owned-but-locked items that are locked due to custom stats
         // (e.g. Hydrilium diving gear locked because user hasn't toggled "Underwater Swimming x25")
         this._checkCustomStatsLockedAlternatives(gearset);
+
+        // Warn (yellow) when the activity requires a specific named item the
+        // user owns none of, so the generated gearset can't actually perform
+        // it (e.g. "Repair the bank" needs a Spectral saw). bug a310debe
+        this._checkUnmetRequiredItems(gearset);
 
         // Auto-copy export string to clipboard if enabled
         const autoCopyExport = window.settingsModal?.autoCopyExport;
@@ -4128,6 +4930,39 @@ class OptimizeButton extends Component {
             const html = `⚠️ You own <strong>${formatList(names)}</strong> which would be better, but ${one ? "it's" : "they're"} locked behind custom stats.<br><span style="opacity:0.85;font-size:0.9em;">Click here to open Custom Stats and unlock ${one ? 'it' : 'them'}.</span>`;
             showLockedToast(html, delay);
         }
+    }
+
+    /**
+     * Yellow "does not meet requirements" warning for activities that require a
+     * specific named item the user owns NONE of (e.g. "Repair the bank" needs a
+     * Spectral saw). The backend can't force-equip an item the user doesn't own,
+     * so the produced gearset looks complete but can't actually perform the
+     * activity. The signal rides in slots_json._locked_alternatives under the
+     * reserved non-slot key __unmet_required_items__. Non-blocking: the gearset
+     * is still shown. (bug a310debe, 2026-09-11)
+     */
+    _checkUnmetRequiredItems(gearset) {
+        const lockedAlts = gearset?.slots_json?._locked_alternatives;
+        const unmetItems = lockedAlts && lockedAlts['__unmet_required_items__'];
+        if (!Array.isArray(unmetItems) || unmetItems.length === 0) return;
+
+        const titleCase = (s) => String(s)
+            .replace(/_/g, ' ')
+            .replace(/\b\w/g, c => c.toUpperCase());
+        const names = unmetItems.map(titleCase);
+        const one = names.length === 1;
+        const list = names.length <= 3
+            ? names.join(', ')
+            : names.slice(0, 2).join(', ') + ` and ${names.length - 2} more`;
+
+        const html = `⚠️ This gear set <strong>does not meet requirements</strong> — `
+            + `it needs <strong>${list}</strong>, which you don't own yet. `
+            + `You won't be able to do this activity until you obtain ${one ? 'it' : 'them'}.`;
+
+        // Slight delay so it doesn't collide with the success toast.
+        setTimeout(() => {
+            api.showWarning(null, { html, duration: 15000 });
+        }, 500);
     }
 
     /**
@@ -4787,7 +5622,7 @@ class OptimizeButton extends Component {
             ? 'Estimated drop rate for base item'
             : 'Estimated drop rate for collectible';
         return `
-            <div class="target-drop-rate-input" style="display:flex;align-items:center;gap:6px;margin-top:6px;font-size:12px">
+            <div class="target-drop-rate-input" style="display:flex;align-items:center;gap:6px;margin-top:6px;font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)))">
                 <label style="color:var(--text-secondary);white-space:nowrap">${label}</label>
                 <input type="number" class="calculator-input target-rate-input" value="${this.targetDropRate || ''}" placeholder="0" min="0" max="100" step="0.01" style="width:70px;text-align:right" />
                 <span style="color:var(--text-secondary)">%</span>
@@ -5124,7 +5959,7 @@ class OptimizeButton extends Component {
                             ? 'color:#27ae60;font-style:italic;'
                             : 'color:var(--text-muted);';
                         skipCollectiblesHtml = `
-                            <label class="optimizer-checkbox skip-collectibles-checkbox" style="margin-top:6px;font-size:0.85em;display:flex;align-items:center;gap:6px;">
+                            <label class="optimizer-checkbox skip-collectibles-checkbox" style="margin-top:6px;margin-left:8px;font-size:0.85em;display:flex;align-items:center;gap:6px;">
                                 <input type="checkbox" class="skip-obtained-collectibles" ${skipChecked} />
                                 <span class="optimizer-checkbox-label" style="${labelStyle}font-weight:600;">Skip collectibles when all obtained</span>
                             </label>
@@ -5298,8 +6133,6 @@ class OptimizeButton extends Component {
                 <div class="quick-opt-settings-content">
                     ${targetSelectorHtml}
                     ${budgetHtml}
-                    ${this._renderInstantActionsCheckbox('quick')}
-                    ${this._renderRunLocalCheckbox()}
                 </div>
             `;
         } else if (hasQuickSettings && !this.inlineSettingsOpen && quickSettingsCollapsed) {
@@ -5313,8 +6146,6 @@ class OptimizeButton extends Component {
                 <div class="quick-opt-settings-content" style="display:none;">
                     ${targetSelectorHtml}
                     ${budgetHtml}
-                    ${this._renderInstantActionsCheckbox('quick')}
-                    ${this._renderRunLocalCheckbox()}
                 </div>
             `;
         }
@@ -5323,13 +6154,19 @@ class OptimizeButton extends Component {
             <div class="optimize-container">
                 ${quickSettingsHtml}
 
-                ${(store.state.gearsets?.comparisonMode && !isTravel) ? `
+                <!-- Pet-ability / instant-actions + "Run optimization locally"
+                     controls. Rendered directly above the Optimize button in
+                     BOTH quick and detailed (gear) modes so they stay put when
+                     the detailed panel opens below. -->
+                ${this._renderExtraControls()}
+
+                ${store.state.gearsets?.comparisonMode ? `
                 <div class="optimize-comparison-buttons" data-pin-id="optimize-comparison-buttons">
-                    <button class="optimize-btn optimize-gs1-btn" data-pin-id="optimize-button-gs1" ${disabled}>
+                    <button class="${isTravel ? ('travel-optimize-btn travel-optimize-gs1-btn' + (this.isOptimizing && this._optimizingSlot === 1 ? ' optimizing' : '')) : 'optimize-btn optimize-gs1-btn'}" data-pin-id="optimize-button-gs1" ${disabled}>
                         ${this.isOptimizing && this._optimizingSlot === 1 ? '<span class="spinner">⏳</span>' : ''}
                         Optimize Set 1
                     </button>
-                    <button class="optimize-btn optimize-gs2-btn" data-pin-id="optimize-button-gs2" ${disabled}>
+                    <button class="${isTravel ? ('travel-optimize-btn travel-optimize-gs2-btn' + (this.isOptimizing && this._optimizingSlot === 2 ? ' optimizing' : '')) : 'optimize-btn optimize-gs2-btn'}" data-pin-id="optimize-button-gs2" ${disabled}>
                         ${this.isOptimizing && this._optimizingSlot === 2 ? '<span class="spinner">⏳</span>' : ''}
                         Optimize Set 2
                     </button>
@@ -5359,6 +6196,11 @@ class OptimizeButton extends Component {
 
         this.$element.html(html);
 
+        // Mount the unified optimizer chips panel into its slot (append the
+        // persistent element, no rebuild) so its in-place animations survive
+        // this full re-render.
+        this._mountSettingsPanel();
+
         // Slide down equip button if it just appeared
         if (this.showEquipButton) {
             const $equipBtns = this.$element.find('.equip-gearset-btn, .equip-comparison-buttons');
@@ -5387,11 +6229,9 @@ class OptimizeButton extends Component {
             if ($panel.length && !$panel.closest('.inline-opt-wrapper').length) {
                 const $wrapper = $('<div class="inline-opt-wrapper"></div>');
                 const $globalBtn = $('<button class="open-global-opt-settings-btn" title="Open the full optimization settings in the Settings modal">Open Global Optimization Settings</button>');
-                // Instant-actions checkbox goes between the optimize button and the global settings button
-                const instantActionsHtmlInline = this._renderInstantActionsCheckbox('inline');
-                const $instantActions = instantActionsHtmlInline ? $(instantActionsHtmlInline) : null;
+                // Instant-actions / run-local render above the Optimize button
+                // (see _renderExtraControls), not in this wrapper.
                 $panel.before($wrapper);
-                if ($instantActions) $wrapper.append($instantActions);
                 $wrapper.append($globalBtn);
                 $wrapper.append($panel);
             }
@@ -5497,42 +6337,99 @@ class OptimizeButton extends Component {
      */
     async equipOptimizedGearset() {
         if (!this.optimizedGearsetId) return;
-
         console.log('Equipping optimized gearset:', this.optimizedGearsetId);
-
-        // Slide up the button first
-        const $equipBtn = this.$element.find('.equip-gearset-btn');
-        $equipBtn.slideUp(300);
-
-        // Load the gearset (this will update the state and trigger gear slot updates)
-        store.loadGearSet(this.optimizedGearsetId);
-
-        // Hide the button after animation
-        setTimeout(() => {
-            this.showEquipButton = false;
-            this.optimizedGearsetId = null;
-            this.render();
-        }, 300);
+        // The single-mode green button (.equip-gearset-btn with no gs1/gs2
+        // modifier) OR the comparison-mode "Equip to Gear Set 1" button.
+        await this._equipWithFeedback(
+            '.equip-gearset-btn:not(.equip-gs1-btn):not(.equip-gs2-btn), .equip-gs1-btn',
+            () => store.loadGearSet(this.optimizedGearsetId)
+        );
     }
 
     async equipOptimizedToSlot2() {
         if (!this.optimizedGearsetId) return;
-
         console.log('Equipping optimized gearset to slot 2:', this.optimizedGearsetId);
+        await this._equipWithFeedback(
+            '.equip-gs2-btn',
+            () => store.loadGearSetToSlot2(this.optimizedGearsetId)
+        );
+    }
 
-        // Slide up the buttons
-        const $btns = this.$element.find('.equip-comparison-buttons');
-        $btns.slideUp(300);
+    /**
+     * Shared equip flow with a visible loading state.
+     *
+     * User report: clicking "Equip Optimized Gear Set" gave no feedback, so
+     * users assumed nothing happened and mashed the button. The equip path
+     * (store.loadGearSet -> loadGearSetFromExport) awaits a catalog fetch that
+     * can take a moment, and the old code fired it WITHOUT awaiting and slid
+     * the button away after a fixed 300ms — so on a slow apply the button
+     * vanished before the gear actually changed.
+     *
+     * This helper:
+     *   1. Guards against re-entry / double-clicks (this._equipping).
+     *   2. Disables every equip button (so neither can be mashed in comparison
+     *      mode) and shows a spinner + "Equipping…" on the clicked one.
+     *   3. AWAITS the actual load so the button only hides once gear is applied.
+     *   4. Restores the buttons on error so the user can retry.
+     *
+     * @param {string} clickedSelector - jQuery selector for the button that was
+     *   clicked (gets the spinner label).
+     * @param {Function} loadFn - Returns the load Promise to await.
+     */
+    async _equipWithFeedback(clickedSelector, loadFn) {
+        if (this._equipping) return;
+        this._equipping = true;
 
-        // Load into gearset 2
-        store.loadGearSetToSlot2(this.optimizedGearsetId);
+        const $all = this.$element.find('.equip-gearset-btn');
+        const $clicked = this.$element.find(clickedSelector);
 
-        // Hide buttons after animation
-        setTimeout(() => {
+        // Snapshot original label so we can restore it on error, then show the
+        // loading state on every equip button (disabled) + spinner on the one
+        // that was clicked.
+        $all.each(function () {
+            const $b = $(this);
+            if ($b.data('origHtml') == null) $b.data('origHtml', $b.html());
+            $b.prop('disabled', true).addClass('equipping');
+        });
+        $clicked.html('<span class="btn-spinner">⚙</span> Equipping…');
+
+        let ok = true;
+        try {
+            // Await the load Promise (loadGearSet/loadGearSetToSlot2 both
+            // resolve once the gear is enriched from the catalog and applied).
+            await loadFn();
+        } catch (e) {
+            ok = false;
+            console.error('Failed to equip optimized gearset:', e);
+            api.showError('Failed to equip gear set. Please try again.');
+        }
+
+        if (!ok) {
+            // Restore the buttons so the user can retry.
+            $all.each(function () {
+                const $b = $(this);
+                $b.prop('disabled', false).removeClass('equipping');
+                const orig = $b.data('origHtml');
+                if (orig != null) { $b.html(orig); $b.removeData('origHtml'); }
+            });
+            this._equipping = false;
+            return;
+        }
+
+        // Success — slide the button(s) away now that the gear is applied,
+        // then clear state (matches the previous post-equip UX). In comparison
+        // mode both buttons live inside .equip-comparison-buttons, so hide that
+        // single wrapper; otherwise hide the lone green button.
+        const $wrapper = this.$element.find('.equip-comparison-buttons');
+        const $toHide = $wrapper.length ? $wrapper : $all;
+        $toHide.slideUp(300, () => {
+            // slideUp's callback fires once per matched element; $toHide is a
+            // single element in both modes, so render() runs exactly once.
             this.showEquipButton = false;
             this.optimizedGearsetId = null;
+            this._equipping = false;
             this.render();
-        }, 300);
+        });
     }
 
     /**
@@ -5546,17 +6443,163 @@ class OptimizeButton extends Component {
         // settings modal + goals report. Namespaced + off so re-running
         // attachEvents (on every render) can't stack duplicate handlers on the
         // persistent $element.
-        this.$element.off('change.optRunLocal').on('change.optRunLocal', '.opt-run-local-checkbox', (e) => {
+        // "Optimize services" + "Run locally" chips (data-simple-chip). Clicking
+        // the (i) info icon must NOT toggle the chip.
+        this.$element.off('click.optSimpleChip').on('click.optSimpleChip', '.opt-simple-chip', (e) => {
+            if (e.target && e.target.closest && e.target.closest('.travel-info-icon')) return;
+            e.preventDefault();
+            this._toggleSimpleChip(e.currentTarget.getAttribute('data-simple-chip'));
+        });
+        this.$element.off('keydown.optSimpleChip').on('keydown.optSimpleChip', '.opt-simple-chip', (e) => {
+            if (e.target && e.target.closest && e.target.closest('.travel-info-icon')) return;
+            if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+                e.preventDefault();
+                this._toggleSimpleChip(e.currentTarget.getAttribute('data-simple-chip'));
+            }
+        });
+        this.$element.find('.opt-simple-chips').each((_, el) => { try { wireInfoIcons(el); } catch (e) { /* ignore */ } });
+
+        // "Include consumables" quick toggle — a goals-report-style chip
+        // mirroring the GLOBAL include_consumables setting. Namespaced + off
+        // so re-running attachEvents on every render can't stack handlers.
+        this.$element.off('click.optConsumablesChip').on('click.optConsumablesChip', '.opt-consumables-chip', (e) => {
+            if (e.target && e.target.closest && e.target.closest('.opt-consumables-caret')) return;
+            e.preventDefault();
+            const cur = !!(window.settingsModal && window.settingsModal.includeConsumables);
+            this._setIncludeConsumables(!cur);
+        });
+        this.$element.off('keydown.optConsumablesChip').on('keydown.optConsumablesChip', '.opt-consumables-chip', (e) => {
+            if (e.target && e.target.closest && e.target.closest('.opt-consumables-caret')) return;
+            if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+                e.preventDefault();
+                const cur = !!(window.settingsModal && window.settingsModal.includeConsumables);
+                this._setIncludeConsumables(!cur);
+            }
+        });
+        // Collapse/expand caret on the "Use consumables" chip — toggles the
+        // sub-options group open/closed independently of the on/off state.
+        this.$element.off('click.optConsCaret').on('click.optConsCaret', '.opt-consumables-caret', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            this._toggleConsumablesCollapsed();
+        });
+        this.$element.off('keydown.optConsCaret').on('keydown.optConsCaret', '.opt-consumables-caret', (e) => {
+            if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+                e.preventDefault();
+                e.stopPropagation();
+                this._toggleConsumablesCollapsed();
+            }
+        });
+
+        // Consumable Options sub-chips (Include Fine / Ignore < X owned / Use
+        // hidden). Clicking the number box must NOT toggle the min-owned chip.
+        this.$element.off('click.optConsSub').on('click.optConsSub', '.opt-consumable-subchip', (e) => {
+            if (e.target && e.target.closest && (e.target.closest('.opt-consumable-minowned-input') || e.target.closest('.opt-consumable-minowned-op'))) return;
+            e.preventDefault();
+            this._toggleConsumableSubopt(e.currentTarget.getAttribute('data-subopt'));
+        });
+        this.$element.off('keydown.optConsSub').on('keydown.optConsSub', '.opt-consumable-subchip', (e) => {
+            if (e.target && e.target.closest && (e.target.closest('.opt-consumable-minowned-input') || e.target.closest('.opt-consumable-minowned-op'))) return;
+            if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+                e.preventDefault();
+                this._toggleConsumableSubopt(e.currentTarget.getAttribute('data-subopt'));
+            }
+        });
+        // Keep the number box from bubbling a click up to the chip toggle.
+        this.$element.off('click.optConsMinStop').on('click.optConsMinStop', '.opt-consumable-minowned-input', (e) => { e.stopPropagation(); });
+        // Comparator select (< / ≤) — don't toggle the chip; update the operator.
+        this.$element.off('click.optConsOpStop mousedown.optConsOpStop').on('click.optConsOpStop mousedown.optConsOpStop', '.opt-consumable-minowned-op', (e) => { e.stopPropagation(); });
+        this.$element.off('change.optConsOp').on('change.optConsOp', '.opt-consumable-minowned-op', (e) => {
+            const v = (e.target.value === 'lte') ? 'lte' : 'lt';
+            if (window.settingsModal) {
+                window.settingsModal.consumableMinOwnedOperator = v;
+                window.settingsModal.consumableMinOwnedEnabled = true;  // choosing a comparator implies enabling
+                try {
+                    document.querySelectorAll('.consumable-min-owned-checkbox').forEach(cb => { cb.checked = true; });
+                    document.querySelectorAll('.consumable-min-owned-op-select').forEach(sel => { sel.disabled = false; if (sel !== e.target) sel.value = v; });
+                } catch (_) { /* non-fatal */ }
+                try { window.settingsModal.saveGlobalOptimizationSettings(); } catch (_) { /* non-fatal */ }
+            }
+            this._suppressConsumableRerenderUntil = Date.now() + 800;
+            this._syncConsumableSuboptsUI();
+            if (this._settingsPanel) this._settingsPanel.syncState();
+            try { window.dispatchEvent(new CustomEvent('consumableOptionsChanged')); } catch (_) { /* non-fatal */ }
+        });
+        // Threshold value — clamp to 1..100, enable the option, sync to master.
+        this.$element.off('change.optConsMin blur.optConsMin').on('change.optConsMin blur.optConsMin', '.opt-consumable-minowned-input', (e) => {
+            let v = parseInt(e.target.value, 10);
+            if (!Number.isFinite(v)) v = 5;
+            v = Math.max(1, Math.min(100, Math.round(v)));
+            e.target.value = v;
+            if (window.settingsModal) {
+                window.settingsModal.consumableMinOwned = v;
+                window.settingsModal.consumableMinOwnedEnabled = true;  // editing implies enabling
+                try {
+                    document.querySelectorAll('.consumable-min-owned-checkbox').forEach(cb => { cb.checked = true; });
+                    document.querySelectorAll('.consumable-min-owned-input').forEach(inp => { if (inp !== e.target) inp.value = v; });
+                } catch (_) { /* non-fatal */ }
+                try { window.settingsModal.saveGlobalOptimizationSettings(); } catch (_) { /* non-fatal */ }
+            }
+            this._suppressConsumableRerenderUntil = Date.now() + 800;
+            this._syncConsumableSuboptsUI();
+            if (this._settingsPanel) this._settingsPanel.syncState();
+            try { window.dispatchEvent(new CustomEvent('consumableOptionsChanged')); } catch (_) { /* non-fatal */ }
+        });
+
+        // "Use pets" quick toggle + "Use Ability" sub-chip — mirrors the
+        // consumables chip. Namespaced + off so re-running attachEvents can't
+        // stack handlers.
+        this.$element.off('click.optPetsChip').on('click.optPetsChip', '.opt-pets-chip', (e) => {
+            if (e.target && e.target.closest && e.target.closest('.opt-pets-caret')) return;
+            e.preventDefault();
+            const cur = !!(window.settingsModal && window.settingsModal.includePets);
+            this._setIncludePets(!cur);
+        });
+        this.$element.off('keydown.optPetsChip').on('keydown.optPetsChip', '.opt-pets-chip', (e) => {
+            if (e.target && e.target.closest && e.target.closest('.opt-pets-caret')) return;
+            if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+                e.preventDefault();
+                const cur = !!(window.settingsModal && window.settingsModal.includePets);
+                this._setIncludePets(!cur);
+            }
+        });
+        this.$element.off('click.optPetsCaret').on('click.optPetsCaret', '.opt-pets-caret', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            this._togglePetsCollapsed();
+        });
+        this.$element.off('keydown.optPetsCaret').on('keydown.optPetsCaret', '.opt-pets-caret', (e) => {
+            if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+                e.preventDefault();
+                e.stopPropagation();
+                this._togglePetsCollapsed();
+            }
+        });
+        this.$element.off('click.optPetSub').on('click.optPetSub', '.opt-pet-subchip', (e) => {
+            e.preventDefault();
+            this._togglePetSubopt(e.currentTarget.getAttribute('data-subopt'));
+        });
+        this.$element.off('keydown.optPetSub').on('keydown.optPetSub', '.opt-pet-subchip', (e) => {
+            if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+                e.preventDefault();
+                this._togglePetSubopt(e.currentTarget.getAttribute('data-subopt'));
+            }
+        });
+
+        // "Optimize services" (Column 3 quick + inline Detailed) — mirrors the
+        // shared setting on window.settingsModal, synced with the settings
+        // modal. Namespaced + off so re-running attachEvents can't stack.
+        this.$element.off('change.optServices').on('change.optServices', '.optimize-services-checkbox', (e) => {
             const checked = e.target.checked;
             if (window.settingsModal) {
-                window.settingsModal.runLocalOptimization = checked;
+                window.settingsModal.optimizeServices = checked;
                 try { window.settingsModal.saveGlobalOptimizationSettings(); } catch (_) { /* non-fatal */ }
             }
             try {
-                window.dispatchEvent(new CustomEvent('runLocalOptimizationChanged', { detail: { enabled: checked } }));
+                document.querySelectorAll('.optimize-services-checkbox').forEach(cb => { if (cb !== e.target) cb.checked = checked; });
+                window.dispatchEvent(new CustomEvent('optimizeServicesChanged', { detail: { enabled: checked } }));
             } catch (_) { /* non-fatal */ }
         });
-        this.$element.find('.opt-run-local-row').each((_, el) => { try { wireInfoIcons(el); } catch (e) { /* ignore */ } });
 
         // Instant-actions checkbox — sync both panels and persist to session
         this.$element.on('change', '.instant-actions-checkbox', async (e) => {
@@ -5682,11 +6725,18 @@ class OptimizeButton extends Component {
             }
         });
 
-        // Travel optimize button
+        // Travel optimize button (single + comparison Set 1/Set 2)
         this.$element.on('click', '.travel-optimize-btn', (e) => {
             e.preventDefault();
             e.stopPropagation();
-            if (!this.isOptimizing) {
+            if (this.isOptimizing) return;
+            if ($(e.target).closest('.optimize-settings-icon').length) return;
+            const $btn = $(e.currentTarget);
+            if ($btn.hasClass('travel-optimize-gs1-btn')) {
+                this.optimizeTravel({ targetSlot: 1 });
+            } else if ($btn.hasClass('travel-optimize-gs2-btn')) {
+                this.optimizeTravel({ targetSlot: 2 });
+            } else {
                 this.optimizeTravel();
             }
         });
@@ -6059,13 +7109,10 @@ class OptimizeButton extends Component {
                 localStorage.setItem('skipObtainedCollectibles', e.target.checked.toString());
                 window.settingsModal.saveOptimizationSettings();
             }
-            // Toggle green/italic styling on the label
-            const $label = $(e.target).closest('label').find('.optimizer-checkbox-label');
-            if (e.target.checked) {
-                $label.css({ color: '#27ae60', fontStyle: 'italic' });
-            } else {
-                $label.css({ color: 'var(--text-muted)', fontStyle: 'normal' });
-            }
+            // Sync every other skip-obtained-collectibles checkbox so multiple
+            // collectibles targets (and the quick/detailed/inline views) all
+            // reflect the one session variable.
+            this._syncSkipCollectiblesCheckboxes(e.target.checked, e.target);
         });
 
         // Target drop rate input (for fine_item/collectible)

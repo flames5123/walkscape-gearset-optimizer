@@ -45,7 +45,19 @@ class _Meta:
 
 
 def _item_id(it):
-    return getattr(it, "uuid", None) or getattr(it, "name", None) or str(id(it))
+    # Quality-aware id. Quality variants of the same base item SHARE a uuid
+    # (e.g. "Gold ruby ring (Good)" and "(Excellent)" are both uuid 532971e1…)
+    # but have distinct names (quality is a name suffix). Keying on uuid alone
+    # collided them, so owned_qty and refs_single got overwritten: the Pareto
+    # frontier used one quality's stat vector but resolved/equipped a different
+    # quality instance (crafted items showed Normal though Good was owned), and
+    # the dual-ring pair frontier couldn't tell Excellent from Good (blank ring
+    # slot / worse ring picked). Combining uuid + name makes each quality a
+    # distinct candidate: single slots let the better quality dominate (prune)
+    # the worse, while rings keep both qualities available for pairing.
+    base = getattr(it, "uuid", None) or getattr(it, "name", None) or str(id(it))
+    name = getattr(it, "name", None)
+    return (base, name) if name else base
 
 
 class ExactGearsetOptimizer:
@@ -58,6 +70,11 @@ class ExactGearsetOptimizer:
     CAP_AXIS = "W"                          # clamped at kappa (work-efficiency)
     SINGLE = ["head", "cape", "back", "chest", "primary", "secondary",
               "hands", "legs", "neck", "feet"]
+
+    # Step floor: activities and crafting BOTH floor at 10 (game rule: no action
+    # costs fewer than 10 steps). Per-solve override via attribute on the
+    # activity/adapter (step_floor). Default matches both.
+    STEP_FLOOR = 10
 
     # Safety valve: hard cap on B&B nodes per activity. Best-first ordering finds
     # a near-optimal incumbent fast, so past this budget we keep that incumbent
@@ -151,7 +168,7 @@ class ExactGearsetOptimizer:
     def steps(self, S0, kappa, WE_level, s):
         eff = min(WE_level + s[self.CAP_AXIS], kappa)
         base = S0 / (1.0 + eff)
-        st = max(math.ceil(base * (1.0 + s["S_pct"]) + s["S_add"]), 10)
+        st = max(math.ceil(base * (1.0 + s["S_pct"]) + s["S_add"]), self.STEP_FLOOR)
         # Double action reduces EXPECTED steps fractionally (no ceil) — matches
         # activities.get_expected_drop_rate. A second ceil rounds small DA away.
         return st / (1.0 + s["B"])
@@ -162,7 +179,7 @@ class ExactGearsetOptimizer:
         # so sub-cap branches get a much tighter (still admissible) bound.
         eff = min(WE_level + s[self.CAP_AXIS] + R[self.CAP_AXIS], kappa)
         b = S0 / (1.0 + eff)
-        st = max(math.ceil(b * (1.0 + s["S_pct"] + R["S_pct"]) + s["S_add"] + R["S_add"]), 10)
+        st = max(math.ceil(b * (1.0 + s["S_pct"] + R["S_pct"]) + s["S_add"] + R["S_add"]), self.STEP_FLOOR)
         return st / (1.0 + s["B"] + R["B"])
 
     def score(self, X0, S0, kappa, WE_level, s):
@@ -173,7 +190,13 @@ class ExactGearsetOptimizer:
 
     # ── helpers ─────────────────────────────────────────────────────────────
     def _vec(self, stats):
-        return {ax: float(stats[k]) for k, ax in self.AXIS_MAP.items() if k in stats}
+        v = {ax: float(stats[k]) for k, ax in self.AXIS_MAP.items() if k in stats}
+        # One-time activities: DA never averages out over a single action, so
+        # get_expected_drop_rate zeroes it. Mirror that here so B (double_action)
+        # doesn't wrongly reduce the modeled steps and over-value DA gear.
+        if getattr(self, "_one_time", False):
+            v["B"] = 0.0
+        return v
 
     @staticmethod
     def _rel(v):
@@ -212,6 +235,122 @@ class ExactGearsetOptimizer:
             kept = [k for k in kept if not self._dom(it, k, reqs, ignore_w)]
             kept.append(it)
         return kept
+
+    def _prune_tool_candidates(self, tools, refs_single, reqs, excluded_kw, set_names):
+        """Exact pre-frontier pruning of the tool pool (runs before
+        pool_frontier). Three passes, each provably exact — every removed tool
+        can never appear in an optimal bundle:
+
+          #1 Relaxed mutual-exclusion dominance. A prunes B when A >= B on every
+             scored axis, A covers B's required keywords, A and B share a banned
+             token (so at most one is ever worn -> pruning the loser is safe),
+             and A's EXTRA tokens are non-required, non-set, and appear only on
+             tools that also conflict with B (so A's extra bans can't cost a
+             companion B could have kept). Gated on mutual exclusion, so tools
+             that CAN coexist (e.g. skydiscs -- 'skydisc' is excluded from
+             tokens) are never pruned. Collapses interchangeable fishing tools
+             (rod/net/spear/cage all share 'fishing tool') to the single best,
+             and Wintry pan over Gold pan (both tokens {gold pan}).
+
+          #2 Drop net-harmful tools. A tool with no beneficial objective stat
+             (nothing positive on a MAX axis and nothing negative on a MIN
+             axis — e.g. only -WE + bonus-XP) can only hurt the objective, so
+             drop it unless it provides a required keyword or is a set piece.
+
+          #3 Required-keyword conflict cull. For each required keyword, take the
+             intersection of the full keyword lists of ALL its providers; any
+             banned keyword in that intersection is guaranteed to be in every
+             valid bundle's ban set (a provider is mandatory), so any tool that
+             shares it and provides NO required keyword can never be worn — cull
+             it. Tools providing some required keyword are never culled (they
+             may be needed for that role).
+        """
+        if not tools:
+            return tools
+        from collections import defaultdict
+
+        def full_kws(it):
+            raw = refs_single.get(it.id)
+            return frozenset(str(k).lower() for k in (getattr(raw, "keywords", []) or []))
+
+        MAXA = self.MAX_AXES; MINA = self.MIN_AXES; AXES = self.AXES
+
+        # #1 — relaxed mutual-exclusion dominance. Precompute token -> bearers so
+        # a dominator's EXTRA tokens can be verified to only ban B-incompatible
+        # tools.
+        _bearers = defaultdict(list)
+        for it in tools:
+            for t in it.tokens:
+                _bearers[t].append(it)
+
+        def _conflict(a, b):
+            return bool(a.tokens & b.tokens)
+
+        def _dom_tool(A, B):
+            # Prune B iff A dominates it AND they mutually exclude (share a
+            # banned token). Exact: tools that can coexist are never pruned.
+            if not _conflict(A, B):
+                return False
+            ga = A.stats.get; gb = B.stats.get
+            for a in MAXA:
+                if ga(a, 0.) < gb(a, 0.):
+                    return False
+            for a in MINA:
+                if ga(a, 0.) > gb(a, 0.):
+                    return False
+            if any(A.keywords.count(k) < B.keywords.count(k) for k in reqs):
+                return False
+            # A's extra tokens must be harmless relative to B: non-required,
+            # non-set, and every pool tool bearing them also conflicts with B
+            # (so banning them removes only tools that can't coexist with B).
+            for t in (A.tokens - B.tokens):
+                if t in reqs or t in set_names:
+                    return False
+                if any(not _conflict(Z, B) for Z in _bearers.get(t, ())):
+                    return False
+            if all(ga(a, 0.) == gb(a, 0.) for a in AXES) and A.tb < B.tb:
+                return False   # exact tie -> keep the higher-tb one
+            return True
+
+        kept = []
+        for i, B in enumerate(tools):
+            dominated = False
+            for j, A in enumerate(tools):
+                if i == j:
+                    continue
+                if _dom_tool(A, B):
+                    if j > i and _dom_tool(B, A):   # equal pair: keep earlier index
+                        continue
+                    dominated = True
+                    break
+            if not dominated:
+                kept.append(B)
+        tools = kept
+
+        # #2 — drop net-harmful tools (no beneficial axis, no keyword, no set)
+        MAXA = self.MAX_AXES; MINA = self.MIN_AXES
+        kept = []
+        for it in tools:
+            beneficial = (any(it.stats.get(a, 0.0) > 0 for a in MAXA)
+                          or any(it.stats.get(a, 0.0) < 0 for a in MINA))
+            if beneficial or it.keywords or (full_kws(it) & set_names):
+                kept.append(it)
+        tools = kept
+
+        # #3 — required-keyword conflict cull
+        for rk in reqs:
+            providers = [it for it in tools if rk in it.keywords]
+            if not providers:
+                continue
+            inter = set(full_kws(providers[0]))
+            for it in providers[1:]:
+                inter &= full_kws(it)
+            guaranteed_banned = {k for k in inter if k not in excluded_kw}
+            if not guaranteed_banned:
+                continue
+            tools = [it for it in tools
+                     if it.keywords or not (it.tokens & guaranteed_banned)]
+        return tools
 
     # ── core branch-and-bound ────────────────────────────────────────────────
     def _optimize(self, slots, metas, X0, S0, kappa, WE_level, reqs, excl, base_stats, lambda_val=None):
@@ -486,17 +625,23 @@ class ExactGearsetOptimizer:
                 mask |= (1 << i)
             metas_at[idxs[0]].append((m, mask))
 
-        def dominates(A, B):
-            va, vb = A["v"], B["v"]
-            for a in self.MAX_AXES:
-                if va[a] < vb[a]:
-                    return False
-            for a in self.MIN_AXES:
-                if va[a] > vb[a]:
-                    return False
-            ka, kb = A["kw"], B["kw"]
-            for k in reqs:
-                if ka[k] < kb[k]:
+        # Flat-tuple dominance: precompute each state's comparison vector once —
+        # MAX axes as-is, MIN axes negated, then keyword provision — so
+        # "A dominates B" reduces to a single componentwise >= scan with early
+        # exit, no per-axis dict lookups (~3-5x faster than the old dict compare,
+        # which was 31.5M calls on Cave's gear build).
+        _MAXA = self.MAX_AXES; _MINA = self.MIN_AXES; _RK = tuple(reqs)
+        _DLEN = len(_MAXA) + len(_MINA) + len(_RK)
+
+        def _dt(s):
+            v = s["v"]; kw = s["kw"]
+            return (tuple(v[a] for a in _MAXA)
+                    + tuple(-v[a] for a in _MINA)
+                    + tuple(kw[k] for k in _RK))
+
+        def dominates_t(da, db):
+            for i in range(_DLEN):
+                if da[i] < db[i]:
                     return False
             return True
 
@@ -512,15 +657,31 @@ class ExactGearsetOptimizer:
         def prune(sts):
             groups = defaultdict(list)
             for s in sts:
+                dt = s.get("dt")
+                if dt is None:
+                    dt = s["dt"] = _dt(s)
                 groups[gkey(s)].append(s)
             out = []
             for g in groups.values():
-                g.sort(key=lambda s: len(s["comp"]))   # fewer pieces first (tie-break)
+                # Sort by primary MAX axis (dt[0]) DESC, then fewer pieces. In
+                # descending-primary order every already-kept state has
+                # primary >= the current one, so the current state can only
+                # dominate kept states with EQUAL primary — the removal scan
+                # skips all unequal-primary kept (near-free), eliminating the
+                # expensive full "s dominates kept" pass.
+                g.sort(key=lambda s: (-s["dt"][0], len(s["comp"])))
                 kept = []
                 for s in g:
-                    if any(dominates(k, s) for k in kept):
+                    sdt = s["dt"]; sp = sdt[0]
+                    dominated = False
+                    for k in kept:
+                        if dominates_t(k["dt"], sdt):
+                            dominated = True
+                            break
+                    if dominated:
                         continue
-                    kept = [k for k in kept if not dominates(s, k)]
+                    kept = [k for k in kept
+                            if k["dt"][0] != sp or not dominates_t(sdt, k["dt"])]
                     kept.append(s)
                 out.extend(kept)
             return out
@@ -568,6 +729,14 @@ class ExactGearsetOptimizer:
         return states
 
     _MITM_COMBINE_CAP = 8_000_000
+    # Max |FT|·|FR| accessory product to attempt the FA pre-merge on. A bail
+    # already pays the FG/FT/FR build, and MITM just reuses those frontiers with
+    # a combine bounded by _MITM_COMBINE_CAP — so MITM is never slower than
+    # bailing to B&B. This cap only guards against a pathologically huge
+    # accessory product (tool-heavy activities) making the FA merge itself
+    # (O(|FT|·|FR|·|FA|)) blow up. Coral (~3.5k), Cave (~2k), Bog Net (~22k) all
+    # run MITM; only extreme tool pools bail.
+    _FA_BUILD_CAP = 60_000
 
     def _optimize_mitm(self, slots, metas, reqs, X0, S0, kappa, WE_level, base_stats):
         """Meet-in-the-middle: collapse gear / tools-bundle / rings to Pareto
@@ -580,43 +749,226 @@ class ExactGearsetOptimizer:
         bail (combine product over the cap, or no feasible combine)."""
         AXES = self.AXES
         reqs = reqs or {}
+        fr = self._mitm_frontiers(slots, metas, reqs)
+        if fr is None:
+            return float("-inf"), None, None      # bail -> caller falls back to B&B
+        FG, FT, FR, FA = fr
+        return self._combine_best(FG, FA, reqs, X0, S0, kappa, WE_level, base_stats)
+
+    def _mitm_frontiers(self, slots, metas, reqs):
+        """Build the MITM Pareto frontiers (FG gear, FT tools+pet+consumable,
+        FR ring-pair, FA = FT∪FR merged) for a candidate `slots` set. Returns
+        (FG, FT, FR, FA) or None to bail (accessory product or combine product
+        over cap -> caller falls back to B&B). Split out of _optimize_mitm so the
+        frontiers can be CACHED and reused across recipes that share the same
+        (skill, location, reqs, pools) — the frontiers depend only on the item
+        pools, not on base_steps/kappa/WE_level/base_stats (those enter the
+        combine). See _run's frontier cache."""
+        reqs = reqs or {}
         ring = slots.get("ring1", [])
         FG = self._group_collapse([(sl, slots.get(sl, [])) for sl in self.SINGLE], metas, reqs)
         FT = self._group_collapse([("tools", slots.get("tools", [])),
                                    ("pet", slots.get("pet", [])),
                                    ("consumable", slots.get("consumable", []))], reqs=reqs)
         FR = self._group_collapse([("ring1", ring), ("ring2", ring)], reqs=reqs)
-        if len(FG) * len(FT) * len(FR) > self._MITM_COMBINE_CAP:
-            return float("-inf"), None, None      # bail -> caller falls back to B&B
+        if len(FT) * len(FR) > self._FA_BUILD_CAP:
+            return None
+        FA = self._merge_accessories(FT, FR, reqs)
+        if len(FG) * len(FA) > self._MITM_COMBINE_CAP:
+            return None
+        return (FG, FT, FR, FA)
+
+    # ── frontier reuse cache (recipe-gated) ──────────────────────────────────
+    def _frontier_key(self, character, skill, location, reqs, pets, consumables):
+        """Cache key for the MITM frontiers. Frontiers depend on the item pools
+        (skill+location+character) and the keyword requirements — NOT on the
+        recipe's base_steps/kappa/WE_level/base_stats (combine-time). Character
+        is fixed within a run (keyed by identity), and the pet/consumable pools
+        are skill-scoped, so (char, skill, location, reqs, pet-sig, consumable-sig)
+        uniquely identifies the frontier build. The cache is run-scoped (cleared
+        per run) so character identity never collides across runs."""
+        if isinstance(location, str):
+            loc_id = location
+        else:
+            loc_id = getattr(location, "id", None) or getattr(location, "name", None) or str(location)
+        pet_sig = tuple(sorted(
+            f"{getattr(p, 'species', getattr(p, 'name', ''))}:{getattr(p, 'level', '')}"
+            for p in (pets or [])))
+        con_sig = tuple(sorted(getattr(c, "name", str(c)) for c in (consumables or [])))
+        return (id(character), str(skill).lower(), str(loc_id).lower(),
+                tuple(sorted(reqs.items())), pet_sig, con_sig)
+
+    def _rescale_acoins(self, states, factor):
+        """Return frontier states with the aggregated find-axis (A_coins)
+        rescaled by `factor`. Cached frontiers embed A_coins at the build
+        recipe's k-scale (k = C0 = base_chest_rate/base_steps for the recipe
+        chest target); a reusing recipe has a different base_steps, so its
+        numerator axis must be rescaled by C0_now/C0_build. Pareto dominance is
+        scale-invariant, so the cached frontier SET is valid for the reusing
+        recipe — only the stored A_coins VALUE needs correcting. No-ops when
+        A_coins isn't an axis or factor≈1."""
+        if "A_coins" not in self.AXES or abs(factor - 1.0) < 1e-15:
+            return states
+        out = []
+        for s in states:
+            v = dict(s["v"]); v["A_coins"] = v.get("A_coins", 0.0) * factor
+            ns = dict(s); ns["v"] = v; ns.pop("dt", None)
+            out.append(ns)
+        return out
+
+    def _build_base_axis(self, base_stats, character, skill, location, input_item):
+        """Baseline axis-stat vector (service base_stats + always-on collectibles
+        + input-item stats), folded through _vec at the CURRENT recipe's k-scale.
+        Independent of the item pools, so it's recomputed fresh per recipe even
+        on a frontier cache hit."""
+        # base_stats arrives with RAW stat keys (work_efficiency, chest_finding,
+        # steps_add, …) from service.get_stats_for_skill — NOT axis keys. Fold it
+        # through _vec (the same raw→axis mapping used for collectibles/items,
+        # which also routes find-axes into A_coins) instead of an axis-key lookup
+        # that silently dropped every service stat. Without this the engine
+        # ignored service work_efficiency/steps_add/chest_finding and mis-ranked
+        # below-cap gearsets (e.g. proper set inflated at cursed services with
+        # negative WE). (Thread 2026-07-28.)
+        base = {a: 0.0 for a in self.AXES}
+        for ax, val in self._vec(base_stats or {}).items():
+            base[ax] = base.get(ax, 0.) + val
+        for _col in (getattr(character, "collectibles", None) or []):
+            if not hasattr(_col, "get_stats_for_skill"):
+                continue
+            try:
+                for ax, val in self._vec(_col.get_stats_for_skill(skill, location=location)).items():
+                    base[ax] = base.get(ax, 0.) + val
+            except Exception:
+                pass
+        if input_item is not None and hasattr(input_item, "get_stats_for_skill"):
+            try:
+                for ax, val in self._vec(input_item.get_stats_for_skill(
+                        skill=skill, location=location, character=character)).items():
+                    base[ax] = base.get(ax, 0.) + val
+            except Exception:
+                pass
+        return base
+
+    def _reconstruct_gearset(self, load, refs_single, refs_meta, refs_pool, n_tools):
+        """Map a combine `load` (list of (slot_label, cid)) back to a
+        {slot: Item} gearset using the reference maps. Shared by the fresh-build
+        and frontier-cache-hit paths."""
+        all_slots = list(self.SINGLE) + ["ring1", "ring2", "pet", "consumable"] + \
+            [f"tool{i}" for i in range(n_tools)]
+        gearset = {s: None for s in all_slots}
+        for label, cid in load:
+            if cid == "(empty)":
+                continue
+            if cid in refs_pool:
+                for j, itm in enumerate(refs_pool[cid]):
+                    if j < n_tools:
+                        gearset[f"tool{j}"] = itm
+            elif cid in refs_meta:
+                for slot, itm in refs_meta[cid]:
+                    gearset[slot] = itm
+            elif cid in refs_single:
+                gearset[label] = refs_single[cid]
+        return gearset
+
+    def _combine_best(self, FG, FA, reqs, X0, S0, kappa, WE_level, base_stats):
+        """Generic FG × FA combine: pick the (gear, accessories) pair with the
+        best score, tie-broken toward fewer pieces. This is the EXACT reference
+        implementation. Objective subclasses (coins, XP) override it with an
+        inlined hot loop that reproduces bit-identical (best_r, best_load,
+        best_s). Returns (best_r, best_load, best_s), or (-inf, None, None) when
+        no feasible pair exists. Flatten frontier vectors to AXES-ordered tuples
+        (kills the per-pair dict rebuild) and memoize the pure-function steps
+        denominator, which depends only on (effWE, S_add, S_pct, B)."""
+        AXES = self.AXES
         s0 = {a: float(base_stats.get(a, 0.)) for a in AXES}
+        s0v = tuple(s0[a] for a in AXES)
+        nax = len(AXES)
+        iW = AXES.index(self.CAP_AXIS)
+        iSa = AXES.index("S_add"); iSp = AXES.index("S_pct"); iB = AXES.index("B")
+        FGv = [(tuple(g["v"][a] for a in AXES), g["kw"], g["comp"]) for g in FG]
+        FAv = [(tuple(a["v"][ax] for ax in AXES), a["kw"], a["comp"]) for a in FA]
+        step_cache = {}
+        def _steps_of(sv):
+            key = (sv[iW], sv[iSa], sv[iSp], sv[iB])
+            st = step_cache.get(key)
+            if st is None:
+                eff = min(WE_level + sv[iW], kappa)
+                stp = max(math.ceil((S0 / (1.0 + eff)) * (1.0 + sv[iSp]) + sv[iSa]), self.STEP_FLOOR)
+                st = stp / (1.0 + sv[iB])
+                step_cache[key] = st
+            return st
         best_r = float("-inf"); best_nfill = None; best_load = None; best_s = None
-        for gG in FG:
-            vG = gG["v"]; kG = gG["kw"]
-            for gT in FT:
-                vGT = {a: vG[a] + gT["v"][a] for a in AXES}
-                kGT = {k: kG[k] + gT["kw"][k] for k in reqs}
-                for gR in FR:
-                    feasible = True
-                    for k, t in reqs.items():
-                        if kGT[k] + gR["kw"][k] < t:
-                            feasible = False
-                            break
-                    if not feasible:
-                        continue
-                    s = {a: s0[a] + vGT[a] + gR["v"][a] for a in AXES}
-                    r = self.score(X0, S0, kappa, WE_level, s)
-                    nfill = -(len(gG["comp"]) + len(gT["comp"]) + len(gR["comp"]))
-                    if best_load is None or (r, nfill) > (best_r, best_nfill):
-                        best_r = r; best_nfill = nfill
-                        best_load = list(gG["comp"]) + list(gT["comp"]) + list(gR["comp"])
-                        best_s = dict(s)
+        rng = range(nax)
+        for gv, kG, cG in FGv:
+            for av, kA, cA in FAv:
+                feasible = True
+                for k, t in reqs.items():
+                    if kG[k] + kA[k] < t:
+                        feasible = False
+                        break
+                if not feasible:
+                    continue
+                sv = tuple(s0v[j] + gv[j] + av[j] for j in rng)
+                s = dict(zip(AXES, sv))
+                r = self.numerator(X0, s) / _steps_of(sv)
+                nfill = -(len(cG) + len(cA))
+                if best_load is None or (r, nfill) > (best_r, best_nfill):
+                    best_r = r; best_nfill = nfill
+                    best_load = list(cG) + list(cA)
+                    best_s = s
         return best_r, best_load, best_s
+
+    def _merge_accessories(self, FT, FR, reqs):
+        """Pareto-merge the tool-bundle frontier FT and the ring-pair frontier
+        FR into a single accessories frontier, so the MITM combine is FG × FA
+        rather than FG × FT × FR. Tools and rings are disjoint item pools, so
+        every (bundle, ring-pair) pair is a valid combination. Dominance uses
+        RAW (uncapped) axes — a piece's surplus W must be preserved because
+        higher raw W is always weakly better once summed and clamped at κ (and a
+        downstream negative-W item could reclaim it) — and kw provision is
+        clamped to the requirement (excess is useless in the ≥-threshold
+        combine feasibility test). Exact by MITM monotonicity."""
+        AXES = self.AXES; MAXA = self.MAX_AXES; MINA = self.MIN_AXES
+        reqs = reqs or {}
+        cand = []
+        for gT in FT:
+            vT = gT["v"]; kT = gT["kw"]; cT = gT["comp"]
+            for gR in FR:
+                vR = gR["v"]; kR = gR["kw"]
+                cand.append({
+                    "v": {a: vT[a] + vR[a] for a in AXES},
+                    "kw": {k: min(kT[k] + kR[k], reqs[k]) for k in reqs},
+                    "comp": list(cT) + list(gR["comp"])})
+        cand.sort(key=lambda s: len(s["comp"]))   # fewer pieces first (tie-break)
+
+        def dom(A, B):
+            va, vb = A["v"], B["v"]
+            for a in MAXA:
+                if va[a] < vb[a]:
+                    return False
+            for a in MINA:
+                if va[a] > vb[a]:
+                    return False
+            ka, kb = A["kw"], B["kw"]
+            for k in reqs:
+                if ka[k] < kb[k]:
+                    return False
+            return True
+
+        kept = []
+        for s in cand:
+            if any(dom(k, s) for k in kept):
+                continue
+            kept = [k for k in kept if not dom(s, k)]
+            kept.append(s)
+        return kept
 
     # ── public entry ─────────────────────────────────────────────────────────
     def optimize(self, activity, character, skill=None, location=None, base_stats=None,
-                 pets=None, consumables=None, input_item=None):
+                 pets=None, consumables=None, input_item=None, frontier_cache=None):
         """Return {slot: Item|None} for controlled slots, or None to fall back."""
         self.last_run_budget_exhausted = False
+        self._frontier_cache = frontier_cache
         try:
             return self._run(activity, character, skill, location, base_stats or {},
                              pets, consumables, input_item)
@@ -632,6 +984,12 @@ class ExactGearsetOptimizer:
             locs = getattr(activity, "locations", None)
             location = locs[0] if locs else None
         X0 = float(activity.base_xp); S0 = int(activity.base_steps); kappa = float(activity.max_efficiency)
+        # One-time activities (Venture/Explore/emergency escapes) complete in a
+        # single action, so Double Action never averages out —
+        # get_expected_drop_rate zeroes DA for them. Flag it so _vec neutralizes
+        # the B (double_action) axis on every candidate; otherwise the optimizer
+        # over-values DA gear and picks a worse real gearset on these activities.
+        self._one_time = bool(getattr(activity, "one_time", False))
         try:
             lvl = character.get_skill_level(str(skill).lower())
         except Exception:
@@ -639,6 +997,22 @@ class ExactGearsetOptimizer:
         sr = getattr(activity, "skill_requirements", {}) or {}
         req_lvl = (sr.get(skill) or (list(sr.values())[0] if sr else 1)) or 1
         WE_level = min(max(0, lvl - req_lvl), 20) * 0.0125
+        # Innate (non-gear, non-service) work-efficiency the engine credits before
+        # gear/service WE. The default above is the ACTIVITY level-WE rule. Crafting
+        # recipes have a DIFFERENT innate level-WE bonus (e.g. 0.125 vs the activity
+        # formula's 0.25 at Carpentry L62), so the recipe adapter supplies the
+        # correct value via `we_level_override`; without it the engine over-credits
+        # innate WE, thinks WE gear hits the max_efficiency cap sooner, and picks
+        # DA-heavy gearsets the real crafting metric rates worse. Activities never
+        # set this attr, so their path is unchanged. (Thread 2026-07-27.)
+        _we_ov = getattr(activity, "we_level_override", None)
+        if _we_ov is not None:
+            WE_level = float(_we_ov)
+        # Per-solve step floor: crafting floors at 1 step (vs activity 10). The
+        # adapter can override via `step_floor`; activities never set it.
+        _sf = getattr(activity, "step_floor", None)
+        if _sf is not None:
+            self.STEP_FLOOR = int(_sf)
         n_tools = character.get_tool_slots()
         self.prepare(activity, character, skill, location, X0, S0, kappa, WE_level)
         # Capture the axis model AFTER prepare() — a category's prepare() (e.g.
@@ -652,6 +1026,31 @@ class ExactGearsetOptimizer:
         reqs = {k.lower(): v for k, v in kc.items() if k.lower() not in input_kw}
         excl = {"primary", "secondary"}
         _excluded_kw = {str(x).lower() for x in getattr(wc, "EXCLUDED_TOOL_KEYWORDS", set())}
+
+        # ── frontier reuse fast-path (recipe-gated) ─────────────────────────
+        # If a frontier cache is provided (recipe-chest solves only) and we've
+        # already built the frontiers for this (skill, location, reqs, pools),
+        # skip the whole expensive build (make / pool_frontier / group_collapse)
+        # and go straight to the combine on the cached frontiers, rescaling the
+        # A_coins numerator axis for this recipe's k. Frontiers are pool-only
+        # (base_steps/kappa/WE_level/base_stats enter the combine), so reuse is
+        # exact. (Thread 2026-07-27.)
+        _fcache = getattr(self, "_frontier_cache", None)
+        _fkey = None
+        if (_fcache is not None and not getattr(self, "_ESTIMATE_ONLY", False)
+                and getattr(self, "_C0", None) is not None):
+            _fkey = self._frontier_key(character, skill, location, reqs, pets, consumables)
+            _hit = _fcache.get(_fkey)
+            if _hit is not None:
+                _FG, _FT, _FR, _FA, _rs, _rm, _rp, _nt, _C0b = _hit
+                _f = (self._C0 / _C0b) if _C0b else 1.0
+                _FGr = self._rescale_acoins(_FG, _f)
+                _FAr = self._rescale_acoins(_FA, _f)
+                _base = self._build_base_axis(base_stats, character, skill, location, input_item)
+                _r, _load, _s = self._combine_best(_FGr, _FAr, reqs, X0, S0, kappa, WE_level, _base)
+                if _load is None:
+                    return None
+                return self._reconstruct_gearset(_load, _rs, _rm, _rp, _nt)
 
         def _tool_tokens(kws_lower):
             return frozenset(kw for kw in kws_lower if kw not in _excluded_kw)
@@ -671,6 +1070,32 @@ class ExactGearsetOptimizer:
                     pass
             owned_qty[_item_id(it)] = qty
             by_slot[it.slot].append(it)
+
+        # Keep only the highest quality per base item for single-occupancy slots
+        # (gear / tools). Lower qualities are strictly dominated and only bloat
+        # the pool — and after the quality-aware _item_id change they're distinct
+        # candidates, so without this the tool pool could fill slots with several
+        # qualities of the SAME base tool (Normal+Good+Great+Perfect Wanderlust
+        # walking stick). filter_items_by_quality keeps the top 2 for rings (dual
+        # ring slots), preserving the excellent+good ring-pairing fix.
+        from util.optimization_utils import (
+            filter_items_by_quality,
+            filter_items_failing_keyword_level_requirements,
+        )
+        for _sl in list(by_slot.keys()):
+            by_slot[_sl] = filter_items_by_quality(by_slot[_sl], keep_highest_only=True)
+
+        # Drop candidates that can never satisfy the activity's tool
+        # keyword-level requirement (e.g. a Mining-40 Tarsilium pickaxe for
+        # "Mine adamant ore", which requires a pickaxe that itself requires
+        # Mining 50). Such a tool carries the gated keyword but is invalid, so
+        # it must not be a candidate — otherwise the objective (xp/coins/chest)
+        # picks it whenever it out-scores a valid pickaxe and the report shows
+        # an impossible gearset. Tool-keyword uniqueness guarantees only one
+        # such tool is ever worn, so removing the under-level ones is exact.
+        for _sl in list(by_slot.keys()):
+            by_slot[_sl] = filter_items_failing_keyword_level_requirements(
+                by_slot[_sl], activity)
 
         refs_single = {}; refs_meta = {}; refs_pool = {}
 
@@ -704,39 +1129,96 @@ class ExactGearsetOptimizer:
         slots["ring1"] = list(ring); slots["ring2"] = list(ring)
 
         def pool_frontier(items, K):
+            _PMAXA = self.MAX_AXES; _PMINA = self.MIN_AXES; _PRK = tuple(reqs)
+            _PLEN = len(_PMAXA) + len(_PMINA) + len(_PRK)
+            # Cap the CAP_AXIS (work_efficiency) at the max useful gear-side value
+            # for dominance comparison. Any tool-bundle W past (kappa - WE_level)
+            # is useless (other W sources are non-negative, so eff is already at
+            # kappa). Without this, a high-W bundle wrongly dominates a
+            # cap-equivalent bundle with better secondary stats. Activities keep
+            # the default 10-step floor and rarely hit this (tools have low WE vs
+            # activity caps), but crafting recipes (low kappa, high innate WE)
+            # frequently trigger it. (Thread 2026-07-27 residual fix.)
+            _w_cap = max(kappa - WE_level, 0.0)
+            _cap_idx = _PMAXA.index(self.CAP_AXIS) if self.CAP_AXIS in _PMAXA else -1
+
+            def _pdt(v, kw):
+                t = tuple(min(v[a], _w_cap) if (i == _cap_idx) else v[a]
+                          for i, a in enumerate(_PMAXA))
+                return (t
+                        + tuple(-v[a] for a in _PMINA)
+                        + tuple(kw[k] for k in _PRK))
             fr = [{"v": {a: 0. for a in AXES}, "kw": {k: 0 for k in reqs},
+                   "dt": (0.0,) * _PLEN,
                    "ban": frozenset(), "size": 0, "comp": (), "tb": 0.0}]
+
             def pdom(A, B):
-                v, w = A["v"], B["v"]
-                for a in self.MAX_AXES:
-                    if v[a] < w[a]:
+                # Flat-tuple numeric dominance (MAX as-is, MIN negated, kw) then
+                # token-ban subset + size — ~3-5x vs the old per-axis dict compare.
+                da, db = A["dt"], B["dt"]
+                for i in range(_PLEN):
+                    if da[i] < db[i]:
                         return False
-                for a in self.MIN_AXES:
-                    if v[a] > w[a]:
-                        return False
-                if any(A["kw"][k] < B["kw"][k] for k in reqs):
-                    return False
                 if not A["ban"] <= B["ban"]:
                     return False
-                return A["size"] <= B["size"]
-            def prune(states):
-                kept = []
-                for s in states:
-                    if any(pdom(k, s) for k in kept):
+                if A["size"] > B["size"]:
+                    return False
+                # On an EXACT tie across every scored axis + ban + size, prefer
+                # the bundle with more beneficial NON-scored stats (higher tb).
+                # Mirrors _dom's tie-break for single slots. Without this, two
+                # keyword-only tools tied on the objective (e.g. Clay skydisc CF2
+                # vs Golden skydisc CF12 for a collectible target where chest_
+                # finding isn't scored) were interchangeable and the first-
+                # enumerated won. Tie-only => never changes the optimum; it only
+                # keeps the strictly-nicer equivalent (and shrinks the frontier).
+                if (A["tb"] < B["tb"] and da == db
+                        and A["ban"] == B["ban"] and A["size"] == B["size"]):
+                    return False
+                return True
+            def _merge(fr, add):
+                # fr is ALREADY a Pareto antichain. Incorporate the new `add`
+                # states without re-checking fr-vs-fr (that O(len(fr)^2) rescan,
+                # repeated per item, was the 76M-comparison / ~40s bottleneck).
+                # The Pareto antichain is unique, so this yields the identical
+                # exact frontier as the old full re-prune.
+                surv = []
+                for a in add:
+                    if any(pdom(k, a) for k in fr):
                         continue
-                    kept = [k for k in kept if not pdom(s, k)]; kept.append(s)
-                return kept
+                    if any(pdom(k, a) for k in surv):
+                        continue
+                    surv = [k for k in surv if not pdom(a, k)]
+                    surv.append(a)
+                if surv:
+                    fr = [s for s in fr if not any(pdom(a, s) for a in surv)]
+                    fr.extend(surv)
+                return fr
+            import time as _pt
+            _gen = 0; _peak = 0; _t0 = _pt.perf_counter()
             for it in items:
                 ib = it.tokens; ik = {k: it.keywords.count(k) for k in reqs}
                 add = []
                 for st in fr:
                     if st["size"] >= K or it.id in st["comp"] or (ib & st["ban"]):
                         continue
-                    add.append({"v": {a: st["v"][a] + it.stats.get(a, 0.) for a in AXES},
-                                "kw": {k: min(st["kw"][k] + ik[k], reqs[k]) for k in reqs},
+                    nv = {a: st["v"][a] + it.stats.get(a, 0.) for a in AXES}
+                    nkw = {k: min(st["kw"][k] + ik[k], reqs[k]) for k in reqs}
+                    add.append({"v": nv, "kw": nkw, "dt": _pdt(nv, nkw),
                                 "ban": st["ban"] | ib, "size": st["size"] + 1,
                                 "comp": st["comp"] + (it.id,), "tb": st["tb"] + it.tb})
-                fr = prune(fr + add)
+                _gen += len(add)
+                if add:
+                    fr = _merge(fr, add)
+                if len(fr) > _peak:
+                    _peak = len(fr)
+            _merge_ms = (_pt.perf_counter() - _t0) * 1000.0
+            if _peak > 50000:
+                print(f"[POOL-WARN] frontier peak {_peak} > 50000 on "
+                      f"{getattr(self, '_cur_activity_name', '?')} — investigate objective-aware DP")
+            if getattr(self, "_POOL_DIAG", False):
+                print(f"[POOL] items={len(items)} K={K} subsets_generated={_gen} "
+                      f"final_frontier={len(fr)} peak_frontier={_peak} "
+                      f"merge_ms={_merge_ms:.0f}")
             out = []
             for i, st in enumerate(fr):
                 pid = f"toolpool#{i}"
@@ -745,12 +1227,56 @@ class ExactGearsetOptimizer:
                 out.append(_It(pid, dict(st["v"]), kws, st["ban"], st["tb"]))
             return out
 
-        slots["tools"] = pool_frontier(make(by_slot.get("tools", [])), n_tools)
+        # Set-piece keyword names (for the #2 prune's set exception): any key of
+        # gated_stats['set_pieces'] on ANY owned item is a set keyword, so a
+        # tool bearing it (e.g. an 'Adventuring Tool Set' rod) is never dropped.
+        _set_names = set()
+        for _lst in by_slot.values():
+            for _it in _lst:
+                _gs = getattr(_it, "gated_stats", None)
+                if isinstance(_gs, dict) and _gs.get("set_pieces"):
+                    for _sn in _gs["set_pieces"].keys():
+                        _set_names.add(str(_sn).lower())
+        _tool_its = make(by_slot.get("tools", []))
+        if getattr(self, "_TOOL_CAND_PRUNE", True):
+            _n0 = len(_tool_its)
+            _tool_its = self._prune_tool_candidates(
+                _tool_its, refs_single, reqs, _excluded_kw, _set_names)
+            if getattr(self, "_POOL_DIAG", False):
+                print(f"[TOOL-PRUNE] {getattr(activity, 'name', '?')} "
+                      f"tools {_n0} -> {len(_tool_its)}")
+        if getattr(self, "_ESTIMATE_ONLY", False):
+            # Cheap solve-cost estimate for shard load-balancing (LPT): the tool
+            # BUNDLE-count upper bound C(T_pruned, tool_slots), computed WITHOUT
+            # building the (expensive) tool frontier or the MITM combine. Reuses
+            # the exact prep + prune above, so the estimate matches exactly what
+            # the real solve would prune to (no divergent second code path). The
+            # frontier grows combinatorially in the number of surviving tools, so
+            # C(T, slots) tracks solve cost far better than a raw tool count.
+            import math as _math
+            _T = len(_tool_its)
+            self.last_estimate_weight = _math.comb(_T, min(int(n_tools), _T)) if _T > 0 else 1
+            return None
+        slots["tools"] = pool_frontier(_tool_its, n_tools)
         for sl in self.SINGLE:
             slots[sl] = self._prune(slots[sl], reqs)
+        # NOTE: pets/consumables are NOT quality-variant gear — pets have no
+        # quality tiers and consumable "Fine" variants are distinct items (not
+        # dominated), so filter_items_by_quality must NOT be applied here. It
+        # also assumes objects with .name, but pets arrive as plain dicts, so
+        # filtering them raised AttributeError that optimize()'s blanket except
+        # swallowed to None -> every job (coins/xp/chests/new_items) silently
+        # fell back to greedy. The gear/tool quality-dedup (the Wanderlust fix)
+        # lives on by_slot above and is unaffected. (regression from 35a18bf1)
         slots["pet"] = self._prune(make(pets or []), reqs)
         slots["consumable"] = self._prune(make(consumables or []), reqs)
-        base = {a: float(base_stats.get(a, 0.)) for a in AXES}
+        # base_stats has RAW stat keys (service.get_stats_for_skill), not axis
+        # keys — fold through _vec (raw→axis + find→A_coins) so service stats
+        # actually reach the engine. The old axis-key lookup dropped them all.
+        # (Thread 2026-07-28; see _build_base_axis for the full rationale.)
+        base = {a: 0.0 for a in AXES}
+        for _bax, _bval in self._vec(base_stats or {}).items():
+            base[_bax] = base.get(_bax, 0.) + _bval
         # Always-on collectible stats folded into the baseline BEFORE the cap
         # (matches calculate_gearset_metrics, which pre-merges collectibles).
         for _col in (getattr(character, "collectibles", None) or []):
@@ -829,20 +1355,46 @@ class ExactGearsetOptimizer:
         if getattr(self, "_MITM_ENABLED", False) and not _use_mitm:
             print(f"[MITM-SKIP] {getattr(activity, 'name', '?')} reqs={len(reqs)} "
                   f"metas={len(metas)} armor_only={_metas_armor_only}")
-        if _use_mitm:
+        if _use_mitm and _fkey is not None:
+            # Recipe frontier cache MISS: build the frontiers once and store them
+            # (plus the reference maps needed to reconstruct the gearset) so the
+            # sibling recipes at this (skill, location, reqs, pools) reuse them.
+            _fr = self._mitm_frontiers(slots, metas, reqs)
+            if _fr is not None:
+                _FG, _FT, _FR, _FA = _fr
+                _fcache[_fkey] = (_FG, _FT, _FR, _FA, refs_single, refs_meta, refs_pool,
+                                  n_tools, self._C0)
+                r, load, _sm = self._combine_best(_FG, _FA, reqs, X0, S0, kappa, WE_level, base)
+            else:
+                # frontier over cap -> exact B&B fallback (not cacheable)
+                r, load, _sb = self._optimize(slots, metas, X0, S0, kappa, WE_level, reqs, excl, base)
+        elif _use_mitm:
             import time as _t
             _t0 = _t.perf_counter()
             r_m, load_m, _sm = self._optimize_mitm(slots, metas, reqs, X0, S0, kappa, WE_level, base)
             _tm = (_t.perf_counter() - _t0) * 1000.0
-            _t1 = _t.perf_counter()
-            r_b, load_b, _sb = self._optimize(slots, metas, X0, S0, kappa, WE_level, reqs, excl, base)
-            _tb = (_t.perf_counter() - _t1) * 1000.0
+            _validate = getattr(self, "_MITM_VALIDATE", True)
             if load_m is None:
                 # MITM bailed (combine product over cap, or no feasible combine).
+                # Fall back to the B&B ALWAYS — even in MITM-only mode — so these
+                # activities still get an exact result.
+                _t1 = _t.perf_counter()
+                r_b, load_b, _sb = self._optimize(slots, metas, X0, S0, kappa, WE_level, reqs, excl, base)
+                _tb = (_t.perf_counter() - _t1) * 1000.0
                 print(f"[MITM-BAIL] {getattr(activity, 'name', '?')} reqs={len(reqs)} "
                       f"-> B&B t_bnb={_tb:.0f}ms")
                 r, load = r_b, load_b
+            elif not _validate:
+                # MITM-only: trust the (proven-exact) MITM result and SKIP the
+                # slow side-by-side B&B. This is where the real speedup lands.
+                print(f"[MITM-ONLY] {getattr(activity, 'name', '?')} reqs={len(reqs)} "
+                      f"r_mitm={r_m:.6f} t_mitm={_tm:.0f}ms")
+                r, load = r_m, load_m
             else:
+                # Side-by-side validation: run the B&B too and compare.
+                _t1 = _t.perf_counter()
+                r_b, load_b, _sb = self._optimize(slots, metas, X0, S0, kappa, WE_level, reqs, excl, base)
+                _tb = (_t.perf_counter() - _t1) * 1000.0
                 _match = (abs(r_m - r_b) < 1e-9) if (r_m > float("-inf") and r_b > float("-inf")) else (r_m == r_b)
                 _spd = (_tb / _tm) if _tm > 0 else 0.0
                 print(f"[MITM] {getattr(activity, 'name', '?')} reqs={len(reqs)} "

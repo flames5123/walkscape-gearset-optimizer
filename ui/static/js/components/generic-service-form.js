@@ -212,7 +212,7 @@ class GenericServiceForm extends Component {
             // Show Delete button if it's not already there
             if (this.currentDefId && !this.$element.find('.btn-delete-service').length) {
                 this.$element.find('.gs-actions').append(
-                    '<button class="btn-delete-service optimize-btn" style="font-size:14px;background:#e53935">🗑 Delete</button>'
+                    '<button class="btn-delete-service optimize-btn" style="font-size: max(var(--min-text, 5px), calc(14px * var(--text-scale, 1)));background:#e53935">🗑 Delete</button>'
                 );
             }
             api.showSuccess('Generic service saved.');
@@ -370,9 +370,9 @@ class GenericServiceForm extends Component {
                                     ${this._renderEmojiPicker()}
                                 </div>
                                 <div style="display:flex;align-items:center;gap:6px;padding:4px 8px">
-                                    <label style="font-size:12px;color:var(--text-secondary)">Tint:</label>
+                                    <label style="font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)));color:var(--text-secondary)">Tint:</label>
                                     <input type="color" class="gs-icon-color" value="${this.selectedIconColor || '#ffffff'}" style="width:32px;height:24px;border:none;cursor:pointer" />
-                                    <button class="gs-color-clear" style="background:none;border:1px solid var(--border-color);border-radius:4px;color:var(--text-secondary);font-size:11px;padding:2px 6px;cursor:pointer">Clear</button>
+                                    <button class="gs-color-clear" style="background:none;border:1px solid var(--border-color);border-radius:4px;color:var(--text-secondary);font-size: max(var(--min-text, 5px), calc(11px * var(--text-scale, 1)));padding:2px 6px;cursor:pointer">Clear</button>
                                 </div>
                                 <emoji-picker class="gs-full-picker"></emoji-picker>
                             </div>
@@ -386,8 +386,8 @@ class GenericServiceForm extends Component {
                     <div class="gs-row">
                         <label>Tier</label>
                         <div style="display:flex;gap:8px">
-                            <button class="gs-tier-btn optimize-btn ${this.selectedTier === 'basic' ? 'gs-tier-active' : ''}" data-tier="basic" style="flex:1;font-size:13px;padding:6px">Basic</button>
-                            <button class="gs-tier-btn optimize-btn ${this.selectedTier === 'advanced' ? 'gs-tier-active' : ''}" data-tier="advanced" style="flex:1;font-size:13px;padding:6px">Advanced</button>
+                            <button class="gs-tier-btn optimize-btn ${this.selectedTier === 'basic' ? 'gs-tier-active' : ''}" data-tier="basic" style="flex:1;font-size: max(var(--min-text, 5px), calc(13px * var(--text-scale, 1)));padding:6px">Basic</button>
+                            <button class="gs-tier-btn optimize-btn ${this.selectedTier === 'advanced' ? 'gs-tier-active' : ''}" data-tier="advanced" style="flex:1;font-size: max(var(--min-text, 5px), calc(13px * var(--text-scale, 1)));padding:6px">Advanced</button>
                         </div>
                     </div>
 
@@ -408,7 +408,7 @@ class GenericServiceForm extends Component {
                     <div class="gs-row">
                         <label>Stats</label>
                         <div class="gs-stat-rows">${statRowsHtml}</div>
-                        <button class="gs-add-stat optimize-btn" style="width:auto;padding:4px 12px;font-size:12px;margin-top:var(--spacing-xs)">+ Add Stat</button>
+                        <button class="gs-add-stat optimize-btn" style="width:auto;padding:4px 12px;font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)));margin-top:var(--spacing-xs)">+ Add Stat</button>
                     </div>
 
                     <div class="gs-row">
@@ -419,8 +419,8 @@ class GenericServiceForm extends Component {
                     </div>
 
                     <div class="gs-actions">
-                        <button class="btn-save-service optimize-btn" style="font-size:14px">💾 Save Service</button>
-                        ${this.currentDefId ? '<button class="btn-delete-service optimize-btn" style="font-size:14px;background:#e53935">🗑 Delete</button>' : ''}
+                        <button class="btn-save-service optimize-btn" style="font-size: max(var(--min-text, 5px), calc(14px * var(--text-scale, 1)))">💾 Save Service</button>
+                        ${this.currentDefId ? '<button class="btn-delete-service optimize-btn" style="font-size: max(var(--min-text, 5px), calc(14px * var(--text-scale, 1)));background:#e53935">🗑 Delete</button>' : ''}
                     </div>
                 </div>
             </div>

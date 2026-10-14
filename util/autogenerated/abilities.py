@@ -13,6 +13,31 @@ ABILITIES = {
         'requirements': [],
         'cooldown': None,
         'data': [],
+        'attributes': [
+            {
+                'id': '0add86b0-aebd-457f-962c-06a15661b021',
+                'customIcon': None,
+                'customTextLocalizationKey': '',
+                'customText': '',
+                'textLocalizationKey': '',
+                'text': '',
+                'statText': 'to <object id="{keyword}" /> count',
+                'skillText': '',
+                'tables': None,
+                'requirements': None,
+                'stats': [
+                    {
+                        'stat': 'to_<object_id={keyword}_/>_count',
+                        'name': 'to <object id="{keyword}" /> count',
+                        'type': 'countsAsKeyword',
+                        'isPercent': False,
+                        'value': 1,
+                        'isNegative': False,
+                        'isMultiplicative': True
+                    }
+                ]
+            }
+        ],
         'icon': 'assets/icons/abilities/clever_climber.png'
     },
     'down_go_the_trees': {
@@ -43,12 +68,14 @@ ABILITIES = {
             }
         ],
         'cooldown': {
+            'id': 'cooldown-downGoesTheTrees',
             'seconds': None,
             'minutes': None,
             'hours': None,
             'days': None,
             'steps': 9999,
             'actions': None,
+            'charges': 3,
             'requirements': [
                 {
                     'type': 'activityType',
@@ -190,6 +217,121 @@ ABILITIES = {
         ],
         'icon': 'assets/icons/activities/explore_underwater_cave.png'
     },
+    'flambé': {
+        'id': 'flambé',
+        'name': 'Flambé',
+        'type': 'active',
+        'desc': 'Completes {count} <object id="cooking_recipe" /> actions instantly with a small chance to give <itemTag tag="fine"/> results.',
+        'requirements': [
+            {
+                'type': 'activityType',
+                'name': 'requirements.singulars.uniques.cookingRecipe',
+                'opposite': False,
+                'requirement': {
+                    'keywords': [
+                        'cooking_recipe'
+                    ],
+                    'skill': None,
+                    'activity': None
+                }
+            },
+            {
+                'type': 'locationHasKeywords',
+                'name': 'requirements.singulars.uniques.notUnderwater',
+                'opposite': True,
+                'requirement': {
+                    'keywords': [
+                        'underwater'
+                    ]
+                }
+            }
+        ],
+        'cooldown': {
+            'id': 'cooldown-flambe',
+            'steps': 2500,
+            'charges': 15,
+            'requirements': [
+                {
+                    'type': 'locationHasKeywords',
+                    'name': 'requirements.singulars.uniques.notUnderwater',
+                    'opposite': True,
+                    'requirement': {
+                        'keywords': [
+                            'underwater'
+                        ]
+                    }
+                },
+                {
+                    'type': 'abilityAvailable',
+                    'name': '',
+                    'opposite': False,
+                    'requirement': {
+                        'ability': 'flambé',
+                        'scanEquippedItems': False
+                    }
+                }
+            ]
+        },
+        'data': [
+            {
+                'dataType': 'normal',
+                'actions': [
+                    {
+                        'type': 'completeActions',
+                        'runtimeType': 'completeActions',
+                        'count': 3
+                    }
+                ]
+            },
+            {
+                'dataType': None,
+                'actions': [
+                    {
+                        'type': 'effect',
+                        'runtimeType': 'effect',
+                        'attributes': [
+                            {
+                                'id': '15ab15c1-ce3a-4b37-8ca7-a3faafede921',
+                                'customIcon': None,
+                                'customTextLocalizationKey': None,
+                                'customText': '',
+                                'textLocalizationKey': None,
+                                'text': '',
+                                'statText': 'Fine recipe outcome',
+                                'skillText': 'Cooking',
+                                'tables': [],
+                                'requirements': [
+                                    {
+                                        'type': 'mainSkill',
+                                        'name': None,
+                                        'opposite': False,
+                                        'requirement': {
+                                            'skill': 'cooking'
+                                        }
+                                    }
+                                ],
+                                'stats': [
+                                    {
+                                        'stat': 'fine_recipe_outcome',
+                                        'name': 'Fine recipe outcome',
+                                        'type': 'fineMaterialOutcome',
+                                        'isPercent': True,
+                                        'value': 0.03,
+                                        'isNegative': False,
+                                        'isMultiplicative': True
+                                    }
+                                ]
+                            }
+                        ],
+                        'duration': {
+                            'actions': 3
+                        }
+                    }
+                ]
+            }
+        ],
+        'icon': 'assets/icons/abilities/living_flame_ability.png'
+    },
     'i_miss_the_sun': {
         'id': 'i_miss_the_sun',
         'name': 'I Miss The Sun',
@@ -197,6 +339,7 @@ ABILITIES = {
         'desc': 'Teleports you to <object id="myriadian_arc" />.',
         'requirements': [],
         'cooldown': {
+            'id': 'cooldown-iMissTheSun',
             'seconds': None,
             'minutes': None,
             'hours': 12,
@@ -218,6 +361,85 @@ ABILITIES = {
             }
         ],
         'icon': 'assets/icons/abilities/i_miss_the_sun.png'
+    },
+    'lucky_day': {
+        'id': 'lucky_day',
+        'name': 'Lucky Day',
+        'type': 'active',
+        'desc': 'Gives you a buff towards your <skillType type="artisan"/> Quality outcome.',
+        'requirements': [],
+        'cooldown': {
+            'id': 'cooldown-luckyDay',
+            'inputsNeeded': 10,
+            'charges': 20,
+            'requirements': [
+                {
+                    'type': 'abilityAvailable',
+                    'name': '',
+                    'opposite': False,
+                    'requirement': {
+                        'ability': 'lucky_day',
+                        'scanEquippedItems': False
+                    }
+                }
+            ],
+            'inputs': [
+                {
+                    'type': 'coins',
+                    'amount': 100,
+                    'value': 1
+                }
+            ]
+        },
+        'data': [
+            {
+                'dataType': 'normal',
+                'actions': [
+                    {
+                        'type': 'effect',
+                        'runtimeType': 'effect',
+                        'attributes': [
+                            {
+                                'id': '6d6bcb25-d0d1-46b8-b6f1-346c55c07377',
+                                'customIcon': None,
+                                'customTextLocalizationKey': '',
+                                'customText': '',
+                                'textLocalizationKey': '',
+                                'text': '',
+                                'statText': 'Quality outcome',
+                                'skillText': '',
+                                'tables': [],
+                                'requirements': [
+                                    {
+                                        'type': 'mainSkillType',
+                                        'name': '',
+                                        'opposite': False,
+                                        'requirement': {
+                                            'type': 'artisan'
+                                        }
+                                    }
+                                ],
+                                'stats': [
+                                    {
+                                        'stat': 'quality_outcome',
+                                        'name': 'Quality outcome',
+                                        'type': 'qualityOutcome',
+                                        'isPercent': False,
+                                        'value': 20,
+                                        'isNegative': False,
+                                        'isMultiplicative': True
+                                    }
+                                ]
+                            }
+                        ],
+                        'duration': {
+                            'actions': 20
+                        }
+                    }
+                ]
+            }
+        ],
+        'icon': 'assets/icons/abilities/golden_frog_ability.png'
     },
     'memosphere:_agility': {
         'id': 'memosphere:_agility',
@@ -537,6 +759,7 @@ ABILITIES = {
             }
         ],
         'cooldown': {
+            'id': 'cooldown-mermaidsNeedMe',
             'seconds': None,
             'minutes': None,
             'hours': None,
@@ -591,12 +814,14 @@ ABILITIES = {
             }
         ],
         'cooldown': {
+            'id': 'cooldown-needToGoFast',
             'seconds': None,
             'minutes': None,
             'hours': None,
             'days': None,
             'steps': 6000,
             'actions': None,
+            'charges': 5,
             'requirements': [
                 {
                     'type': 'itemEquipped',
@@ -621,6 +846,81 @@ ABILITIES = {
             }
         ],
         'icon': 'assets/icons/abilities/move_fast.png'
+    },
+    'party_mode': {
+        'id': 'party_mode',
+        'name': 'Party Mode',
+        'type': 'active',
+        'desc': 'Gives a buff to Find collectibles.',
+        'requirements': [],
+        'cooldown': {
+            'id': 'cooldown-partArtyCool',
+            'inputsNeeded': 3,
+            'charges': 100,
+            'requirements': [
+                {
+                    'type': 'abilityAvailable',
+                    'name': '',
+                    'opposite': False,
+                    'requirement': {
+                        'ability': 'party_mode',
+                        'scanEquippedItems': False
+                    }
+                }
+            ],
+            'inputs': [
+                {
+                    'type': 'item',
+                    'item': 'wine',
+                    'value': 3
+                },
+                {
+                    'type': 'item',
+                    'item': 'beer',
+                    'value': 1
+                }
+            ]
+        },
+        'data': [
+            {
+                'dataType': 'normal',
+                'actions': [
+                    {
+                        'type': 'effect',
+                        'runtimeType': 'effect',
+                        'attributes': [
+                            {
+                                'id': '40e58576-dd43-4e09-be0a-186bbbfe0812',
+                                'customIcon': None,
+                                'customTextLocalizationKey': '',
+                                'customText': '',
+                                'textLocalizationKey': '',
+                                'text': '',
+                                'statText': 'Find collectibles',
+                                'skillText': '',
+                                'tables': [],
+                                'requirements': [],
+                                'stats': [
+                                    {
+                                        'stat': 'find_collectibles',
+                                        'name': 'Find collectibles',
+                                        'type': 'findCollectibles',
+                                        'isPercent': True,
+                                        'value': 0.2,
+                                        'isNegative': False,
+                                        'isMultiplicative': True
+                                    }
+                                ]
+                            }
+                        ],
+                        'duration': {
+                            'steps': 1000
+                        }
+                    }
+                ]
+            }
+        ],
+        'icon': 'assets/icons/abilities/party_mode.png'
     },
     'pecking_order': {
         'id': 'pecking_order',
@@ -647,7 +947,9 @@ ABILITIES = {
             }
         ],
         'cooldown': {
+            'id': 'cooldown-peckingOrder',
             'steps': 4000,
+            'charges': 5,
             'requirements': [
                 {
                     'type': 'mainSkill',
@@ -689,7 +991,9 @@ ABILITIES = {
         'desc': 'Gives 5 random <hl>presents</hl> containing items.',
         'requirements': [],
         'cooldown': {
+            'id': 'cooldown-presentRain',
             'hours': 10,
+            'charges': 15,
             'requirements': []
         },
         'data': [
@@ -701,12 +1005,11 @@ ABILITIES = {
                         'runtimeType': 'rollLootTable',
                         'tables': [
                             {
-                                'id': '77a1e0c1-205a-41f4-8b43-bbf69599a6e8',
                                 'isPrimary': False,
                                 'type': [],
                                 'rollAmount': 5,
                                 'tables': [
-                                    '25038dda-3538-4a64-95fa-fff809b0e2ed'
+                                    'find_present_items'
                                 ]
                             }
                         ]
@@ -716,6 +1019,78 @@ ABILITIES = {
         ],
         'icon': 'assets/icons/abilities/present_rain.png'
     },
+    'reciprocating_saw': {
+        'id': 'reciprocating_saw',
+        'name': 'Reciprocating Saw',
+        'type': 'active',
+        'desc': 'Gives a large buff toward your <skill skill="carpentry"/> Double action.',
+        'requirements': [],
+        'cooldown': {
+            'id': 'cooldown-mantisSaw',
+            'steps': 3000,
+            'charges': 25,
+            'requirements': [
+                {
+                    'type': 'abilityAvailable',
+                    'name': '',
+                    'opposite': False,
+                    'requirement': {
+                        'ability': 'reciprocating_saw',
+                        'scanEquippedItems': False
+                    }
+                }
+            ]
+        },
+        'data': [
+            {
+                'dataType': 'normal',
+                'actions': [
+                    {
+                        'type': 'effect',
+                        'runtimeType': 'effect',
+                        'attributes': [
+                            {
+                                'id': '42dfca37-2cc5-4c02-9a6f-d26d4ec37629',
+                                'customIcon': None,
+                                'customTextLocalizationKey': None,
+                                'customText': '',
+                                'textLocalizationKey': None,
+                                'text': '',
+                                'statText': 'Double action',
+                                'skillText': 'Carpentry',
+                                'tables': None,
+                                'requirements': [
+                                    {
+                                        'type': 'mainSkill',
+                                        'name': None,
+                                        'opposite': False,
+                                        'requirement': {
+                                            'skill': 'carpentry'
+                                        }
+                                    }
+                                ],
+                                'stats': [
+                                    {
+                                        'stat': 'double_action',
+                                        'name': 'Double action',
+                                        'type': 'doubleAction',
+                                        'isPercent': True,
+                                        'value': 0.5,
+                                        'isNegative': False,
+                                        'isMultiplicative': True
+                                    }
+                                ]
+                            }
+                        ],
+                        'duration': {
+                            'steps': 1000
+                        }
+                    }
+                ]
+            }
+        ],
+        'icon': 'assets/icons/abilities/mantis_karate_chop.png'
+    },
     'rock_and_roll': {
         'id': 'rock_and_roll',
         'name': 'Rock And Roll',
@@ -723,12 +1098,14 @@ ABILITIES = {
         'desc': 'Creates 5 random <hl>rough gems</hl>.',
         'requirements': [],
         'cooldown': {
+            'id': 'cooldown-rockAndRoll',
             'seconds': None,
             'minutes': None,
             'hours': None,
             'days': None,
             'steps': None,
             'actions': 300,
+            'charges': 3,
             'requirements': [
                 {
                     'type': 'mainSkill',
@@ -769,12 +1146,11 @@ ABILITIES = {
                         'runtimeType': 'rollLootTable',
                         'tables': [
                             {
-                                'id': 'reroll-this-id-b1f102bd-bda0-423c-87af-d538f90f9c0d',
                                 'isPrimary': False,
                                 'type': [],
                                 'rollAmount': 5,
                                 'tables': [
-                                    'loottable-gem_pouch_table-b13d22bc-ca02-4238-9534-7ba804c9e2c4'
+                                    'gem_pouch_table'
                                 ]
                             }
                         ]
@@ -783,6 +1159,163 @@ ABILITIES = {
             }
         ],
         'icon': 'assets/icons/abilities/spawn_gems.png'
+    },
+    'rockslide': {
+        'id': 'rockslide',
+        'name': 'Rockslide',
+        'type': 'active',
+        'desc': 'Gives you some buffs toward <skill skill="trinketry"/>.',
+        'requirements': [],
+        'cooldown': {
+            'id': 'cooldown-rockslide',
+            'inputsNeeded': 10,
+            'charges': 10,
+            'requirements': [
+                {
+                    'type': 'abilityAvailable',
+                    'name': '',
+                    'opposite': False,
+                    'requirement': {
+                        'ability': 'rockslide',
+                        'scanEquippedItems': False
+                    }
+                }
+            ],
+            'inputs': [
+                {
+                    'type': 'item',
+                    'item': 'stone',
+                    'value': 1
+                },
+                {
+                    'type': 'item',
+                    'item': 'large_stone',
+                    'value': 10
+                }
+            ]
+        },
+        'data': [
+            {
+                'dataType': 'normal',
+                'actions': [
+                    {
+                        'type': 'effect',
+                        'runtimeType': 'effect',
+                        'attributes': [
+                            {
+                                'id': '6ada1fbd-5600-465f-adf4-0660d5cafbd3',
+                                'customIcon': None,
+                                'customTextLocalizationKey': '',
+                                'customText': '',
+                                'textLocalizationKey': '',
+                                'text': '',
+                                'statText': 'Work efficiency',
+                                'skillText': 'Trinketry',
+                                'tables': [],
+                                'requirements': [
+                                    {
+                                        'type': 'mainSkill',
+                                        'name': '',
+                                        'opposite': False,
+                                        'requirement': {
+                                            'skill': 'trinketry'
+                                        }
+                                    }
+                                ],
+                                'stats': [
+                                    {
+                                        'stat': 'work_efficiency',
+                                        'name': 'Work efficiency',
+                                        'type': 'workEfficiency',
+                                        'isPercent': True,
+                                        'value': 0.1,
+                                        'isNegative': False,
+                                        'isMultiplicative': True
+                                    }
+                                ]
+                            },
+                            {
+                                'id': 'a3232b49-0f61-4fed-9966-89b8b7a83357',
+                                'customIcon': None,
+                                'customTextLocalizationKey': '',
+                                'customText': '',
+                                'textLocalizationKey': '',
+                                'text': '',
+                                'statText': 'Double action',
+                                'skillText': 'Trinketry',
+                                'tables': [],
+                                'requirements': [
+                                    {
+                                        'type': 'mainSkill',
+                                        'name': '',
+                                        'opposite': False,
+                                        'requirement': {
+                                            'skill': 'trinketry'
+                                        }
+                                    }
+                                ],
+                                'stats': [
+                                    {
+                                        'stat': 'double_action',
+                                        'name': 'Double action',
+                                        'type': 'doubleAction',
+                                        'isPercent': True,
+                                        'value': 0.03,
+                                        'isNegative': False,
+                                        'isMultiplicative': True
+                                    }
+                                ]
+                            },
+                            {
+                                'id': '40d99a7e-6523-4475-b5eb-7639f2a28bb5',
+                                'customIcon': 'assets/icons/text/stats/skilling/chance_gems.png',
+                                'customTextLocalizationKey': 'attributes.singulars.custom.rollGemPouchTable.text',
+                                'customText': 'Chance to find <hl>1</hl> <object id="rough_gem" />',
+                                'textLocalizationKey': 'attributes.singulars.custom.rollGemPouchTable.text',
+                                'text': 'Chance to find <hl>1</hl> <object id="rough_gem" />',
+                                'statText': 'Roll special table',
+                                'skillText': 'Trinketry',
+                                'tables': [
+                                    {
+                                        'isPrimary': False,
+                                        'type': [],
+                                        'rollAmount': 1,
+                                        'tables': [
+                                            'gem_pouch_table'
+                                        ]
+                                    }
+                                ],
+                                'requirements': [
+                                    {
+                                        'type': 'mainSkill',
+                                        'name': '',
+                                        'opposite': False,
+                                        'requirement': {
+                                            'skill': 'trinketry'
+                                        }
+                                    }
+                                ],
+                                'stats': [
+                                    {
+                                        'stat': 'roll_special_table',
+                                        'name': 'Roll special table',
+                                        'type': 'rollSpecialTable',
+                                        'isPercent': True,
+                                        'value': 0.05,
+                                        'isNegative': False,
+                                        'isMultiplicative': True
+                                    }
+                                ]
+                            }
+                        ],
+                        'duration': {
+                            'actions': 20
+                        }
+                    }
+                ]
+            }
+        ],
+        'icon': 'assets/icons/abilities/pet_rock_ability.png'
     },
     'run_for_your_life!': {
         'id': 'run_for_your_life!',
@@ -833,7 +1366,9 @@ ABILITIES = {
             }
         ],
         'cooldown': {
+            'id': 'cooldown-shellForge',
             'steps': 4000,
+            'charges': 10,
             'requirements': [
                 {
                     'type': 'mainSkill',
@@ -889,6 +1424,50 @@ ABILITIES = {
         ],
         'icon': 'assets/icons/activities/agility/spring_bat_tracking.png'
     },
+    'study_time': {
+        'id': 'study_time',
+        'name': 'Study Time',
+        'type': 'active',
+        'desc': 'Will give you some random <object id="memosphere" />.',
+        'requirements': [],
+        'cooldown': {
+            'id': 'cooldown-studyTime',
+            'steps': 1234,
+            'charges': 20,
+            'requirements': [
+                {
+                    'type': 'itemEquipped',
+                    'name': '',
+                    'opposite': False,
+                    'requirement': {
+                        'item': 'hat_of_wisdom'
+                    }
+                }
+            ]
+        },
+        'data': [
+            {
+                'dataType': 'normal',
+                'actions': [
+                    {
+                        'type': 'rollLootTable',
+                        'runtimeType': 'rollLootTable',
+                        'tables': [
+                            {
+                                'isPrimary': False,
+                                'type': [],
+                                'rollAmount': 2,
+                                'tables': [
+                                    'find_memospheres'
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+        ],
+        'icon': 'assets/icons/abilities/continued_education.png'
+    },
     'take_me_home': {
         'id': 'take_me_home',
         'name': 'Take Me Home',
@@ -905,6 +1484,7 @@ ABILITIES = {
             }
         ],
         'cooldown': {
+            'id': 'cooldown-takeMeHome',
             'seconds': None,
             'minutes': None,
             'hours': 12,
@@ -927,52 +1507,95 @@ ABILITIES = {
         ],
         'icon': 'assets/icons/abilities/teleport.png'
     },
+    'terminate': {
+        'id': 'terminate',
+        'name': 'Terminate',
+        'type': 'passive',
+        'desc': 'Chance to turn a <object id="log" /> you find into <skill skill="carpentry"/> experience.',
+        'requirements': [],
+        'data': [],
+        'attributes': [
+            {
+                'id': 'cb55a772-250d-4998-aa81-ac12c74775c0',
+                'customIcon': None,
+                'customTextLocalizationKey': '',
+                'customText': '',
+                'textLocalizationKey': '',
+                'text': '',
+                'statText': 'Item swap',
+                'skillText': 'Woodcutting',
+                'tables': None,
+                'requirements': [
+                    {
+                        'type': 'mainSkill',
+                        'name': '',
+                        'opposite': False,
+                        'requirement': {
+                            'skill': 'woodcutting'
+                        }
+                    }
+                ],
+                'stats': [
+                    {
+                        'stat': 'item_swap',
+                        'name': 'Item swap',
+                        'type': 'swapItem',
+                        'isPercent': True,
+                        'value': 0.15,
+                        'isNegative': False,
+                        'isMultiplicative': True,
+                        'swapFromKeywords': [
+                            'logs'
+                        ],
+                        'swapToSkill': 'carpentry',
+                        'swapToXpEffortModifier': 0.5,
+                        'scopes': [
+                            'activityLoot'
+                        ]
+                    }
+                ]
+            }
+        ],
+        'icon': 'assets/icons/abilities/terminate.png'
+    },
     'thats_a_wrap': {
         'id': 'thats_a_wrap',
         'name': "That's A Wrap",
-        'type': 'active',
-        'desc': 'Gives some <hl>linens</hl>.',
+        'type': 'passive',
+        'desc': 'Your <hl>Mummy</hl> occasionally takes some of its excess linens that have been sprawling off of its body and hands you them as a gift.',
         'requirements': [],
-        'cooldown': {
-            'steps': 3000,
-            'requirements': [
-                {
-                    'type': 'mainSkill',
-                    'name': '',
-                    'opposite': False,
-                    'requirement': {
-                        'skill': 'tailoring'
-                    }
-                },
-                {
-                    'type': 'abilityAvailable',
-                    'name': '',
-                    'opposite': False,
-                    'requirement': {
-                        'ability': 'thats_a_wrap',
-                        'scanEquippedItems': False
-                    }
-                }
-            ]
-        },
-        'data': [
+        'cooldown': None,
+        'data': [],
+        'attributes': [
             {
-                'dataType': 'normal',
-                'actions': [
+                'id': 'f17ba7b5-898f-4e03-bb45-dbd03c97dfb0',
+                'customIcon': 'assets/icons/text/stats/skilling/find_linens.png',
+                'customTextLocalizationKey': 'abilities.singulars.thatsAWrap.text',
+                'customText': 'Chance to get some <hl>linens</hl>.',
+                'textLocalizationKey': '',
+                'text': '',
+                'statText': 'Roll special table',
+                'skillText': '',
+                'tables': [
                     {
-                        'type': 'rollLootTable',
-                        'runtimeType': 'rollLootTable',
+                        'isPrimary': False,
+                        'type': [],
+                        'rollAmount': 2,
                         'tables': [
-                            {
-                                'id': '201a7a20-a433-4a82-bdfc-1e53120534b2',
-                                'isPrimary': False,
-                                'type': [],
-                                'rollAmount': 2,
-                                'tables': [
-                                    'd2c1b3e6-a825-4c4f-94d0-40666cd59d6f'
-                                ]
-                            }
+                            'find_linens'
                         ]
+                    }
+                ],
+                'requirements': [],
+                'stats': [
+                    {
+                        'stat': 'roll_special_table',
+                        'name': 'Roll special table',
+                        'type': 'rollSpecialTable',
+                        'isPercent': True,
+                        'value': 0.07,
+                        'isNegative': False,
+                        'isMultiplicative': True
                     }
                 ]
             }
@@ -986,6 +1609,9 @@ ABILITIES = {
         'desc': 'Gives you some buffs toward <skill skill="hunting"/>.',
         'requirements': [],
         'cooldown': {
+            'id': 'cooldown-theHuntIsOn',
+            'inputsNeeded': 10,
+            'charges': 10,
             'requirements': [
                 {
                     'type': 'abilityAvailable',
@@ -995,6 +1621,23 @@ ABILITIES = {
                         'ability': 'the_hunt_is_on',
                         'scanEquippedItems': False
                     }
+                }
+            ],
+            'inputs': [
+                {
+                    'type': 'item',
+                    'item': 'raw_carp',
+                    'value': 1
+                },
+                {
+                    'type': 'item',
+                    'item': 'raw_pike',
+                    'value': 1
+                },
+                {
+                    'type': 'item',
+                    'item': 'animal_meat',
+                    'value': 2
                 }
             ]
         },
@@ -1104,7 +1747,6 @@ ABILITIES = {
                             }
                         ],
                         'duration': {
-                            'id': 'a51b3bae-52f9-4147-b82d-bcc484647cf1',
                             'actions': 20
                         }
                     }
@@ -1146,7 +1788,9 @@ ABILITIES = {
             }
         ],
         'cooldown': {
+            'id': 'cooldown-torpedoAway',
             'steps': 5000,
+            'charges': 5,
             'requirements': [
                 {
                     'type': 'locationHasKeywords',

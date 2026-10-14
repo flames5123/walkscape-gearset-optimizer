@@ -12,6 +12,8 @@ Public surface (unchanged for callers):
   last_run_budget_exhausted  (module attr, set after each call)
   _EXACT_NODE_BUDGET         (module attr, tunable)
 """
+import math
+
 from util.exact_gearset_optimizer import ExactGearsetOptimizer
 
 # Tunable node budget (kept at module level so the worker + tests can read/set
@@ -79,6 +81,62 @@ class ExactXpOptimizer(ExactGearsetOptimizer):
     def numerator_bound(self, X0, s, R):
         # Admissible: independent per-slot max of A_xp and P_xp reserves.
         return (X0 + s["A_xp"] + R["A_xp"]) * (1.0 + s["P_xp"] + R["P_xp"])
+
+    def _combine_best(self, FG, FA, reqs, X0, S0, kappa, WE_level, base_stats):
+        """Inlined XP FG × FA combine. Bit-identical to the base reference (same
+        float association: axp_tot/pxp_tot summed before the outer op), hoisting
+        gear-side scalars and inlining the numerator ((X0+A_xp)*(1+P_xp)) and the
+        steps args — no per-pair dict(zip(...)) rebuild, no numerator() call."""
+        AXES = self.AXES
+        s0 = {a: float(base_stats.get(a, 0.)) for a in AXES}
+        s0v = tuple(s0[a] for a in AXES)
+        iAx = AXES.index("A_xp"); iPx = AXES.index("P_xp")
+        iW = AXES.index("W"); iSa = AXES.index("S_add"); iSp = AXES.index("S_pct"); iB = AXES.index("B")
+        s0Ax = s0v[iAx]; s0Px = s0v[iPx]
+        s0W = s0v[iW]; s0Sa = s0v[iSa]; s0Sp = s0v[iSp]; s0B = s0v[iB]
+        FGv = [(tuple(g["v"][a] for a in AXES), g["kw"], g["comp"]) for g in FG]
+        FAv = [(tuple(a["v"][ax] for ax in AXES), a["kw"], a["comp"]) for a in FA]
+        step_cache = {}
+        def _steps(w, sa, sp, b):
+            key = (w, sa, sp, b)
+            st = step_cache.get(key)
+            if st is None:
+                eff = min(WE_level + w, kappa)
+                stp = max(math.ceil((S0 / (1.0 + eff)) * (1.0 + sp) + sa), 10)
+                st = stp / (1.0 + b)
+                step_cache[key] = st
+            return st
+        reqs_items = list(reqs.items())
+        has_reqs = bool(reqs_items)
+        best_r = float("-inf"); best_nfill = None; best_load = None
+        best_gv = None; best_av = None
+        for gv, kG, cG in FGv:
+            gAx = s0Ax + gv[iAx]; gPx = s0Px + gv[iPx]
+            gW = s0W + gv[iW]; gSa = s0Sa + gv[iSa]; gSp = s0Sp + gv[iSp]; gB = s0B + gv[iB]
+            nG = len(cG)
+            for av, kA, cA in FAv:
+                if has_reqs:
+                    ok = True
+                    for k, t in reqs_items:
+                        if kG[k] + kA[k] < t:
+                            ok = False
+                            break
+                    if not ok:
+                        continue
+                axp_tot = gAx + av[iAx]          # == sv[iAx] (same association)
+                pxp_tot = gPx + av[iPx]          # == sv[iPx]
+                r = ((X0 + axp_tot) * (1.0 + pxp_tot)) / _steps(
+                    gW + av[iW], gSa + av[iSa], gSp + av[iSp], gB + av[iB])
+                nfill = -(nG + len(cA))
+                if best_load is None or (r, nfill) > (best_r, best_nfill):
+                    best_r = r; best_nfill = nfill
+                    best_load = list(cG) + list(cA)
+                    best_gv = gv; best_av = av
+        if best_load is None:
+            return float("-inf"), None, None
+        rng = range(len(AXES))
+        bsv = tuple(s0v[j] + best_gv[j] + best_av[j] for j in rng)
+        return best_r, best_load, dict(zip(AXES, bsv))
 
 
 def exact_xp_optimize(activity, character, skill=None, location=None, base_stats=None,

@@ -255,14 +255,20 @@ def scrape_all_shops():
         if not shop_html:
             print(f"  ⚠ Failed to download: {shop['name']}")
             shop['inventory'] = []
+            shop['can_sell'] = True  # unknown — assume sellable
             continue
 
         inventory = parse_shop_inventory(shop_html, shop['name'])
         shop['inventory'] = inventory
+        # Sellability: the wiki "Purchases" section reads "Nothing may be sold at
+        # this shop." for shops the player cannot sell to (clothing/cosmetic shops,
+        # Casbrant's Sunken Ship, etc.). This is the authoritative signal.
+        shop['can_sell'] = 'nothing may be sold at this shop' not in shop_html.lower()
 
         # Resolve item references
         for item in inventory:
-            item['item_ref'] = resolve_item_reference(item['item_name'], lookups)
+            item['item_ref'] = resolve_item_reference(
+                item['item_name'], lookups, item_type=item.get('item_type'))
             if not item['item_ref']:
                 validator.add_item_issue(shop['name'], [f"Could not resolve: {item['item_name']}"])
 
@@ -317,6 +323,7 @@ def generate_module(shops):
         lines.append('    region: str')
         lines.append('    requirements: List[str] = field(default_factory=list)')
         lines.append('    inventory: List[ShopItem] = field(default_factory=list)')
+        lines.append('    can_sell: bool = True  # False = the player cannot sell items at this shop')
         lines.append('')
         lines.append('')
         lines.append('# ============================================================================')
@@ -348,6 +355,8 @@ def generate_module(shops):
                     lines.append(f'{var_name} = ShopInfo(')
                     lines.append(f"    name='{escape_str(shop['name'])}', building_type='{escape_str(shop['building_type'])}',")
                     lines.append(f"    location='{escape_str(shop['location'])}', region='{escape_str(shop['region'])}',")
+                    if not shop.get('can_sell', True):
+                        lines.append('    can_sell=False,')
                     lines.append(')')
                 else:
                     lines.append(f'{var_name} = ShopInfo(')
@@ -358,6 +367,8 @@ def generate_module(shops):
                         ref_str = f"'{item['item_ref']}'" if item.get('item_ref') else 'None'
                         lines.append(f"        ShopItem('{escape_str(item['item_name'])}', {item['stock']}, {item['price']}, '{item['currency']}', '{item['item_type']}', {ref_str}),")
                     lines.append('    ],')
+                    if not shop.get('can_sell', True):
+                        lines.append('    can_sell=False,')
                     lines.append(')')
                 lines.append('')
 

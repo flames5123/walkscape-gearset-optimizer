@@ -11,6 +11,7 @@ import { showInfoPopover, wireInfoIcons } from './info-popover.js';
 
 import RegionCard from './travel-region-card.js';
 import MovementActivitiesSection from './travel-movement-activities.js';
+import { CONSUMABLE_OPTIONS_INFO_ICON_HTML } from './utils/consumable-options-info.js';
 
 // ============================================================================
 // CONSTANTS
@@ -102,7 +103,11 @@ const LOCATION_CANONICAL_REGION = {
     'Nurturing Nook Springs': 'jarvonia', 'Pit of Pittance': 'jarvonia',
     'Port Skildar': 'jarvonia', 'Sanguine Hills': 'jarvonia',
     'Winter Waves Glacier': 'jarvonia', "Winter's End": 'jarvonia',
-    'Noiseless Pass': 'jarvonia',
+    // GDTE gateway: Fort of Permafrost <-> Noiseless Pass (Jarvonian letter of
+    // passage) <-> Mangrove Forest. Classed as GDTE (trellin) so the Jarvonia
+    // crossing is a non-gear cross-region route and Noiseless Pass -> Mangrove
+    // Forest becomes GDTE-internal rather than a spurious crossing (item 2).
+    'Noiseless Pass': 'trellin',
     // Trellin (GDTE sub-region)
     'Mangrove Forest': 'trellin', 'Farsand Coast': 'trellin', 'Salsfirth': 'trellin',
     'Granfiddich': 'trellin', 'Granfiddich Shores': 'trellin', 'Warrenfield': 'trellin',
@@ -386,6 +391,8 @@ export default class ConfigPanel {
 
     _renderTopControls() {
         const showMovement = this.config.show_movement_activities || false;
+        const optimizePets = this.config.optimize_pets || false;
+        const optimizeConsumables = this.config.optimize_consumables || false;
 
         return `
             <div class="travel-top-buttons">
@@ -397,6 +404,16 @@ export default class ConfigPanel {
                 </button>
             </div>
             <div class="travel-top-checkboxes">
+                <label class="travel-checkbox-label">
+                    <input type="checkbox" id="travel-optimize-pets" ${optimizePets ? 'checked' : ''} />
+                    <span>Optimize Pets</span>
+                    <span class="travel-info-icon" data-info="When enabled, the optimizer picks the best pet you own for each route. When disabled, pets are not included in travel optimization.">ⓘ</span>
+                </label>
+                <label class="travel-checkbox-label">
+                    <input type="checkbox" id="travel-optimize-consumables" ${optimizeConsumables ? 'checked' : ''} />
+                    <span>Optimize Consumables</span>
+                    <span class="travel-info-icon" data-info="When enabled, the optimizer picks the best consumable you own for each route. When disabled, consumables are not included in travel optimization.">ⓘ</span>${CONSUMABLE_OPTIONS_INFO_ICON_HTML}
+                </label>
                 <label class="travel-checkbox-label">
                     <input type="checkbox" id="travel-show-movement" ${showMovement ? 'checked' : ''} />
                     <span>Show Movement Activities</span>
@@ -417,6 +434,23 @@ export default class ConfigPanel {
         const clearBtn = this.el.querySelector('#travel-clear-all-btn');
         if (clearBtn) {
             clearBtn.addEventListener('click', () => this._onClearAllClick(clearBtn));
+        }
+
+        // Optimize Pets / Optimize Consumables checkboxes (item 3).
+        // These only affect the optimize payload, so no re-render is needed.
+        const optPetsCheck = this.el.querySelector('#travel-optimize-pets');
+        if (optPetsCheck) {
+            optPetsCheck.addEventListener('change', (e) => {
+                this.config.optimize_pets = e.target.checked;
+                this.onConfigChange();
+            });
+        }
+        const optConsCheck = this.el.querySelector('#travel-optimize-consumables');
+        if (optConsCheck) {
+            optConsCheck.addEventListener('change', (e) => {
+                this.config.optimize_consumables = e.target.checked;
+                this.onConfigChange();
+            });
         }
 
         // Show Movement Activities checkbox
@@ -597,8 +631,19 @@ export default class ConfigPanel {
                         // GDTE internal: assign to origin (bidirectional within GDTE)
                         return fromRegion === region.id;
                     }
-                    // Major cross-region: assign to destination
-                    return toRegion === region.id;
+                    // Major cross-region assignment (item 2):
+                    //  - gear-requirement exceptions (diving/skis/light): forward
+                    //    stays in the DESTINATION region; the origin lists it in its
+                    //    cross-region section. Unchanged.
+                    //  - non-gear crossings (e.g. letter-of-passage gateways like
+                    //    Fort of Permafrost -> Noiseless Pass): assign the forward to
+                    //    the ORIGIN region so it's optimized with the starting region's
+                    //    gear; the reverse is synthesized one-way in the destination
+                    //    region below.
+                    if (exceptionOriginalIds.has(route.id)) {
+                        return toRegion === region.id;
+                    }
+                    return fromRegion === region.id;
                 }
                 // Only from is known: use it
                 if (fromRegion) return fromRegion === region.id;
@@ -632,9 +677,12 @@ export default class ConfigPanel {
             route._oneWay = true;
         }
 
-        // Add reverse directions of major cross-region routes as one-way routes
-        // in the origin region (since the forward route is in the destination card).
-        // GDTE internal crossings don't need reverse routes (they're bidirectional in origin card).
+        // Synthesize the reverse direction of non-gear major cross-region routes as a
+        // one-way route in the DESTINATION region. The forward is assigned to the
+        // origin region (main filter), so the reverse belongs to the other endpoint's
+        // region — giving two independent one-way slots, each optimized in its own
+        // starting region (item 2). Gear exceptions get no synthetic reverse (item 1);
+        // GDTE-internal crossings are bidirectional in the origin card.
         for (const route of this.routes) {
             const parts = (route.name || '').split(' to ');
             if (parts.length !== 2) continue;
@@ -647,15 +695,19 @@ export default class ConfigPanel {
             // Skip GDTE internal crossings — they're bidirectional in the origin card
             if (gdteSet.has(fromRegion) && gdteSet.has(toRegion)) continue;
 
-            // Reverse goes to the origin region (fromRegion)
-            if (fromRegion !== region.id) continue;
+            // Gear-requirement cross-region exception routes get NO synthetic reverse
+            // (item 1): the forward lives in the destination card + the origin's
+            // cross-region section. Seeding a reverse into the origin dragged the gear
+            // requirement (diving) into that region's same-region optimization and
+            // produced a bogus "need 3x diving gear, have 0" warning.
+            if (exceptionOriginalIds.has(route.id)) continue;
 
-            // For exception routes: check if gear is normal for the reverse starting region (toRegion)
-            if (exceptionOriginalIds.has(route.id)) {
-                const gearReqs = (route.terrainModifiers || []).filter(isGearsetRequirement);
-                const allNormal = gearReqs.length > 0 && gearReqs.every(req => isGearNormalForRegion(req, toRegion));
-                if (!allNormal) continue;
-            }
+            // Non-gear major crossings: the forward route is assigned to the ORIGIN
+            // region (see main filter). Synthesize the reverse one-way in the
+            // DESTINATION region so each direction is optimized in its own starting
+            // region — e.g. Fort of Permafrost -> Noiseless Pass under Jarvonia, and the
+            // reverse Noiseless Pass -> Fort of Permafrost under Trellin (item 2).
+            if (toRegion !== region.id) continue;
 
             result.push({
                 ...route,

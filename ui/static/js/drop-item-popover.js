@@ -1,3 +1,4 @@
+import { rewardSourceGroupsHtml, openAchievementFromSource } from './utils/reward-sources.js';
 /**
  * Drop Item Popover — shows item stats when hovering/clicking a drop icon in the drops section.
  *
@@ -18,6 +19,8 @@ import { renderRequirementsRow } from './utils/requirements.js';
 import { formatFixed } from './utils/number-format.js';
 import { wikiDarkModeSuffix } from './utils/wiki-link.js';
 import { ownedCountLabel } from './utils/owned-quantity.js';
+import { fetchOwnedByQuality, ownedBlockHtml } from './utils/owned-quality-breakdown.js';
+import { tradingButtonsHTML } from './trading-buttons.js';
 
 let activeDropPopover = null;
 let dropDismissTimer = null;
@@ -368,12 +371,36 @@ function buildPopoverHtml(item, quality = null, opts = null) {
     // the caller opts in (e.g. the notepad item/drop popover) and a character
     // has been imported.
     let ownedHtml = '';
+    let ownedForTrade = false;
     if (opts && opts.showOwned && opts.itemId) {
         const oq = (window.store && window.store.state && window.store.state.character
             && window.store.state.character.owned_quantities) || null;
         const ownedText = ownedCountLabel(oq, opts.itemId, { fine: quality === 'Fine' });
-        if (ownedText) ownedHtml = `<div class="drop-popover-owned">${ownedText}</div>`;
+        if (ownedText) ownedForTrade = true;
+        // Per-quality breakdown: line 1 is the hovered quality's own count,
+        // line 2 lists every owned quality in its colour. Falls back to the
+        // plain "N owned" total when there's no per-quality variety to show
+        // (fixed-rarity items, Normal-only stacks) or no live data yet.
+        const ownedMap = (opts.ownedByQuality && opts.ownedByQuality[opts.itemId]) || null;
+        const block = ownedBlockHtml({ ownedMap, activeQuality: quality, line1Class: 'drop-popover-owned' });
+        ownedHtml = block || (ownedText ? `<div class="drop-popover-owned">${ownedText}</div>` : '');
     }
+    // Trading: Wishlist + Search-market (shown only when flag on, tradable, not owned).
+    const _tradeQuality = quality ? String(quality).toLowerCase() : 'normal';
+    const tradeHtml = tradingButtonsHTML(
+        { name: item.name, type: item.type, quality: _tradeQuality, tradable: item.tradable },
+        { owned: ownedForTrade });
+
+    // Coin VALUE for THIS quality (crafted tiers via quality_values, Fine via
+    // value_fine, else the base/Normal value) — shown as a centered pill right
+    // below the Sources button.
+    const _coinVal = qualityCoinValue(item, quality);
+    const valuePillHtml = (_coinVal != null)
+        ? `<div class="drop-popover-value" style="text-align:center;margin:5px 0 2px;">`
+          + `<span class="keyword" style="display:inline-flex;align-items:center;gap:4px;">`
+          + `<img src="/assets/icons/items/coins.svg" width="14" height="14" style="image-rendering:pixelated;" alt="coins">`
+          + `${Number(_coinVal).toLocaleString(undefined, { maximumFractionDigits: 2 })} value</span></div>`
+        : '';
 
     return `
         <div class="drop-popover-inner ${rarity}">
@@ -382,13 +409,39 @@ function buildPopoverHtml(item, quality = null, opts = null) {
             <div class="drop-popover-actions">
                 <a href="${wikiUrl}" target="_blank" rel="noopener noreferrer" class="wiki-link">Wiki</a>
                 <button class="btn-source-dropdown drop-popover-sources-btn" title="Show sources for this item">Sources <span class="source-arrow">▼</span></button>
+                ${tradeHtml}
             </div>
+            ${valuePillHtml}
             <div class="drop-popover-source-container" style="display: none;"></div>
             ${requirementsHtml}
             <div class="keywords">${keywordsHtml}</div>
             <div class="stats">${statsHtml}${gatedHtml}</div>
         </div>
     `;
+}
+
+/**
+ * Resolve the coin VALUE for a given quality of a catalog item.
+ * - Crafted tiers (Normal..Eternal): item.quality_values[quality] (case-insensitive).
+ * - Fine: item.value_fine.
+ * - Otherwise (base / no per-quality data): item.value.
+ * Returns a number, or null when no value is known.
+ */
+function qualityCoinValue(item, quality) {
+    if (!item) return null;
+    const q = quality ? String(quality) : null;
+    const ql = q ? q.toLowerCase() : null;
+    const qv = item.quality_values;
+    if (q && qv && typeof qv === 'object') {
+        if (qv[q] != null) return qv[q];
+        for (const k of Object.keys(qv)) {
+            if (String(k).toLowerCase() === ql && qv[k] != null) return qv[k];
+        }
+    }
+    if (ql === 'fine' && item.value_fine != null) return item.value_fine;
+    if (item.value != null) return item.value;
+    if (item.value_fine != null) return item.value_fine;  // fine-only materials
+    return null;
 }
 
 /**
@@ -861,6 +914,10 @@ export async function showDropPopover(anchor, itemName, pinned = false, quality 
         return;
     }
 
+    // Live per-quality owned map (cached after first fetch) for the owned
+    // breakdown line in the popover.
+    const ownedByQuality = await fetchOwnedByQuality();
+
     const id = ++dropPopoverId;
     const isPetEgg = item.type === 'pet';
     // Pet eggs use a neutral outer bg; other items tint by rarity.
@@ -877,7 +934,7 @@ export async function showDropPopover(anchor, itemName, pinned = false, quality 
     popover.className = outerClass;
     popover.innerHTML = `
         <div class="drop-popover-arrow drop-popover-arrow-bottom"></div>
-        ${isPetEgg ? buildPetEggPopoverHtml(item, itemName) : buildPopoverHtml(item, quality, { showOwned: true, itemId: anchor.dataset.npOwnedItemId || item.id })}
+        ${isPetEgg ? buildPetEggPopoverHtml(item, itemName) : buildPopoverHtml(item, quality, { showOwned: true, itemId: anchor.dataset.npOwnedItemId || item.id, ownedByQuality })}
     `;
     document.body.appendChild(popover);
 
@@ -1043,6 +1100,137 @@ export function wireDropAnchor(anchor, name, isContainer, quality = null) {
     });
 }
 
+// ============================================================================
+// ACHIEVEMENT POPOVER (notepad achievement chips)
+// ============================================================================
+// Reuses the same anchored/arrow popover shell + dismiss machinery as the drop
+// popover, but the content is an achievement (icon + name, a Wiki button, and
+// the requirement text) rather than a catalog item. There is no async catalog
+// lookup and no sources section.
+
+function _escHtml(s) {
+    return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+}
+
+function buildAchievementPopoverHtml(ach) {
+    const name = ach.name || 'Achievement';
+    const wikiName = name.replace(/ /g, '_');
+    const wikiUrl = `https://wiki.walkscape.app/wiki/${encodeURIComponent(wikiName).replace(/%2F/g, '/').replace(/%5F/g, '_')}${wikiDarkModeSuffix()}`;
+    const iconHtml = ach.icon
+        ? `<img class="drop-popover-ach-icon" src="${_escHtml(ach.icon)}" alt="">`
+        : '';
+    const reqs = ach.requirements || [];
+    const reqHtml = reqs.length
+        ? reqs.map(r => `<div class="drop-popover-req">${_escHtml(r)}</div>`).join('')
+        : '<div class="drop-popover-req">See the wiki for details.</div>';
+    return `
+        <div class="drop-popover-inner">
+            <div class="drop-popover-name">${iconHtml}${_escHtml(name)}</div>
+            <div class="drop-popover-actions">
+                <a href="${wikiUrl}" target="_blank" rel="noopener noreferrer" class="wiki-link">Wiki</a>
+            </div>
+            <div class="drop-popover-reqs">${reqHtml}</div>
+        </div>
+    `;
+}
+
+/**
+ * Show an achievement popover anchored to a chip. Mirrors showDropPopover's
+ * shell (arrow, positioning, hover/scroll/outside-click dismiss) using the
+ * shared activeDropPopover state, so only one popover is ever open at a time.
+ */
+export function showAchievementPopover(anchor, ach, pinned = false) {
+    clearTimeout(dropDismissTimer);
+    dropDismissTimer = null;
+    if (activeDropPopover && activeDropPopover.anchor === anchor && activeDropPopover.pinned) {
+        dismissDropPopover();
+        return;
+    }
+    if (activeDropPopover) {
+        activeDropPopover.el.remove();
+        activeDropPopover = null;
+    }
+    const id = ++dropPopoverId;
+    const popover = document.createElement('div');
+    popover.className = 'drop-item-popover achievement-popover';
+    popover.innerHTML = `
+        <div class="drop-popover-arrow drop-popover-arrow-bottom"></div>
+        ${buildAchievementPopoverHtml(ach || {})}
+    `;
+    document.body.appendChild(popover);
+    positionPopover(popover, anchor);
+    const initialWidth = popover.getBoundingClientRect().width;
+    popover.style.width = initialWidth + 'px';
+    activeDropPopover = { el: popover, anchor, pinned, id };
+    attachScrollDismiss();
+    startAnchorWatch();
+
+    const wikiLink = popover.querySelector('.wiki-link');
+    if (wikiLink) wikiLink.addEventListener('click', (e) => e.stopPropagation());
+
+    popover.addEventListener('mouseenter', () => {
+        if (activeDropPopover && !activeDropPopover.pinned) {
+            clearTimeout(dropDismissTimer);
+            dropDismissTimer = null;
+        }
+    });
+    popover.addEventListener('mouseleave', () => {
+        if (activeDropPopover && !activeDropPopover.pinned && activeDropPopover.id === id) {
+            scheduleDropDismiss(id);
+        }
+    });
+
+    if (pinned || isTouchDevice()) {
+        const delay = isTouchDevice() ? 500 : 0;
+        setTimeout(() => {
+            const eventType = isTouchDevice() ? 'touchend' : 'pointerdown';
+            document.addEventListener(eventType, onDropOutsideClick, { once: true, capture: true });
+        }, delay);
+    }
+}
+
+/**
+ * Wire an achievement chip to its anchored popover: hover to preview, click to
+ * pin/unpin (matching the drop-card interaction model). Idempotent.
+ * @param {HTMLElement} anchor - the .np-entity achievement chip
+ * @param {Object} ach - { name, icon, requirements }
+ */
+export function wireAchievementAnchor(anchor, ach) {
+    if (!anchor || !ach) return;
+    if (anchor.dataset.achWired) return;
+    anchor.dataset.achWired = '1';
+    anchor.classList.add('drop-card-interactive');
+
+    anchor.addEventListener('mouseenter', () => {
+        if (isTouchDevice()) return;
+        if (activeDropPopover && activeDropPopover.pinned) return;
+        anchor.dataset.popoverSeq = String(nextShowSeq());
+        clearTimeout(dropDismissTimer);
+        dropDismissTimer = null;
+        showAchievementPopover(anchor, ach, false);
+    });
+    anchor.addEventListener('mouseleave', () => {
+        if (isTouchDevice()) return;
+        if (activeDropPopover && activeDropPopover.pinned) return;
+        anchor.dataset.popoverSeq = String(nextShowSeq());
+        if (activeDropPopover && activeDropPopover.anchor === anchor) {
+            scheduleDropDismiss(activeDropPopover.id);
+        }
+    });
+    anchor.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        anchor.dataset.popoverSeq = String(nextShowSeq());
+        if (activeDropPopover && activeDropPopover.anchor === anchor && activeDropPopover.pinned) {
+            dismissDropPopover();
+        } else {
+            showAchievementPopover(anchor, ach, true);
+        }
+    });
+}
+
 /**
  * Schedule dismissal of the active drop popover if it is anchored to the
  * given element and is not pinned. Safe to call from any anchor's mouseleave
@@ -1194,6 +1382,8 @@ async function showChildItemPopover(rowAnchor, itemName, pinned, parentPopover) 
         return;
     }
 
+    const ownedByQuality = await fetchOwnedByQuality();
+
     const id = ++childPopoverId;
     const isPetEgg = item.type === 'pet';
     const rarity = getRarityClass(item.rarity);
@@ -1204,7 +1394,7 @@ async function showChildItemPopover(rowAnchor, itemName, pinned, parentPopover) 
     popover.className = outerClass;
     popover.innerHTML = `
         <div class="drop-popover-arrow drop-popover-arrow-bottom"></div>
-        ${isPetEgg ? buildPetEggPopoverHtml(item, itemName) : buildPopoverHtml(item, null, { showOwned: true, itemId: item.id })}
+        ${isPetEgg ? buildPetEggPopoverHtml(item, itemName) : buildPopoverHtml(item, null, { showOwned: true, itemId: item.id, ownedByQuality })}
     `;
     document.body.appendChild(popover);
 
@@ -1507,6 +1697,7 @@ async function loadAndRenderSources(item, container, lookupOverride = null) {
             }
         }
 
+        html += rewardSourceGroupsHtml(sources);
         html += '</div>';
         // Set content directly — display:block so positionPopover can measure
         container.innerHTML = html;
@@ -1527,6 +1718,8 @@ async function loadAndRenderSources(item, container, lookupOverride = null) {
                     if (window.recipeSelector) {
                         window.recipeSelector.selectRecipe(sourceId);
                     }
+                } else if (sourceType === 'achievement_reward') {
+                    openAchievementFromSource(sourceId);
                 }
 
                 dismissDropPopover();

@@ -24,8 +24,8 @@ class Currency:
     """All currencies in Walkscape."""
 
     COIN = CurrencyInstance(name='Coins')
-    ADVENTURERS_GUILD_TOKEN = CurrencyInstance(name="Adventurers' guild token")
-    ADVENTURING_GUILD_CHIP = CurrencyInstance(name='Adventuring guild chip')
+    ADVENTURERS_GUILD_CHIP = CurrencyInstance(name="Adventurers' Guild chip")
+    ADVENTURERS_GUILD_TOKEN = CurrencyInstance(name="Adventurers' Guild token")
     AGILITY_CHIP = CurrencyInstance(name='Agility chip')
     CARPENTRY_CHIP = CurrencyInstance(name='Carpentry chip')
     COOKING_CHIP = CurrencyInstance(name='Cooking chip')
@@ -48,8 +48,8 @@ class Currency:
 # Lookup dictionary for quick access
 CURRENCIES_BY_NAME = {
     'Coins': Currency.COIN,
-    "Adventurers' guild token": Currency.ADVENTURERS_GUILD_TOKEN,
-    'Adventuring guild chip': Currency.ADVENTURING_GUILD_CHIP,
+    "Adventurers' Guild chip": Currency.ADVENTURERS_GUILD_CHIP,
+    "Adventurers' Guild token": Currency.ADVENTURERS_GUILD_TOKEN,
     'Agility chip': Currency.AGILITY_CHIP,
     'Carpentry chip': Currency.CARPENTRY_CHIP,
     'Cooking chip': Currency.COOKING_CHIP,

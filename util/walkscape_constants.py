@@ -482,14 +482,19 @@ class Sorting(Enum):
 
         Weight semantics:
           - weight=100: strict priority — optimize fully (no regression allowed)
-          - weight=1-99: threshold — the floor is a MINIMUM, not a target.
-                         Once both gearsets clear the floor, keep optimizing:
-                         whichever is better on the raw metric wins. If they
-                         tie on this metric, fall through to the next entry.
-                         If one gearset clears the floor and the other doesn't,
-                         the one that clears wins (the floor is a hard
-                         minimum). If neither clears the floor, the one that
-                         is closer to clearing wins (strict raw compare).
+          - weight=1-99: threshold — the floor is a MINIMUM to satisfy, then
+                         MOVE ON to the next goal. Once BOTH gearsets clear
+                         the floor, this goal is considered satisfied and no
+                         longer dominates priority order — the comparison
+                         proceeds to the next entry. (This is what lets a 1%
+                         weight trade the metric down toward its floor to
+                         maximize a lower-priority goal, instead of behaving
+                         like 100%.) If one gearset clears the floor and the
+                         other doesn't, the one that clears wins (hard
+                         minimum). If NEITHER clears the floor, the one closer
+                         to clearing wins (strict raw compare — this entry
+                         still gates). Satisfied threshold goals are remembered
+                         for a final Pareto tiebreaker.
           - weight=0: ignored entirely — no constraint, no optimization
 
         Algorithm:
@@ -498,19 +503,35 @@ class Sorting(Enum):
            a. weight=0: skip.
            b. weight=100: strict lex — improvement → True, regression → False.
            c. weight=1-99 (threshold):
-              - If one meets the floor and the other doesn't: the one that
-                meets wins (accept/reject accordingly).
-              - Otherwise (both meet or both fail): strict raw compare on
-                this metric. Better → True, worse → False, equal → continue.
-        3. All entries exhausted → False (equal).
+              - One meets the floor, the other doesn't → the one that meets
+                wins (accept/reject accordingly).
+              - Neither meets → strict raw compare (closer to floor wins);
+                this entry still gates.
+              - BOTH meet → goal satisfied: defer to the next entry, and
+                record (new,old) for the final Pareto tiebreaker.
+        3. Final Pareto tiebreaker: all gating goals tied and every threshold
+           goal cleared by both → in priority order, prefer a free improvement
+           on a satisfied threshold metric.
+        4. Otherwise → False (equal).
 
-        Design note: Older versions of this function skipped the raw-value
-        compare when both gearsets cleared the floor, which made it
-        impossible for the local search to catch Pareto improvements on
-        weighted metrics (e.g. swapping a legs item that trades wasted WE
-        for real chest-finding when XP is unchanged). That caused
-        user-visible "why didn't it swap?" bugs. The floor now behaves as a
-        minimum constraint on top of normal priority-order optimization.
+        Design note: This function must balance two requirements that pull in
+        opposite directions:
+          (a) A threshold weight (e.g. 1%) must let the optimizer sacrifice
+              the metric down toward its floor to maximize a later goal —
+              "meet the floor, then move on." Earlier code did a strict raw
+              compare on the metric even when both sets cleared the floor,
+              which made 1% behave identically to 100% (bug 24ed6dac): the
+              top metric was always fully maximized whenever its low floor
+              was trivially met, so the next goal was never consulted.
+          (b) A free Pareto improvement on a satisfied threshold metric (all
+              higher-priority goals unchanged) must still be preferred — the
+              "why didn't it swap?" bug.
+        The reconciliation: when both sets clear a threshold floor, DEFER that
+        goal (don't let it dominate here) but remember it; after the priority
+        loop, break ties by raw-comparing the deferred (satisfied) threshold
+        metrics in priority order. This satisfies (a) — a satisfied primary no
+        longer blocks optimizing the next goal — while preserving (b) — an
+        all-else-equal free gain is still captured by the tiebreaker.
         """
         if metrics_old is None:
             return True
@@ -523,6 +544,12 @@ class Sorting(Enum):
             if weights is not None and entry.sort in weights:
                 w = weights[entry.sort]
             return w
+
+        # Threshold goals that BOTH gearsets already clear are "satisfied":
+        # they must not dominate priority order (that made a 1% weight behave
+        # like 100%). Defer them to a final Pareto tiebreaker so an
+        # all-else-equal free improvement is still preferred, in priority order.
+        deferred_satisfied = []  # list of (new_sort, old_sort), priority order
 
         for entry in entries:
             weight = _weight(entry)
@@ -573,15 +600,34 @@ class Sorting(Enum):
             if not new_meets and old_meets:
                 return False  # old clears the hard minimum, new doesn't
 
-            # Both meet or both fail → strict raw compare on this metric.
-            # This is the key difference from the older threshold-skip
-            # behavior: the floor is a minimum, not a target, so we keep
-            # optimizing past it.
+            if not new_meets and not old_meets:
+                # Neither clears the hard minimum → prefer the one closer to
+                # clearing it. This entry still gates (we have not yet
+                # satisfied the floor, so it is not safe to move on).
+                if new_sort < old_sort:
+                    return True
+                if new_sort > old_sort:
+                    return False
+                # equal → continue to next priority
+                continue
+
+            # Both clear the floor → this goal is SATISFIED. Do NOT raw-compare
+            # it here (that is what made a 1% threshold behave like 100% by
+            # always maximizing the top metric). Move on to the next goal, but
+            # remember this metric for the final Pareto tiebreaker so an
+            # all-else-equal free improvement is still preferred.
+            deferred_satisfied.append((new_sort, old_sort))
+            # continue to next priority
+
+        # Final Pareto tiebreaker: every strict/gating goal was tied and all
+        # threshold goals were cleared by both sets. Prefer a free improvement
+        # on a satisfied threshold metric, in priority order.
+        for new_sort, old_sort in deferred_satisfied:
             if new_sort < old_sort:
                 return True
             if new_sort > old_sort:
                 return False
-            # equal → continue to next priority
+
         return False  # all entries exhausted, equal
 
 
@@ -702,6 +748,7 @@ _XY_TO_LEGACY_SORTING_NAMES = {
     ('materials',       'quality'):     'MATERIALS',               # materials_for_target (quality target)
     ('total_crafts',    'quality'):     'TOTAL_CRAFTS_FOR_TARGET', # total_crafts (quality target)
     ('expected_steps',  'quality'):     'TOTAL_STEPS',             # steps_for_target (quality target)
+    ('expected_steps',  'action'):      'EXPECTED_STEPS_PER_ACTION', # expected_steps_per_action (bug: was unmapped -> user's #1 recipe sort silently dropped, degenerate scoring, empty non-owned upgrades on non-quality recipes like bars)
     ('expected_steps',  'craft'):       'STEPS_PER_CRAFT',         # expected_steps_per_item
     ('displayed_steps', 'craft'):       'DISPLAYED_STEPS_PER_CRAFT', # current_steps
     ('materials',       'craft'):       'MATERIALS_PER_CRAFT',     # materials_per_craft

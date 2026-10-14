@@ -127,7 +127,7 @@ class Consumable:
 
     BUG_BAIT = ConsumableItem(
         name='Bug bait',
-        keywords=['Fishing'],
+        keywords=['Fishing', 'Fishing Bait'],
         attributes={'fishing': {'global': {'steps_add': -1.0}}},
         duration=5000,
         value=4
@@ -135,7 +135,7 @@ class Consumable:
 
     BUG_BAIT_FINE = ConsumableItem(
         name='Bug bait (Fine)',
-        keywords=['Fishing'],
+        keywords=['Fishing', 'Fishing Bait'],
         attributes={'fishing': {'global': {'steps_add': -2.0}}},
         duration=5000,
         value=24
@@ -170,7 +170,7 @@ class Consumable:
         keywords=['Food', 'Cooked Fish', 'Mining'],
         attributes={'mining': {'global': {'work_efficiency': 8.0}}},
         duration=500,
-        value=32
+        value=22
     )
 
     COOKED_ANGLERFISH_FINE = ConsumableItem(
@@ -178,7 +178,7 @@ class Consumable:
         keywords=['Food', 'Cooked Fish', 'Mining'],
         attributes={'mining': {'global': {'work_efficiency': 15.0}}},
         duration=500,
-        value=127
+        value=116
     )
 
     COOKED_CARP = ConsumableItem(
@@ -234,7 +234,7 @@ class Consumable:
         keywords=['Food', 'Cooked Fish', 'Crafting'],
         attributes={'crafting': {'global': {'double_rewards': 3.0}}},
         duration=500,
-        value=6
+        value=5
     )
 
     COOKED_LOBSTER_FINE = ConsumableItem(
@@ -242,7 +242,7 @@ class Consumable:
         keywords=['Food', 'Cooked Fish', 'Crafting'],
         attributes={'crafting': {'global': {'double_rewards': 5.0}}},
         duration=500,
-        value=37
+        value=26
     )
 
     COOKED_MEAT = ConsumableItem(
@@ -314,7 +314,7 @@ class Consumable:
         keywords=['Food', 'Cooked Fish', 'Woodcutting'],
         attributes={'woodcutting': {'global': {'steps_add': -1.0, 'double_rewards': 2.0}}},
         duration=500,
-        value=15
+        value=14
     )
 
     COOKED_SHARK_FINE = ConsumableItem(
@@ -322,7 +322,7 @@ class Consumable:
         keywords=['Food', 'Cooked Fish', 'Woodcutting'],
         attributes={'woodcutting': {'global': {'steps_add': -2.0, 'double_rewards': 4.0}}},
         duration=500,
-        value=74
+        value=73
     )
 
     COOKED_SHRIMP = ConsumableItem(
@@ -378,7 +378,7 @@ class Consumable:
         keywords=['Food', 'Cooked Fish', 'Woodcutting'],
         attributes={'woodcutting': {'global': {'fine_material_finding': 50.0}}},
         duration=500,
-        value=10
+        value=9
     )
 
     COOKED_SWORDFISH_FINE = ConsumableItem(
@@ -386,7 +386,7 @@ class Consumable:
         keywords=['Food', 'Cooked Fish', 'Woodcutting'],
         attributes={'woodcutting': {'global': {'fine_material_finding': 100.0}}},
         duration=500,
-        value=51
+        value=50
     )
 
     COOKED_TROUT = ConsumableItem(
@@ -567,7 +567,7 @@ class Consumable:
 
     FROZEN_BAIT = ConsumableItem(
         name='Frozen bait',
-        keywords=['Fishing'],
+        keywords=['Fishing', 'Fishing Bait'],
         attributes={'fishing': {'global': {'fine_material_finding': 200.0}}},
         duration=5000,
         value=4
@@ -575,7 +575,7 @@ class Consumable:
 
     FROZEN_BAIT_FINE = ConsumableItem(
         name='Frozen bait (Fine)',
-        keywords=['Fishing'],
+        keywords=['Fishing', 'Fishing Bait'],
         attributes={'fishing': {'global': {'fine_material_finding': 400.0}}},
         duration=5000,
         value=24
@@ -930,7 +930,7 @@ class Consumable:
         keywords=['Food', 'Global'],
         attributes={'global': {'global': {'quality_outcome': 25.0}}},
         duration=1000,
-        value=10
+        value=25
     )
 
     SWEET_CARROT_PIE_FINE = ConsumableItem(
@@ -938,7 +938,7 @@ class Consumable:
         keywords=['Food', 'Global'],
         attributes={'global': {'global': {'quality_outcome': 50.0}}},
         duration=1000,
-        value=51
+        value=69
     )
 
     TAILORING_MEMOSPHERE = ConsumableItem(
@@ -1026,7 +1026,7 @@ class Consumable:
         keywords=['Beverage', 'Alcohol', 'Global'],
         attributes={'global': {'global': {'bonus_xp_percent': -4.0, 'find_collectibles': 15.0}}},
         duration=1000,
-        value=4
+        value=2
     )
 
     WINE_FINE = ConsumableItem(
@@ -1034,7 +1034,7 @@ class Consumable:
         keywords=['Beverage', 'Alcohol', 'Global'],
         attributes={'global': {'global': {'bonus_xp_percent': -4.0, 'find_collectibles': 25.0}}},
         duration=1000,
-        value=24
+        value=15
     )
 
     WOODCUTTING_MEMOSPHERE = ConsumableItem(

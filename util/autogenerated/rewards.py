@@ -352,6 +352,13 @@ REWARDS = {
                 'quality': 'common',
                 'tag': 'none',
                 'quantity': 1
+            },
+            {
+                'type': 'item',
+                'id': 'hunting_chest',
+                'quality': 'common',
+                'tag': 'none',
+                'quantity': 1
             }
         ]
     },
@@ -391,6 +398,13 @@ REWARDS = {
             {
                 'type': 'item',
                 'id': 'smithing_chest',
+                'quality': 'common',
+                'tag': 'none',
+                'quantity': 1
+            },
+            {
+                'type': 'item',
+                'id': 'tailoring_chest',
                 'quality': 'common',
                 'tag': 'none',
                 'quantity': 1
@@ -642,7 +656,7 @@ REWARDS = {
         'rewardItems': [
             {
                 'type': 'item',
-                'id': 'travelers_kit',
+                'id': 'travellers_kit',
                 'quality': 'epic',
                 'tag': None,
                 'quantity': 1
@@ -728,6 +742,149 @@ REWARDS = {
                 'type': 'item',
                 'id': 'adoring_fan_statue',
                 'quality': 'legendary',
+                'tag': None,
+                'quantity': 1
+            }
+        ]
+    },
+    'reward_progress-achievements-new160': {
+        'id': 'reward_progress-achievements-new160',
+        'type': 'achievementPoints',
+        'rewardItems': [
+            {
+                'type': 'item',
+                'id': 'collection_ring',
+                'quality': 'epic',
+                'tag': None,
+                'quantity': 1
+            }
+        ]
+    },
+    'reward_progress-achievements-new170': {
+        'id': 'reward_progress-achievements-new170',
+        'type': 'achievementPoints',
+        'rewardItems': [
+            {
+                'type': 'item',
+                'id': 'treasure_hunter_gloves',
+                'quality': 'epic',
+                'tag': None,
+                'quantity': 1
+            }
+        ]
+    },
+    'reward_progress-achievements-new180': {
+        'id': 'reward_progress-achievements-new180',
+        'type': 'achievementPoints',
+        'rewardItems': [
+            {
+                'type': 'item',
+                'id': 'adventuring_buckler',
+                'quality': 'epic',
+                'tag': None,
+                'quantity': 1
+            }
+        ]
+    },
+    'reward_progress-achievements-new190': {
+        'id': 'reward_progress-achievements-new190',
+        'type': 'achievementPoints',
+        'rewardItems': [
+            {
+                'type': 'item',
+                'id': 'treasure_hunter_bandolier',
+                'quality': 'epic',
+                'tag': None,
+                'quantity': 1
+            }
+        ]
+    },
+    'reward_progress-achievements-new200': {
+        'id': 'reward_progress-achievements-new200',
+        'type': 'achievementPoints',
+        'rewardItems': [
+            {
+                'type': 'item',
+                'id': 'treasure_hunter_scarf',
+                'quality': 'epic',
+                'tag': None,
+                'quantity': 1
+            }
+        ]
+    },
+    'reward_progress-achievements-new220': {
+        'id': 'reward_progress-achievements-new220',
+        'type': 'achievementPoints',
+        'rewardItems': [
+            {
+                'type': 'item',
+                'id': 'quickdraw_map',
+                'quality': 'epic',
+                'tag': None,
+                'quantity': 1
+            }
+        ]
+    },
+    'reward_progress-achievements-new240': {
+        'id': 'reward_progress-achievements-new240',
+        'type': 'achievementPoints',
+        'rewardItems': [
+            {
+                'type': 'item',
+                'id': 'globetrotters_backpack',
+                'quality': 'epic',
+                'tag': None,
+                'quantity': 1
+            }
+        ]
+    },
+    'reward_progress-achievements-new260': {
+        'id': 'reward_progress-achievements-new260',
+        'type': 'achievementPoints',
+        'rewardItems': [
+            {
+                'type': 'item',
+                'id': 'boulder_boots',
+                'quality': 'epic',
+                'tag': None,
+                'quantity': 1
+            }
+        ]
+    },
+    'reward_progress-achievements-new280': {
+        'id': 'reward_progress-achievements-new280',
+        'type': 'achievementPoints',
+        'rewardItems': [
+            {
+                'type': 'item',
+                'id': 'hat_of_wisdom',
+                'quality': 'epic',
+                'tag': None,
+                'quantity': 1
+            }
+        ]
+    },
+    'reward_progress-achievements-new300': {
+        'id': 'reward_progress-achievements-new300',
+        'type': 'achievementPoints',
+        'rewardItems': [
+            {
+                'type': 'item',
+                'id': 'golden_frog_egg',
+                'quality': None,
+                'tag': None,
+                'quantity': 1
+            }
+        ]
+    },
+    'reward_progress-achievements-new45': {
+        'id': 'reward_progress-achievements-new45',
+        'type': 'achievementPoints',
+        'rewardItems': [
+            {
+                'type': 'item',
+                'id': 'pixie_egg',
+                'quality': None,
                 'tag': None,
                 'quantity': 1
             }

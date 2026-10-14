@@ -345,13 +345,13 @@ class GenericRecipeForm extends Component {
 
             // Show View button if not already present
             if (!this.$element.find('.btn-view-generic').length) {
-                const viewBtn = `<div class="gr-row gr-view-btn-row" style="margin-bottom:var(--spacing-xs)"><button class="btn-view-generic optimize-btn" style="font-size:14px;background:#2196F3;width:100%">View Recipe Info</button></div>`;
+                const viewBtn = `<div class="gr-row gr-view-btn-row" style="margin-bottom:var(--spacing-xs)"><button class="btn-view-generic optimize-btn" style="font-size: max(var(--min-text, 5px), calc(14px * var(--text-scale, 1)));background:#2196F3;width:100%">View Recipe Info</button></div>`;
                 this.$element.find('.gr-saved-selector').after(viewBtn);
             }
 
             // Show Delete button if not already present
             if (!this.$element.find('.btn-delete-generic').length) {
-                this.$element.find('.gr-actions').append('<button class="btn-delete-generic optimize-btn" style="font-size:14px;background:#e53935">🗑 Delete</button>');
+                this.$element.find('.gr-actions').append('<button class="btn-delete-generic optimize-btn" style="font-size: max(var(--min-text, 5px), calc(14px * var(--text-scale, 1)));background:#e53935">🗑 Delete</button>');
             }
 
             // Scroll up to show the info section
@@ -619,7 +619,7 @@ class GenericRecipeForm extends Component {
             // XP ambiguous — show candidate buttons + calibrate
             if (xp && xp.ambiguous && xp.candidates && xp.candidates.length > 1) {
                 const xpBtns = xp.candidates.map(c =>
-                    `<button class="btn-pick-xp-candidate optimize-btn" data-xp="${c}" style="width:auto;padding:6px 14px;font-size:13px;margin:2px">${c}</button>`
+                    `<button class="btn-pick-xp-candidate optimize-btn" data-xp="${c}" style="width:auto;padding:6px 14px;font-size: max(var(--min-text, 5px), calc(13px * var(--text-scale, 1)));margin:2px">${c}</button>`
                 ).join('');
                 html += `</div>`;
                 html += `
@@ -628,7 +628,7 @@ class GenericRecipeForm extends Component {
                         <div class="reverse-result-detail">${xp.candidates.length} possible values (${Math.round(xp.bonus_xp_pct * 100)}% bonus XP from collectibles & service) — pick if you know, or calibrate:</div>
                         <div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:var(--spacing-xs)">${xpBtns}</div>
                         <div style="margin-top:var(--spacing-sm)">
-                            <button class="btn-calibrate-xp optimize-btn" style="width:auto;padding:8px 16px;font-size:13px;background:#e67e22">🔍 Calibrate with gear</button>
+                            <button class="btn-calibrate-xp optimize-btn" style="width:auto;padding:8px 16px;font-size: max(var(--min-text, 5px), calc(13px * var(--text-scale, 1)));background:#e67e22">🔍 Calibrate with gear</button>
                         </div>
                         <div class="gr-xp-calibration-area"></div>
                     </div>
@@ -640,7 +640,7 @@ class GenericRecipeForm extends Component {
             if (r.computed_xp != null) {
                 html += `<br/>✓ Base XP resolved: <strong>${r.computed_xp}</strong>`;
                 if (xp && xp.bonus_xp_pct > 0) {
-                    html += ` <span style="color:var(--text-secondary);font-size:12px">(adjusted for ${Math.round(xp.bonus_xp_pct * 100)}% bonus XP from collectibles & service)</span>`;
+                    html += ` <span style="color:var(--text-secondary);font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)))">(adjusted for ${Math.round(xp.bonus_xp_pct * 100)}% bonus XP from collectibles & service)</span>`;
                 }
             }
             html += `</div>`;
@@ -648,12 +648,12 @@ class GenericRecipeForm extends Component {
         }
         if (r.ambiguous) {
             const candidateBtns = r.candidates.slice(0, 10).map(c =>
-                `<button class="btn-pick-candidate optimize-btn" data-steps="${c}" style="width:auto;padding:6px 14px;font-size:13px;margin:2px">${c}</button>`
+                `<button class="btn-pick-candidate optimize-btn" data-steps="${c}" style="width:auto;padding:6px 14px;font-size: max(var(--min-text, 5px), calc(13px * var(--text-scale, 1)));margin:2px">${c}</button>`
             ).join('');
 
             let xpNote = '';
             if (xp && xp.ambiguous && xp.candidates && xp.candidates.length > 1) {
-                xpNote = `<div style="margin-top:var(--spacing-xs);color:var(--text-secondary);font-size:12px">ℹ Base XP is also ambiguous (${xp.candidates.length} candidates) — will resolve after you pick steps.</div>`;
+                xpNote = `<div style="margin-top:var(--spacing-xs);color:var(--text-secondary);font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)))">ℹ Base XP is also ambiguous (${xp.candidates.length} candidates) — will resolve after you pick steps.</div>`;
             }
 
             return `
@@ -663,7 +663,7 @@ class GenericRecipeForm extends Component {
                     <div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:var(--spacing-xs)">${candidateBtns}</div>
                     ${xpNote}
                     <div style="margin-top:var(--spacing-sm)">
-                        <button class="btn-calibrate optimize-btn" style="width:auto;padding:8px 16px;font-size:13px;background:#e67e22">🔍 Calibrate with gear</button>
+                        <button class="btn-calibrate optimize-btn" style="width:auto;padding:8px 16px;font-size: max(var(--min-text, 5px), calc(13px * var(--text-scale, 1)));background:#e67e22">🔍 Calibrate with gear</button>
                     </div>
                     <div class="gr-calibration-area"></div>
                 </div>
@@ -689,12 +689,12 @@ class GenericRecipeForm extends Component {
                     `<option value="${kw}" ${kw === r.keyword ? 'selected' : ''}>${kw}</option>`
                 ).join('');
                 fields = `
-                    <select class="gr-req-keyword" style="flex:1;font-size:12px;padding:4px">
+                    <select class="gr-req-keyword" style="flex:1;font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)));padding:4px">
                         <option value="">Select keyword...</option>
                         ${kwOptions}
                         <option value="_custom" ${r.keyword && !COMMON_KEYWORDS.includes(r.keyword) ? 'selected' : ''}>Custom...</option>
                     </select>
-                    ${r.keyword && !COMMON_KEYWORDS.includes(r.keyword) ? `<input type="text" class="gr-req-keyword-custom" value="${r.keyword}" placeholder="Custom keyword" style="flex:1;font-size:12px;padding:4px" />` : ''}
+                    ${r.keyword && !COMMON_KEYWORDS.includes(r.keyword) ? `<input type="text" class="gr-req-keyword-custom" value="${r.keyword}" placeholder="Custom keyword" style="flex:1;font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)));padding:4px" />` : ''}
                     <span>×</span><input type="number" class="gr-req-count" value="${r.count || 1}" min="1" max="10" style="width:48px" />
                 `;
             } else if (r.type === 'reputation') {
@@ -703,7 +703,7 @@ class GenericRecipeForm extends Component {
                     return `<option value="${f}" ${f === r.faction ? 'selected' : ''}>${label}</option>`;
                 }).join('');
                 fields = `
-                    <select class="gr-req-faction" style="flex:1;font-size:12px;padding:4px">
+                    <select class="gr-req-faction" style="flex:1;font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)));padding:4px">
                         <option value="">Select faction...</option>
                         ${factionOptions}
                     </select>
@@ -724,9 +724,9 @@ class GenericRecipeForm extends Component {
             ).join('');
 
             return `<div class="gr-req-row" data-index="${i}" style="display:flex;align-items:center;gap:6px;margin-bottom:4px">
-                <select class="gr-req-type" style="min-width:130px;font-size:12px;padding:4px">${typeSelect}</select>
+                <select class="gr-req-type" style="min-width:130px;font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)));padding:4px">${typeSelect}</select>
                 ${fields}
-                <button class="gr-req-remove" title="Remove" style="background:none;border:none;color:var(--text-secondary);cursor:pointer;font-size:16px">✕</button>
+                <button class="gr-req-remove" title="Remove" style="background:none;border:none;color:var(--text-secondary);cursor:pointer;font-size: max(var(--min-text, 5px), calc(16px * var(--text-scale, 1)))">✕</button>
             </div>`;
         }).join('');
     }
@@ -824,7 +824,7 @@ class GenericRecipeForm extends Component {
                         </label>
                     </div>
 
-                    ${this.currentDefId ? `<div class="gr-row" style="margin-bottom:var(--spacing-xs)"><button class="btn-view-generic optimize-btn" style="font-size:14px;background:#2196F3;width:100%">View Recipe Info</button></div>` : ''}
+                    ${this.currentDefId ? `<div class="gr-row" style="margin-bottom:var(--spacing-xs)"><button class="btn-view-generic optimize-btn" style="font-size: max(var(--min-text, 5px), calc(14px * var(--text-scale, 1)));background:#2196F3;width:100%">View Recipe Info</button></div>` : ''}
 
                     <div class="gr-row gr-name-row">
                         <div class="gr-icon-picker">
@@ -834,9 +834,9 @@ class GenericRecipeForm extends Component {
                                     ${this._renderEmojiPicker()}
                                 </div>
                                 <div style="display:flex;align-items:center;gap:6px;padding:4px 8px">
-                                    <label style="font-size:12px;color:var(--text-secondary)">Tint:</label>
+                                    <label style="font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)));color:var(--text-secondary)">Tint:</label>
                                     <input type="color" class="gr-icon-color" value="${this.selectedIconColor || '#ffffff'}" style="width:32px;height:24px;border:none;cursor:pointer" />
-                                    <button class="gr-color-clear" style="background:none;border:1px solid var(--border-color);border-radius:4px;color:var(--text-secondary);font-size:11px;padding:2px 6px;cursor:pointer">Clear</button>
+                                    <button class="gr-color-clear" style="background:none;border:1px solid var(--border-color);border-radius:4px;color:var(--text-secondary);font-size: max(var(--min-text, 5px), calc(11px * var(--text-scale, 1)));padding:2px 6px;cursor:pointer">Clear</button>
                                 </div>
                                 <emoji-picker class="gr-full-picker"></emoji-picker>
                             </div>
@@ -858,7 +858,7 @@ class GenericRecipeForm extends Component {
 
                     <div class="gr-row gr-mode-row">
                         <span>Input Mode: <strong class="gr-mode-label">${modeLabel}</strong></span>
-                        <button class="btn-toggle-mode optimize-btn" style="width:auto;padding:6px 12px;font-size:13px">Switch to ${otherModeLabel}</button>
+                        <button class="btn-toggle-mode optimize-btn" style="width:auto;padding:6px 12px;font-size: max(var(--min-text, 5px), calc(13px * var(--text-scale, 1)))">Switch to ${otherModeLabel}</button>
                     </div>
 
                     <div class="gr-row gr-svc-selector">
@@ -877,7 +877,7 @@ class GenericRecipeForm extends Component {
                         <div class="gr-row">
                             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:2px">
                                 <label>Current Location</label>
-                                <button class="btn-copy-svc-location optimize-btn" style="width:auto;padding:3px 10px;font-size:12px">📋 Same as service</button>
+                                <button class="btn-copy-svc-location optimize-btn" style="width:auto;padding:3px 10px;font-size: max(var(--min-text, 5px), calc(12px * var(--text-scale, 1)))">📋 Same as service</button>
                             </div>
                             <div class="gr-helper-text">Your in-game location for collectible lookup</div>
                             <div id="gr-current-loc-dropdown"></div>
@@ -935,8 +935,8 @@ class GenericRecipeForm extends Component {
                     <div class="gr-reverse-result-container">${this._renderReverseResult()}</div>
 
                     <div class="gr-actions">
-                        <button class="btn-save-generic optimize-btn" style="font-size:14px">${btnLabel}</button>
-                        ${this.currentDefId ? '<button class="btn-delete-generic optimize-btn" style="font-size:14px;background:#e53935">🗑 Delete</button>' : ''}
+                        <button class="btn-save-generic optimize-btn" style="font-size: max(var(--min-text, 5px), calc(14px * var(--text-scale, 1)))">${btnLabel}</button>
+                        ${this.currentDefId ? '<button class="btn-delete-generic optimize-btn" style="font-size: max(var(--min-text, 5px), calc(14px * var(--text-scale, 1)));background:#e53935">🗑 Delete</button>' : ''}
                     </div>
                 </div>
             </div>
@@ -1418,7 +1418,7 @@ class GenericRecipeForm extends Component {
                 }
 
                 const calButtons = calValues.map(({ base, displayed }) =>
-                    `<button class="btn-pick-xp-candidate optimize-btn" data-xp="${base}" style="width:auto;padding:8px 14px;font-size:13px;margin:2px">
+                    `<button class="btn-pick-xp-candidate optimize-btn" data-xp="${base}" style="width:auto;padding:8px 14px;font-size: max(var(--min-text, 5px), calc(13px * var(--text-scale, 1)));margin:2px">
                         If you see <strong>${displayed}</strong> XP → base is <strong>${base}</strong>
                     </button>`
                 ).join('');
@@ -1459,7 +1459,7 @@ class GenericRecipeForm extends Component {
                     const stepsEff = Math.ceil(base / eff);
                     const minSteps = Math.ceil(base / (1 + maxEff));
                     const calObs = Math.max(Math.max(stepsEff, minSteps), 10);
-                    return `<button class="btn-pick-candidate optimize-btn" data-steps="${base}" style="width:auto;padding:8px 14px;font-size:13px;margin:2px">
+                    return `<button class="btn-pick-candidate optimize-btn" data-steps="${base}" style="width:auto;padding:8px 14px;font-size: max(var(--min-text, 5px), calc(13px * var(--text-scale, 1)));margin:2px">
                         If you see <strong>${calObs}</strong> steps → base is <strong>${base}</strong>
                     </button>`;
                 }).join('');

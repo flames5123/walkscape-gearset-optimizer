@@ -199,7 +199,7 @@ function renderReportsList(reports, stats) {
             <option value="reviewed" ${reportsFilter === 'reviewed' ? 'selected' : ''}>Reviewed</option>
             <option value="all" ${reportsFilter === 'all' ? 'selected' : ''}>All</option>
         </select>
-        <span style="color:var(--text-muted);font-size:0.8rem">${reports.length} report(s)</span>
+        <span style="color:var(--text-muted);font-size: max(var(--min-text, 5px), calc(0.8rem * var(--text-scale, 1)))">${reports.length} report(s)</span>
     </div>`;
 
     let listHtml = '';
@@ -273,7 +273,7 @@ function renderReportDetail(data) {
         </div>`;
         if (c.skills && Object.keys(c.skills).length) {
             const skills = Object.entries(c.skills).sort((a, b) => b[1] - a[1]).slice(0, 12);
-            charHtml += `<div style="margin-top:0.5rem"><label style="font-size:0.7rem;color:var(--text-muted)">Skills</label><div class="detail-grid">`;
+            charHtml += `<div style="margin-top:0.5rem"><label style="font-size: max(var(--min-text, 5px), calc(0.7rem * var(--text-scale, 1)));color:var(--text-muted)">Skills</label><div class="detail-grid">`;
             for (const [k, v] of skills) {
                 charHtml += `<div class="detail-field"><label>${escHtml(k)}</label><span>${v}</span></div>`;
             }
@@ -284,7 +284,7 @@ function renderReportDetail(data) {
     // Gear sets
     let gearHtml = '';
     if (gearSets.length) {
-        gearHtml = `<div class="detail-section"><h4>Gear Sets (${gearSets.length})</h4><div style="font-size:0.85rem">`;
+        gearHtml = `<div class="detail-section"><h4>Gear Sets (${gearSets.length})</h4><div style="font-size: max(var(--min-text, 5px), calc(0.85rem * var(--text-scale, 1)))">`;
         for (const gs of gearSets.slice(0, 10)) {
             gearHtml += `<div style="padding:0.25rem 0;color:var(--text-secondary)">• ${escHtml(gs.name)}</div>`;
         }
@@ -343,7 +343,7 @@ function renderReportDetail(data) {
         <button class="back-btn" id="back-to-list">← Back to reports</button>
         <div class="card">
             <div class="card-header"><h3>${badge} Report ${r.id.slice(0, 8)}...</h3></div>
-            <div class="detail-section"><h4>Description</h4><div style="white-space:pre-wrap;font-size:0.9rem">${escHtml(r.description)}</div></div>
+            <div class="detail-section"><h4>Description</h4><div style="white-space:pre-wrap;font-size: max(var(--min-text, 5px), calc(0.9rem * var(--text-scale, 1)))">${escHtml(r.description)}</div></div>
             <div class="detail-section"><h4>Info</h4>
                 <div class="detail-grid">
                     <div class="detail-field"><label>Report ID</label><span class="mono">${r.id}</span></div>
@@ -519,7 +519,7 @@ function renderSessionsList(data) {
 
     let html = `<div class="filter-bar" style="margin-top:0.75rem">
         <input type="text" id="session-search" placeholder="Search by name..." value="${escHtml(sessionsSearch)}">
-        <span style="color:var(--text-muted);font-size:0.8rem">${total} total</span>
+        <span style="color:var(--text-muted);font-size: max(var(--min-text, 5px), calc(0.8rem * var(--text-scale, 1)))">${total} total</span>
     </div>`;
 
     if (!characters.length) {
@@ -597,11 +597,11 @@ async function loadActiveSessions() {
     try {
         const data = await apiJson(`/sessions/active?hours=${activeHours}&page=0`);
         let html = `<div class="filter-bar" style="margin-top:0.75rem">
-            <label style="font-size:0.8rem;color:var(--text-muted)">Hours:</label>
+            <label style="font-size: max(var(--min-text, 5px), calc(0.8rem * var(--text-scale, 1)));color:var(--text-muted)">Hours:</label>
             <select id="active-hours">
                 ${[1, 6, 12, 24, 48, 168].map(h => `<option value="${h}" ${h === activeHours ? 'selected' : ''}>${h}h</option>`).join('')}
             </select>
-            <span style="color:var(--text-muted);font-size:0.8rem">${data.total} session(s)</span>
+            <span style="color:var(--text-muted);font-size: max(var(--min-text, 5px), calc(0.8rem * var(--text-scale, 1)))">${data.total} session(s)</span>
         </div>`;
 
         if (data.sessions.length) {
@@ -671,15 +671,15 @@ async function doLookup() {
             </div>`;
         if (c.skills && Object.keys(c.skills).length) {
             const skills = Object.entries(c.skills).sort((a, b) => b[1] - a[1]);
-            html += `<div style="margin-top:0.75rem"><h4 style="font-size:0.8rem;color:var(--text-muted);margin-bottom:0.5rem">Skills</h4><div class="detail-grid">`;
+            html += `<div style="margin-top:0.75rem"><h4 style="font-size: max(var(--min-text, 5px), calc(0.8rem * var(--text-scale, 1)));color:var(--text-muted);margin-bottom:0.5rem">Skills</h4><div class="detail-grid">`;
             for (const [k, v] of skills) {
                 html += `<div class="detail-field"><label>${escHtml(k)}</label><span>${v}</span></div>`;
             }
             html += '</div></div>';
         }
         if (gs.length) {
-            html += `<div style="margin-top:0.75rem"><h4 style="font-size:0.8rem;color:var(--text-muted);margin-bottom:0.5rem">Gear Sets</h4>`;
-            for (const g of gs) html += `<div style="padding:0.2rem 0;font-size:0.85rem;color:var(--text-secondary)">• ${escHtml(g.name)}</div>`;
+            html += `<div style="margin-top:0.75rem"><h4 style="font-size: max(var(--min-text, 5px), calc(0.8rem * var(--text-scale, 1)));color:var(--text-muted);margin-bottom:0.5rem">Gear Sets</h4>`;
+            for (const g of gs) html += `<div style="padding:0.2rem 0;font-size: max(var(--min-text, 5px), calc(0.85rem * var(--text-scale, 1)));color:var(--text-secondary)">• ${escHtml(g.name)}</div>`;
             html += '</div>';
         }
         html += `<div style="margin-top:0.75rem" class="btn-group">
@@ -720,7 +720,7 @@ let logLines = 500;
 async function loadLogs() {
     const panel = document.getElementById('panel-logs');
     panel.innerHTML = `<div class="filter-bar">
-        <label style="font-size:0.8rem;color:var(--text-muted)">Lines:</label>
+        <label style="font-size: max(var(--min-text, 5px), calc(0.8rem * var(--text-scale, 1)));color:var(--text-muted)">Lines:</label>
         <select id="log-lines">
             ${[100, 500, 1000, 5000, 10000].map(n => `<option value="${n}" ${n === logLines ? 'selected' : ''}>${n.toLocaleString()}</option>`).join('')}
         </select>
@@ -787,7 +787,7 @@ async function loadDebug() {
                     <td><span class="uuid" data-uuid="${s.session_uuid}">${s.session_uuid.slice(0, 12)}...</span></td>
                     <td>${s.enabled_at ? s.enabled_at.slice(0, 19) : '?'}</td>
                     <td>${escHtml(s.enabled_by)}</td>
-                    <td><button class="btn btn-outline" data-disable="${s.session_uuid}" style="font-size:0.75rem;padding:0.2rem 0.5rem">Disable</button></td>
+                    <td><button class="btn btn-outline" data-disable="${s.session_uuid}" style="font-size: max(var(--min-text, 5px), calc(0.75rem * var(--text-scale, 1)));padding:0.2rem 0.5rem">Disable</button></td>
                 </tr>`;
             }
             html += '</tbody></table>';
@@ -867,7 +867,7 @@ async function loadFlags() {
                     <td><span class="uuid" data-uuid="${s.session_uuid}">${s.session_uuid.slice(0, 12)}...</span></td>
                     <td>${s.enabled_at === 'always' ? '<span style="color:var(--warning)">(hardcoded)</span>' : (s.enabled_at ? s.enabled_at.slice(0, 19) : '?')}</td>
                     <td>${escHtml(s.enabled_by)}</td>
-                    <td>${isHardcoded ? '<span style="color:var(--text-muted);font-size:0.75rem">(hardcoded)</span>' : `<button class="btn btn-outline" data-flag-disable="${s.session_uuid}" style="font-size:0.75rem;padding:0.2rem 0.5rem">Disable</button>`}</td>
+                    <td>${isHardcoded ? '<span style="color:var(--text-muted);font-size: max(var(--min-text, 5px), calc(0.75rem * var(--text-scale, 1)))">(hardcoded)</span>' : `<button class="btn btn-outline" data-flag-disable="${s.session_uuid}" style="font-size: max(var(--min-text, 5px), calc(0.75rem * var(--text-scale, 1)));padding:0.2rem 0.5rem">Disable</button>`}</td>
                 </tr>`;
             }
             html += '</tbody></table>';
@@ -950,7 +950,7 @@ function renderSnapshotsList(snapshots) {
     const panel = document.getElementById('panel-snapshots');
 
     let html = `<div class="filter-bar">
-        <span style="color:var(--text-muted);font-size:0.85rem">${snapshots.length} snapshot(s)</span>
+        <span style="color:var(--text-muted);font-size: max(var(--min-text, 5px), calc(0.85rem * var(--text-scale, 1)))">${snapshots.length} snapshot(s)</span>
         <div style="margin-left:auto">
             <input type="text" id="snapshot-uuid-input" placeholder="Session UUID" style="width:260px">
             <button class="btn btn-primary" id="snapshot-create-btn">📸 New Snapshot</button>
@@ -965,18 +965,18 @@ function renderSnapshotsList(snapshots) {
             const snapName = s.snapshot_session_uuid_name || origName;
             html += `<div class="card" style="margin-bottom:0.75rem">
                 <div class="card-header">
-                    <h3 style="font-size:0.9rem">${escHtml(snapName)} — ${escHtml(s.description || 'No description')}</h3>
-                    <span style="font-size:0.75rem;color:var(--text-muted)">${timeAgo(s.created_at)}</span>
+                    <h3 style="font-size: max(var(--min-text, 5px), calc(0.9rem * var(--text-scale, 1)))">${escHtml(snapName)} — ${escHtml(s.description || 'No description')}</h3>
+                    <span style="font-size: max(var(--min-text, 5px), calc(0.75rem * var(--text-scale, 1)));color:var(--text-muted)">${timeAgo(s.created_at)}</span>
                 </div>
                 <div class="detail-grid" style="margin-bottom:0.5rem">
                     <div class="detail-field">
                         <label>Original Session</label>
-                        <span class="mono" style="font-size:0.7rem">${s.original_session_uuid}</span>
-                        <div style="font-size:0.8rem;color:var(--text-secondary)">${escHtml(origName)}</div>
+                        <span class="mono" style="font-size: max(var(--min-text, 5px), calc(0.7rem * var(--text-scale, 1)))">${s.original_session_uuid}</span>
+                        <div style="font-size: max(var(--min-text, 5px), calc(0.8rem * var(--text-scale, 1)));color:var(--text-secondary)">${escHtml(origName)}</div>
                     </div>
                     <div class="detail-field">
                         <label>Snapshot Session</label>
-                        <span class="mono" style="font-size:0.7rem">${s.snapshot_session_uuid}</span>
+                        <span class="mono" style="font-size: max(var(--min-text, 5px), calc(0.7rem * var(--text-scale, 1)))">${s.snapshot_session_uuid}</span>
                     </div>
                     <div class="detail-field">
                         <label>Created</label>

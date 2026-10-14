@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SettingsPanel layout test</title>
+<style>
+  body { margin: 0; background: #04070f; color: #dfe7f5;
+         font: 14px/1.5 -apple-system, Segoe UI, Roboto, sans-serif; padding: 20px; }
+  h1 { font-size: 18px; color: #fff; }
+  .ctl { margin: 10px 0; display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+  .frame { border: 1px dashed #6a7690; border-radius: 8px; background: #070c17;
+           padding: 12px; margin: 12px 0; box-sizing: border-box; }
+  .wlabel { font: 12px ui-monospace, monospace; color: #7f8ba6; margin-bottom: 4px; }
+  label { user-select: none; }
+  input[type=range] { width: 320px; }
+</style>
+</head>
+<body>
+  <h1>SettingsPanel — live layout test</h1>
+  <div class="ctl">
+    <label>Panel width: <input id="w" type="range" min="220" max="760" value="560"></label>
+    <span id="wv" style="font:12px ui-monospace,monospace;color:#8fd0ff">560px</span>
+  </div>
+  <div class="ctl">
+    <label><input type="checkbox" id="tcons" checked> Use consumables ON (options open)</label>
+    <label><input type="checkbox" id="tpets" checked> Use pets ON (options open)</label>
+  </div>
+  <div class="wlabel" id="wlabel">panel 560px</div>
+  <div class="frame" id="frame" style="width:560px">
+    <div id="mount"></div>
+  </div>
+  <p style="color:#9aa7c2;font-style:italic;max-width:640px">
+    Drag the width slider to sweep WIDE→MEDIUM→NARROW and watch the boxes shrink
+    (3-in-row → 2+1 → stacked) to stay side by side, then "Use pets" wrap below.
+    Toggle the checkboxes for the single-open (A2/A3) cases. Compare against the
+    mock frames in the Bunsho doc.
+  </p>
+
+  <script type="module">
+    import { SettingsPanel, Toggle } from '/static/js/components/settings-panel.js';
+
+    // --- stub the existing WalkScape persistence surface ---
+    window.settingsModal = {
+      includeConsumables: true, includeFineConsumables: true,
+      consumableMinOwnedEnabled: false, consumableMinOwned: 9, consumableMinOwnedOperator: 'lt',
+      consumableUseHidden: false, includePets: true, usePetAbility: false,
+      optimizeServices: false, runLocalOptimization: false,
+      saveGlobalOptimizationSettings() { /* no-op in test */ },
+    };
+
+    // Red eye as an <img> so the shared "grayscale when unselected" filter
+    // makes it gray -> red on select (matches other icon chips).
+    const RED_EYE = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23e06666' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z'/%3E%3Ccircle cx='12' cy='12' r='3'/%3E%3C/svg%3E";
+
+    function build() {
+      const panel = new SettingsPanel({ settingType: 'optimization-settings', onCollapseChange: () => {} });
+
+      const fine = new Toggle('/assets/icons/keywords/fine_material.svg', 'Include Fine', 'var(--fine-color,#B1F7ED)', 'optimization-settings', 'includeFineConsumables', { defaultOn: true });
+      const minOwn = new Toggle('/assets/icons/attributes/inventory_space.svg',
+        'Ignore <select data-settings-name="consumableMinOwnedOperator"><option value="lt">&lt;</option><option value="lte">\u2264</option></select> ' +
+        '<input type="number" data-settings-name="consumableMinOwned" value="9" min="1" max="100" style="width:3ch"> owned',
+        '#c9a06a', 'optimization-settings', 'consumableMinOwnedEnabled');
+      const hidden = new Toggle(RED_EYE, 'Use hidden', '#e06666', 'optimization-settings', 'consumableUseHidden');
+
+      const cons = new Toggle('/assets/icons/slots/consumable.svg', 'Use consumables', '#3fbf5f', 'optimization-settings', 'includeConsumables');
+      cons.attachCollapsableOption(fine, minOwn, hidden);
+
+      const ability = new Toggle('/assets/icons/keywords/ability.svg', 'Use Ability', '#B18DFC', 'optimization-settings', 'usePetAbility');
+      const pets = new Toggle('/assets/icons/keywords/pet_egg.svg', 'Use pets', '#F68187', 'optimization-settings', 'includePets');
+      pets.attachCollapsableOption(ability);
+
+      const services = new Toggle('/assets/icons/keywords/services.svg', 'Optimize services', '#DBA463', 'optimization-settings', 'optimizeServices');
+      const runLocal = new Toggle('/assets/icons/keywords/run_locally.svg', 'Run locally', '#2189ff', 'optimization-settings', 'runLocalOptimization');
+
+      panel.addToggle(cons, pets);
+      panel.addNewLine();
+      panel.addToggle(services, runLocal);
+      return panel;
+    }
+
+    const mount = document.getElementById('mount');
+    let panel = build();
+    panel.mount(mount);
+
+    const w = document.getElementById('w');
+    const frame = document.getElementById('frame');
+    const wv = document.getElementById('wv');
+    const wlabel = document.getElementById('wlabel');
+    w.addEventListener('input', () => {
+      frame.style.width = w.value + 'px';
+      wv.textContent = w.value + 'px';
+      wlabel.textContent = 'panel ' + w.value + 'px';
+      panel.relayout();
+    });
+
+    document.getElementById('tcons').addEventListener('change', (e) => {
+      window.settingsModal.includeConsumables = e.target.checked;
+      panel.lines.flat().forEach(t => t._syncChipState && t._syncChipState());
+      panel.relayout();
+    });
+    document.getElementById('tpets').addEventListener('change', (e) => {
+      window.settingsModal.includePets = e.target.checked;
+      panel.lines.flat().forEach(t => t._syncChipState && t._syncChipState());
+      panel.relayout();
+    });
+  </script>
+</body>
+</html>

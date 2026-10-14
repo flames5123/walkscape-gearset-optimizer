@@ -76,7 +76,8 @@ self.addEventListener('push', (event) => {
         const payload = event.data.json();
         title = payload.title || title;
         body = payload.body || body;
-        data = { broadcast_id: payload.broadcast_id, session_uuid: payload.session_uuid };
+        data = { broadcast_id: payload.broadcast_id, session_uuid: payload.session_uuid,
+                 hash: payload.hash, trading_thread: payload.trading_thread };
     } catch (e) { }
     event.waitUntil(
         self.registration.showNotification(title, {
@@ -102,19 +103,24 @@ self.addEventListener('notificationclick', (event) => {
             })
         }).catch(() => { });
     }
-    // Determine target URL: stats report notifications navigate to #stats-report
-    const targetHash = data.stats_report_run_id ? '#stats-report' : '';
+    // Determine target URL: trading pushes carry a hash (and optional thread);
+    // stats-report pushes navigate to #stats-report.
+    const targetHash = data.hash || (data.stats_report_run_id ? '#stats-report' : '');
+    const tradingThread = data.trading_thread || null;
     event.waitUntil(
         clients.matchAll({ type: 'window', includeUncontrolled: true }).then(clientList => {
             for (const client of clientList) {
                 if (client.url && 'focus' in client) {
                     if (targetHash) {
-                        client.postMessage({ type: 'navigate', hash: targetHash });
+                        client.postMessage({ type: 'navigate', hash: targetHash, trading_thread: tradingThread });
                     }
                     return client.focus();
                 }
             }
-            if (clients.openWindow) return clients.openWindow('/' + targetHash);
+            if (clients.openWindow) {
+                const u = (tradingThread ? ('/?trading_thread=' + encodeURIComponent(tradingThread)) : '/') + targetHash;
+                return clients.openWindow(u);
+            }
         })
     );
 });

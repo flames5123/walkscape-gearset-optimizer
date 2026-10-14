@@ -86,6 +86,117 @@ def _pet_has_global_find_stat(pet_info, find_stats) -> bool:
     return False
 
 
+# Skill CATEGORY membership — mirrors SkillInstance.matches_skill /
+# _SKILL_GROUPS elsewhere. A pet stat keyed by a category ('artisan') applies
+# to every concrete skill in that category.
+_SKILL_GROUPS_FILTER = {
+    'gathering': {'fishing', 'foraging', 'hunting', 'mining', 'woodcutting'},
+    'artisan': {'carpentry', 'cooking', 'crafting', 'smithing', 'tailoring', 'trinketry'},
+    'utility': {'agility', 'traveling'},
+}
+
+
+def _stat_key_applies_to_skill(stat_key, skill) -> bool:
+    """True if a pet-stat SKILL KEY ('trinketry', 'artisan', ...) applies to a
+    concrete target ``skill`` (exact match or category membership). 'global' is
+    intentionally NOT handled here — the caller excludes it on purpose."""
+    if not stat_key or not skill:
+        return False
+    k = str(stat_key).lower()
+    s = str(skill).lower()
+    if k == s:
+        return True
+    return k in _SKILL_GROUPS_FILTER and s in _SKILL_GROUPS_FILTER[k]
+
+
+def _pet_has_skill_scoped_stat(pet_info, skill) -> bool:
+    """True if ``pet_info`` carries a NON-global stat scoped to ``skill`` (or a
+    category containing it), including stats merged from an activatable ability.
+
+    Used to re-admit a pet that the skill-XP-preference narrowing would drop but
+    which materially helps the target skill — e.g. the Golden Frog's Lucky Day
+    artisan ``quality_outcome`` on a trinketry recipe (bug 83a55d82). Global-only
+    stats are excluded here so the Tortoise/Camel global-inventory_space case
+    (e5145503 / 9ce474f8) stays excluded."""
+    stats = getattr(pet_info, '_stats', None)
+    if not isinstance(stats, dict):
+        return False
+    for skill_key, by_loc in stats.items():
+        if str(skill_key).lower() == 'global':
+            continue
+        if not _stat_key_applies_to_skill(skill_key, skill):
+            continue
+        if isinstance(by_loc, dict) and any(
+            isinstance(v, dict) and any(val for val in v.values()) for v in by_loc.values()
+        ):
+            return True
+    return False
+
+
+# Stats that add to the step count (lower is better) — negated when scoring
+# usefulness so a step reduction counts as positive utility.
+_NEUTRAL_UTILITY_LOWER_IS_BETTER = {'steps_add', 'steps_percent'}
+
+# Stats that NEVER change any optimization metric (steps/XP/coins/find-rate).
+# `inventory_space` is classified TIER_3 "tiebreaker-only" by
+# util/dumb_upgrade_pass.py — carrying more of it is not a functional upgrade.
+# Excluded from the usefulness score so a pet whose only edge is +inventory_space
+# does not out-rank one providing chest_finding / find_* / work_efficiency etc.
+_NEUTRAL_UTILITY_IGNORED = {'inventory_space'}
+
+
+def metric_neutral_utility(total_stats, we_cap: Optional[float] = None) -> float:
+    """Score how *useful* an aggregated gearset stat block is, for use ONLY as
+    a tiebreaker when two gearsets are exactly equal on the optimized metric.
+
+    ``we_cap`` (bug ac561640): the activity's ``max_efficiency`` (work-efficiency
+    cap). When provided, the ``work_efficiency`` contribution is clamped to the
+    cap before it is summed, so WE the gearset carries *beyond* the cap confers
+    no tiebreaker advantage. Without this, an item whose only edge is
+    work_efficiency (e.g. Gem shield's agility WE) out-ranks an alternative
+    (e.g. Adventuring buckler) purely on WE that is already wasted because the
+    build is at/over the cap — the "optimizer insists on gem shield" bug. When
+    ``we_cap`` is None the old uncapped behavior is preserved.
+
+    Bug 03429148: when the optimization target is unaffected by a slot (e.g. a
+    pet's stats don't move steps/fine-item), the greedy selector keeps the
+    FIRST candidate it enumerated, which is often the Camel (only global stat:
+    +inventory_space) over a genuinely more useful pet like the Pixie
+    (+chest_finding / +find_collectibles / +work_efficiency). Neither changes
+    the scored metric, so the metric comparison ties — but one pet is clearly
+    more useful to actually equip.
+
+    This returns the signed sum of every stat that could ever matter to *some*
+    metric (work_efficiency, double_*, bonus_xp_*, all find_* / chest_finding /
+    fine_material_finding / ItemFindingCategory.*, step reductions, etc.),
+    EXCLUDING `inventory_space` (tier-3, never affects any metric). Higher =
+    more useful. Because the two gearsets being compared differ only in the one
+    tied slot, comparing absolute scores is equivalent to comparing that slot's
+    useful contribution.
+
+    ``total_stats`` is the flat aggregated stat dict returned as the second
+    value from ``calculate_gearset_metrics``. Non-numeric or missing values are
+    ignored. Returns 0.0 for an empty/None block.
+    """
+    if not isinstance(total_stats, dict):
+        return 0.0
+    score = 0.0
+    for stat_name, value in total_stats.items():
+        if not isinstance(value, (int, float)):
+            continue
+        if stat_name in _NEUTRAL_UTILITY_IGNORED:
+            continue
+        if stat_name in _NEUTRAL_UTILITY_LOWER_IS_BETTER:
+            score -= value
+        elif stat_name == 'work_efficiency' and we_cap is not None and we_cap > 0:
+            # Over-cap work efficiency is wasted — it can't reduce steps past the
+            # cap — so it must not count as tiebreaker "usefulness" (bug ac561640).
+            score += min(value, we_cap)
+        else:
+            score += value
+    return score
+
+
 def filter_pets_to_skill_xp_relevant(pet_pool, skill, *, pets_by_name=None,
                                      keep_if_global_find_stats=None):
     """Narrow a pet candidate pool to skill-XP-relevant pets when possible.
@@ -167,21 +278,33 @@ def filter_pets_to_skill_xp_relevant(pet_pool, skill, *, pets_by_name=None,
     # (the pre-existing behavior).
     base = relevant if relevant else pool
 
+    result = list(base)
+
+    # Always re-admit a pet carrying a NON-global stat scoped to the target
+    # skill (or its category) — including stats merged from an activatable
+    # ability. XP-preference narrowing decides which pet to TRAIN; it must not
+    # drop a pet that materially helps the objective. Without this the Golden
+    # Frog (max level, gains XP by wealth not skill, whose Lucky Day artisan
+    # quality_outcome directly cuts materials on a trinketry recipe) was
+    # excluded whenever an un-maxed skill-XP pet like Pet Rock existed
+    # (bug 83a55d82). Global-only stats stay excluded (e5145503 / 9ce474f8).
+    for pet in pool:
+        if pet not in result and _pet_has_skill_scoped_stat(pet, skill):
+            result.append(pet)
+
     # Bug 2d4f5491: union in any pet carrying a target-relevant global find
     # stat that the base pool dropped. This never removes candidates — it only
     # re-admits find-stat pets the skill-XP narrowing would otherwise exclude,
     # so the optimizer can still score (and prefer) them for a find-category
     # target like a collectibles report.
     if keep_if_global_find_stats:
-        result = list(base)
         for pet in pool:
             if pet in result:
                 continue
             if _pet_has_global_find_stat(pet, keep_if_global_find_stats):
                 result.append(pet)
-        return result
 
-    return base
+    return result
 
 
 # ============================================================================
@@ -201,44 +324,60 @@ def filter_items_by_quality(items: list, keep_highest_only: bool = True) -> list
     """
     if not keep_highest_only:
         return items
-    
-    # Group by base name (remove quality suffix)
+
+    def _name_of(it):
+        """Resolve an item's display name as a str, or None if it has none
+        (e.g. a raw dict pet, or an object without a string .name). Name-less
+        items can't be quality-deduped, so callers pass them through as-is."""
+        n = getattr(it, "name", None)
+        if n is None and isinstance(it, dict):
+            n = it.get("name")
+        return n if isinstance(n, str) else None
+
+    # Group by base name (remove quality suffix). Items with no resolvable name
+    # can't be quality-keyed, so keep them all (never dedup / never crash).
     by_base = {}
-    
+    passthrough = []
+
     for item in items:
-        # Extract base name (remove quality in parentheses)
-        base_name = item.name
+        nm = _name_of(item)
+        if nm is None:
+            passthrough.append(item)
+            continue
+        base_name = nm
         if '(' in base_name and ')' in base_name:
             base_name = base_name[:base_name.index('(')].strip()
-        
+
         if base_name not in by_base:
             by_base[base_name] = []
         by_base[base_name].append(item)
-    
+
     # Keep highest quality per base
-    filtered = []
+    filtered = list(passthrough)
     quality_order = {
         'Eternal': 6, 'Perfect': 5, 'Excellent': 4,
         'Great': 3, 'Good': 2, 'Normal': 1, None: 0
     }
-    
+
     for base_name, base_items in by_base.items():
         # Sort by quality (highest first), then by value
         def get_quality_score(item):
+            nm = _name_of(item) or ""
+            val = getattr(item, "value", 0) or 0
             for quality_name, score in quality_order.items():
-                if quality_name and f'({quality_name})' in item.name:
-                    return (score, item.value)
-            return (0, item.value)
-        
+                if quality_name and f'({quality_name})' in nm:
+                    return (score, val)
+            return (0, val)
+
         # For rings: keep top 2 qualities (player has 2 ring slots)
-        is_ring = any(hasattr(item, 'slot') and item.slot == 'ring' for item in base_items)
+        is_ring = any(getattr(item, 'slot', None) == 'ring' for item in base_items)
         if is_ring and len(base_items) > 1:
             sorted_items = sorted(base_items, key=get_quality_score, reverse=True)
             filtered.extend(sorted_items[:2])
         else:
             best_item = max(base_items, key=get_quality_score)
             filtered.append(best_item)
-    
+
     return filtered
 
 def filter_items_by_stats(
@@ -771,6 +910,64 @@ def gearset_meets_keyword_level_requirements(items, activity) -> bool:
         if not satisfied:
             return False
     return True
+
+def filter_items_failing_keyword_level_requirements(items, activity):
+    """Drop candidate items that can NEVER satisfy an activity's tool
+    keyword-level requirement.
+
+    Some activities require an equipped tool whose OWN skill requirement is at
+    least a given level, e.g. "Mine adamant ore" needs a Pickaxe that itself
+    requires Mining 50. A Tarsilium pickaxe (Mining 40) carries the 'pickaxe'
+    keyword but fails that level, so equipping it does NOT let you perform the
+    activity. Because tool-keyword uniqueness means only one item of a given
+    tool keyword is ever worn, such a tool can never be part of a valid gearset
+    and must not be a candidate for ANY optimizer (greedy or exact) — otherwise
+    the optimizer picks it whenever it scores best on the objective (higher WE,
+    chest_finding, etc.) and reports an impossible gearset.
+
+    An item is removed iff, for some keyword_level_requirement, it carries that
+    keyword but does NOT meet the required minimum skill level. Items that carry
+    none of the gated keywords are always kept. Activities without any
+    keyword_level_requirements return the list unchanged.
+
+    Args:
+        items: iterable of item instances (None entries tolerated).
+        activity: object with a `.requirements` dict.
+
+    Returns:
+        A new list with the disqualified items removed.
+    """
+    reqs = getattr(activity, 'requirements', {}) or {}
+    keyword_level_requirements = reqs.get('keyword_level_requirements', [])
+    if not keyword_level_requirements:
+        return [it for it in items if it is not None]
+
+    kept = []
+    for item in items:
+        if item is None:
+            continue
+        item_kws = {str(k).lower() for k in (getattr(item, 'keywords', []) or [])}
+        item_reqs = getattr(item, 'requirements', []) or []
+        disqualified = False
+        for req in keyword_level_requirements:
+            req_kw = str(req.get('keyword', '')).lower()
+            if not req_kw or req_kw not in item_kws:
+                continue
+            req_skill = str(req.get('skill', '')).lower()
+            req_level = req.get('level', 0)
+            meets = any(
+                r.get('type') == 'skill'
+                and str(r.get('skill', '')).lower() == req_skill
+                and r.get('level', 0) >= req_level
+                for r in item_reqs
+            )
+            if not meets:
+                disqualified = True
+                break
+        if not disqualified:
+            kept.append(item)
+    return kept
+
 
 def meets_activity_requirements(gearset_dict: dict, activity, character, input_item=None) -> bool:
     """

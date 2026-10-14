@@ -14,7 +14,7 @@ import sqlite3
 import uuid
 import logging
 import html as html_lib
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple, Union
 
 from fastapi import FastAPI, HTTPException, Request, Response, Cookie, BackgroundTasks
 from fastapi.staticfiles import StaticFiles
@@ -308,8 +308,13 @@ class ImportData(BaseModel):
 
 
 class ConfigUpdate(BaseModel):
-    """Configuration update request model."""
-    path: str
+    """Configuration update request model.
+
+    `path` may be a dot-separated string (legacy) OR a list of path segments.
+    The list form lets a single segment contain a literal '.' (e.g. an item id
+    like "letter_from_a._a.") without being shattered by the '.' delimiter.
+    """
+    path: Union[str, List[str]]
     value: Any
 
 
@@ -421,6 +426,7 @@ class PushPreferencesRequest(BaseModel):
     """Request model for notification preferences update."""
     global_announcements: bool
     targeted_announcements: bool
+    trading: Optional[bool] = None
 
 
 class PushEventRequest(BaseModel):
@@ -465,6 +471,33 @@ _optimization_event_loop = None  # Set on startup to the main event loop
 _sheets_sync_manager = None
 _sheets_sync_report = None
 _sheets_sync_paused = False
+
+# ── Blue-green deploy: role + readiness + ownership ─────────────────────────
+# WALKSCAPE_ROLE: 'active' (default) owns the shared sessions.db and serves
+# user traffic; 'standby' boots fully warm (catalog + precompute loaded) but
+# 503s real routes and does NOT run owner-only startup work, until it is
+# promoted via POST /api/admin/become-active. An ABSENT env var == 'active' ==
+# exact pre-blue-green behavior (so the fallback force-recreate deploy and any
+# single-container run are unchanged).
+_WALKSCAPE_ROLE = (os.environ.get("WALKSCAPE_ROLE") or "active").strip().lower()
+# Set True once the app is warm AND (if active) owner startup has completed.
+# The deploy script polls /api/health/ready and only flips Caddy to a green
+# container once this is True — so traffic never hits a cold process.
+_APP_READY = False
+# Blue sets this on /api/admin/release so it stops accepting NEW optimizer runs
+# while it drains existing SSE/requests before being stopped.
+_DRAINING = False
+# Shared secret guarding the localhost-only promote/release/resume endpoints
+# (the deploy script passes it via the X-Deploy-Token header).
+_DEPLOY_ADMIN_TOKEN = os.environ.get("DEPLOY_ADMIN_TOKEN") or ""
+# Paths a standby still answers (health/readiness + static). Everything else 503s.
+_STANDBY_OK_PATHS = {"/api/skills", "/api/health", "/api/health/ready"}
+
+
+def _is_active() -> bool:
+    """True when this instance owns the DB and should serve/own startup work."""
+    # (deploy smoke-test marker 2026-10-10 — comment-only, no behavior change)
+    return _WALKSCAPE_ROLE == "active"
 
 
 def _get_sheets_sync():
@@ -550,18 +583,21 @@ async def startup_event():
     # Clean up any stale optimization records from previous runs
     # On server restart (including uvicorn --reload), any running workers are orphaned
     # since the _tail_worker_log thread that monitors them is gone. Clear all records.
-    try:
-        conn = get_db()._get_connection()
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM active_optimizations")
-        cleared = cursor.rowcount
-        conn.commit()
-        if not get_db()._persistent_conn:
-            conn.close()
-        if cleared:
-            print(f"🧹 Cleared {cleared} stale optimization record(s) from previous run")
-    except Exception:
-        pass  # Table might not exist yet before migrations
+    # OWNER-ONLY: a standby must NOT wipe this — the live active owner's rows
+    # belong to its running workers. Only a cold active boot clears stale rows.
+    if _is_active():
+        try:
+            conn = get_db()._get_connection()
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM active_optimizations")
+            cleared = cursor.rowcount
+            conn.commit()
+            if not get_db()._persistent_conn:
+                conn.close()
+            if cleared:
+                print(f"🧹 Cleared {cleared} stale optimization record(s) from previous run")
+        except Exception:
+            pass  # Table might not exist yet before migrations
     
     # Run pending database migrations on startup
     from pathlib import Path
@@ -579,6 +615,25 @@ async def startup_event():
             print(f"🔄 Applied {applied} migration(s) on startup")
     except Exception as e:
         print(f"⚠️  Migration error on startup (non-fatal): {e}")
+
+    # one-time wipes/backfills). A standby skips all of it until promoted via
+    # /api/admin/become-active, which calls _run_owner_startup() then. An absent
+    # WALKSCAPE_ROLE == active, so single-container / fallback deploys are
+    # unchanged (this runs inline exactly as before).
+    global _APP_READY
+    if _is_active():
+        await _run_owner_startup(db_path)
+
+    # Warm + (if active) owner-startup done → the deploy flip may now route here.
+    _APP_READY = True
+    print(f"✅ App ready (role={_WALKSCAPE_ROLE})")
+
+
+async def _run_owner_startup(db_path):
+    """Owner-only startup work — runs on a cold ACTIVE boot and on promotion
+    (become-active). MUST be idempotent: a standby being promoted while the old
+    owner drains may briefly overlap it. Does NOT include the active_optimizations
+    wipe (that is cold-boot only; the draining owner still owns its rows)."""
 
     # ── Stats Report precompute auto-generate / refresh (2026-06-15) ─────
     # The stats-report stale-detection "item_change" signal diffs a per-scope
@@ -735,6 +790,42 @@ def get_db() -> DatabaseManager:
 # Mount static file directories with caching
 app.mount("/static", ShortCachedStaticFiles(directory="ui/static"), name="static")
 app.mount("/assets", CachedStaticFiles(directory="assets"), name="assets")
+# Bank icon picker source: serve the raw wiki SVG dump in place so the searchable
+# icon index (GET /api/bank/icons) can reference every game icon without copying
+# ~1700 files. Spec §4/§9/§16.
+app.mount("/wiki-icons", CachedStaticFiles(directory="wiki_all_svg_downloads"), name="wiki-icons")
+
+# Root-level icon probes. iOS Safari (and other agents) request these at the
+# domain root regardless of the <link> tags in index.html -- in particular the
+# Favorites / bookmark tile and legacy touch-icon lookups fetch /favicon.ico and
+# /apple-touch-icon[-precomposed].png at the root. Without these routes those
+# paths fall through to the JSON 404 handler, so Safari never finds a usable
+# icon and draws the letter-monogram ("W") fallback. Serve the committed PNGs
+# under assets/icons/ for each. (The in-page <link rel=apple-touch-icon> covers
+# Add-to-Home-Screen; these cover the root-probe surfaces it doesn't.)
+_ICONS_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets", "icons"
+)
+_ROOT_ICON_HEADERS = {"Cache-Control": "public, max-age=86400"}
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def root_favicon_ico():
+    return FileResponse(
+        os.path.join(_ICONS_DIR, "favicon-32.png"),
+        media_type="image/png",
+        headers=_ROOT_ICON_HEADERS,
+    )
+
+
+@app.get("/apple-touch-icon.png", include_in_schema=False)
+@app.get("/apple-touch-icon-precomposed.png", include_in_schema=False)
+async def root_apple_touch_icon():
+    return FileResponse(
+        os.path.join(_ICONS_DIR, "apple-touch-icon.png"),
+        media_type="image/png",
+        headers=_ROOT_ICON_HEADERS,
+    )
 
 # ============================================================================
 # PROTOTYPE: Client-side optimization (Pyodide hybrid, Option C)
@@ -764,6 +855,17 @@ def _find_local_job(jobs, scope):
     (category + skill + chest + source name) — job_id is random per build so it
     cannot be used for matching."""
     cat = scope.get('category')
+    # 2026-08-12 (jwbail): target_items jobs share (category, skill_name=group,
+    # chest_name, activity_name) across every item in the same group farmed at
+    # the same activity, so the generic match below collapses ~35 items onto one
+    # job -> one scope key -> 179/214 (bug 1db9384e). Match on the unique
+    # item_slug leaf instead.
+    if cat == 'target_items':
+        item_slug = scope.get('item_slug')
+        for j in jobs:
+            if j.category == cat and (getattr(j, 'extras', None) or {}).get('item_slug') == item_slug:
+                return j
+        return None
     skill = scope.get('skill_name')
     chest = scope.get('chest_name')
     src = scope.get('activity_name')
@@ -895,6 +997,56 @@ async def pyodide_last_request():
 # ============================================================================
 
 @app.middleware("http")
+async def standby_gate_middleware(request: Request, call_next):
+    """A standby instance is warm but is NOT the DB owner: answer health /
+    readiness and static assets, and 503 everything else — so the deploy flip
+    can wait for it to be ready without it serving user traffic or touching
+    owner state. No-op when active (the default)."""
+    if _WALKSCAPE_ROLE == "standby":
+        p = request.url.path
+        if not (p in _STANDBY_OK_PATHS or p.startswith("/static/")
+                or p == "/favicon.ico" or p.startswith("/api/admin/")):
+            from starlette.responses import JSONResponse
+            return JSONResponse(
+                {"detail": "This instance is a warm standby (not yet promoted)."},
+                status_code=503,
+            )
+    return await call_next(request)
+
+
+@app.get("/api/health")
+async def health_live():
+    """Liveness: the process is up and serving."""
+    from starlette.responses import JSONResponse
+    return JSONResponse({"status": "ok", "role": _WALKSCAPE_ROLE})
+
+
+@app.get("/api/health/ready")
+async def health_ready():
+    """Readiness: warm (catalog/precompute loaded) and, if active, owner startup
+    done. The deploy script polls this on a freshly-booted green container and
+    only flips Caddy once it returns 200, so traffic never hits a cold process."""
+    from starlette.responses import JSONResponse
+    return JSONResponse(
+        {"ready": _APP_READY, "role": _WALKSCAPE_ROLE, "draining": _DRAINING},
+        status_code=200 if _APP_READY else 503,
+    )
+
+
+def _deploy_token_ok(request: Request) -> bool:
+    """Admin endpoints are only reachable from the host (Caddy never proxies
+    /api/admin/*) and additionally require the shared DEPLOY_ADMIN_TOKEN."""
+    return bool(_DEPLOY_ADMIN_TOKEN) and \
+        request.headers.get("X-Deploy-Token", "") == _DEPLOY_ADMIN_TOKEN
+
+
+
+
+
+
+
+
+@app.middleware("http")
 async def session_middleware(request: Request, call_next):
     """
     Session middleware for UUID cookie handling.
@@ -975,6 +1127,18 @@ async def api_audit_middleware(request: Request, call_next):
     response = await call_next(request)
     elapsed_ms = (time.monotonic() - start) * 1000
 
+    # Surface slow requests to the log stream so loading-lag can be diagnosed
+    # straight from `docker logs` (no need to query the api_access table).
+    # Covers ALL paths — the root page load and static assets too, not just
+    # /api/* — because a stalled "/" or /static/* is what users perceive as
+    # the page hanging. Skips the long-lived SSE stream which is expected to
+    # stay open indefinitely.
+    SLOW_REQUEST_MS = 1000
+    if request.url.path != "/api/optimization-events" and elapsed_ms >= SLOW_REQUEST_MS:
+        slow_uuid = getattr(request.state, 'session_uuid', 'unknown')
+        log(f"⏱️  SLOW {request.method} {request.url.path} -> "
+            f"{response.status_code} in {elapsed_ms:.0f}ms", slow_uuid)
+
     # Only log API endpoints (skip SSE which holds a long-lived connection)
     if request.url.path.startswith("/api/") and request.url.path != "/api/optimization-events":
         session_uuid = getattr(request.state, 'session_uuid', 'unknown')
@@ -999,10 +1163,10 @@ async def api_audit_middleware(request: Request, call_next):
 
     return response
 
+
 # ============================================================================
 # ROOT ENDPOINT
 # ============================================================================
-
 @app.get("/robots.txt", response_class=PlainTextResponse)
 async def robots_txt():
     """Serve robots.txt at the root path for crawlers."""
@@ -1013,6 +1177,11 @@ async def robots_txt():
 @app.get("/", response_class=HTMLResponse)
 async def root():
     """Serve the main HTML page with cache-busted JS entry point."""
+    return HTMLResponse(content=_spa_html())
+
+
+def _spa_html() -> str:
+    """Read index.html and inject the cache-busted JS/CSS version."""
     with open("ui/static/index.html", "r") as f:
         html = f.read()
     # Inject DATA_VERSION into main.js URL so Cloudflare/CDN never serves stale JS modules
@@ -1027,12 +1196,33 @@ async def root():
         'href="/static/css/styles.css?v=4"',
         f'href="/static/css/styles.css?v={DATA_VERSION}"'
     )
-    return HTMLResponse(content=html)
+    return html
+
+
+@app.get("/u/{handle}", response_class=HTMLResponse)
+async def public_profile(handle: str):
+    """Pretty public trader-profile URL (/u/<handle>). Serves the SPA; the client
+    reads the path and opens that trader's page."""
+    return HTMLResponse(content=_spa_html())
+
+
+@app.get("/u/{handle}/compare", response_class=HTMLResponse)
+async def public_profile_compare(handle: str):
+    """Pretty public compare URL (/u/<handle>/compare). Serves the SPA; the client
+    reads the path and opens the comparison against that trader."""
+    return HTMLResponse(content=_spa_html())
 
 @app.get("/maptest")
 async def maptest():
     """Serve the map test page."""
     with open("ui/static/maptest.html", "r") as f:
+        return HTMLResponse(content=f.read())
+
+
+@app.get("/testpanel")
+async def testpanel():
+    """Serve the SettingsPanel layout playground."""
+    with open("ui/static/settings-panel-test.html", "r") as f:
         return HTMLResponse(content=f.read())
 
 
@@ -1735,6 +1925,22 @@ async def sell_for_chips(request: Request):
 # Whitelist of allowed documents. Only these can be served via the API.
 # Format: { "id": { "label": "Display Name", "path": "relative/path.md" } }
 ALLOWED_DOCS = {
+    "trading-requirements": {
+        "label": "Trading — Requirements",
+        "path": ".kiro/specs/trading/requirements.md",
+    },
+    "trading-cross-site-design": {
+        "label": "Trading — Cross-Site Federation (Design, older)",
+        "path": ".kiro/specs/trading/cross-site-design.md",
+    },
+    "trading-design": {
+        "label": "Trading — Design",
+        "path": ".kiro/specs/trading/design.md",
+    },
+    "trading-tasks": {
+        "label": "Trading — Tasks",
+        "path": ".kiro/specs/trading/tasks.md",
+    },
     "notepad-spec": {
         "label": "Notepad — Spec",
         "path": ".kiro/NOTEPAD_SPEC.md",
@@ -1818,6 +2024,18 @@ ALLOWED_DOCS = {
     "crafting-tree-calculator-tasks": {
         "label": "Crafting Tree Calculator — Tasks",
         "path": ".kiro/specs/crafting-tree-calculator/tasks.md",
+    },
+    "fastest-craft-requirements": {
+        "label": "Fastest Craft — Requirements",
+        "path": ".kiro/specs/fastest-craft/requirements.md",
+    },
+    "fastest-craft-design": {
+        "label": "Fastest Craft — Design",
+        "path": ".kiro/specs/fastest-craft/design.md",
+    },
+    "fastest-craft-tasks": {
+        "label": "Fastest Craft — Tasks",
+        "path": ".kiro/specs/fastest-craft/tasks.md",
     },
     "meeting-bets-requirements": {
         "label": "Meeting Bets — Requirements",
@@ -1930,6 +2148,22 @@ ALLOWED_DOCS = {
     "sell-for-chips-tasks": {
         "label": "Sell for Chips — Tasks",
         "path": ".kiro/specs/sell-for-chips/tasks.md",
+    },
+    "bank-layout-spec": {
+        "label": "Bank Layout Simulator — Spec",
+        "path": ".kiro/BANK_LAYOUT_SPEC.md",
+    },
+    "item-upgrades-tracker-requirements": {
+        "label": "Item Upgrades Tracker — Requirements",
+        "path": ".kiro/specs/item-upgrades-tracker/requirements.md",
+    },
+    "item-upgrades-tracker-design": {
+        "label": "Item Upgrades Tracker — Design",
+        "path": ".kiro/specs/item-upgrades-tracker/design.md",
+    },
+    "zero-downtime-deploy-design": {
+        "label": "Zero-Downtime Deploy — Design (blue-green)",
+        "path": ".kiro/specs/zero-downtime-deploy/design.md",
     },
 }
 
@@ -2170,7 +2404,14 @@ async def get_session(uuid: str):
             canonical_id = item_obj.name.lower().replace(' ', '_').replace('(', '').replace(')', '').replace('-', '_').replace("'", '')
             if export_name != canonical_id:
                 export_aliases[export_name] = canonical_id
-    
+
+    # Historical renames whose OLD id no longer exists in the mapping (e.g.
+    # travelers_kit -> travellers_kit). These can't be derived from the current
+    # catalog, so merge them explicitly so a user's saved owned/checked state
+    # migrates instead of silently un-checking. See util/item_renames.py.
+    from util.item_renames import get_item_renames
+    export_aliases.update(get_item_renames())
+
     result = SessionData(**session)
     # Attach export_aliases to the response (for renamed item resolution)
     response_dict = result.model_dump()
@@ -2229,6 +2470,7 @@ async def import_character(uuid: str, data: ImportData):
         
         # Import the function to get items from export names
         from util.autogenerated.export_names import get_item_from_export_name
+        from util.wiki_item_values import WIKI_ITEM_VALUES
         
         log(f"Processing {len(all_items_raw)} items for quality/quantity parsing (inventory + bank + gear)...", uuid)
         
@@ -2474,13 +2716,22 @@ async def import_character(uuid: str, data: ImportData):
             "currencies": character._currencies_raw,
         }
         
-        # Compute inventory value: coins + (value × quantity) for ALL items in inventory+bank+gear
-        inventory_value = character.coins or 0
+        # Value of all items: (value × quantity) for ALL items in inventory+bank+gear.
+        # Coins are intentionally EXCLUDED — this is the "Value of all items" figure
+        # the UI shows, matching the game's bank value (which lists coins separately).
+        # True total wealth = coins + inventory_value, added at each wealth call site.
+        inventory_value = 0
         for export_name, quantity in all_items_raw.items():
             try:
                 item = get_item_from_export_name(export_name)
-                if item and hasattr(item, 'value') and item.value:
-                    inventory_value += item.value * quantity
+                v = item.value if (item and getattr(item, 'value', 0)) else 0
+                if not v:
+                    # Non-sellable items (tools-API itemValue.value=null) have no
+                    # vendor price but still count toward total wealth at their
+                    # wiki "Value" (see util/scrapers/merge_wiki_item_values.py).
+                    v = WIKI_ITEM_VALUES.get(export_name, 0)
+                if v:
+                    inventory_value += v * quantity
             except Exception:
                 pass
 
@@ -2617,12 +2868,20 @@ async def export_character_config(uuid: str):
         "steps": config.get("steps", 0),
         "achievement_points": config.get("achievement_points", 0),
         "coins": config.get("coins", 0),
+        # Currencies the player holds (chips/tokens), stored raw from the
+        # original import as { "<Currency name>": qty }. Present in the game
+        # import format, so round-trip it back out.
+        "currencies": config.get("currencies", {}),
         "skills": skills,
         "reputation": config.get("reputation", {}),
         "inventory": inventory,
         "bank": {},
         "gear": {},
         "consumables": {},
+        # We don't track chests or lore, but both appear in the game import
+        # format — emit empty objects so the export round-trips cleanly.
+        "chests": {},
+        "lore": {},
         "collectibles": config.get("collectibles", []),
         "pets": pets_obj,
         "available_pets": available_pets,
@@ -2642,13 +2901,16 @@ def _recompute_inventory_value(uuid: str):
     """Recompute and store inventory_value for a session based on all items with quantities."""
     try:
         from util.autogenerated.export_names import get_item_from_export_name
+        from util.wiki_item_values import WIKI_ITEM_VALUES
         
         session = get_db().get_session(uuid)
         if not session or not session.get('character_config'):
             return
         
         config = session['character_config']
-        inventory_value = config.get('coins', 0) or 0
+        # Items-only value (coins EXCLUDED) — see the inventory-value compute in
+        # the import path. True total wealth = coins + inventory_value.
+        inventory_value = 0
         
         # Use full inventory from separate column if available
         all_items_json = session.get('all_items_raw')
@@ -2658,8 +2920,11 @@ def _recompute_inventory_value(uuid: str):
                 for export_name, quantity in all_items.items():
                     try:
                         item_obj = get_item_from_export_name(export_name)
-                        if item_obj and hasattr(item_obj, 'value') and item_obj.value:
-                            inventory_value += item_obj.value * quantity
+                        v = item_obj.value if (item_obj and getattr(item_obj, 'value', 0)) else 0
+                        if not v:
+                            v = WIKI_ITEM_VALUES.get(export_name, 0)
+                        if v:
+                            inventory_value += v * quantity
                     except Exception:
                         pass
             except (json.JSONDecodeError, TypeError):
@@ -2670,8 +2935,11 @@ def _recompute_inventory_value(uuid: str):
             for export_name in owned_items:
                 try:
                     item_obj = get_item_from_export_name(export_name)
-                    if item_obj and hasattr(item_obj, 'value') and item_obj.value:
-                        inventory_value += item_obj.value
+                    v = item_obj.value if (item_obj and getattr(item_obj, 'value', 0)) else 0
+                    if not v:
+                        v = WIKI_ITEM_VALUES.get(export_name, 0)
+                    if v:
+                        inventory_value += v
                 except Exception:
                     pass
         
@@ -2713,19 +2981,22 @@ async def update_config(uuid: str, update: ConfigUpdate):
     try:
         # Update the config path
         get_db().update_config_path(uuid, update.path, update.value)
-        
+
+        # Normalize path to segments for the heuristics below. A list path
+        # keeps dotted segments (e.g. item id "letter_from_a._a.") atomic.
+        parts = update.path if isinstance(update.path, list) else update.path.split('.')
+
         # Recompute inventory value when item ownership changes
-        if update.path.startswith('items.') and update.path.endswith('.has'):
+        if len(parts) >= 2 and parts[0] == 'items' and parts[-1] == 'has':
             _recompute_inventory_value(uuid)
-        
+
         # Invalidate stats report results when item ownership, hide, or quality changes
-        parts = update.path.split('.')
         if len(parts) >= 3 and parts[0] == 'items' and parts[2] in ('has', 'hide', 'quality'):
             try:
                 get_db().mark_stats_report_runs_stale(uuid)
             except Exception:
                 pass  # Non-critical
-        
+
         return {
             "success": True,
             "message": f"Updated {update.path} to {update.value}"
@@ -2747,7 +3018,7 @@ async def update_config(uuid: str, update: ConfigUpdate):
 # ============================================================================
 
 @app.get("/api/session/{uuid}/gearsets")
-async def get_gear_sets(uuid: str, response: Response, summary: bool = False, limit: Optional[int] = None, offset: int = 0):
+def get_gear_sets(uuid: str, response: Response, summary: bool = False, limit: Optional[int] = None, offset: int = 0):
     """
     Get all gear sets for a session.
 
@@ -2922,6 +3193,26 @@ async def delete_gear_set(uuid: str, gearset_id: str):
         "success": True,
         "message": f"Gear set {gearset_id} deleted"
     }
+
+
+@app.post("/api/session/{uuid}/gearsets/{gearset_id}/suggest-dismiss")
+async def suggest_dismiss_gear_set(uuid: str, gearset_id: str):
+    """
+    Mark a gear set as dismissed for activity/recipe suggestion.
+
+    Args:
+        uuid: Session UUID
+        gearset_id: Gear set ID to mark as dismissed
+
+    Returns:
+        Success message
+    """
+    session = get_db().get_session(uuid)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    get_db().set_gear_set_suggest_dismissed(uuid, gearset_id, 1)
+    return {"success": True}
 
 
 # ============================================================================
@@ -3947,6 +4238,25 @@ async def get_items(request: Request, response: Response):
     }
 
 
+_INTERNAL_ITEM_IDS_CACHE = None
+
+
+def _load_internal_item_ids():
+    """slug -> game item entry id (e.g. 'copper_bar' -> '<uuid>', 'absorbing_amulet' ->
+    'item-absorbing_amulet-<uuid>'). Sourced from the tools-API internal-ids cache. Cached
+    in-process; benign empty dict if the file is missing."""
+    global _INTERNAL_ITEM_IDS_CACHE
+    if _INTERNAL_ITEM_IDS_CACHE is not None:
+        return _INTERNAL_ITEM_IDS_CACHE
+    try:
+        from pathlib import Path as _P
+        p = _P(__file__).parent.parent / "util" / "cache" / "tools_api_cache" / "_internal_ids.json"
+        _INTERNAL_ITEM_IDS_CACHE = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+    except Exception:
+        _INTERNAL_ITEM_IDS_CACHE = {}
+    return _INTERNAL_ITEM_IDS_CACHE
+
+
 @app.get("/api/catalog")
 async def get_catalog(request: Request, response: Response):
     """
@@ -3960,8 +4270,17 @@ async def get_catalog(request: Request, response: Response):
     """
     from ui.catalog import ItemCatalog
     from util.walkscape_constants import Item
-    
-    cached = _maybe_static_304(request, response, "catalog")
+    from util.trading_tradable import is_tradable
+    try:
+        from util.autogenerated.item_trade_flags import ITEM_TRADE_FLAGS as _ITEM_TRADE_FLAGS
+    except Exception:
+        _ITEM_TRADE_FLAGS = {}
+    try:
+        from util.autogenerated.item_game_keys import ITEM_GAME_KEYS as _ITEM_GAME_KEYS
+    except Exception:
+        _ITEM_GAME_KEYS = {}
+
+    cached = _maybe_static_304(request, response, "catalog-gamekey-v3")  # bumped: + category + sources filter dims
     if cached:
         return cached
     
@@ -3975,6 +4294,84 @@ async def get_catalog(request: Request, response: Response):
         if isinstance(category_data, dict):
             # Check if this is an item (has 'id' field)
             if 'id' in category_data and 'name' in category_data:
+                _nm = category_data.get('name') or ''
+                _nid = _nm.lower().replace(' ', '_').replace('(', '').replace(')', '').replace('-', '_').replace("'", '')
+                # Authoritative game export key (birch_logs, letter_from_a._a.) — the
+                # Trading item identity. Resolve by name-id/name, else fall back to the
+                # catalog id (which already equals the export key for most items).
+                category_data['game_key'] = (_ITEM_GAME_KEYS.get(category_data['id'])
+                                             or _ITEM_GAME_KEYS.get(_nid)
+                                             or _ITEM_GAME_KEYS.get(_nm.lower())
+                                             or category_data['id'])
+                # Stamp authoritative trade flags from the tools-API scrape
+                # (ITEM_TRADE_FLAGS, keyed by both API id and name-id). is_tradable
+                # prefers canBeTraded over the legacy type heuristic.
+                _flags = _ITEM_TRADE_FLAGS.get(category_data['id'])
+                if _flags is None:
+                    _flags = _ITEM_TRADE_FLAGS.get(_nid)
+                if _flags:
+                    if _flags.get('canBeTraded') is not None:
+                        category_data['canBeTraded'] = _flags.get('canBeTraded')
+                    if _flags.get('canBeBanked') is not None:
+                        category_data['canBeBanked'] = _flags.get('canBeBanked')
+                    if _flags.get('canBeDropped') is not None:
+                        category_data['canBeDropped'] = _flags.get('canBeDropped')
+                category_data['tradable'] = is_tradable(category_data)
+                # Split equipment ('item') into gear / tool / loot by equip slot
+                # so the Trading item picker can filter them separately.
+                if category_data.get('type') == 'item':
+                    _slot = category_data.get('slot')
+                    # Tool items carry slot 'tools' (plural); the tool0..tool5
+                    # values are gear-set equip positions, NOT item slots. Body
+                    # gear has a real equip slot; everything else (chest drops,
+                    # rewards) has no slot -> loot.
+                    if _slot == 'tools' or (isinstance(_slot, str) and _slot.startswith('tool')):
+                        category_data['subtype'] = 'tool'
+                    elif _slot:
+                        category_data['subtype'] = 'gear'
+                    else:
+                        category_data['subtype'] = 'loot'
+                # Orthogonal filter dimensions (type/category vs source/origin):
+                #   category: gear / tool / consumable / pet_egg / material
+                #   sources : crafted / chest_loot / activity_drop / other
+                # A crafted sword is category=gear, sources=[crafted]; a log is
+                # category=material, sources=[activity_drop] (and/or chest_loot).
+                _t = category_data.get('type')
+                _slot2 = category_data.get('slot')
+                if _t == 'egg':
+                    _category = 'pet_egg'
+                elif _t == 'consumable':
+                    _category = 'consumable'
+                elif _t == 'material':
+                    _category = 'material'
+                elif _t == 'coins':
+                    _category = 'coins'
+                elif _t in ('item', 'crafted_item', 'achievement_item'):
+                    if _slot2 == 'tools' or (isinstance(_slot2, str) and _slot2.startswith('tool')):
+                        _category = 'tool'
+                    elif _slot2:
+                        _category = 'gear'
+                    else:
+                        _category = 'material'
+                else:
+                    _category = _t or 'other'
+                _nm2 = category_data.get('name') or ''
+                _sources = []
+                if _t == 'crafted_item':
+                    _sources.append('crafted')
+                try:
+                    if _nm2 in getattr(catalog, '_chest_item_names', set()):
+                        _sources.append('chest_loot')
+                    if _nm2 in getattr(catalog, '_activity_drop_names', set()):
+                        _sources.append('activity_drop')
+                    if _nm2 in getattr(catalog, '_shop_item_names', set()):
+                        _sources.append('shop')
+                except Exception:
+                    pass
+                if not _sources:
+                    _sources = ['other']
+                category_data['category'] = _category
+                category_data['sources'] = _sources
                 all_items.append(category_data)
             else:
                 # Recurse into subcategories
@@ -3989,7 +4386,22 @@ async def get_catalog(request: Request, response: Response):
     for category_name, category_data in catalog.categories.items():
         if category_name != 'collectibles':
             add_items_from_category(category_data)
-    
+
+    # Dedupe by id. An item filed under more than one category is emitted once per
+    # placement by the recursive flatten above, so the flat catalog can contain the
+    # same id many times (e.g. foods appear in every cooking bucket). The flat catalog
+    # is meant to be unique by id; consumers that render it raw (the Bank Layout view)
+    # otherwise show each multi-categorized item as duplicate tiles. Keep first occurrence.
+    _seen_item_ids = set()
+    _deduped_items = []
+    for _it in all_items:
+        _iid = _it.get('id')
+        if _iid in _seen_item_ids:
+            continue
+        _seen_item_ids.add(_iid)
+        _deduped_items.append(_it)
+    all_items = _deduped_items
+
     # Get collectibles separately (flatten from subcategorized structure)
     collectibles_data = catalog.categories.get('collectibles', {})
     collectibles = []
@@ -4003,7 +4415,19 @@ async def get_catalog(request: Request, response: Response):
                         collectibles.extend(group_items)
     elif isinstance(collectibles_data, list):
         collectibles = collectibles_data
-    
+
+    # Dedupe collectibles by id for the same reason (multi-subcategory placement).
+    _seen_col_ids = set()
+    _deduped_cols = []
+    for _c in collectibles:
+        _cid = _c.get('id') if isinstance(_c, dict) else None
+        if _cid is not None and _cid in _seen_col_ids:
+            continue
+        if _cid is not None:
+            _seen_col_ids.add(_cid)
+        _deduped_cols.append(_c)
+    collectibles = _deduped_cols
+
     # Note: No session UUID available in this endpoint (static data)
     log(f"Catalog API: Returning {len(all_items)} items and {len(collectibles)} collectibles")
     
@@ -4023,7 +4447,26 @@ async def get_catalog(request: Request, response: Response):
             canonical_id = item_obj.name.lower().replace(' ', '_').replace('(', '').replace(')', '').replace('-', '_').replace("'", '')
             if export_name != canonical_id:
                 export_aliases[export_name] = canonical_id
-    
+
+    # Historical renames whose OLD id no longer exists in the mapping. Merge
+    # explicitly so saved owned/checked state migrates. See util/item_renames.py.
+    from util.item_renames import get_item_renames
+    export_aliases.update(get_item_renames())
+
+    # Attach the game's own item entry id (from the tools-API internal-ids map) so the Bank
+    # Layout export can reference items in the game's `i` array. NOTE: materials/ores are bare
+    # UUIDs while equipment/collectibles are "item-<slug>-<uuid>" — the map has the exact form.
+    _iids = _load_internal_item_ids()
+    if _iids:
+        for _it in all_items:
+            _gid = _iids.get(_it.get('id'))
+            if _gid:
+                _it['game_id'] = _gid
+        for _c in collectibles:
+            _gid = _iids.get(_c.get('id')) if isinstance(_c, dict) else None
+            if _gid:
+                _c['game_id'] = _gid
+
     return {
         "items": all_items,
         "collectibles": collectibles,
@@ -4100,6 +4543,127 @@ async def get_skills(request: Request, response: Response):
         "skills": skills,
         "by_category": by_category
     }
+
+
+@app.get("/api/achievements")
+async def get_achievements(request: Request):
+    """
+    Achievements for the notepad entity-link picker + popup.
+
+    Merges the tools-API achievement list (id / name / difficulty) with the
+    wiki-scraped requirement text and the per-achievement icon, grouped by
+    difficulty in Easy -> Normal -> Hard -> Extreme order.
+
+    The tools API exposes no icon or description for achievements, so the
+    requirement text comes from util.autogenerated.achievement_descriptions
+    (scraped from the wiki via util/scrapers/scrape_achievements_wiki.py) and
+    icons are served from /assets/icons/achievements/<id>.svg.
+
+    Returns:
+        { order: [difficulty, ...],
+          groups: { difficulty: [{ id, name, difficulty, icon, requirements }] } }
+    """
+    from util.autogenerated.achievements import ACHIEVEMENTS
+    try:
+        from util.autogenerated.achievement_descriptions import ACHIEVEMENT_DESCRIPTIONS
+    except Exception:
+        ACHIEVEMENT_DESCRIPTIONS = {}
+
+    import re as _re
+
+    def _icon_path(aid, desc):
+        # Prefer the wiki-scraped icon path; fall back to a URL-safe slug
+        # (achievement ids can contain '?'/'!'/'.', which break an image URL).
+        if desc.get("icon"):
+            return desc["icon"]
+        slug = _re.sub(r"[^a-z0-9_]+", "", (aid or "").lower())
+        return f"/assets/icons/achievements/{slug}.svg"
+
+    order = ["easy", "normal", "hard", "extreme"]
+    groups = {d: [] for d in order}
+    for aid, a in ACHIEVEMENTS.items():
+        difficulty = (a.get("difficulty") or "normal").lower()
+        if difficulty not in groups:
+            groups[difficulty] = []
+            order.append(difficulty)
+        desc = ACHIEVEMENT_DESCRIPTIONS.get(aid, {})
+        groups[difficulty].append({
+            "id": aid,
+            "name": a.get("name") or aid,
+            "difficulty": difficulty,
+            "icon": _icon_path(aid, desc),
+            "back": desc.get("back"),
+            "requirements": desc.get("requirements", []),
+            "parsed": desc.get("parsed", []),
+            "rewards": desc.get("rewards", {}),
+        })
+    for entries in groups.values():
+        entries.sort(key=lambda x: x["name"].lower())
+    return {"order": order, "groups": groups, "enabled": True}  # Released to all users
+
+
+def _require_achievements(session_uuid: str):
+    return  # Released to all users — no FAC gate
+
+
+@app.get("/api/achievements/progress")
+async def achievements_progress_get(request: Request):
+    """Return the session's saved achievement progress (manual check-offs +
+    reward reveals). Benign 200 with empty progress when the feature is off."""
+    session_uuid = request.state.session_uuid
+    return {
+        "enabled": True,  # Released to all users
+        "progress": get_db().get_achievement_progress(session_uuid),
+    }
+
+
+@app.put("/api/achievements/progress")
+async def achievements_progress_put(request: Request):
+    """Persist the session's achievement progress blob (FAC-gated)."""
+    session_uuid = request.state.session_uuid
+    _require_achievements(session_uuid)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    progress = body.get("progress") if isinstance(body, dict) else None
+    if not isinstance(progress, dict):
+        raise HTTPException(status_code=400, detail="progress (object) required")
+    import json as _json
+    if len(_json.dumps(progress).encode("utf-8")) > 200_000:
+        raise HTTPException(status_code=413, detail="Progress too large")
+    get_db().set_achievement_progress(session_uuid, progress)
+    return {"success": True}
+
+
+@app.get("/api/shops")
+async def get_shops():
+    """Shops (id, name, location, region) for the achievement per-shop checklist
+    ("Peddle To The Mettle" — sell to 20 different shops)."""
+    import re as _re
+    import util.autogenerated.shops as shopsmod
+    ShopInfo = shopsmod.ShopInfo
+    out, seen = [], set()
+    for attr in dir(shopsmod):
+        obj = getattr(shopsmod, attr)
+        if not isinstance(obj, ShopInfo):
+            continue
+        name = (obj.name or "").strip()
+        if not name or "not a shop" in name.lower():
+            continue
+        # Only shops the player can actually sell to (the "Peddle To The Mettle"
+        # achievement counts shops you SELL at). Purchase-only shops like
+        # Casbrant's Sunken Ship (tools API: onlyPurchaseSellingListItems with no
+        # sell-back list) are excluded.
+        if not getattr(obj, "can_sell", True):
+            continue
+        sid = _re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+        if sid in seen:
+            continue
+        seen.add(sid)
+        out.append({"id": sid, "name": name, "location": obj.location, "region": obj.region})
+    out.sort(key=lambda s: ((s["location"] or ""), s["name"]))
+    return {"shops": out}
 
 
 @app.get("/api/activities")
@@ -4325,9 +4889,14 @@ async def get_activities(request: Request, response: Response):
             
             # Get item keywords for frontend find bonus detection (e.g., gems)
             item_keywords = []
+            item_effort = None
             try:
                 if drop.item_object and hasattr(drop.item_object, 'keywords'):
                     item_keywords = [kw for kw in drop.item_object.keywords]
+                if drop.item_object is not None:
+                    # `effort` (materials only) drives the Termite pet's
+                    # log->Carpentry-XP conversion, computed client-side.
+                    item_effort = getattr(drop.item_object, 'effort', None)
             except Exception:
                 pass
             
@@ -4353,6 +4922,7 @@ async def get_activities(request: Request, response: Response):
                 'shell_value': shell_value,
                 'fine_shell_value': fine_shell_value,
                 'item_keywords': item_keywords,
+                'effort': item_effort,
                 'multi_roll_count': drop.multi_roll_count if hasattr(drop, 'multi_roll_count') and drop.multi_roll_count else None,
                 'quantity': {
                     'min': drop.quantity.min_qty if not drop.quantity.is_na else None,
@@ -4412,9 +4982,14 @@ async def get_activities(request: Request, response: Response):
             
             # Get item keywords for frontend find bonus detection (e.g., gems)
             item_keywords = []
+            item_effort = None
             try:
                 if drop.item_object and hasattr(drop.item_object, 'keywords'):
                     item_keywords = [kw for kw in drop.item_object.keywords]
+                if drop.item_object is not None:
+                    # `effort` (materials only) drives the Termite pet's
+                    # log->Carpentry-XP conversion, computed client-side.
+                    item_effort = getattr(drop.item_object, 'effort', None)
             except Exception:
                 pass
             
@@ -4440,6 +5015,7 @@ async def get_activities(request: Request, response: Response):
                 'shell_value': shell_value,
                 'fine_shell_value': fine_shell_value,
                 'item_keywords': item_keywords,
+                'effort': item_effort,
                 'multi_roll_count': drop.multi_roll_count if hasattr(drop, 'multi_roll_count') and drop.multi_roll_count else None,
                 'quantity': {
                     'min': drop.quantity.min_qty if not drop.quantity.is_na else None,
@@ -4775,7 +5351,18 @@ async def get_travel_stats(request: Request):
                     skills_data[skill] = level_to_xp(level)
                 for skill, xp in skills_xp.items():
                     skills_data[skill] = xp
-                
+
+                # Populate inventory from owned_items so item_ownership gated
+                # stats resolve during travel scoring (e.g. Map of Arenum grants
+                # +15% double_action while travelling in each region, each gated
+                # on owning that region's map via an itemAnywhere requirement).
+                # Character.items scans gear+inventory+bank; without owned items
+                # here the maps aren't "owned" and the gate silently contributes
+                # nothing. Unknown/quality-suffixed slugs are kept as harmless
+                # strings by Character._parse_items.
+                owned_items_list = char_config.get('owned_items', []) or []
+                owned_inventory = {slug: 1 for slug in owned_items_list}
+
                 minimal_export = {
                     "name": char_config.get('name', 'Player'),
                     "game_version": char_config.get('game_version', '1.0'),
@@ -4784,7 +5371,7 @@ async def get_travel_stats(request: Request):
                     "coins": char_config.get('coins', 0),
                     "skills": skills_data,
                     "reputation": char_config.get('reputation', {}),
-                    "inventory": {},
+                    "inventory": owned_inventory,
                     "bank": {},
                     "gear": char_config.get('gear', {}),
                     "collectibles": char_config.get('collectibles', []),
@@ -4879,6 +5466,7 @@ async def get_travel_stats(request: Request):
         seg_stats_list.append({
             'steps_avg': steps_avg,
             'stats': stats,
+            'base_steps': distance,  # route Base Steps -> route-dependent chest chance
             'start_name': seg.get('start_name', ''),
             'end_name': seg.get('end', ''),
         })
@@ -5007,12 +5595,20 @@ async def calculate_activity_stats(request: Request):
     
     # Get character
     character = None
+    active_pet = None
     if hasattr(request, 'state') and hasattr(request.state, 'session_uuid'):
         try:
             session = get_db().get_session(request.state.session_uuid)
             if session and session.get('character_config'):
                 from ui.database import Character
-                character = Character.from_dict(session['character_config'])
+                cfg = session['character_config']
+                character = Character.from_dict(cfg)
+                # The active pet (used for the Termite effort->Carpentry-XP
+                # informational feature) lives in character_config['pets'].
+                for _p in (cfg.get('pets') or []):
+                    if isinstance(_p, dict) and _p.get('active'):
+                        active_pet = _p
+                        break
         except:
             pass
     
@@ -5034,7 +5630,13 @@ async def calculate_activity_stats(request: Request):
         character=character,
         consumable=consumable
     )
-    
+
+    # Termite pet "effort" -> Carpentry XP (informational). Mutates `results`
+    # to reduce logs-keyword drop yields by the 15% swap and returns the
+    # computed secondary Carpentry XP per step/action (or None).
+    from ui.pet_effort import apply_termite_effort
+    pet_effort = apply_termite_effort(activity, results, details, active_pet)
+
     return {
         'activity': {
             'id': activity_id,
@@ -5043,7 +5645,8 @@ async def calculate_activity_stats(request: Request):
         },
         'stats': gear_stats,
         'details': details,
-        'drop_rates': results
+        'drop_rates': results,
+        'pet_effort': pet_effort
     }
 
 
@@ -5088,11 +5691,23 @@ async def comparison_stats(request: Request):
     session_uuid = request.state.session_uuid
     session = get_db().get_session(session_uuid)
     character_config = session.get('character_config') if session else None
-    
+
+    # Custom stats (e.g. explored_realm_<slug> toggles that gate explore_realm
+    # bonuses like Quickdraw map). Sourced from ui_config exactly like the
+    # frontend (store.state.ui.custom_stats merged with user_overrides.custom_stats)
+    # so the backend explore_realm gate matches Combined Stats. Without this the
+    # gate defaulted off and Quickdraw's per-realm WE/DA was dropped, so the
+    # comparison-view col3 metrics diverged from col2 (bug #2 follow-up).
+    resolved_custom_stats = {}
+
     # Apply user overrides
     if character_config and session:
         ui_config = session.get('ui_config', {})
         user_overrides = ui_config.get('user_overrides', {})
+        resolved_custom_stats = {
+            **(ui_config.get('custom_stats') or {}),
+            **(user_overrides.get('custom_stats') or {}),
+        }
         if user_overrides.get('achievement_points') is not None:
             character_config['achievement_points'] = user_overrides['achievement_points']
         if user_overrides.get('skills'):
@@ -5132,6 +5747,7 @@ async def comparison_stats(request: Request):
                 "bank": {},
                 "gear": character_config.get('gear', {}),
                 "collectibles": character_config.get('collectibles', []),
+                "custom_stats": resolved_custom_stats,
             }
             character = Character(json_mod.dumps(minimal_export))
         except Exception:
@@ -5424,16 +6040,14 @@ async def comparison_stats(request: Request):
     
     log(f"[comparison-stats] After service: QO={total_stats.get('quality_outcome', 0)}", session_uuid)
     
-    # Add fine input bonus if enabled (same bonuses as the main view)
+    # Add fine input bonus if enabled (same bonuses as the main view). The
+    # helper gates on Hunting + keyword-type input (fine variants of non-hunting
+    # inputs like Fine Fabric have identical stats, so the flat bonus must not
+    # apply for them — see bug 8cb1876f). Single source of truth shared with the
+    # crafting-tree stat paths.
     if use_fine_inputs and activity_id:
-        # Check if the activity has input_items (keyword-type inputs that can be fine)
-        if activity and hasattr(activity, 'input_items') and activity.input_items:
-            has_keyword_input = any(getattr(ii, 'type', '') == 'keyword' for ii in activity.input_items)
-            if has_keyword_input:
-                total_stats['work_efficiency'] = total_stats.get('work_efficiency', 0) + 0.40
-                total_stats['double_rewards'] = total_stats.get('double_rewards', 0) + 0.10
-                total_stats['bonus_xp_percent'] = total_stats.get('bonus_xp_percent', 0) + 1.00
-                total_stats['fine_material_finding'] = total_stats.get('fine_material_finding', 0) + 2.00
+        from util.fine_inputs import apply_fine_input_bonus
+        apply_fine_input_bonus(total_stats, activity, use_fine_inputs)
     
     # Add input item stats (items selected in input slots contribute their stats)
     input_items_data = body.get('input_items', [])
@@ -5535,6 +6149,36 @@ async def comparison_stats(request: Request):
         else:
             stats_pct[k] = v
     
+    # Termite pet "effort" -> Carpentry XP (informational) for comparison mode.
+    # The pet is a gearset slot here; the terminate passive applies whenever a
+    # Termite (lvl >= 4) is in the compared gearset on a Woodcutting activity.
+    # Recomputes this gearset's log drops (location bonuses omitted — standard
+    # log drops aren't location-gated) to derive the per-gearset Carpentry XP.
+    pet_effort = None
+    if activity is not None:
+        _termite = None
+        for _sd in gearset_slots.values():
+            if not isinstance(_sd, dict):
+                continue
+            _iid = str(_sd.get('itemId') or _sd.get('item_id') or '').lower()
+            _nm = str(_sd.get('name') or '').lower()
+            if _iid == 'termite' or _nm == 'termite':
+                try:
+                    _lvl = int(_sd.get('level') or 0)
+                except (TypeError, ValueError):
+                    _lvl = 0
+                _termite = {'species': 'termite', 'level': _lvl}
+                break
+        if _termite:
+            try:
+                _res, _det = activity.get_expected_drop_rate(
+                    stats=total_stats, location=None, verbose=True, character=character
+                )
+                from ui.pet_effort import apply_termite_effort
+                pet_effort = apply_termite_effort(activity, _res, _det, _termite)
+            except Exception:
+                pet_effort = None
+
     return {
         "stats": stats_pct,
         "metrics": metrics,
@@ -5543,6 +6187,7 @@ async def comparison_stats(request: Request):
         "base_xp": base_xp,
         "max_efficiency": max_efficiency,
         "activity_level": activity_level,
+        "pet_effort": pet_effort,
     }
 
 
@@ -5567,6 +6212,12 @@ async def get_recipes(request: Request, response: Response):
     import util.autogenerated.recipes as recipes_module
     from util.coin_value import CHEST_COIN_VALUES
     from util.shell_value import CHEST_SHELL_VALUES
+    # Canonical item-name slug (name.lower, spaces->'_', drop parens, hyphens->'_',
+    # drop apostrophes). Reused here so recipe material_id keys match the
+    # owned_quantities keys the inventory parser builds — a divergent inline slug
+    # (missing apostrophe/hyphen strip) previously made equipment inputs like
+    # "Miner's magnet" show "0 owned" in the recipe info panel.
+    from ui.crafting_tree import _slug_item_name
 
     def _enrich_recipe_drop(d):
         """Add `coin_value` and `shell_value` to a recipe drop_table entry
@@ -5595,12 +6246,18 @@ async def get_recipes(request: Request, response: Response):
                 if hasattr(Material, _fine):
                     out['fine_coin_value'] = float(getattr(Material, _fine).value or 0)
                 out['shell_value'] = 1.0
-                out['fine_shell_value'] = 10.0  # Material.SEA_SHELL_FINE.special_sell qty
+                _ssf = getattr(Material, 'SEA_SHELL_FINE', None)
+                out['fine_shell_value'] = (
+                    float(_ssf.special_sell[0]) if (_ssf and _ssf.special_sell) else 10.0
+                )  # sourced from Material.SEA_SHELL_FINE.special_sell qty
             elif ref == 'Material.SEA_SHELL_FINE':
                 _attr = ref.split('.', 1)[1]
                 if hasattr(Material, _attr):
                     out['coin_value'] = float(getattr(Material, _attr).value or 0)
-                out['shell_value'] = 10.0
+                _ssf = getattr(Material, 'SEA_SHELL_FINE', None)
+                out['shell_value'] = (
+                    float(_ssf.special_sell[0]) if (_ssf and _ssf.special_sell) else 10.0
+                )  # sourced from Material.SEA_SHELL_FINE.special_sell qty
             elif ref.startswith('Material.'):
                 _attr = ref.split('.', 1)[1]
                 if hasattr(Material, _attr):
@@ -5665,12 +6322,17 @@ async def get_recipes(request: Request, response: Response):
                 if isinstance(material_obj, type(Material.BIRCH_LOGS)) if hasattr(Material, 'BIRCH_LOGS') else False:
                     material_type = 'material'
                     material_name = material_obj.name
-                    material_id = material_obj.name.lower().replace(' ', '_').replace("'", '')
+                    material_id = _slug_item_name(material_obj.name)
                     material_icon_name = material_obj.name.replace(' ', '_').lower()  # Lowercase for icon filename
                 elif hasattr(material_obj, 'name'):
                     material_name = material_obj.name
-                    # Keep apostrophes for icon paths, but create a clean ID for lookups
-                    material_id = material_name.lower().replace(' ', '_').replace('(', '').replace(')', '')
+                    # Clean ID for lookups. MUST match the canonical slug used to build
+                    # owned_quantities keys, otherwise the recipe-info "(N owned)" label
+                    # and have-enough coloring miss the item. Equipment inputs like
+                    # "Miner's magnet" broke here because a divergent inline slug did not
+                    # strip the apostrophe: owned_quantities key was "miners_magnet" but
+                    # material_id was "miner's_magnet" -> lookup returned 0.
+                    material_id = _slug_item_name(material_name)
                     material_icon_name = material_name.replace(' ', '_').lower()  # Lowercase for icon filename
                     
                     # Check type by module
@@ -6137,7 +6799,61 @@ async def get_item_sources(request: Request, response: Response):
                 'stock': shop_item.stock,
                 'item_type': shop_item.item_type,
             })
-    
+
+    # --- Tools-API shops (additive) ---
+    # The wiki shops.py above is the authoritative price source. Additionally
+    # surface tools-API shop associations for items the wiki doesn't cover —
+    # e.g. Zorre's desert gourdpack (bought at the Cactus Canyon guild
+    # miragepost) and mysterious chitin / strange fur (sold TO the Adventurers'
+    # Guild for tokens). Skip any item that already has a wiki shop source so
+    # wiki prices/currency are never duplicated or overridden.
+    try:
+        from util.autogenerated.shops_from_api import ALL_SHOPS as API_SHOPS
+    except Exception:
+        API_SHOPS = []
+    for shop in API_SHOPS:
+        for shop_item in getattr(shop, 'inventory', []) or []:
+            if shop_item.item_type in ('Cosmetic',):
+                continue
+            key = shop_item.item_name.lower().strip()
+            if any(s.get('type') == 'shop' for s in sources.get(key, [])):
+                continue  # already sourced from the wiki shops (authoritative)
+            sell = getattr(shop_item, 'sell_to_shop', False)
+            if sell:
+                price_display = (f"Sell for {shop_item.price} AG tokens"
+                                 if shop_item.price else "Sell to shop")
+            elif shop_item.currency == 'adventurers_guild_token':
+                price_display = f"{shop_item.price} AG tokens"
+            elif shop_item.currency == 'coins':
+                price_display = f"{shop_item.price:,} coins" if shop_item.price else "—"
+            else:
+                price_display = f"{shop_item.price} {shop_item.currency}"
+            add_source(shop_item.item_name, {
+                'type': 'shop',
+                'name': shop.name,
+                'location': shop.location,
+                'region': shop.region,
+                'price': shop_item.price,
+                'currency': shop_item.currency,
+                'price_display': price_display,
+                'stock': shop_item.stock,
+                'item_type': shop_item.item_type,
+                'sell_to_shop': sell,
+            })
+
+    # --- Achievement / AP-track / Faction reputation rewards (additive) ---
+    # Items granted only by an achievement, an Achievement-Points milestone, or
+    # a faction-reputation tier have no drop/recipe/shop source and previously
+    # rendered "No sources found". Surface those reward tracks here so the
+    # frontend "sources" section can show (and, for achievements, link to) them.
+    try:
+        from util.reward_sources import build_reward_source_index
+        for _reward_item_name, _reward_sources in build_reward_source_index().items():
+            for _rs in _reward_sources:
+                add_source(_reward_item_name, _rs)
+    except Exception:
+        pass
+
     return {
         'sources': sources,
         'count': len(sources)
@@ -6617,6 +7333,19 @@ async def get_services_for_recipe(recipe_id: str, request: Request):
     }
 
 
+def _get_all_custom_stat_ids():
+    """Return a list of all known custom stat IDs.
+
+    Single source of truth used by the 'all_custom_stats_enabled' override
+    to resolve every custom-stat gate as satisfied. Mirrors the IDs defined
+    in GET /api/custom-stats below. The canonical list lives in the
+    dependency-free util.custom_stats_catalog module so optimizer workers can
+    reuse it without importing this FastAPI app module.
+    """
+    from util.custom_stats_catalog import get_all_custom_stat_ids
+    return get_all_custom_stat_ids()
+
+
 @app.get("/api/custom-stats")
 async def get_custom_stats():
     """
@@ -6675,6 +7404,12 @@ async def get_custom_stats():
             'default': False
         },
         {
+            'id': 'merfolk_dancing',
+            'name': 'Kelp diving gear: Merfolk Dancing',
+            'description': '25+ completions of Merfolk Dancing activity<br/>Requirement for all 3 Kelp diving gear pieces',
+            'default': False
+        },
+        {
             'id': 'firewood_making',
             'name': 'Log Splitters: Firewood Making',
             'description': '200+ completions of Firewood Making activity<br/>Requirement for Log splitter and Hydrilium log splitter',
@@ -6687,9 +7422,18 @@ async def get_custom_stats():
             'default': False
         },
         {
+            # Item-unlock gate (activity_completion) for Zorre's desert gourdpack:
+            # complete the Twophointoh Hunt activity 10x. is_unlocked() reads the
+            # normalized activity id as the custom-stat key.
+            'id': 'twophointoh_hunt',
+            'name': "Zorre's desert gourdpack: Twophointoh Hunt",
+            'description': '10+ completions of the Twophointoh Hunt activity<br/>Requirement to unlock Zorre\'s desert gourdpack',
+            'default': False
+        },
+        {
             'id': 'gdte_skydisc_course',
-            'name': 'Red Skydisc: GDtE Skydisc Course',
-            'description': '25+ completions of the Grand Duchy of Trellin &amp; Erdwise (GDtE) Skydisc Course activity<br/>Requirement for Red skydisc',
+            'name': 'Red Skydisc: GDTE Skydisc Course',
+            'description': '25+ completions of the Grand Duchy of Trellin &amp; Erdwise (GDTE) Skydisc Course activity<br/>Requirement for Red skydisc',
             'default': False
         },
         {
@@ -6702,6 +7446,41 @@ async def get_custom_stats():
             'id': 'petal_finder_travel_steps_175000',
             'name': 'Petal Finder: 175,000 Travel Steps',
             'description': 'Walk a total of 175,000 steps dedicated to travel<br/>Unlocks +2 Foraging XP on Petal finder',
+            'default': False
+        },
+        {
+            # Realm-exploration gates for global bonuses on Globetrotter's
+            # backpack / Quickdraw map (exploreRealm requirement). Keyed on the
+            # region code the emitter normalizes realms to (see
+            # old_shape_emitters._normalize_realm_slug). Realm exploration is a
+            # character-wide fact, so one toggle per realm (not per item).
+            'id': 'explored_realm_jarvonia',
+            'name': 'Explored: Jarvonia',
+            'description': 'Fully explored every location in Jarvonia<br/>Unlocks the Jarvonia bonuses on Globetrotter\'s backpack &amp; Quickdraw map',
+            'default': False
+        },
+        {
+            'id': 'explored_realm_gdte',
+            'name': 'Explored: Grand Duchy of Trellin-Erdwise',
+            'description': 'Fully explored every location in GDTE<br/>Unlocks the GDTE bonuses on Globetrotter\'s backpack &amp; Quickdraw map',
+            'default': False
+        },
+        {
+            'id': 'explored_realm_syrenthia',
+            'name': 'Explored: Syrenthia',
+            'description': 'Fully explored every location in Syrenthia<br/>Unlocks the Syrenthia bonuses on Globetrotter\'s backpack &amp; Quickdraw map',
+            'default': False
+        },
+        {
+            'id': 'explored_realm_wallisia',
+            'name': 'Explored: Wallisia',
+            'description': 'Fully explored every location in the Empire of Wallisia<br/>Unlocks the Wallisia bonuses on Globetrotter\'s backpack &amp; Quickdraw map',
+            'default': False
+        },
+        {
+            'id': 'explored_realm_wrentmark',
+            'name': 'Explored: Wrentmark',
+            'description': 'Fully explored every location in Wrentmark<br/>Unlocks the Wrentmark bonuses on Globetrotter\'s backpack &amp; Quickdraw map',
             'default': False
         }
         # ,
@@ -6754,6 +7533,13 @@ async def get_item_finding_categories(request: Request, response: Response):
                 display_name_singular = "gold pieces"  # Already plural in meaning
             elif display_name == "Sea Shells":
                 display_name_singular = "sea shell"
+            elif attr_name == "RANDOM_GEM":
+                # The category is internally "Random Gem" but drops rough gems
+                # (Rough opal/topaz/jade/...); the game/wiki keyword is
+                # "Rough gem". Display that so it matches the wiki wording
+                # ("Chance to find 1 Rough gem").
+                display_name = "Rough gem"
+                display_name_singular = "Rough gem"
             
             # Icon name should be singular (matching the actual file)
             # The icon files are named after the singular form
@@ -7211,6 +7997,36 @@ async def submit_bug_report(request: Request, data: BugReportData):
                     pass
         except Exception:
             pass
+        # 2026-08-12 (jwbail): ALSO attach the stats_report_worker_*.log files.
+        # The stats-report (goals report) worker runs as a SUBPROCESS with its
+        # stdout/stderr redirected to /tmp/stats_report_worker_<sess>_<run>.log
+        # (see the subprocess.Popen sites in this file), so its per-job
+        # [stats_report_worker] START/OK/SLOW lines and per-item TI-BUILD lines
+        # NEVER reach docker logs and were previously lost to bug reports
+        # entirely. That was the observability gap: a target_items run finishing
+        # 200+ "jobs" in seconds looked suspicious with no per-job trace to
+        # confirm the work. Attach the 3 most recent so goals-report bugs carry
+        # the actual per-job/per-item execution trace.
+        try:
+            import glob as _glob2
+            sr_logs = sorted(
+                _glob2.glob('/tmp/stats_report_worker_*.log'),
+                key=lambda p: os.path.getmtime(p),
+                reverse=True,
+            )[:3]
+            for spath in sr_logs:
+                try:
+                    with open(spath, 'r') as _sf:
+                        _scontent = _sf.read()
+                    # Tail to last 40K chars each so bug report doesn't explode
+                    _scontent = _scontent[-40000:]
+                    server_logs = (server_logs or '') + \
+                        f"\n\n===== STATS REPORT WORKER LOG: {spath} (last {len(_scontent)} chars) =====\n" + \
+                        _scontent
+                except Exception:
+                    pass
+        except Exception:
+            pass
         if server_logs:
             conn = get_db()._get_connection()
             conn.execute(
@@ -7420,6 +8236,19 @@ def _require_admin(request: Request):
 async def reports_page():
     """Serve the admin reports HTML page."""
     return FileResponse("ui/static/reports.html")
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -7768,7 +8597,7 @@ async def set_push_preferences(body: PushPreferencesRequest, request: Request):
     session_uuid = request.cookies.get("session_uuid")
     if not session_uuid:
         raise HTTPException(status_code=400, detail="No session")
-    get_db().upsert_notification_preferences(session_uuid, body.global_announcements, body.targeted_announcements)
+    get_db().upsert_notification_preferences(session_uuid, body.global_announcements, body.targeted_announcements, body.trading)
     return {"ok": True}
 
 
@@ -7798,6 +8627,66 @@ async def push_event(body: PushEventRequest):
 # ============================================================================
 # PUSH NOTIFICATION DELIVERY
 # ============================================================================
+
+async def _push_to_session(session_uuid, title, body, url="/#trading", thread=None):
+    """Best-effort web push to ALL of one session's subscriptions (direct
+    messages / per-user alerts — not gated on announcement prefs). Prunes dead
+    subscriptions. Safe to fire-and-forget via asyncio.create_task."""
+    if not _push_enabled or not session_uuid:
+        return
+    # Gate on the recipient's "Trading notifications" preference (unset follows
+    # their Personal-notifications setting). Off → no trading push.
+    try:
+        if not get_db().get_notification_preferences(session_uuid).get("trading"):
+            return
+    except Exception:
+        pass
+    import asyncio
+    try:
+        from pywebpush import webpush  # noqa: F401
+    except ImportError:
+        return
+    try:
+        subs = get_db().get_push_subscriptions_for_session(session_uuid)
+    except Exception:
+        subs = []
+    for sub in subs or []:
+        endpoint = sub.get("endpoint")
+        if not endpoint:
+            continue
+        payload = json.dumps({"title": title or "WalkScape", "body": body or "", "url": url,
+                              "hash": "#trading", "trading_thread": thread})
+        subscription_info = {"endpoint": endpoint, "keys": {"p256dh": sub.get("p256dh"), "auth": sub.get("auth")}}
+        try:
+            loop = asyncio.get_event_loop()
+            resp = await loop.run_in_executor(None, lambda: webpush(
+                subscription_info=subscription_info, data=payload,
+                vapid_private_key=_vapid_instance, vapid_claims={"sub": VAPID_SUBJECT}))
+            sc = getattr(resp, "status_code", 201)
+            if sc in (404, 410):
+                try: get_db().delete_push_subscription(endpoint)
+                except Exception: pass
+        except Exception as e:
+            code = getattr(getattr(e, "response", None), "status_code", None)
+            if code in (404, 410):
+                try: get_db().delete_push_subscription(endpoint)
+                except Exception: pass
+
+
+def _flush_trade_pushes():
+    """Fire any per-user trade push notifications queued by the DB layer (wishlist
+    matches, inbound cross-site messages). Call from async endpoints."""
+    import asyncio
+    try:
+        queued = get_db().drain_push_queue()
+    except Exception:
+        queued = []
+    for item in queued or []:
+        try:
+            asyncio.create_task(_push_to_session(item.get("session_uuid"), item.get("title"), item.get("body"), thread=item.get("thread")))
+        except Exception:
+            pass
+
 
 async def send_push_notifications(
     broadcast_id: str,
@@ -8324,11 +9213,25 @@ async def get_optimization_settings(request: Request):
             'current_order': travel_sorting,
         },
         'include_consumables': include_consumables,
+        # Consumable Options (global): applied wherever consumables are used
+        # (activity/recipe, crafting tree, travel, goals report). Persisted
+        # per-user; intentionally excluded from import/export strings like
+        # include_consumables.
+        'include_fine_consumables': ui_config.get('include_fine_consumables', True),
+        'use_fine_inputs': ui_config.get('use_fine_inputs', False),
+        'consumable_min_owned_enabled': ui_config.get('consumable_min_owned_enabled', False),
+        'consumable_min_owned': ui_config.get('consumable_min_owned', 5),
+        'consumable_min_owned_operator': ui_config.get('consumable_min_owned_operator', 'lt'),
+        'consumable_use_hidden': ui_config.get('consumable_use_hidden', False),
         'auto_equip_optimized': ui_config.get('auto_equip_optimized', False),
         'auto_copy_export': ui_config.get('auto_copy_export', False),
         'lock_current_gear_slots': ui_config.get('lock_current_gear_slots', False),
         'include_pets': ui_config.get('include_pets', False),
         'show_non_owned_alternatives': True,  # Always on for everyone
+        'optimize_all_items': ui_config.get('optimize_all_items', True),
+        'use_pet_ability': ui_config.get('use_pet_ability', True),
+        'unlock_all': ui_config.get('unlock_all', False),
+        'optimize_services': ui_config.get('optimize_services', False),
         'skip_obtained_collectibles': ui_config.get('skip_obtained_collectibles', True),
         'run_local_optimization': ui_config.get('run_local_optimization', False),
         'finish_on_server_on_leave': ui_config.get('finish_on_server_on_leave', False),
@@ -8397,11 +9300,34 @@ async def save_optimization_settings(request: Request):
     auto_copy_export = body.get('auto_copy_export', False)
     lock_current_gear_slots = body.get('lock_current_gear_slots', False)
     include_pets = body.get('include_pets', False)
+    # Consumable Options (global). include_fine_consumables defaults True;
+    # the min-owned threshold is disabled by default and seeded at 5 when the
+    # user first enables it (clamped 1..100 here as a server-side backstop).
+    include_fine_consumables = bool(body.get('include_fine_consumables', True))
+    # "Use fine inputs" (R2): goals-report hunting input slot only. Default off.
+    use_fine_inputs = bool(body.get('use_fine_inputs', False))
+    consumable_min_owned_enabled = bool(body.get('consumable_min_owned_enabled', False))
+    try:
+        consumable_min_owned = int(body.get('consumable_min_owned', 5))
+    except (ValueError, TypeError):
+        consumable_min_owned = 5
+    consumable_min_owned = max(1, min(100, consumable_min_owned))
+    consumable_min_owned_operator = str(body.get('consumable_min_owned_operator', 'lt') or 'lt').lower()
+    if consumable_min_owned_operator not in ('lt', 'lte'):
+        consumable_min_owned_operator = 'lt'
+    # When True, consumables the user hid (column-1 hide) are still considered
+    # by the optimizer (still subject to the fine + min-owned rules). Default
+    # False preserves the hide-respecting behavior.
+    consumable_use_hidden = bool(body.get('consumable_use_hidden', False))
     show_non_owned_alternatives = body.get('show_non_owned_alternatives', False)
     skip_obtained_collectibles = body.get('skip_obtained_collectibles', True)
     run_local_optimization = body.get('run_local_optimization', False)
     finish_on_server_on_leave = body.get('finish_on_server_on_leave', False)
     disable_local_opt_warning = body.get('disable_local_opt_warning', False)
+    optimize_all_items = body.get('optimize_all_items', True)
+    use_pet_ability = body.get('use_pet_ability', True)
+    unlock_all = body.get('unlock_all', False)
+    optimize_services = body.get('optimize_services', False)
 
     def validate_sorting_tuples(sorting_list, is_activity=True):
         """Validate and normalize sorting entries to [key, weight, target] tuples with clamped weights.
@@ -8559,6 +9485,12 @@ async def save_optimization_settings(request: Request):
     ui_config['optimize_sorting_recipe'] = recipe_sorting
     ui_config['optimize_sorting_travel'] = travel_sorting
     ui_config['include_consumables'] = include_consumables
+    ui_config['include_fine_consumables'] = include_fine_consumables
+    ui_config['use_fine_inputs'] = use_fine_inputs
+    ui_config['consumable_min_owned_enabled'] = consumable_min_owned_enabled
+    ui_config['consumable_min_owned'] = consumable_min_owned
+    ui_config['consumable_min_owned_operator'] = consumable_min_owned_operator
+    ui_config['consumable_use_hidden'] = consumable_use_hidden
     ui_config['auto_equip_optimized'] = auto_equip_optimized
     ui_config['auto_copy_export'] = auto_copy_export
     ui_config['lock_current_gear_slots'] = lock_current_gear_slots
@@ -8568,6 +9500,10 @@ async def save_optimization_settings(request: Request):
     ui_config['run_local_optimization'] = run_local_optimization
     ui_config['finish_on_server_on_leave'] = finish_on_server_on_leave
     ui_config['disable_local_opt_warning'] = disable_local_opt_warning
+    ui_config['optimize_all_items'] = optimize_all_items
+    ui_config['use_pet_ability'] = use_pet_ability
+    ui_config['unlock_all'] = unlock_all
+    ui_config['optimize_services'] = optimize_services
 
     # `optimize_removed_activity` is no longer maintained on save — entries
     # are dicts now and per-entry `hiddenInQuick` is the source of truth.
@@ -8710,6 +9646,17 @@ def _require_pin_item(session_uuid: str):
         raise HTTPException(status_code=403, detail='Pin Item feature not enabled')
 
 
+def _require_fastest_craft_goals(session_uuid: str):
+    """Raise HTTPException(403) if the session lacks the fastest_craft_goals flag.
+
+    Phase 0 FAC gate for the Fastest Craft optimized-goals-report category
+    (.kiro/specs/fastest-craft/, R1). Called by the Phase 2 run_fastest_craft
+    route once it exists; defined now so the server-side gate is ready.
+    """
+    if not get_db().has_feature(session_uuid, 'fastest_craft_goals'):
+        raise HTTPException(status_code=403, detail='Fastest Craft feature not enabled')
+
+
 @app.get("/api/pinned-saves")
 async def get_pinned_saves(request: Request):
     """Return all pinned-save presets for the current session, newest first."""
@@ -8807,6 +9754,11 @@ def _build_worker_request_data(
     locked_slots, selected_location, input_items, use_fine_inputs,
     target_slot, equipped_consumable, equipped_pet, instant_actions,
     pet_ability_stats=False,
+    optimize_all_items=False,
+    use_pet_ability=True,
+    all_custom_stats_enabled=False,
+    unlock_all=False,
+    optimize_services=False,
 ):
     """Assemble the optimize_worker request payload.
 
@@ -8837,6 +9789,11 @@ def _build_worker_request_data(
         'equipped_pet': equipped_pet,
         'instant_actions': instant_actions,
         'pet_ability_stats': pet_ability_stats,
+        'optimize_all_items': optimize_all_items,
+        'use_pet_ability': use_pet_ability,
+        'all_custom_stats_enabled': all_custom_stats_enabled,
+        'unlock_all': unlock_all,
+        'optimize_services': optimize_services,
         'show_non_owned_alternatives': True  # Always on for everyone
     }
 
@@ -8909,6 +9866,11 @@ async def optimize_gearset(request: Request, background_tasks: BackgroundTasks):
     equipped_pet = body.get('equipped_pet')  # Direct from frontend, avoids stale DB
     instant_actions = body.get('instant_actions', False)  # Instant-actions optimization mode
     pet_ability_stats = body.get('pet_ability_stats', False)  # Ability-stats pet mode (e.g. Tiger hunting buff)
+    optimize_all_items = body.get('optimize_all_items', False)  # Expand candidate pool to all game items
+    use_pet_ability = body.get('use_pet_ability', True)  # Merge active ability stats onto candidate pets
+    all_custom_stats_enabled = body.get('all_custom_stats_enabled', False)  # Override all custom stat gates to True
+    unlock_all = body.get('unlock_all', False)  # Treat every item/stat as fully unlocked (max attributes)
+    optimize_services = body.get('optimize_services', False)  # Try all unlocked+accessible services and pick the best
     
     # Validate instant_actions: only allowed for activities/recipes with a matching instant-actions pet
     if instant_actions:
@@ -8962,7 +9924,38 @@ async def optimize_gearset(request: Request, background_tasks: BackgroundTasks):
     # Get session
     session_uuid = request.state.session_uuid
     session = get_db().get_session(session_uuid)
-    
+
+    # Consumable Options (global): the client sends the LIVE settings-modal
+    # values in the request body. Persist them to the session ui_config up front
+    # so BOTH the local (Pyodide) and background worker paths — which each read
+    # ui_config from the session — see the current values instead of a copy that
+    # may lag the debounced settings save. (Fixes "include hidden / ignore < X"
+    # not taking effect on the very next optimize.)
+    if session is not None:
+        _co_keys = ('include_fine_consumables', 'consumable_min_owned_enabled',
+                    'consumable_min_owned', 'consumable_min_owned_operator', 'consumable_use_hidden')
+        if any(k in body for k in _co_keys):
+            _co_uic = session.get('ui_config', {}) or {}
+            if 'include_fine_consumables' in body:
+                _co_uic['include_fine_consumables'] = bool(body['include_fine_consumables'])
+            if 'consumable_min_owned_enabled' in body:
+                _co_uic['consumable_min_owned_enabled'] = bool(body['consumable_min_owned_enabled'])
+            if 'consumable_min_owned' in body:
+                try:
+                    _co_uic['consumable_min_owned'] = max(1, min(100, int(body['consumable_min_owned'])))
+                except (TypeError, ValueError):
+                    pass
+            if 'consumable_min_owned_operator' in body:
+                _co_op = str(body['consumable_min_owned_operator'] or 'lt').lower()
+                _co_uic['consumable_min_owned_operator'] = _co_op if _co_op in ('lt', 'lte') else 'lt'
+            if 'consumable_use_hidden' in body:
+                _co_uic['consumable_use_hidden'] = bool(body['consumable_use_hidden'])
+            try:
+                get_db().update_ui_config(session_uuid, _co_uic)
+            except Exception as _co_e:
+                log(f"[optimize-gearset] failed to persist consumable options: {_co_e!r}", session_uuid)
+            session['ui_config'] = _co_uic
+
     # Build character config from either imported data or UI overrides
     character_config = session.get('character_config') if session else None
     
@@ -9110,7 +10103,10 @@ async def optimize_gearset(request: Request, background_tasks: BackgroundTasks):
             include_consumables, include_pets, budget_materials, budget_target,
             locked_slots, selected_location, input_items, use_fine_inputs,
             target_slot, equipped_consumable, equipped_pet, instant_actions,
-            pet_ability_stats,
+            pet_ability_stats, optimize_all_items, use_pet_ability,
+            all_custom_stats_enabled,
+            unlock_all,
+            optimize_services,
         )
         log(f"[optimize-gearset POST] run_local — returning request_data to client", session_uuid)
         return {
@@ -9156,6 +10152,11 @@ async def optimize_gearset(request: Request, background_tasks: BackgroundTasks):
         equipped_pet,
         instant_actions,
         pet_ability_stats,
+        optimize_all_items,
+        use_pet_ability,
+        all_custom_stats_enabled,
+        unlock_all,
+        optimize_services,
     )
     
     # Return immediate response with server timestamp for clock-skew-safe polling
@@ -9630,6 +10631,46 @@ def _spawn_stats_report_resume_worker(db, run, db_path):
     return new_count
 
 
+def _live_stats_report_runs() -> tuple:
+    """Scan /proc for in-flight stats_report_worker.py subprocesses and return
+    (live_run_ids, live_session_uuids) parsed from their --run-id /
+    --session-uuid args.
+
+    Makes orphan-resume idempotent: a run (or a session) that already has a
+    LIVE worker must NOT be resumed again. On a blue-green flip the newly
+    started container runs the orphan-resume sweeper while the prior resume
+    wave's workers are still alive, so without this guard each flip spawned a
+    DUPLICATE worker for the same run — they piled up (6 workers for 3 runs
+    observed) and saturated all cores (the "orphan-resume double-execution"
+    hazard the blue-green design doc flagged)."""
+    import os as _os
+    live_runs: set = set()
+    live_sessions: set = set()
+    proc_dir = '/proc'
+    if not _os.path.isdir(proc_dir):
+        return live_runs, live_sessions
+    for pid_str in _os.listdir(proc_dir):
+        if not pid_str.isdigit():
+            continue
+        try:
+            with open(f'/proc/{pid_str}/cmdline', 'rb') as f:
+                cmdline = f.read().decode('utf-8', errors='replace').replace('\x00', ' ')
+        except Exception:
+            continue
+        if 'stats_report_worker.py' not in cmdline:
+            continue
+        tokens = cmdline.split()
+        for flag, sink in (('--run-id', live_runs), ('--session-uuid', live_sessions)):
+            try:
+                if flag in tokens:
+                    i = tokens.index(flag)
+                    if i + 1 < len(tokens):
+                        sink.add(tokens[i + 1])
+            except Exception:
+                pass
+    return live_runs, live_sessions
+
+
 async def _resume_orphan_stats_report_runs(db_path: str,
                                             max_age_hours: int = 24,
                                             max_resume_count: int = 3,
@@ -9685,7 +10726,37 @@ async def _resume_orphan_stats_report_runs(db_path: str,
     
     if not orphans:
         return
-    
+
+    # Idempotency + per-session dedup guard (blue-green double-execution fix).
+    # Never resume a run that already has a LIVE worker, never resume a session
+    # that already has a live worker, and resume at most ONE run per session in
+    # this sweep. Without this, each blue-green flip's startup sweeper spawned
+    # another duplicate worker for runs still in flight, piling up until the box
+    # saturated (observed: 6 workers for 3 runs @ ~388% CPU on a 4-core host).
+    live_runs, live_sessions = _live_stats_report_runs()
+    _filtered = []
+    _seen_sessions = set()
+    _skipped_live = 0
+    _skipped_dupsession = 0
+    for run in orphans:
+        rid = run.get('id')
+        sid = run.get('session_uuid')
+        if rid in live_runs or sid in live_sessions:
+            _skipped_live += 1
+            continue
+        if sid in _seen_sessions:
+            _skipped_dupsession += 1
+            continue
+        _seen_sessions.add(sid)
+        _filtered.append(run)
+    if _skipped_live or _skipped_dupsession:
+        print(f"🔄 [stats_report] orphan-resume guard: skipped {_skipped_live} already-live "
+              f"+ {_skipped_dupsession} duplicate-session run(s)")
+    orphans = _filtered
+    if not orphans:
+        print("🔄 [stats_report] no orphan runs to resume after idempotency guard")
+        return
+
     print(f"🔄 [stats_report] Resuming {len(orphans)} orphan run(s) from container restart")
     
     sem = _asyncio.Semaphore(max_concurrent)
@@ -9730,6 +10801,48 @@ async def stats_report_run(request: Request):
     # any older client that doesn't send them).
     include_pets = bool(body.get('include_pets', False))
     include_consumables = bool(body.get('include_consumables', False))
+    # 2026-08-31 (jwbail): "Always use active applicable pet ability" toggle —
+    # merges each candidate pet's active adult-level ability stats into scoring
+    # and marks the equipped pet so Equip checks column-2's "use ability" box.
+    # Defaults False (preserves prior behavior for older clients).
+    use_pet_ability = bool(body.get('use_pet_ability', False))
+    # Consumable Options are GLOBAL settings (persisted in ui_config), so read
+    # them from the session rather than the run body. A body value (if a future
+    # client sends one) takes precedence.
+    _cons_ui = {}
+    try:
+        _cons_sess = get_db().get_session(session_uuid)
+        _cons_ui = (_cons_sess or {}).get('ui_config', {}) or {}
+    except Exception:
+        _cons_ui = {}
+    include_fine_consumables = bool(body.get('include_fine_consumables', _cons_ui.get('include_fine_consumables', True)))
+    use_fine_inputs = bool(body.get('use_fine_inputs', _cons_ui.get('use_fine_inputs', False)))
+    consumable_min_owned_enabled = bool(body.get('consumable_min_owned_enabled', _cons_ui.get('consumable_min_owned_enabled', False)))
+    try:
+        consumable_min_owned = int(body.get('consumable_min_owned', _cons_ui.get('consumable_min_owned', 5)))
+    except (TypeError, ValueError):
+        consumable_min_owned = 5
+    consumable_min_owned = max(1, min(100, consumable_min_owned))
+    consumable_min_owned_operator = str(body.get('consumable_min_owned_operator', _cons_ui.get('consumable_min_owned_operator', 'lt')) or 'lt').lower()
+    if consumable_min_owned_operator not in ('lt', 'lte'):
+        consumable_min_owned_operator = 'lt'
+    consumable_use_hidden = bool(body.get('consumable_use_hidden', _cons_ui.get('consumable_use_hidden', False)))
+    # 2026-10-01 (jwbail): "Include unavailable" dimensions. The client sends a
+    # master toggle (include_unavailable) + per-dimension sub-flags; derive the
+    # EFFECTIVE map here (effective[dim] = includeUnavailable && by<Dim>) so both
+    # the server worker (--include-unavailable) and the local Pyodide worker
+    # (_run_params.include_unavailable) gate identically. Defaults reproduce
+    # today's behavior exactly: includeUnavailable and inputs default True, every
+    # other dimension False — i.e. inputs included-with-warning, the rest hidden.
+    _iu_master = bool(body.get('include_unavailable', True))
+    _iu_by_inputs = bool(body.get('unavail_by_inputs', True))
+    effective_incl = {
+        'level': _iu_master and bool(body.get('unavail_by_level', False)),
+        'location': _iu_master and bool(body.get('unavail_by_location', False)),
+        'gear': _iu_master and bool(body.get('unavail_by_gear', False)),
+        'inputs': _iu_master and _iu_by_inputs,
+        'other': _iu_master and bool(body.get('unavail_by_other', False)),
+    }
     # Stats-report stale-detection: when stale_only=True, the worker filters
     # its job list to scopes flagged as stale or newly-unlocked.
     # Default False preserves prior behavior for unmigrated clients.
@@ -9741,6 +10854,24 @@ async def stats_report_run(request: Request):
     kinds = body.get('kinds', ['gear', 'tools', 'eggs', 'collectibles'])
     if not isinstance(kinds, list):
         kinds = ['gear', 'tools', 'eggs', 'collectibles']
+    # 2026-08-11 (jwbail): WTO sub-filter for target_items. Subset of the
+    # target-category slugs (gems, normal_items, fine_items, etc.). Worker
+    # filters build_target_items_jobs to only the selected categories.
+    # None/empty/missing means "all categories" (preserves prior behavior).
+    target_categories = body.get('target_categories', None)
+    if target_categories is not None and not isinstance(target_categories, list):
+        target_categories = None
+    # 2026-08-12 (jwbail): v2 include_fine toggle for target_items.
+    include_fine = bool(body.get('include_fine', False))
+    # Fastest Craft category: prefixed chip ids to solve ('gear:rings',
+    # 'mat:bar', ...; empty = all).
+    # FAC-gated — silently dropped from the run when the session lacks the flag.
+    fastest_craft_categories = body.get('fastest_craft_categories') or []
+    if not isinstance(fastest_craft_categories, list):
+        fastest_craft_categories = []
+    fastest_craft_categories = [str(c) for c in fastest_craft_categories]
+    if 'fastest_craft' in categories and not get_db().has_feature(session_uuid, 'fastest_craft_goals'):
+        categories = [c for c in categories if c != 'fastest_craft']
     # 2026-06-02 (jwbail): WTO chest filter. Subset of ALL chest
     # display names (e.g. ['Mining chest', 'Foraging chest']). Worker
     # filters build_chest_jobs and build_chests_recipes_jobs to only
@@ -9774,15 +10905,6 @@ async def stats_report_run(request: Request):
     # via a checkbox in the WTO panel — only meant for verifying the run
     # actually starts/progresses for all categories.
     fast = bool(body.get('fast', False))
-    # 2026-07-11 (jwbail): "today's changes" old/new toggle from the goals-report
-    # checkbox (gated to session 20a57b65). None (absent) -> leave the optimizer
-    # default (new/on). True -> new way (ring de-dup on); False -> old way (ring
-    # de-dup off). Exact stays gated by the allowlist either way; the 5M cap +
-    # greedy/1-4swap fallback are present in both. Honored by the local (Pyodide)
-    # path via _sr_build.
-    exact_new = body.get('exact_new', None)
-    if exact_new is not None:
-        exact_new = bool(exact_new)
     # Client-side (Pyodide) path: when set + FAC on, the browser runs the jobs
     # locally and POSTs each scope to /api/stats-report/local-scope.
     run_local = bool(body.get('run_local', False))
@@ -9794,6 +10916,41 @@ async def stats_report_run(request: Request):
     existing_run = get_db().get_latest_stats_report_run(session_uuid)
     if existing_run and existing_run.get('status') == 'running':
         return {'success': False, 'error': 'A run is already in progress'}
+
+    # 2026-08-11 (bug 29d4b8ce): prune orphaned goals-report rows whose scope
+    # is no longer in the character's applicable-source set BEFORE building the
+    # run. A game-data location rename (e.g. blackspell_port ->
+    # blackspell_harbour) or a scope the enumerator stopped emitting (Bird
+    # nest / Coin pouch / Gem pouch container chests, one-time exploration
+    # activities) leaves a stored row keyed at the retired scope. It keeps its
+    # old optimization_version, so stale-check flags it version_bump forever
+    # ("Optimizer was updated — re-run for fresh scores"), and the incremental
+    # run can never heal it: the rebuilt job derives the CURRENT scope key,
+    # which never matches the orphan, so it is neither overwritten nor deleted.
+    # Pruning here — the single Optimize entrypoint for BOTH the server and
+    # local (Pyodide) paths — clears those permanent (!) badges. Keyed off the
+    # SAME enumerate_applicable_sources the stale detector uses for
+    # newly_unlocked, so this is its exact symmetric complement. Fail-open: any
+    # error just skips the prune (a lingering badge, never lost valid data).
+    try:
+        from util.stats_report.state_snapshot import from_char_config as _from_cc
+        from util.stats_report.applicable_sources import enumerate_applicable_sources as _enum_apps
+        _sess_for_prune = get_db().get_session(session_uuid) or {}
+        _curr_snap = _from_cc(_sess_for_prune.get('character_config') or {},
+                              _sess_for_prune.get('ui_config') or {})
+        _applicable_keys = _enum_apps(
+            _curr_snap,
+            db=get_db()._get_connection(),
+            char_config=_sess_for_prune.get('character_config') or {},
+        )
+        if _applicable_keys:
+            _pruned = get_db().prune_orphaned_stats_report_scopes(session_uuid, _applicable_keys)
+            if _pruned.get('pruned_results'):
+                log(f"[stats_report] pruned {_pruned['pruned_results']} orphaned scope row(s) "
+                    f"(renamed/deprecated location, bug 29d4b8ce); "
+                    f"sample={_pruned.get('orphan_sample')}", session_uuid)
+    except Exception as _prune_err:
+        log(f"[stats_report] orphan-scope prune skipped: {_prune_err}", session_uuid)
 
     # 2026-05-21: pre-compute total_jobs synchronously so the run record
     # carries the real count from the moment it's created. Previously
@@ -9844,6 +11001,11 @@ async def stats_report_run(request: Request):
             _all_jobs.extend(_cr)
         if 'coins' in categories:
             _all_jobs.extend(_srw.build_coins_jobs('precount', session_uuid, _sr_skills_for('coins'), _character))
+        if 'target_items' in categories:
+            _ti = _srw.build_target_items_jobs('precount', session_uuid, _character,
+                                              include_fine=include_fine,
+                                              target_groups=target_categories)
+            _all_jobs.extend(_ti)
         precomputed_total = len(_all_jobs)
     except Exception as e:
         # If precount fails for any reason, fall back to total_jobs=0
@@ -9871,7 +11033,36 @@ async def stats_report_run(request: Request):
     # so the per-scope ingest can re-derive the matching job for the
     # stale-detection row, then return the params so the browser can rebuild
     # and run the jobs locally.
+    #
+    # Steps per Recipe (fastest_craft) also runs locally now: its exact solver +
+    # fastest_craft.py are in the Pyodide bundle, so the browser computes it
+    # on-device (api._startStatsReportRunLocal -> runFastestCraftLocal) and POSTs
+    # the per-item details to /api/fastest-craft/local-result for the server to
+    # persist (owned-count banked + base-dominance bitmap). The regular local
+    # stats-report worker ignores the 'fastest_craft' category (it builds no jobs
+    # for it), so FC rides alongside the normal local goals without interfering.
     if run_local and get_db().has_feature(session_uuid, 'local_optimization'):
+        # Resolve the exact/new-optimizer gate SERVER-SIDE (DB available here)
+        # so the local/Pyodide run honors the admin FAC flag too. The browser
+        # can't read the DB, so without this the local path only sees the
+        # bundle-embedded allowlist. Passing the resolved bool lets the admin
+        # `new_optimizer` (or `exact_xp_optimizer`) DB toggle drive local runs.
+        try:
+            from ui import stats_report_worker as _srw_gate
+            _exact_enabled = _srw_gate.exact_xp_enabled_for(session_uuid, db_path)
+        except Exception:
+            _exact_enabled = None
+        # Region access computed SERVER-SIDE (DB available) and passed to the
+        # local/Pyodide run so the browser uses the SAME set instead of
+        # recomputing it DB-free (which diverged — e.g. missed 'jarvonia' and
+        # dropped "Litter looting in Kallaheim" locally). None = no region filter.
+        try:
+            _ur_set, _ll_set = _srw_gate.compute_region_access(session_uuid, db_path)
+            _unlocked_regions_param = sorted(_ur_set) if _ur_set is not None else None
+            _locked_locations_param = sorted(_ll_set) if _ll_set else []
+        except Exception:
+            _unlocked_regions_param = None
+            _locked_locations_param = []
         _run_params = {
             'run_id': run_id,
             'session_uuid': session_uuid,
@@ -9879,13 +11070,34 @@ async def stats_report_run(request: Request):
             'skills': skills,
             'include_pets': include_pets,
             'include_consumables': include_consumables,
+            'use_pet_ability': use_pet_ability,
+            # 2026-09-23 (jwbail): report-local Consumable Options must ride in
+            # run_params too — the local (Pyodide) worker reads these from its
+            # params to run _collect_owned_consumables. Omitting them made the
+            # browser fall back to defaults (min-owned DISABLED), so the
+            # "ignore < X owned" filter did nothing on local runs (it kept
+            # suggesting consumables owned below the threshold, e.g. Fried
+            # noodles at 4 owned with threshold 5).
+            'include_fine_consumables': include_fine_consumables,
+            'consumable_min_owned_enabled': consumable_min_owned_enabled,
+            'consumable_min_owned': consumable_min_owned,
+            'consumable_min_owned_operator': consumable_min_owned_operator,
+            'consumable_use_hidden': consumable_use_hidden,
             'kinds': kinds,
+            'target_categories': target_categories,
+            'include_fine': include_fine,
             'chests': chests_filter,
             'skills_by_category': skills_by_category,
             'chests_by_category': chests_by_category,
             'stale_only': stale_only,
             'fast': fast,
-            'exact_new': exact_new,
+            'exact_xp_enabled': _exact_enabled,
+            'unlocked_regions': _unlocked_regions_param,
+            'locked_locations': _locked_locations_param,
+            # 2026-10-01 (jwbail): EFFECTIVE include-unavailable dimensions so the
+            # local (Pyodide) worker gates identically to the server worker. The
+            # browser forwards this into srw._INCL_UNAVAIL (optimize-local-worker.js).
+            'include_unavailable': effective_incl,
         }
         # Full session dict so the browser can build character + jobs DB-free
         # (the worker injects a fake ui.database whose get_session returns this).
@@ -9911,15 +11123,42 @@ async def stats_report_run(request: Request):
         if stale_only:
             try:
                 from ui import stats_report_worker as _srw_filter
+                # Make the local stale computation gate on the SAME EFFECTIVE
+                # include-unavailable dimensions as this run, so the stale/"N
+                # optimizing" count stays in lockstep with the worker's job set.
+                try:
+                    _srw_filter._INCL_UNAVAIL = _srw_filter._normalize_incl_unavail(effective_incl)
+                except Exception:
+                    pass
 
                 def _sr_local_ident(j):
                     src = (j.activity.name if getattr(j, 'activity', None)
                            else getattr(j, 'recipe_name', None))
-                    return (j.category, j.skill_name, j.chest_name, src)
+                    k = (j.category, j.skill_name, j.chest_name, src)
+                    # target_items: many items share (skill=group, activity),
+                    # so the local worker's _ident() appends the item_slug leaf.
+                    # Mirror it here or the fresh-skip idents collapse ~35 items
+                    # onto one key and the browser re-runs them all (bug
+                    # 1db9384e class).
+                    if getattr(j, 'category', None) == 'target_items':
+                        k = k + ((getattr(j, 'extras', None) or {}).get('item_slug'),)
+                    return k
 
                 _jobs_list = _all_jobs if isinstance(_all_jobs, list) else []
-                _stale_jobs = _srw_filter._filter_jobs_to_stale_only(
-                    _jobs_list, session_uuid, db_path,
+                # target_items now stale-filters locally exactly like the server
+                # worker (_filter_target_items_jobs_to_stale) instead of
+                # always-running (2026-08-13). Fresh target_items scopes fall
+                # into _completed_skip below (with their item_slug) so the
+                # browser driver skips them; only new / version-bumped /
+                # gear-or-input-changed (item, activity) scopes re-run.
+                _ti_jobs = [j for j in _jobs_list
+                            if getattr(j, 'category', None) == 'target_items']
+                _other_jobs = [j for j in _jobs_list
+                               if getattr(j, 'category', None) != 'target_items']
+                _ti_stale = _srw_filter._filter_target_items_jobs_to_stale(
+                    _ti_jobs, session_uuid, db_path)
+                _stale_jobs = _ti_stale + _srw_filter._filter_jobs_to_stale_only(
+                    _other_jobs, session_uuid, db_path,
                 )
                 _stale_idents = {_sr_local_ident(j) for j in _stale_jobs}
                 for j in _jobs_list:
@@ -9930,6 +11169,9 @@ async def stats_report_run(request: Request):
                             'chest_name': j.chest_name,
                             'activity_name': (j.activity.name if getattr(j, 'activity', None)
                                               else getattr(j, 'recipe_name', None)),
+                            'item_slug': ((getattr(j, 'extras', None) or {}).get('item_slug')
+                                          if getattr(j, 'category', None) == 'target_items'
+                                          else None),
                         })
                 _local_total = len(_stale_jobs)
                 # Keep the run record's total_jobs in sync with what will actually
@@ -9986,9 +11228,20 @@ async def stats_report_run(request: Request):
         '--notify', 'true' if notify_on_complete else 'false',
         '--include-pets', 'true' if include_pets else 'false',
         '--include-consumables', 'true' if include_consumables else 'false',
+        '--use-pet-ability', 'true' if use_pet_ability else 'false',
+        '--include-fine-consumables', 'true' if include_fine_consumables else 'false',
+        '--use-fine-inputs', 'true' if use_fine_inputs else 'false',
+        '--consumable-min-owned-enabled', 'true' if consumable_min_owned_enabled else 'false',
+        '--consumable-min-owned', str(consumable_min_owned),
+        '--consumable-min-owned-operator', consumable_min_owned_operator,
+        '--consumable-use-hidden', 'true' if consumable_use_hidden else 'false',
+        '--include-unavailable', json.dumps(effective_incl),
         '--stale-only', 'true' if stale_only else 'false',
         '--mode', 'fresh',
         '--kinds', json.dumps(kinds),
+        '--target-categories', json.dumps(target_categories) if target_categories else 'null',
+        '--include-fine', 'true' if include_fine else 'false',
+        '--fastest-craft-categories', json.dumps(fastest_craft_categories if 'fastest_craft' in categories else []),
         '--chests', json.dumps(chests_filter) if chests_filter else 'null',
         '--skills-by-category', json.dumps(skills_by_category),
         '--chests-by-category', json.dumps(chests_by_category),
@@ -10057,6 +11310,59 @@ def _finalize_local_stats_report_run(db, run_id, session_uuid):
         import traceback as _tb
         log(f'[stats-report finalize] new_items orphan prune skipped (non-fatal): '
             f'{_e}\n{_tb.format_exc()}', session_uuid)
+
+    # target_items: heal the stale-detection rows (cache-independent). The
+    # per-scope /local-scope heal (_write_local_stale_row) depends on the
+    # in-memory _STATS_REPORT_LOCAL_RUNS cache, which uvicorn --reload wipes
+    # mid-run -- so the version-0 placeholder rows written by
+    # ensure_target_items_applicability_rows never get healed to the current
+    # optimization_version. The stale filter then treats every scope as
+    # `version`-stale and re-runs ALL target_items scopes on every Optimize
+    # (user-reported: "recalculates the entire 125 every time"). Sweep once here
+    # at finalize: for each built job that has a COMPLETED gearset row this
+    # session, (re)write its current-version stale-detection row from the stored
+    # gearset values. Cache-independent (loads character + rebuilds jobs), so it
+    # survives a --reload. Best-effort: never break finalize.
+    try:
+        if 'target_items' in _cats:
+            from ui import stats_report_worker as _srw
+            _ti_char = _srw.load_character(session_uuid, db.db_path)
+            _ti_jobs = _srw.build_target_items_jobs(
+                run_id, session_uuid, _ti_char, include_fine=True)
+            _tconn = db._get_connection()
+            _done = {}
+            for _r in _tconn.execute(
+                    "SELECT skill_name, chest_name, activity_name, metric_value, "
+                    "metric_name, gearset_export, metrics_json "
+                    "FROM stats_report_gearsets "
+                    "WHERE session_uuid = ? AND category = 'target_items' "
+                    "AND job_status = 'complete'",
+                    (session_uuid,)).fetchall():
+                _done[(_r[0], _r[1], _r[2])] = _r
+            _healed = 0
+            for _j in _ti_jobs:
+                _an = _j.activity.name if getattr(_j, 'activity', None) else None
+                _gr = _done.get((_j.skill_name, _j.chest_name, _an))
+                if _gr is None:
+                    continue
+                try:
+                    _srw._write_stats_report_result_row(db, _j, _ti_char, {
+                        'metric_value': _gr[3],
+                        'metric_name': _gr[4],
+                        'gearset_export': _gr[5],
+                        'metrics_json': _gr[6],
+                    })
+                    _healed += 1
+                except Exception:
+                    continue
+            if _healed:
+                log(f'[stats-report finalize] healed {_healed} target_items stale '
+                    f'row(s) to current version for run {run_id}', session_uuid)
+    except Exception as _e:
+        import traceback as _tb
+        log(f'[stats-report finalize] target_items stale heal skipped (non-fatal): '
+            f'{_e}\n{_tb.format_exc()}', session_uuid)
+
     try:
         from util.stats_report.state_snapshot import from_char_config as _snap_cc
         import time as _t
@@ -10098,6 +11404,39 @@ def _finalize_local_stats_report_run(db, run_id, session_uuid):
             session_uuid)
 
 
+@app.post("/api/stats-report/client-log")
+async def stats_report_client_log(request: Request):
+    """Relay browser-side goals-report diagnostics (per-shard [local-timing]
+    lines, the LPT cost-balance) into the SERVER log so they are captured in a
+    bug report's server_logs (which is `docker logs`, NOT the page console).
+    Mirrors the local-scope [CHESTS-DIAG] pattern. Best-effort; returns a benign
+    200 even when the feature is off so a background relay never toasts.
+    """
+    session_uuid = getattr(request.state, "session_uuid", None)
+    try:
+        if not get_db().has_feature(session_uuid, 'local_optimization'):
+            return JSONResponse(content={'success': True, 'skipped': True})
+    except Exception:
+        return JSONResponse(content={'success': True, 'skipped': True})
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={'success': False, 'error': 'bad_json'})
+    run_id = body.get('run_id')
+    lines = body.get('lines') or []
+    if isinstance(lines, str):
+        lines = [lines]
+    rid = (str(run_id)[:8] + ' ') if run_id else ''
+    n = 0
+    for ln in lines[:200]:            # cap so a runaway client can't flood the log
+        try:
+            log(f'[local-goals][client {rid}] {str(ln)[:500]}', session_uuid)
+            n += 1
+        except Exception:
+            pass
+    return JSONResponse(content={'success': True, 'logged': n})
+
+
 @app.post("/api/stats-report/local-scope")
 async def stats_report_local_scope(request: Request, background_tasks: BackgroundTasks):
     """Persist client-side (Pyodide) goals-report scope(s).
@@ -10135,6 +11474,13 @@ async def stats_report_local_scope(request: Request, background_tasks: Backgroun
         _diag = scope.pop('_diag', None)
         if _diag:
             log(f'[stats-report local-scope][CHESTS-DIAG] {_diag}', session_uuid)
+        # 2026-08-12 (jwbail): target_items scopes carry item_slug/group_slug so
+        # _find_local_job can match the exact item (bug 1db9384e). These are NOT
+        # stats_report_gearsets columns, so pop them before the **scope splat
+        # (otherwise create_stats_report_gearset raises TypeError and nothing is
+        # written), then re-attach for the stale-row job match below.
+        _item_slug = scope.pop('item_slug', None)
+        _group_slug = scope.pop('group_slug', None)
         try:
             db.create_stats_report_gearset(**scope)   # fast: the report row
             db.update_stats_report_progress(run_id, success=True)  # fast: progress
@@ -10150,6 +11496,10 @@ async def stats_report_local_scope(request: Request, background_tasks: Backgroun
             # (user-reported: "ran carpentry chest recipes locally, they stay
             # stale; server run clears them"). Writing it inline guarantees
             # stale detection is consistent the instant the run finishes.
+            if _item_slug is not None:
+                scope['item_slug'] = _item_slug
+            if _group_slug is not None:
+                scope['group_slug'] = _group_slug
             _write_local_stale_row(run_id, scope, session_uuid)
         except Exception as e:
             import traceback as _tb
@@ -10356,6 +11706,56 @@ async def stats_report_reset_category(request: Request):
     return {'success': True, 'category': category, 'counts': counts}
 
 
+@app.post("/api/stats-report/reset-subcategory")
+async def stats_report_reset_subcategory(request: Request):
+    """Reset the saved goals-report data for one or more SUBcategories.
+
+    Finer-grained sibling of /api/stats-report/reset-category: clears only the
+    rows for a specific subgroup (a skill, a chest, a new_items kind, a
+    target-item group, or a single target item) so re-running recomputes just
+    that subgroup, leaving every other subgroup and category intact.
+
+    Body: {
+      "category": one of STATS_REPORT_CATEGORIES,
+      "scopes": [ {"subcategory": str, "leaf": Optional[str]}, ... ]
+    }
+
+    Refuses (success=False) while a run is in progress, mirroring
+    /reset-category, so a live worker doesn't re-write rows we just deleted.
+    Does NOT kill the worker (an unrelated multi-category run is never
+    disrupted).
+    """
+    session_uuid = request.state.session_uuid
+    if not get_db().has_feature(session_uuid, 'stats_report'):
+        raise HTTPException(status_code=403, detail='Stats report feature not enabled')
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    category = (body or {}).get('category')
+    scopes = (body or {}).get('scopes') or []
+    if category not in get_db().STATS_REPORT_CATEGORIES:
+        raise HTTPException(
+            status_code=400,
+            detail=f'category must be one of {get_db().STATS_REPORT_CATEGORIES}',
+        )
+    if not isinstance(scopes, list) or not scopes:
+        raise HTTPException(status_code=400, detail='scopes must be a non-empty list')
+
+    existing_run = get_db().get_latest_stats_report_run(session_uuid)
+    if existing_run and existing_run.get('status') == 'running':
+        return {
+            'success': False,
+            'error': 'A run is in progress. Let it finish or Cancel it before resetting a subcategory.',
+        }
+
+    counts = get_db().reset_stats_report_subcategory(session_uuid, category, scopes)
+    log(f'[stats_report] RESET SUBCATEGORY {category!r} scopes={scopes} wiped: {counts}',
+        session_uuid)
+    return {'success': True, 'category': category, 'counts': counts}
+
+
 @app.post("/api/stats-report/cancel")
 async def stats_report_cancel(request: Request):
     """Cancel the current stats report run for this session.
@@ -10477,7 +11877,21 @@ async def stats_report_status(request: Request):
     session_uuid = request.state.session_uuid
     has_stats_report = get_db().has_feature(session_uuid, 'stats_report')
 
-    run = get_db().get_latest_stats_report_run(session_uuid) if has_stats_report else None
+    # Optional run_id: when the client passes the run it just started, return
+    # THAT run's status (scoped to the session) instead of 'latest run for
+    # session'. This prevents a stale prior run (e.g. a days-old failed run)
+    # from hijacking a fresh run's UI when the new run hasn't registered a row
+    # yet or ran purely client-side (bug: local FC run showed "Goals report
+    # failed" from an Oct-10 failed run). Falls back to latest when absent or
+    # the id isn't found for this session.
+    _req_run_id = request.query_params.get('run_id') or None
+    if not has_stats_report:
+        run = None
+    elif _req_run_id:
+        run = (get_db().get_stats_report_run_by_id(session_uuid, _req_run_id)
+               or get_db().get_latest_stats_report_run(session_uuid))
+    else:
+        run = get_db().get_latest_stats_report_run(session_uuid)
     if not run:
         return {
             'success': True,
@@ -10530,7 +11944,8 @@ async def stats_report_status(request: Request):
                     f"with no progress for >={STUCK_FINISHING_GRACE_SECS}s — "
                     f"lazy-finalizing (safety net)", session_uuid)
                 _finalize_local_stats_report_run(get_db(), run['id'], session_uuid)
-                run = get_db().get_latest_stats_report_run(session_uuid) or run
+                run = (get_db().get_stats_report_run_by_id(session_uuid, run['id'])
+                       or get_db().get_latest_stats_report_run(session_uuid) or run)
     except Exception as _e:
         log(f"[stats-report status] lazy-finalize safety net failed (non-fatal): {_e}",
             session_uuid)
@@ -10552,8 +11967,77 @@ async def stats_report_status(request: Request):
     }
 
 
+# 2026-08-31 (jwbail): fingerprint cache for /api/stats-report/stale-check.
+# A single goals-report open fires this endpoint ~7x (open events + stale
+# refreshes), and for a large character each call is ~9s (detect_stale_scopes
+# + compute_target_items_stale_groups), all serialized on the shared SQLite
+# connection. The inputs are identical across that burst, so we memoize the
+# response keyed on the EXACT inputs: current + previous snapshot hashes
+# (deterministic json.dumps(sort_keys=True)) plus a "results signature" =
+# gearset row count + newest created_at. The signature changes only when an
+# Optimize run writes rows, so the cache auto-invalidates after a run but
+# stays hot across the open burst. Purely additive — any miss computes
+# exactly as before. Process-local (single-worker app); a soft TTL bounds
+# staleness from any signal we didn't capture.
+_STALE_CHECK_CACHE: dict = {}          # key -> (stored_at_epoch, response_dict)
+_STALE_CHECK_CACHE_TTL = 300.0          # seconds
+_STALE_CHECK_CACHE_CAP = 2000           # max entries before oldest-evict
+
+
+def _stale_results_signature(session_uuid: str, conn) -> str:
+    """Cheap signature of the session's stored gearset rows (indexed query).
+
+    Uses stats_report_gearsets ONLY — the table Optimize runs write to — not
+    stats_report_results, because the stale-check itself materializes
+    applicability rows into stats_report_results and keying on that would
+    self-invalidate the cache every call.
+    """
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT COUNT(*), COALESCE(MAX(created_at), '') "
+        "FROM stats_report_gearsets WHERE session_uuid = ?",
+        (session_uuid,),
+    )
+    row = cur.fetchone() or (0, '')
+    return f"{row[0]}:{row[1]}"
+
+
+def _stale_cache_key(session_uuid, curr_snapshot, prev_snapshot, conn):
+    import hashlib
+    cj = curr_snapshot.to_json() if curr_snapshot is not None else ''
+    pj = prev_snapshot.to_json() if prev_snapshot is not None else ''
+    sig = _stale_results_signature(session_uuid, conn)
+    h = hashlib.sha256()
+    h.update(cj.encode('utf-8')); h.update(b'|')
+    h.update(pj.encode('utf-8')); h.update(b'|')
+    h.update(sig.encode('utf-8'))
+    return f"{session_uuid}:{h.hexdigest()}"
+
+
+def _stale_cache_get(key):
+    import time as _t
+    ent = _STALE_CHECK_CACHE.get(key)
+    if not ent:
+        return None
+    ts, resp = ent
+    if (_t.time() - ts) > _STALE_CHECK_CACHE_TTL:
+        _STALE_CHECK_CACHE.pop(key, None)
+        return None
+    return resp
+
+
+def _stale_cache_store(key, resp):
+    import time as _t
+    if key is None:
+        return
+    if len(_STALE_CHECK_CACHE) >= _STALE_CHECK_CACHE_CAP:
+        for _k in list(_STALE_CHECK_CACHE.keys())[:max(1, _STALE_CHECK_CACHE_CAP // 10)]:
+            _STALE_CHECK_CACHE.pop(_k, None)
+    _STALE_CHECK_CACHE[key] = (_t.time(), resp)
+
+
 @app.get("/api/stats-report/stale-check")
-async def stats_report_stale_check(request: Request):
+def stats_report_stale_check(request: Request):
     """Compute stale scopes for the session's stats_report_results.
 
     Returns:
@@ -10569,6 +12053,16 @@ async def stats_report_stale_check(request: Request):
     from util.stats_report.state_snapshot import CharacterStateSnapshot, from_char_config
     from util.stats_report.stale_detector import detect_stale_scopes
 
+    # 2026-08-30 (jwbail): per-step timing probe. The goals-report open HAR
+    # showed an ~8.3s stall attributed to this endpoint (inferred from request
+    # order, timings stripped). Emit a single TIMING log line per call so we
+    # can confirm which sub-step dominates before optimizing. Cheap; remove
+    # once the hotspot is confirmed.
+    import time as _time
+    _ck = [('start', _time.perf_counter())]
+    def _mark(_label):
+        _ck.append((_label, _time.perf_counter()))
+
     db = get_db()
     # 2026-05-25 (jwbail): build the snapshot directly from char_config +
     # ui_config (the simplified flat lists the sessions table actually
@@ -10579,6 +12073,7 @@ async def stats_report_stale_check(request: Request):
     # update. from_char_config matches the worker's snapshot shape, so
     # prev/curr compare cleanly.
     sess = db.get_session(session_uuid)
+    _mark('get_session')
     if not sess:
         return {'stale_scopes': [], 'stale_subcategory_chips': {}, 'any_stale': False}
 
@@ -10588,6 +12083,8 @@ async def stats_report_stale_check(request: Request):
     except Exception as _e:
         print(f'[stale-check] from_char_config failed: {_e}')
         return {'stale_scopes': [], 'stale_subcategory_chips': {}, 'any_stale': False}
+
+    _mark('from_char_config')
 
     # Load previous snapshot from cache (if any)
     conn = db._get_connection()
@@ -10604,10 +12101,46 @@ async def stats_report_stale_check(request: Request):
         except Exception:
             prev_snapshot = None
 
+    _mark('prev_snapshot')
+
+    # Fingerprint-cache short-circuit (see _STALE_CHECK_CACHE above). Keyed on
+    # the exact inputs; a hit skips the ~9s detect_stale_scopes + target_items
+    # recompute and returns the identical response the full path would build.
+    _cache_key = None
+    try:
+        _cache_key = _stale_cache_key(session_uuid, curr_snapshot, prev_snapshot, conn)
+        _cached = _stale_cache_get(_cache_key)
+        if _cached is not None:
+            _mark('cache_hit')
+            try:
+                _total = round((_ck[-1][1] - _ck[0][1]) * 1000)
+                log(f"[stale-check TIMING] CACHE HIT total={_total}ms "
+                    f"scopes={len(_cached.get('stale_scopes', []))}", session_uuid)
+            except Exception:
+                pass
+            return _cached
+    except Exception as _ce:
+        print(f'[stale-check] cache key/get failed (non-fatal): {_ce}')
+        _cache_key = None
+
     # Compute stale scopes
     scopes = detect_stale_scopes(prev_snapshot, curr_snapshot, conn,
                                  session_uuid=session_uuid,
                                  char_config=sess.get('character_config') or {})
+    _mark('detect_stale_scopes')
+
+    # target_items has its OWN dedicated read-side stale pass below
+    # (compute_target_items_stale_groups) that uses the SAME (bitmap, hash,
+    # version) signal logic as the worker's Optimize stale filter, so a badged
+    # target_items group always has runnable stale jobs and the badge clears
+    # after a run. detect_stale_scopes, however, ALSO emits target_items scopes
+    # after any character change (e.g. a fresh import) -- including scopes that
+    # are already computed and FRESH per the worker's filter (AGT was the
+    # reported case). Those got badged while Optimize ran 0/0 (nothing actually
+    # stale), producing a perpetual (!) that never cleared. Drop target_items
+    # here and let the dedicated pass be its SOLE authority (the degenerate-row
+    # pass + compute_target_items_stale_groups below cover the real stale cases).
+    scopes = [s for s in scopes if getattr(s, 'category', None) != 'target_items']
 
     # Build subcategory chip map
     chips = {}
@@ -10617,6 +12150,7 @@ async def stats_report_stale_check(request: Request):
     # Resolve item ids to display data for the popover
     cursor.execute("SELECT id, import_name, quality FROM item_ids")
     id_to_item = {r[0]: {'id': r[0], 'slug': r[1], 'quality': r[2]} for r in cursor.fetchall()}
+    _mark('item_ids')
 
     out_scopes = []
     _seen_keys = set()
@@ -10661,12 +12195,75 @@ async def stats_report_stale_check(request: Request):
             })
     except Exception as _e:
         print(f'[stale-check] degenerate-scope flagging failed: {_e}')
+    _mark('degenerate')
 
-    return {
+    # 2026-08-13 (jwbail): target_items (!) badge. target_items is NOT in the
+    # enumerate_applicable_sources scope space (its scope key is field-overloaded
+    # and detect_stale_scopes' _scope_for_row returns None for it), so it never
+    # surfaced here. Compute its staleness read-side from the stored rows using
+    # the SAME signal logic the worker's stale filter uses on Optimize, so a
+    # badged group re-runs and the badge clears (no perpetual-(!)). Fail-safe.
+    try:
+        from ui import stats_report_worker as _srw_ti
+        # Materialize placeholder rows for newly-applicable target_items scopes
+        # first, so scopes the character can now farm but has never optimized
+        # 'have a row to read' and get badged (mirrors the other categories'
+        # newly-unlocked detection). Fail-safe / idempotent.
+        try:
+            _srw_ti.ensure_target_items_applicability_rows(session_uuid, get_db().db_path)
+            # End any implicit read snapshot on this connection so the badge
+            # read below sees the placeholder rows ensure_...() just committed
+            # on its own connection.
+            try:
+                conn.commit()
+            except Exception:
+                pass
+        except Exception as _e2:
+            print(f'[stale-check] target_items applicability materialize failed: {_e2}')
+        _mark('ti_materialize')
+        _ti_groups, _ti_scopes = _srw_ti.compute_target_items_stale_groups(
+            curr_snapshot, conn, session_uuid)
+        _mark('ti_compute')
+        for _g in _ti_groups:
+            chips.setdefault('target_items', set()).add(_g)
+        for (_g, _item_slug, _act_slug) in _ti_scopes:
+            _tikey = ('target_items', _g, _item_slug, _act_slug, 'NONE')
+            if _tikey in _seen_keys:
+                continue
+            _seen_keys.add(_tikey)
+            out_scopes.append({
+                'category': 'target_items',
+                'subcategory': _g,
+                'source_name': _item_slug,
+                'location': _act_slug,
+                'service': 'NONE',
+                'reason': 'item_change',
+                'added_items': [],
+                'removed_items': [],
+            })
+    except Exception as _e:
+        print(f'[stale-check] target_items stale pass failed: {_e}')
+
+    _mark('build_output')
+    _response = {
         'stale_scopes': out_scopes,
         'stale_subcategory_chips': {k: sorted(v) for k, v in chips.items()},
         'any_stale': bool(out_scopes),
     }
+    try:
+        _stale_cache_store(_cache_key, _response)
+    except Exception as _se:
+        print(f'[stale-check] cache store failed (non-fatal): {_se}')
+    try:
+        _durs = {_ck[i][0]: round((_ck[i][1] - _ck[i - 1][1]) * 1000)
+                 for i in range(1, len(_ck))}
+        _total = round((_ck[-1][1] - _ck[0][1]) * 1000)
+        log(f"[stale-check TIMING] total={_total}ms steps={_durs} "
+            f"scopes={len(out_scopes)}", session_uuid)
+    except Exception:
+        pass
+
+    return _response
 
 
 @app.post("/api/stats-report/state-changed")
@@ -10752,9 +12349,19 @@ async def stats_report_results(request: Request):
     if not get_db().has_feature(session_uuid, 'stats_report'):
         raise HTTPException(status_code=403, detail='Stats report feature not enabled')
 
+    # 2026-08-30 (jwbail): per-step timing probe (see stale-check). The 5 MB
+    # results payload plus three read-path filters (ownership / single-
+    # completion / ungeared) each re-read the session blob; time them so we
+    # can confirm the dedup win before refactoring. Cheap; remove after.
+    import time as _time
+    _ck = [('start', _time.perf_counter())]
+    def _mark(_label):
+        _ck.append((_label, _time.perf_counter()))
+
     run = get_db().get_latest_stats_report_run(session_uuid)
     if not run:
         return {'success': True, 'run_id': None, 'results': {}}
+    _mark('latest_run')
 
     # 2026-06-11 (jwbail): read ADDITIVE results — the latest row per scope
     # across ALL of the session's runs, not just run['id']. A stale_only
@@ -10762,6 +12369,65 @@ async def stats_report_results(request: Request):
     # the old run-scoped query dropped every unchanged scope and blanked
     # the report. run_id is still returned for the stale-banner key.
     results = get_db().get_stats_report_results_latest_per_scope(session_uuid)
+    _mark('main_query')
+
+    # 2026-07-17 (bug 0e1a28e6): hide new_items the user now owns. Once an
+    # item is obtained, build_new_items_jobs stops emitting a job for it, so
+    # its stale cached row is never overwritten or deleted — it lingered at
+    # the top of "fastest to obtain" until a full reset. Filter on read
+    # using the SAME ownership logic the worker uses to skip drops, so the
+    # list self-heals on the next optimize run without a reset.
+    try:
+        from ui import stats_report_worker as _srw
+        _ownership = _srw.get_ownership_lookup(session_uuid, get_db().db_path)
+        results = _srw.filter_owned_new_items(results, _ownership)
+    except Exception as e:
+        log(f'[stats-report results] new_items ownership filter failed: {e}', session_uuid)
+    _mark('ownership_filter')
+
+    # 2026-07-29 (report fee0a91e): hide rows for single-completion
+    # activities (e.g. "Repair the bank") the user has flagged complete via
+    # custom_stats. Same lingering-cache problem as owned new_items above:
+    # once is_unlocked() returns False the worker stops writing rows, but the
+    # stale cached rows persist until a reset. Filter on read so checking the
+    # custom stat drops the activity from the report with no rerun — and no
+    # (!) (enumerate_applicable_sources already gates it).
+    try:
+        from ui import stats_report_worker as _srw
+        _session = get_db().get_session(session_uuid) or {}
+        _ui_config = _session.get('ui_config') or {}
+        if isinstance(_ui_config, str):
+            _ui_config = json.loads(_ui_config)
+        _custom_stats = (_ui_config or {}).get('custom_stats') or {}
+        results = _srw.filter_completed_single_completion_activities(results, _custom_stats)
+    except Exception as e:
+        log(f'[stats-report results] single-completion filter failed: {e}', session_uuid)
+    _mark('single_completion_filter')
+
+    # 2026-08-28 (jwbail): hide cached rows whose activity's required gear the
+    # player doesn't own (e.g. Casbrant's Grave Wreck Diving / Sea fishing
+    # (Spear) need 'advanced diving gear: 3' — with none owned, Optimize
+    # returns "0/0 optimizations"). Read-path mirror of the build-time
+    # _activity_required_gear_owned gate, so rows cached BEFORE the gate
+    # existed self-heal without a reset (and reappear if the player later
+    # acquires the gear).
+    try:
+        from ui import stats_report_worker as _srw
+        _char = _srw.load_character(session_uuid, get_db().db_path)
+        results = _srw.filter_ungeared_activities(results, _char)
+    except Exception as e:
+        log(f'[stats-report results] ungeared-activity filter failed: {e}', session_uuid)
+    _mark('ungeared_filter')
+
+    try:
+        _durs = {_ck[i][0]: round((_ck[i][1] - _ck[i - 1][1]) * 1000)
+                 for i in range(1, len(_ck))}
+        _total = round((_ck[-1][1] - _ck[0][1]) * 1000)
+        _nrows = sum(len(v) for v in results.values()) if isinstance(results, dict) else 0
+        log(f"[results TIMING] total={_total}ms steps={_durs} rows={_nrows}", session_uuid)
+    except Exception:
+        pass
+
     return {'success': True, 'run_id': run['id'], 'results': results}
 
 
@@ -10777,6 +12443,25 @@ async def stats_report_save_gearset(request: Request):
 
     body = await request.json()
     result_id = body.get('result_id', '').strip()
+
+    # Alt-Save (Inc 4b): alternative locations/services live inline in the
+    # primary row's metrics_json and have no stored result row, so the frontend
+    # posts the gearset_export + a display name directly. Save it straight to
+    # the gear-sets table (deduping the name) and return — no result lookup.
+    _direct_export = (body.get('gearset_export') or '').strip()
+    if _direct_export:
+        _base = (body.get('name') or 'Goals Report Gearset').strip() or 'Goals Report Gearset'
+        _existing = {gs.get('name', '') for gs in (get_db().get_gear_sets(session_uuid) or [])}
+        _name = _base; _c = 2
+        while _name in _existing:
+            _name = f'{_base} ({_c})'; _c += 1
+        _gid = str(_uuid.uuid4())
+        get_db().save_gear_set(
+            session_uuid=session_uuid, name=_name, slots_json={},
+            gear_set_id=_gid, is_optimized=True, export_string=_direct_export)
+        log(f'[stats_report] Saved gearset "{_name}" from export (alt)', session_uuid)
+        return {'success': True, 'gear_set_id': _gid, 'name': _name}
+
     if not result_id:
         return {'success': False, 'error': 'result_id required'}
 
@@ -10879,6 +12564,40 @@ async def stats_report_merge(request: Request):
     # consumables" behavior.
     include_pets = bool(body.get('include_pets', False))
     include_consumables = bool(body.get('include_consumables', False))
+    use_pet_ability = bool(body.get('use_pet_ability', False))
+    # Consumable Options are GLOBAL settings (persisted in ui_config), so read
+    # them from the session rather than the run body. A body value (if a future
+    # client sends one) takes precedence.
+    _cons_ui = {}
+    try:
+        _cons_sess = get_db().get_session(session_uuid)
+        _cons_ui = (_cons_sess or {}).get('ui_config', {}) or {}
+    except Exception:
+        _cons_ui = {}
+    include_fine_consumables = bool(body.get('include_fine_consumables', _cons_ui.get('include_fine_consumables', True)))
+    use_fine_inputs = bool(body.get('use_fine_inputs', _cons_ui.get('use_fine_inputs', False)))
+    consumable_min_owned_enabled = bool(body.get('consumable_min_owned_enabled', _cons_ui.get('consumable_min_owned_enabled', False)))
+    try:
+        consumable_min_owned = int(body.get('consumable_min_owned', _cons_ui.get('consumable_min_owned', 5)))
+    except (TypeError, ValueError):
+        consumable_min_owned = 5
+    consumable_min_owned = max(1, min(100, consumable_min_owned))
+    consumable_min_owned_operator = str(body.get('consumable_min_owned_operator', _cons_ui.get('consumable_min_owned_operator', 'lt')) or 'lt').lower()
+    if consumable_min_owned_operator not in ('lt', 'lte'):
+        consumable_min_owned_operator = 'lt'
+    consumable_use_hidden = bool(body.get('consumable_use_hidden', _cons_ui.get('consumable_use_hidden', False)))
+
+    # 2026-10-01 (jwbail): mirror the run endpoint's include-unavailable
+    # derivation so merged jobs honor the same EFFECTIVE dimensions.
+    _iu_master = bool(body.get('include_unavailable', True))
+    _iu_by_inputs = bool(body.get('unavail_by_inputs', True))
+    effective_incl = {
+        'level': _iu_master and bool(body.get('unavail_by_level', False)),
+        'location': _iu_master and bool(body.get('unavail_by_location', False)),
+        'gear': _iu_master and bool(body.get('unavail_by_gear', False)),
+        'inputs': _iu_master and _iu_by_inputs,
+        'other': _iu_master and bool(body.get('unavail_by_other', False)),
+    }
 
     if not run_id:
         return {'success': False, 'error': 'run_id required'}
@@ -10903,6 +12622,14 @@ async def stats_report_merge(request: Request):
         '--notify', 'false',
         '--include-pets', 'true' if include_pets else 'false',
         '--include-consumables', 'true' if include_consumables else 'false',
+        '--use-pet-ability', 'true' if use_pet_ability else 'false',
+        '--include-fine-consumables', 'true' if include_fine_consumables else 'false',
+        '--use-fine-inputs', 'true' if use_fine_inputs else 'false',
+        '--consumable-min-owned-enabled', 'true' if consumable_min_owned_enabled else 'false',
+        '--consumable-min-owned', str(consumable_min_owned),
+        '--consumable-min-owned-operator', consumable_min_owned_operator,
+        '--consumable-use-hidden', 'true' if consumable_use_hidden else 'false',
+        '--include-unavailable', json.dumps(effective_incl),
         '--mode', 'merge',
     ]
     log_path = os.path.join('/tmp', f'stats_report_worker_{session_uuid[:8]}_{run_id[:8]}_merge.log')
@@ -11163,6 +12890,10 @@ async def stats_report_slot_alternatives(request: Request):
     category = body.get('category', 'xp')
     chest_name = body.get('chest_name', None)
     gearset_slots = body.get('gearset_slots', {}) or {}
+    # Optional: the goals-report gearset row id. When present, the computed
+    # alternatives are cached back into that row's metrics_json so the report
+    # serves them from the DB on reload instead of recomputing every open.
+    result_id = body.get('result_id', None)
 
     if not activity_name:
         return {'success': False, 'error': 'activity_name required'}
@@ -11412,7 +13143,7 @@ async def stats_report_slot_alternatives(request: Request):
         # optimizer path. Without this, opt_type='activity' + activity=None
         # returned no alternatives for every recipe slot click.
         if category == 'chests_recipes':
-            alts, locked_alts = compute_slot_alternatives(
+            alts, locked_alts, hidden_alts = compute_slot_alternatives(
                 gearset_dict, character, 'recipe',
                 recipe=recipe,
                 service=service_for_recipe,
@@ -11449,7 +13180,7 @@ async def stats_report_slot_alternatives(request: Request):
             except Exception:
                 _sel_loc = None
                 _input_item = None
-            alts, locked_alts = compute_slot_alternatives(
+            alts, locked_alts, hidden_alts = compute_slot_alternatives(
                 gearset_dict, character, 'activity',
                 activity=activity,
                 consumable=consumable_obj,
@@ -11467,10 +13198,28 @@ async def stats_report_slot_alternatives(request: Request):
         log(f'[stats_report] slot-alternatives failed for {activity_name}: {e}', session_uuid)
         return {'success': False, 'error': f'Alternatives calculation failed: {e}'}
 
+    # Cache the computed alternatives back into the goals-report row's
+    # metrics_json so a reload serves them from the DB (via the frontend's
+    # _storedRowAlternatives) instead of recomputing on every popup open.
+    # Best-effort: a persistence failure must not fail the response. Rows are
+    # not user-editable, so the baseline gearset == the stored row's gearset.
+    if result_id:
+        try:
+            get_db().update_stats_report_gearset_alternatives(
+                result_id,
+                alternatives=alts or {},
+                locked_alternatives=locked_alts or {},
+                hidden_alternatives=hidden_alts or {},
+            )
+        except Exception as _persist_e:
+            log(f'[stats_report] slot-alternatives cache-write skipped for '
+                f'{result_id}: {_persist_e}', session_uuid)
+
     return {
         'success': True,
         'alternatives': alts or {},
         'locked_alternatives': locked_alts or {},
+        'hidden_alternatives': hidden_alts or {},
     }
 
 
@@ -11497,6 +13246,11 @@ def run_optimization_background(
     equipped_pet: dict = None,
     instant_actions: bool = False,
     pet_ability_stats: bool = False,
+    optimize_all_items: bool = False,
+    use_pet_ability: bool = True,
+    all_custom_stats_enabled: bool = False,
+    unlock_all: bool = False,
+    optimize_services: bool = False,
 ):
     """
     Spawn optimization as a fully detached subprocess that saves directly to DB.
@@ -11557,7 +13311,10 @@ def run_optimization_background(
                 include_consumables, include_pets, budget_materials, budget_target,
                 locked_slots, selected_location, input_items, use_fine_inputs,
                 target_slot, equipped_consumable, equipped_pet, instant_actions,
-                pet_ability_stats,
+                pet_ability_stats, optimize_all_items, use_pet_ability,
+                all_custom_stats_enabled,
+                unlock_all,
+                optimize_services,
             )
             json.dump(request_data, f)
             temp_file = f.name
@@ -11724,10 +13481,1659 @@ async def get_feature_flags(request: Request):
         "sell_for_chips": True,  # Released to all users (FAC gate removed)
         "local_optimization": get_db().has_feature(session_uuid, "local_optimization"),
         "walkdle": _walkdle_enabled(request),
-        "notepad": get_db().has_feature(session_uuid, "notepad"),
+        "notepad": True,  # Released to all users (beta)
+        "bank_layouts": True,  # Released to all users (beta)
+        "crafting_tree_exact": get_db().has_feature(session_uuid, "crafting_tree_exact"),
+        "achievements": True,  # Released to all users
+        "topbar_customization": True,  # Released to all users (FAC gate removed)
+        "fastest_target_item": True,  # Released to all users (FAC gate removed)
+        "upgrades_tracker": get_db().has_feature(session_uuid, "upgrades_tracker"),
+        "trading": get_db().has_feature(session_uuid, "trading"),
+        "fastest_craft_goals": get_db().has_feature(session_uuid, "fastest_craft_goals"),
+        "trading_upgrades_filter": get_db().has_feature(session_uuid, "trading_upgrades_filter"),
     }
+    # Embed the (user-independent, cached) Steps-per-Recipe chip taxonomy for
+    # enabled sessions so the "What to optimize" sub-filter renders synchronously
+    # — no second /api/fastest-craft/categories round-trip, no loading flash.
+    if flags["fastest_craft_goals"]:
+        try:
+            from ui.fastest_craft import fastest_craft_taxonomy
+            flags["fastest_craft_taxonomy"] = fastest_craft_taxonomy()
+        except Exception as e:  # noqa: BLE001 — taxonomy is best-effort; JS falls back to the fetch
+            log(f"feature-flags taxonomy embed failed: {e!r}", session_uuid)
     log(f"Feature flags for {session_uuid}: crafting_tree={flags['crafting_tree']} crafting_tree_lp={flags['crafting_tree_lp']}", session_uuid)
     return flags
+
+
+# ============================================================================
+# FASTEST CRAFT ENDPOINTS (FAC-gated: fastest_craft_goals; .kiro/specs/fastest-craft/)
+# Phase 5 read layer: the pill universe + stored results (with banked refresh).
+# The heavy compute/run (12 solves/item) layers on as a background worker,
+# mirroring the stats-report run pattern.
+# ============================================================================
+@app.get("/api/fastest-craft/categories")
+async def fastest_craft_categories(request: Request):
+    """The grouped Fastest Craft chip universe (Gear / Tools / Consumables /
+    Materials), each chip keyed by a prefixed selection id."""
+    session_uuid = request.state.session_uuid
+    _require_fastest_craft_goals(session_uuid)
+    from ui.fastest_craft import fastest_craft_taxonomy
+    return fastest_craft_taxonomy()
+
+
+@app.get("/api/fastest-craft/results")
+async def fastest_craft_results(request: Request):
+    """Stored Fastest Craft rows for the session, grouped by item, with the
+    banked step count refreshed on load when an item's owned material counts
+    changed (R6). Owned-count mapping for the banked refresh is a follow-up;
+    until then banked equals the stored value (empty owned set is a no-op)."""
+    session_uuid = request.state.session_uuid
+    _require_fastest_craft_goals(session_uuid)
+    from ui import fastest_craft as _fc
+    db = get_db()
+    # Live banked (R6): map this session's owned inventory onto every stored
+    # material-offset ref, then recompute banked only for rows whose owned stock
+    # changed. owned_quantities lives in the stored character_config (same source
+    # the crafting-tree 'use banked materials' feature reads).
+    _sess0 = db.get_session(session_uuid) or {}
+    _sd0 = _sess0.get("character_config") or {}
+    try:
+        _all_offset_refs: set = set()
+        for _r in db.get_fastest_craft_results(session_uuid):
+            _all_offset_refs |= set((_r.get("material_offsets") or {}).keys())
+        owned_counts = _fc.owned_counts_for_refs(_all_offset_refs, _sd0)
+    except Exception:
+        owned_counts = {}
+    try:
+        _fc.refresh_banked_if_stale(db, session_uuid, owned_counts)
+    except Exception as _e:  # noqa: BLE001 — banked refresh is best-effort
+        log(f"fastest-craft results banked refresh failed: {_e!r}", session_uuid)
+    rows = db.get_fastest_craft_results(session_uuid)
+    # Enrich for the UI: display name + pill categories (from the crafted-item
+    # enumeration), the per-quality headline = min(total/banked across variants),
+    # and the live stale flag (R7) via the Phase 4 detector adapter.
+    try:
+        _enum = _fc.enumerate_craftable_items(None)
+        name_cats = {row["output_ref"]: (row["output_name"], row["categories"])
+                     for row in _enum}
+        groups_by_ref = {row["output_ref"]: row.get("group") for row in _enum}
+    except Exception:
+        name_cats = {}
+        groups_by_ref = {}
+    stale_refs: set = set()
+    try:
+        from util.stats_report.state_snapshot import from_char_config as _from_cc
+        _sess = get_db().get_session(session_uuid) or {}
+        _char = _sess.get("character_config") or {}
+        _curr = _from_cc(_char, _sess.get("ui_config") or {})
+        stale_refs = _fc.live_stale_items(
+            db, session_uuid, _curr, char_config=_char,
+            item_refs=list({r["item_ref"] for r in rows}))
+    except Exception as _se:  # noqa: BLE001 — stale is advisory; never block results
+        log(f"fastest-craft results stale pass failed: {_se!r}", session_uuid)
+    items = _fc.group_results_for_ui(rows, name_cats, stale_refs, groups_by_ref)
+    return {"items": items, "count": len(rows)}
+
+
+@app.post("/api/fastest-craft/reset")
+async def fastest_craft_reset(request: Request):
+    """Delete stored Steps-per-Recipe rows so they recompute on the next run.
+    Body (all optional):
+      {}                           -> reset ALL rows for the session
+      {"item_refs": [...]}         -> reset only those items (a master category)
+      {"item_refs": [...], "quality": "Perfect"}  -> only that quality tier
+    Mirrors the goals-report per-category/subcategory reset but on the FC store."""
+    session_uuid = request.state.session_uuid
+    _require_fastest_craft_goals(session_uuid)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    item_refs = body.get("item_refs") or None
+    if item_refs is not None and not isinstance(item_refs, list):
+        return {"success": False, "error": "item_refs must be a list"}
+    quality = body.get("quality") or None
+    try:
+        deleted = get_db().delete_fastest_craft_results(
+            session_uuid, item_refs=item_refs, quality=quality)
+        return {"success": True, "deleted": deleted}
+    except Exception as e:  # noqa: BLE001
+        log(f"fastest-craft reset failed: {e!r}", session_uuid)
+        return {"success": False, "error": str(e)}
+
+
+# In-memory per-session run registry for the Fastest Craft background compute
+# (mirrors the crafting-tree optimize task-dict pattern). One run per session;
+# the frontend polls /run-status. run_fastest_craft persists each item's rows to
+# fastest_craft_results as it goes, so results survive the task dict's lifetime.
+_FASTEST_CRAFT_TASKS: dict = {}
+
+
+@app.post("/api/fastest-craft/run")
+async def fastest_craft_run(request: Request):
+    """Kick off the Fastest Craft compute for the selected prefixed chip ids
+    (body.categories) in a background
+    thread (12 solves/item). Returns immediately; poll /run-status. Results are
+    persisted per-item to fastest_craft_results and read via /results."""
+    session_uuid = request.state.session_uuid
+    _require_fastest_craft_goals(session_uuid)
+    body = await request.json()
+    categories = body.get("categories") or []
+    selected = set(categories) if categories else None
+    return _start_fastest_craft_task(session_uuid, selected)
+
+
+def _start_fastest_craft_task(session_uuid: str, selected):
+    """Start the Fastest Craft background compute for a session (one per
+    session). Shared by /api/fastest-craft/run and the goals-report run's
+    local (Pyodide) path, which has no server worker to host it."""
+    sess = get_db().get_session(session_uuid) or {}
+    session_data = sess.get("character_config") or {}
+    ui_config = sess.get("ui_config") or {}
+    if isinstance(ui_config, str):
+        try:
+            ui_config = json.loads(ui_config)
+        except Exception:
+            ui_config = {}
+    existing = _FASTEST_CRAFT_TASKS.get(session_uuid)
+    if existing and existing.get("status") == "running":
+        return {"started": False, "status": "running",
+                "done": existing.get("done", 0), "total": existing.get("total", 0)}
+    task = {"status": "running", "done": 0, "total": 0, "count": 0, "error": None}
+    _FASTEST_CRAFT_TASKS[session_uuid] = task
+
+    def _progress(done, total):
+        task["done"] = done
+        task["total"] = total
+
+    def _work():
+        try:
+            from ui import fastest_craft as _fc
+            res = _fc.run_fastest_craft(
+                session_uuid, selected, session_data, ui_config,
+                db=get_db(), owned_counts=None, progress=_progress,
+                log=lambda *a, **k: None)
+            task["count"] = res.get("count", 0)
+            task["status"] = "complete"
+        except Exception as e:  # noqa: BLE001 — surface via status, never crash the thread
+            task["error"] = str(e)
+            task["status"] = "error"
+
+    threading.Thread(target=_work, daemon=True).start()
+    return {"started": True, "status": "running"}
+
+
+@app.post("/api/fastest-craft/local-result")
+async def fastest_craft_local_result(request: Request):
+    """Persist Steps-per-Recipe results computed in the browser (Pyodide).
+
+    The client runs the EXACT solver on-device (run_fastest_craft(db=None)) and
+    POSTs the per-item details here; the server applies ONLY the DB-bound layer
+    — owned-count banked, base-node dominance bitmap, and row upserts — exactly
+    as run_fastest_craft(db=...) does for a server run. No compute happens here;
+    this is the on-device mirror of the gearset optimizer's local-result path.
+
+    Body: {session_uuid, items: [{output_ref, recipe_name, details, ...}, ...]}
+    """
+    session_uuid = request.state.session_uuid
+    _require_fastest_craft_goals(session_uuid)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    items = body.get("items") or []
+    if not isinstance(items, list):
+        return {"success": False, "error": "items must be a list"}
+    from ui import fastest_craft as _fc
+    db = get_db()
+    sess = db.get_session(session_uuid) or {}
+    session_data = sess.get("character_config") or {}
+    ui_config = sess.get("ui_config") or {}
+    if isinstance(ui_config, str):
+        try:
+            ui_config = json.loads(ui_config)
+        except Exception:
+            ui_config = {}
+    written = 0
+    persisted = 0
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        ref = it.get("output_ref")
+        details = it.get("details")
+        if not ref or not details:
+            continue
+        try:
+            # owned_counts + base-dominance bitmap are the SAME per-item steps
+            # run_fastest_craft(db=...) performs; replicate them verbatim so a
+            # local run persists byte-identically to a server run.
+            oc = _fc.owned_counts_for_refs(_fc._refs_in_details(details), session_data)
+            _bscope = _fc._base_scope_for_recipe(it.get("recipe_name"), session_data)
+            _bbm = None
+            if _bscope is not None:
+                try:
+                    from util.stats_report.state_snapshot import from_char_config
+                    _bsnap = from_char_config(session_data or {}, ui_config or {})
+                    _bbm = _fc.base_dominance_bitmap(_bsnap, _bscope, db)
+                except Exception:
+                    _bbm = None
+            written += _fc.persist_fastest_craft(
+                db, session_uuid, ref, details, oc,
+                base_scope=_bscope, base_bitmap=_bbm)
+            persisted += 1
+        except Exception as e:  # noqa: BLE001 — one bad item never fails the batch
+            log(f"fastest-craft local-result persist failed {ref}: {e!r}", session_uuid)
+    return {"success": True, "items": persisted, "rows": written}
+
+
+@app.get("/api/fastest-craft/run-status")
+async def fastest_craft_run_status(request: Request):
+    """Poll the current session's Fastest Craft background run."""
+    session_uuid = request.state.session_uuid
+    _require_fastest_craft_goals(session_uuid)
+    task = _FASTEST_CRAFT_TASKS.get(session_uuid)
+    if not task:
+        return {"status": None, "done": 0, "total": 0, "count": 0, "error": None}
+    return {"status": task["status"], "done": task["done"], "total": task["total"],
+            "count": task["count"], "error": task.get("error")}
+
+
+@app.get("/api/fastest-craft/tree")
+async def fastest_craft_tree(request: Request):
+    """Nested preview tree for one craftable item at a (quality, variant) — the
+    Phase 5 preview (task 5.7). Built with the exact optimizer on demand."""
+    session_uuid = request.state.session_uuid
+    _require_fastest_craft_goals(session_uuid)
+    item_ref = request.query_params.get("item_ref") or ""
+    quality = request.query_params.get("quality") or "Normal"
+    variant = request.query_params.get("variant") or "normal"
+    if not item_ref:
+        raise HTTPException(status_code=400, detail="item_ref required")
+    from ui import fastest_craft as _fc
+    sess = get_db().get_session(session_uuid) or {}
+    session_data = _enrich_session_data_with_regions(sess.get("character_config") or {})
+    ui_config = sess.get("ui_config") or {}
+    if isinstance(ui_config, str):
+        try:
+            ui_config = json.loads(ui_config)
+        except Exception:
+            ui_config = {}
+    try:
+        tree = _fc.build_preview_tree(item_ref, session_data, ui_config,
+                                      quality=quality, variant=variant,
+                                      log=lambda *a, **k: None)
+    except Exception as e:  # noqa: BLE001
+        log(f"fastest-craft preview tree failed {item_ref}: {e!r}", session_uuid)
+        raise HTTPException(status_code=500, detail="preview build failed")
+    return {"item_ref": item_ref, "quality": quality, "variant": variant,
+            "tree": tree}
+
+
+@app.post("/api/fastest-craft/save-tree")
+async def fastest_craft_save_tree(request: Request):
+    """Build + optimize the crafting tree for one item at a (quality, variant)
+    and persist it to saved_crafting_trees so it opens natively in the crafting
+    tree view (task 5.9)."""
+    session_uuid = request.state.session_uuid
+    _require_fastest_craft_goals(session_uuid)
+    body = await request.json()
+    item_ref = body.get("item_ref") or ""
+    quality = body.get("quality") or "Normal"
+    variant = body.get("variant") or "normal"
+    name = body.get("name")
+    if not item_ref:
+        raise HTTPException(status_code=400, detail="item_ref required")
+    from ui import fastest_craft as _fc
+    db = get_db()
+    sess = db.get_session(session_uuid) or {}
+    session_data = _enrich_session_data_with_regions(sess.get("character_config") or {})
+    ui_config = sess.get("ui_config") or {}
+    if isinstance(ui_config, str):
+        try:
+            ui_config = json.loads(ui_config)
+        except Exception:
+            ui_config = {}
+    try:
+        res = _fc.build_and_save_tree(db, session_uuid, item_ref, session_data,
+                                      ui_config, quality=quality, variant=variant,
+                                      name=name, log=lambda *a, **k: None)
+    except Exception as e:  # noqa: BLE001
+        log(f"fastest-craft save-tree failed {item_ref}: {e!r}", session_uuid)
+        raise HTTPException(status_code=500, detail="save failed")
+    return {"saved": True, **res}
+
+
+# ============================================================================
+# TRADING ENDPOINTS (FAC-gated: trading; see .kiro/specs/trading/)
+# Ownership keyed on the private session_uuid; only in_game_name + display_name
+# are exposed outward. P1 core: profile, listings, wishlist, search, trader view.
+# ============================================================================
+
+def _require_trading(session_uuid: str):
+    """Trading is released to all users (testing banner shown in-app); retained
+    as a no-op for the existing call sites so the gate can be re-enabled easily."""
+    return
+
+
+def _trading_char(session_uuid: str):
+    """Return (in_game_name, character_config) for the session."""
+    sess = get_db().get_session(session_uuid) or {}
+    cc = sess.get("character_config") or {}
+    return (cc.get("name") or ""), cc
+
+
+def _trading_owned_qualities(session_uuid: str) -> dict:
+    """Owned map ``{game_key: {variant_token: qty}}`` parsed LIVE from the
+    session's stored ``all_items_raw`` ({export_name: qty}) — the same source
+    Export Config uses. The export suffix IS the variant token: no suffix = ''
+    (base), ``_common``..``_ethereal`` -> that rarity token, ``_fine`` -> 'fine'.
+    The base export name is normalised to the catalog's authoritative game key
+    (ITEM_GAME_KEYS) so owned counts line up with the picker. No re-import.
+    """
+    from util.autogenerated.export_names import get_item_from_export_name
+    try:
+        from util.autogenerated.item_game_keys import ITEM_GAME_KEYS
+    except Exception:
+        ITEM_GAME_KEYS = {}
+    sess = get_db().get_session(session_uuid) or {}
+    raw = sess.get("all_items_raw")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            raw = {}
+    if not isinstance(raw, dict):
+        raw = {}
+    rarity_tokens = ("common", "uncommon", "rare", "epic", "legendary", "ethereal")
+
+    def _canon_id(name):
+        return name.lower().replace(" ", "_").replace("(", "").replace(")", "").replace("-", "_").replace("'", "")
+
+    def _game_key(base):
+        # Resolve the base export name to the catalog's authoritative game key.
+        it = get_item_from_export_name(base) or get_item_from_export_name(base, item_type="material")
+        if it is not None and hasattr(it, "name"):
+            nid = _canon_id(it.name)
+            return ITEM_GAME_KEYS.get(nid) or ITEM_GAME_KEYS.get(it.name.lower()) or ITEM_GAME_KEYS.get(base) or nid
+        return ITEM_GAME_KEYS.get(base, base)
+
+    out = {}
+    for export_name, qty in raw.items():
+        try:
+            qty = int(qty)
+        except (TypeError, ValueError):
+            continue
+        base = export_name
+        token = ""
+        for tok in rarity_tokens:
+            if export_name.endswith(f"_{tok}"):
+                base = export_name[: -len(f"_{tok}")]
+                token = tok
+                break
+        if token == "" and export_name.endswith("_fine"):
+            base = export_name[:-5]
+            token = "fine"
+        key = _game_key(base)
+        if not key:
+            continue
+        bucket = out.setdefault(key, {})
+        bucket[token] = bucket.get(token, 0) + qty
+    return out
+
+
+def _owned_qualities_by_item_id(session_uuid: str) -> dict:
+    """Owned map ``{canon_item_id: {variant_token: qty}}`` parsed LIVE from the
+    session's stored ``all_items_raw`` -- the NON-trading-gated sibling of
+    ``_trading_owned_qualities``, keyed by the catalog's canonical item id
+    (i.e. ``item.id``) instead of the trading game_key. Drives the per-quality
+    "owned" breakdown shown in the item hover popovers (drops, notepad,
+    crafting tree, gearset comparison). Tokens: '' (base/Normal), 'common'..
+    'ethereal' (craft rarity), 'fine'. No re-import -- reads the live snapshot.
+    """
+    from util.autogenerated.export_names import get_item_from_export_name
+    sess = get_db().get_session(session_uuid) or {}
+    raw = sess.get("all_items_raw")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            raw = {}
+    if not isinstance(raw, dict):
+        raw = {}
+    rarity_tokens = ("common", "uncommon", "rare", "epic", "legendary", "ethereal")
+
+    def _canon_id(name):
+        return name.lower().replace(" ", "_").replace("(", "").replace(")", "").replace("-", "_").replace("'", "")
+
+    def _resolve_id(base):
+        it = get_item_from_export_name(base) or get_item_from_export_name(base, item_type="material")
+        if it is not None and hasattr(it, "name"):
+            return _canon_id(it.name)
+        return _canon_id(base)
+
+    out = {}
+    for export_name, qty in raw.items():
+        try:
+            qty = int(qty)
+        except (TypeError, ValueError):
+            continue
+        base = export_name
+        token = ""
+        for tok in rarity_tokens:
+            if export_name.endswith(f"_{tok}"):
+                base = export_name[: -len(f"_{tok}")]
+                token = tok
+                break
+        if token == "" and export_name.endswith("_fine"):
+            base = export_name[:-5]
+            token = "fine"
+        key = _resolve_id(base)
+        if not key:
+            continue
+        bucket = out.setdefault(key, {})
+        bucket[token] = bucket.get(token, 0) + qty
+    return out
+
+
+@app.get("/api/owned-by-quality")
+async def owned_by_quality(request: Request):
+    """Live per-quality owned map ``{item_id: {token: qty}}`` from the session's
+    stored ``all_items_raw``. Drives the per-quality "owned" breakdown in item
+    hover popovers. NOT trading-gated -- available to every imported session."""
+    session_uuid = request.state.session_uuid
+    return {"owned": _owned_qualities_by_item_id(session_uuid)}
+
+
+def _validate_tradable_item(item):
+    from util.trading_tradable import is_tradable
+    if not isinstance(item, dict) or not item.get("slug") or not item.get("type"):
+        raise HTTPException(status_code=400, detail="item {slug,type[,quality]} required")
+    if not is_tradable(item):
+        raise HTTPException(status_code=400, detail=f"Item type '{item.get('type')}' is not tradable")
+
+
+@app.get("/api/trading/me")
+async def trading_me(request: Request):
+    session_uuid = request.state.session_uuid
+    _require_trading(session_uuid)
+    name, _ = _trading_char(session_uuid)
+    t = get_db().get_or_create_trader(session_uuid, name, create=False)
+    return {"in_game_name": t["in_game_name"], "display_name": t["display_name"],
+            "contact_prefs": t["contact_prefs"], "auto_renew": bool(t.get("auto_renew")),
+            "share_inventory": bool(t.get("share_inventory")),
+            "handle": (t.get("display_name") or t.get("in_game_name")),
+            "trader_id": t.get("trader_id"), "account_id": t.get("account_id")}
+
+
+@app.put("/api/trading/me")
+async def trading_update_me(request: Request):
+    session_uuid = request.state.session_uuid
+    _require_trading(session_uuid)
+    name, _ = _trading_char(session_uuid)
+    get_db().get_or_create_trader(session_uuid, name)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    display_name = body.get("display_name")
+    contact_prefs = body.get("contact_prefs")
+    auto_renew = body.get("auto_renew")
+    share_inventory = body.get("share_inventory")
+    if display_name is not None and not isinstance(display_name, str):
+        raise HTTPException(status_code=400, detail="display_name must be a string")
+    if contact_prefs is not None and not isinstance(contact_prefs, list):
+        raise HTTPException(status_code=400, detail="contact_prefs must be a list")
+    if auto_renew is not None and not isinstance(auto_renew, bool):
+        raise HTTPException(status_code=400, detail="auto_renew must be a boolean")
+    if share_inventory is not None and not isinstance(share_inventory, bool):
+        raise HTTPException(status_code=400, detail="share_inventory must be a boolean")
+    # Display name doubles as the public /u/<handle> slug, so it must be unique.
+    # If the requested name is taken by another trader, don't save it — the public
+    # profile falls back to the character name — and tell the client so it can show
+    # "not available, using your character name instead".
+    display_name_taken = False
+    if display_name is not None and isinstance(display_name, str) and display_name.strip():
+        if not get_db().display_name_available(display_name, session_uuid):
+            display_name_taken = True
+            display_name = None  # skip the update; keep existing / fall back to char name
+    get_db().update_trader(session_uuid, display_name=display_name, contact_prefs=contact_prefs,
+                           auto_renew=auto_renew, share_inventory=share_inventory)
+    t = get_db().get_trader(session_uuid)
+    return {"in_game_name": t["in_game_name"], "display_name": t["display_name"],
+            "contact_prefs": t["contact_prefs"], "auto_renew": bool(t.get("auto_renew")),
+            "share_inventory": bool(t.get("share_inventory")),
+            "handle": (t.get("display_name") or t.get("in_game_name")),
+            "display_name_taken": display_name_taken,
+            "trader_id": t.get("trader_id"), "account_id": t.get("account_id")}
+
+
+@app.get("/api/trading/handle-check")
+async def trading_handle_check(request: Request):
+    """Live availability check for a desired display-name handle. Returns
+    {available, handle, reason}. Used by Settings as the user types."""
+    session_uuid = request.state.session_uuid
+    _require_trading(session_uuid)
+    name = (request.query_params.get("display_name") or "").strip()
+    if not name:
+        return {"available": True, "handle": None, "reason": "empty"}
+    avail = get_db().display_name_available(name, session_uuid)
+    return {"available": avail, "handle": (name if avail else None),
+            "reason": ("ok" if avail else "taken")}
+
+
+@app.get("/api/trading/owned")
+async def trading_owned(request: Request):
+    """Live per-quality owned map {item_id: {QualityName: qty}} from the session's
+    stored all_items_raw. Drives the item picker's per-quality rows + counts so
+    each owned quality shows with its correct rarity colour (no re-import)."""
+    session_uuid = request.state.session_uuid
+    _require_trading(session_uuid)
+    return {"owned": _trading_owned_qualities(session_uuid)}
+
+
+@app.get("/api/trading/listings")
+async def trading_listings(request: Request):
+    session_uuid = request.state.session_uuid
+    _require_trading(session_uuid)
+    listings = get_db().get_listings(session_uuid)
+    # Annotate each listing with how many open wishlists exist for its item
+    # (wishlisted_count) and how many that listing would satisfy (match_count),
+    # excluding the caller's own wishlists. Mirror of the My Wishlist badge.
+    try:
+        me_name, _ = _trading_char(session_uuid)
+    except Exception:
+        me_name = None
+    try:
+        from ui.trading import quality_matches
+        wishes = get_db().all_wishlist_entries() + get_db().remote_objects("wishlist")
+        by_slug: Dict[str, list] = {}
+        for w in wishes:
+            if me_name and w.get("trader") == me_name:
+                continue
+            s = (w.get("item") or {}).get("slug")
+            if s:
+                by_slug.setdefault(s, []).append(w)
+        for l in listings:
+            it = l.get("item") or {}
+            slug = it.get("slug")
+            cands = by_slug.get(slug, [])
+            l["wishlisted_count"] = len(cands)
+            lq = it.get("quality") or ""
+            lprice = l.get("price_coins")
+            n = 0
+            for w in cands:
+                ctype = (w.get("item") or {}).get("type") or it.get("type") or ""
+                if not quality_matches(lq, w.get("quality_rule") or "exact",
+                                       w.get("quality_floor") or "", ctype):
+                    continue
+                mc = w.get("max_coins")
+                if mc is not None and lprice is not None and lprice > mc:
+                    continue
+                n += 1
+            l["match_count"] = n
+    except Exception:
+        pass  # counts are best-effort decoration
+    return {"listings": listings}
+
+
+@app.post("/api/trading/listings")
+async def trading_create_listing(request: Request):
+    from ui.trading import item_location
+    session_uuid = request.state.session_uuid
+    _require_trading(session_uuid)
+    name, cc = _trading_char(session_uuid)
+    get_db().get_or_create_trader(session_uuid, name)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    item = body.get("item")
+    _validate_tradable_item(item)
+    item.setdefault("quality", "")
+    try:
+        qty = int(body.get("qty") or 1)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="qty must be an integer")
+    created = get_db().create_listing(session_uuid, item, qty=qty,
+                                      price_coins=body.get("price_coins"),
+                                      trade_for=body.get("trade_for"),
+                                      notify=bool(body.get("notify")),
+                                      note=(body.get("note") or None))
+    loc = item_location(cc, item["slug"])
+    bank_warning = loc in ("inventory", "equipped") and not get_db().is_bank_ignored(session_uuid, item["slug"])
+    _flush_trade_pushes()
+    return {"listing": created, "location": loc, "bank_warning": bank_warning}
+
+
+@app.post("/api/trading/listings/batch")
+async def trading_create_listings_batch(request: Request):
+    """Create many listings in one request + one DB transaction. Used by the
+    bulk "list all duplicate gear/tools" flow so it doesn't fire N sequential
+    POSTs. Body: {"listings": [{item:{slug,type,quality}, qty, price_coins?,
+    note?, obo?, accept_wishlist?, notify?, trade_for?}, ...]}."""
+    session_uuid = request.state.session_uuid
+    _require_trading(session_uuid)
+    name, _cc = _trading_char(session_uuid)
+    get_db().get_or_create_trader(session_uuid, name)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    entries = (body or {}).get("listings")
+    if not isinstance(entries, list) or not entries:
+        raise HTTPException(status_code=400, detail="listings must be a non-empty array")
+    if len(entries) > 500:
+        raise HTTPException(status_code=400, detail="Too many listings in one batch (max 500)")
+    norm = []
+    for e in entries:
+        if not isinstance(e, dict):
+            raise HTTPException(status_code=400, detail="each listing must be an object")
+        item = e.get("item")
+        _validate_tradable_item(item)
+        item.setdefault("quality", "")
+        try:
+            qty = int(e.get("qty") or 1)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="qty must be an integer")
+        norm.append({"item": item, "qty": qty, "price_coins": e.get("price_coins"),
+                     "trade_for": e.get("trade_for"), "notify": bool(e.get("notify")),
+                     "obo": bool(e.get("obo")), "accept_wishlist": bool(e.get("accept_wishlist")),
+                     "note": (e.get("note") or None)})
+    created = get_db().create_listings_batch(session_uuid, norm)
+    _flush_trade_pushes()
+    return {"listings": created, "count": len(created)}
+
+
+@app.delete("/api/trading/listings/{listing_id}")
+async def trading_delete_listing(listing_id: int, request: Request):
+    session_uuid = request.state.session_uuid
+    _require_trading(session_uuid)
+    if not get_db().delete_listing(session_uuid, listing_id):
+        raise HTTPException(status_code=404, detail="Listing not found")
+    return {"ok": True}
+
+
+@app.post("/api/trading/listings/delete-all")
+async def trading_delete_all_listings(request: Request):
+    session_uuid = request.state.session_uuid
+    _require_trading(session_uuid)
+    return {"deleted": get_db().delete_all_listings(session_uuid)}
+
+
+@app.put("/api/trading/listings/{listing_id}")
+async def trading_update_listing(listing_id: int, request: Request):
+    session_uuid = request.state.session_uuid
+    _require_trading(session_uuid)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    # Only forward recognised, editable fields.
+    allowed = {"qty", "price_coins", "trade_for", "notify", "item_quality", "note"}
+    fields = {k: v for k, v in (body or {}).items() if k in allowed}
+    if not fields:
+        raise HTTPException(status_code=400, detail="No editable fields provided")
+    if not get_db().update_listing(session_uuid, listing_id, fields):
+        raise HTTPException(status_code=404, detail="Listing not found")
+    return {"ok": True}
+
+
+@app.post("/api/trading/listings/renew-all")
+async def trading_renew_all_listings(request: Request):
+    session_uuid = request.state.session_uuid
+    _require_trading(session_uuid)
+    return {"renewed": get_db().renew_all_listings(session_uuid)}
+
+
+@app.post("/api/trading/listings/{listing_id}/renew")
+async def trading_renew_listing(listing_id: int, request: Request):
+    """Reset a listing's 7-day expiry (and reopen it if it had expired)."""
+    session_uuid = request.state.session_uuid
+    _require_trading(session_uuid)
+    if not get_db().renew_listing(session_uuid, listing_id):
+        raise HTTPException(status_code=404, detail="Listing not found")
+    return {"ok": True}
+
+
+@app.post("/api/trading/listings/{listing_id}/close")
+async def trading_close_listing(listing_id: int, request: Request):
+    """Close out an owned listing. Body: {sold_for?: {coins?, items?}, sold_to?,
+    status?, qty_sold?}. Default status 'sold' -> records a trade-history row with
+    what it sold for (coins and/or a trade), marks the listing sold (drops from
+    active browse/search), and federates the status change to peers. A qty_sold
+    below the listing's qty is a PARTIAL sale: the listing stays open at the
+    reduced qty (no re-list / re-alert) and only the sold units are logged.
+    status 'cancelled' (etc.) just closes it with no history row."""
+    session_uuid = request.state.session_uuid
+    _require_trading(session_uuid)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    sold_for = body.get("sold_for")
+    if sold_for is not None and not isinstance(sold_for, dict):
+        raise HTTPException(status_code=400, detail="sold_for must be an object {coins?, items?}")
+    status = (body.get("status") or "sold").strip().lower()
+    if status not in ("sold", "closed", "cancelled", "canceled", "deleted", "removed"):
+        raise HTTPException(status_code=400, detail="invalid close status")
+    sold_to = (body.get("sold_to") or "").strip()
+    qty_sold = body.get("qty_sold")
+    if qty_sold is not None:
+        try:
+            qty_sold = int(qty_sold)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="qty_sold must be an integer")
+        if qty_sold < 1:
+            raise HTTPException(status_code=400, detail="qty_sold must be >= 1")
+    result = get_db().close_listing(session_uuid, listing_id, sold_for=sold_for,
+                                    sold_to=sold_to, status=status, qty_sold=qty_sold)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Listing not found or already closed")
+    return {"ok": True, **result}
+
+
+@app.post("/api/trading/wishlist/{wid}/close")
+async def trading_close_wishlist(wid: int, request: Request):
+    """Close out an owned WISHLIST entry when YOU bought the item. Body:
+    {bought_for?: {coins?, items?}, bought_from?, status?, qty_bought?}. Default
+    status 'bought' -> records a trade-history row in the BUYER direction
+    (party_a = seller you bought from, party_b = you), marks the wishlist entry
+    bought (drops from active wishlist), and federates the status change. A
+    qty_bought below the entry's qty is a PARTIAL buy (entry stays open at the
+    reduced qty). status 'cancelled'/'deleted' closes with no history row."""
+    session_uuid = request.state.session_uuid
+    _require_trading(session_uuid)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    bought_for = body.get("bought_for")
+    if bought_for is not None and not isinstance(bought_for, dict):
+        raise HTTPException(status_code=400, detail="bought_for must be an object {coins?, items?}")
+    status = (body.get("status") or "bought").strip().lower()
+    if status not in ("bought", "closed", "cancelled", "canceled", "deleted", "removed"):
+        raise HTTPException(status_code=400, detail="invalid close status")
+    bought_from = (body.get("bought_from") or "").strip()
+    qty_bought = body.get("qty_bought")
+    if qty_bought is not None:
+        try:
+            qty_bought = int(qty_bought)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="qty_bought must be an integer")
+        if qty_bought < 1:
+            raise HTTPException(status_code=400, detail="qty_bought must be >= 1")
+    result = get_db().close_wishlist_entry(session_uuid, wid, bought_for=bought_for,
+                                           bought_from=bought_from, status=status,
+                                           qty_bought=qty_bought)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Wishlist entry not found or already closed")
+    return {"ok": True, **result}
+
+
+@app.get("/api/trading/links")
+async def trading_list_links(request: Request):
+    """Links involving an object (listing or wishlist). ?object_id=<site:L#|site:W#>."""
+    session_uuid = request.state.session_uuid
+    _require_trading(session_uuid)
+    oid = (request.query_params.get("object_id") or "").strip()
+    if not oid:
+        raise HTTPException(status_code=400, detail="object_id required")
+    return {"links": get_db().links_for_object(oid)}
+
+
+@app.post("/api/trading/links")
+async def trading_add_link(request: Request):
+    """Link a listing + wishlist so the trade isn't double-counted. The caller
+    must own at least one side (their listing or their wishlist)."""
+    session_uuid = request.state.session_uuid
+    _require_trading(session_uuid)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    loid = (body.get("listing_object_id") or "").strip()
+    woid = (body.get("wishlist_object_id") or "").strip()
+    if not loid or not woid:
+        raise HTTPException(status_code=400, detail="listing_object_id and wishlist_object_id required")
+    # Ownership: at least one side must be the caller's own local object.
+    mine_prefix = f"{get_db()._TRADING_ORIGIN}:"
+    owns = False
+    if loid.startswith(mine_prefix + "L"):
+        try:
+            owns = owns or any(l["id"] == int(loid.split(":L")[1]) for l in get_db().get_listings(session_uuid))
+        except (ValueError, IndexError):
+            pass
+    if woid.startswith(mine_prefix + "W"):
+        try:
+            owns = owns or any(w["id"] == int(woid.split(":W")[1]) for w in get_db().get_wishlist(session_uuid))
+        except (ValueError, IndexError):
+            pass
+    if not owns:
+        raise HTTPException(status_code=403, detail="You must own the listing or the wishlist to link them")
+    created = get_db().link_entries(loid, woid, session_uuid)
+    return {"ok": True, "created": created, "links": get_db().links_for_object(loid)}
+
+
+@app.delete("/api/trading/links")
+async def trading_remove_link(request: Request):
+    """Unlink a listing + wishlist. Params: listing_object_id, wishlist_object_id."""
+    session_uuid = request.state.session_uuid
+    _require_trading(session_uuid)
+    qp = request.query_params
+    loid = (qp.get("listing_object_id") or "").strip()
+    woid = (qp.get("wishlist_object_id") or "").strip()
+    if not loid or not woid:
+        raise HTTPException(status_code=400, detail="listing_object_id and wishlist_object_id required")
+    get_db().unlink_entries(loid, woid)
+    return {"ok": True}
+
+
+@app.get("/api/trading/item")
+async def trading_item_detail(request: Request):
+    """Aggregated detail for one item: open listings, wishlists, and sale history."""
+    session_uuid = request.state.session_uuid
+    _require_trading(session_uuid)
+    slug = (request.query_params.get("slug") or "").strip()
+    if not slug:
+        raise HTTPException(status_code=400, detail="slug required")
+    blocked = set(get_db().list_blocks(session_uuid))
+    listings = [l for l in get_db().listings_for_item(slug) if l.get("trader") and l.get("trader") not in blocked]
+    wishlists = [w for w in get_db().wishlists_for_item(slug) if w.get("trader") and w.get("trader") not in blocked]
+    listings += [l for l in get_db().remote_objects("listing")
+                 if (l.get("item") or {}).get("slug") == slug and l.get("trader") not in blocked]
+    wishlists += [w for w in get_db().remote_objects("wishlist")
+                  if (w.get("item") or {}).get("slug") == slug and w.get("trader") not in blocked]
+    history = [h for h in get_db().recent_history(200)
+               if any((it or {}).get("slug") == slug for it in (h.get("items") or []))]
+    price = (get_db().trading_prices(slugs=[slug], by_rarity=False) or [None])[0]
+    # Per-quality price rows (one per quality token) so the item page can offer a
+    # quality selector for quality-bearing items. Only quality-dimension types
+    # (crafted / consumable / pet egg) will have meaningfully distinct rows.
+    prices_by_quality = get_db().trading_prices(slugs=[slug], by_rarity=True) or []
+    # Resolve the item type (for the frontend's quality-dimension check) from any
+    # available row: a price row, then a listing/wishlist.
+    item_type = (price or {}).get("type")
+    if not item_type:
+        item_type = next((r.get("type") for r in prices_by_quality if r.get("type")), None)
+    if not item_type:
+        for r in (listings + wishlists):
+            t = (r.get("item") or {}).get("type")
+            if t:
+                item_type = t
+                break
+    return {"slug": slug, "listings": listings, "wishlists": wishlists,
+            "history": history[:25], "price": price,
+            "prices_by_quality": prices_by_quality, "item_type": item_type}
+
+
+@app.get("/api/trading/prices")
+async def trading_prices_board(request: Request):
+    """Market price aggregates for every item with activity (the Prices tab)."""
+    session_uuid = request.state.session_uuid
+    _require_trading(session_uuid)
+    return {"prices": get_db().trading_prices()}
+
+
+@app.get("/api/trading/history/recent")
+async def trading_recent_sales(request: Request):
+    session_uuid = request.state.session_uuid
+    _require_trading(session_uuid)
+    return {"history": get_db().recent_history(25)}
+
+
+@app.get("/api/trading/history/averages")
+async def trading_history_averages(request: Request):
+    """Average sold coin price per item slug across all trade history — drives
+    the bulk-list 'historical average' price option."""
+    session_uuid = request.state.session_uuid
+    _require_trading(session_uuid)
+    return {"averages": get_db().historical_average_prices()}
+
+
+@app.post("/api/trading/bank-ignore")
+async def trading_bank_ignore(request: Request):
+    session_uuid = request.state.session_uuid
+    _require_trading(session_uuid)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    slug = (body or {}).get("item_slug")
+    if not slug:
+        raise HTTPException(status_code=400, detail="item_slug required")
+    get_db().set_bank_ignore(session_uuid, slug)
+    return {"ok": True}
+
+
+@app.get("/api/trading/wishlist")
+async def trading_wishlist(request: Request):
+    session_uuid = request.state.session_uuid
+    _require_trading(session_uuid)
+    wl = get_db().get_wishlist(session_uuid)
+    # Annotate each entry with how many open sell listings exist for its item
+    # (listed_count) and how many satisfy its quality rule + price cap (match_count),
+    # excluding the caller's own listings.
+    try:
+        me_name, _ = _trading_char(session_uuid)
+    except Exception:
+        me_name = None
+    listings = get_db().all_open_listings() + get_db().remote_objects("listing")
+    by_slug: Dict[str, list] = {}
+    for l in listings:
+        if me_name and l.get("trader") == me_name:
+            continue
+        s = (l.get("item") or {}).get("slug")
+        if s:
+            by_slug.setdefault(s, []).append(l)
+    RANK = {"": 0, "common": 1, "uncommon": 2, "rare": 3, "epic": 4, "legendary": 5, "ethereal": 6}
+    for w in wl:
+        slug = (w.get("item") or {}).get("slug")
+        cands = by_slug.get(slug, [])
+        w["listed_count"] = len(cands)
+        floor = (w.get("quality_floor") or "")
+        rule = w.get("quality_rule") or "exact"
+        maxc = w.get("max_coins")
+
+        def _ok(l):
+            lq = (l.get("item") or {}).get("quality") or ""
+            if floor:
+                if rule == "this_or_better":
+                    if RANK.get(lq, 0) < RANK.get(floor, 0):
+                        return False
+                elif lq != floor:
+                    return False
+            if maxc:
+                p = l.get("price_coins")
+                if p is not None and p > maxc:
+                    return False
+            return True
+        w["match_count"] = sum(1 for l in cands if _ok(l))
+    return {"wishlist": wl}
+
+
+@app.post("/api/trading/wishlist")
+async def trading_create_wishlist(request: Request):
+    session_uuid = request.state.session_uuid
+    _require_trading(session_uuid)
+    name, _ = _trading_char(session_uuid)
+    get_db().get_or_create_trader(session_uuid, name)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    item = body.get("item")
+    _validate_tradable_item(item)
+    rule = body.get("quality_rule") or "exact"
+    if rule not in ("exact", "this_or_better"):
+        raise HTTPException(status_code=400, detail="quality_rule must be exact|this_or_better")
+    created = get_db().create_wishlist_entry(
+        session_uuid, item, quality_rule=rule, quality_floor=body.get("quality_floor") or "",
+        max_coins=body.get("max_coins"), trade_for=body.get("trade_for"),
+        notify_match=bool(body.get("notify_match")),
+        qty=int(body.get("qty") or 1), note=(body.get("note") or None))
+    _flush_trade_pushes()
+    return {"wishlist_entry": created}
+
+
+@app.delete("/api/trading/wishlist/{wid}")
+async def trading_delete_wishlist(wid: int, request: Request):
+    session_uuid = request.state.session_uuid
+    _require_trading(session_uuid)
+    if not get_db().delete_wishlist_entry(session_uuid, wid):
+        raise HTTPException(status_code=404, detail="Wishlist entry not found")
+    return {"ok": True}
+
+
+@app.post("/api/trading/wishlist/delete-all")
+async def trading_delete_all_wishlist(request: Request):
+    session_uuid = request.state.session_uuid
+    _require_trading(session_uuid)
+    return {"deleted": get_db().delete_all_wishlist_entries(session_uuid)}
+
+
+@app.put("/api/trading/wishlist/{wid}")
+async def trading_update_wishlist(wid: int, request: Request):
+    """Edit an owned wishlist entry (quality rule/floor, max coins, qty, note)."""
+    session_uuid = request.state.session_uuid
+    _require_trading(session_uuid)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    fields = {}
+    if "quality_rule" in body:
+        qr = body.get("quality_rule")
+        if qr not in ("exact", "this_or_better"):
+            raise HTTPException(status_code=400, detail="quality_rule must be exact or this_or_better")
+        fields["quality_rule"] = qr
+    for k in ("quality_floor", "max_coins", "qty", "note", "notify_match"):
+        if k in body:
+            fields[k] = body[k]
+    if not fields:
+        raise HTTPException(status_code=400, detail="No editable fields provided")
+    if not get_db().update_wishlist_entry(session_uuid, wid, fields):
+        raise HTTPException(status_code=404, detail="Wishlist entry not found")
+    return {"ok": True}
+
+
+@app.post("/api/trading/wishlist/renew-all")
+async def trading_renew_all_wishlist(request: Request):
+    session_uuid = request.state.session_uuid
+    _require_trading(session_uuid)
+    return {"renewed": get_db().renew_all_wishlist_entries(session_uuid)}
+
+
+@app.post("/api/trading/wishlist/{wid}/renew")
+async def trading_renew_wishlist(wid: int, request: Request):
+    """Reset a wishlist entry's 7-day expiry."""
+    session_uuid = request.state.session_uuid
+    _require_trading(session_uuid)
+    if not get_db().renew_wishlist_entry(session_uuid, wid):
+        raise HTTPException(status_code=404, detail="Wishlist entry not found")
+    return {"ok": True}
+
+
+@app.post("/api/trading/auto-renew")
+async def trading_auto_renew(request: Request):
+    """Renew all of the caller's listings + wishlist entries with < 4 days left
+    (expired included) to +7 days. Invoked on site open when the trader's
+    auto_renew preference is on. No-op (renewed:0) if nothing is eligible."""
+    session_uuid = request.state.session_uuid
+    _require_trading(session_uuid)
+    renewed = get_db().auto_renew_entries(session_uuid, threshold_days=4)
+    return {"renewed": renewed}
+
+
+@app.get("/api/trading/search")
+async def trading_search(request: Request):
+    """Cross-user search. v1 filters: q (slug substring), type, side, owned.
+    rarity/stat/source/keyword filters are TODO (task 14 refinement)."""
+    session_uuid = request.state.session_uuid
+    _require_trading(session_uuid)
+    qp = request.query_params
+    q = (qp.get("q") or "").strip().lower()
+    types = set(t for t in (qp.get("type") or "").split(",") if t.strip())
+    side = (qp.get("side") or "both").strip()
+    owned_f = qp.get("owned")  # 'true' | 'false' | None
+    include_expired = (qp.get("include_expired") or "").strip().lower() in ("1", "true", "yes")
+    _, cc = _trading_char(session_uuid)
+    owned = set((cc.get("owned_quantities") or {}).keys())
+    blocked = set(get_db().list_blocks(session_uuid))
+    rows = []
+    if side in ("selling", "both"):
+        rows += get_db().all_open_listings(include_expired=include_expired)
+    if side in ("buying", "both"):
+        rows += get_db().all_wishlist_entries(include_expired=include_expired)
+    if side in ("selling", "both"):
+        rows += get_db().remote_objects("listing", include_expired=include_expired)
+    if side in ("buying", "both"):
+        rows += get_db().remote_objects("wishlist", include_expired=include_expired)
+
+    def keep(row):
+        if not row.get("trader"):
+            return False  # no-identity trader (both name fields blank) — unactionable
+        if row.get("trader") in blocked:
+            return False
+        it = row.get("item", {})
+        if q and q not in (it.get("slug", "")).lower():
+            return False
+        if types and it.get("type") not in types:
+            return False
+        if owned_f in ("true", "false"):
+            if (owned_f == "true") != (it.get("slug") in owned):
+                return False
+        return True
+
+    rows = [r for r in rows if keep(r)]
+
+    # "Upgrades for me" filter (FAC-gated: trading_upgrades_filter). Keep only
+    # SELL listings whose item is EXPLICITLY better than something the viewer
+    # owns, using simple static dominance (reduce owned to the non-self-
+    # dominated frontier per slot first; a listing qualifies iff it statically
+    # dominates >=1 owned frontier item in its slot). Buying rows (wishlists)
+    # are not acquirable, so they are dropped under this filter.
+    if (qp.get("upgrades") or "").strip().lower() in ("1", "true", "yes") \
+            and get_db().has_feature(session_uuid, "trading_upgrades_filter"):
+        try:
+            from ui.trading_upgrades import make_predicate
+            is_upgrade = make_predicate(_trading_owned_qualities(session_uuid))
+
+            def _is_upgrade_row(r):
+                if r.get("side") == "buying":
+                    return False
+                it = r.get("item", {}) or {}
+                return is_upgrade(it.get("slug", ""), it.get("quality", "") or "")
+
+            rows = [r for r in rows if _is_upgrade_row(r)]
+        except Exception as e:
+            log(f"upgrades filter failed (non-fatal): {e}", session_uuid)
+
+    rows.sort(key=lambda r: r.get("txn_id", 0), reverse=True)
+    return {"results": rows, "count": len(rows)}
+
+
+def _resolve_local_trader_uuid(db, qp, name):
+    """Resolve a LOCAL trader, preferring the unique trader_id (tid) query param.
+
+    Name resolution alone can't disambiguate two local records that share a
+    display name (e.g. one row with only in_game_name set, another with only
+    display_name set — the coalesced Browse handle points at whichever carries
+    the name, but resolve_trader_by_name matches in_game_name and can pick the
+    wrong record). When the caller passes the row's trader_id we use it directly.
+    """
+    tid = (qp.get("tid") or "").strip()
+    origin_prefix = f"{db._TRADING_ORIGIN}:"
+    if tid.startswith(origin_prefix):
+        uuid = tid[len(origin_prefix):] or None
+        if uuid and db.get_trader(uuid):
+            return uuid
+    # `name` may be a public handle (display_name) or a raw in_game_name — the
+    # handle resolver tries display_name first, then in_game_name.
+    return db.resolve_trader_by_handle(name) or db.resolve_trader_by_name(name)
+
+
+@app.get("/api/trading/traders/{name}")
+async def trading_trader_detail(name: str, request: Request):
+    session_uuid = request.state.session_uuid
+    _require_trading(session_uuid)
+    db = get_db()
+    site = (request.query_params.get("site") or "").strip()
+    is_remote = (request.query_params.get("remote") or "").strip().lower() in ("1", "true", "yes")
+
+    # objects — never a local same-named trader (don't conflate two sites).
+    if is_remote and site:
+        listings = [l for l in db.remote_objects("listing")
+                    if l.get("trader") == name and l.get("source_site") == site]
+        wishlist = [w for w in db.remote_objects("wishlist")
+                    if w.get("trader") == name and w.get("source_site") == site]
+        disp = next((r.get("display_name") for r in (listings + wishlist) if r.get("display_name")), name)
+        history = [h for h in db.recent_history(200)
+                   if name in (h.get("party_a"), h.get("party_b"))][:25]
+        return {"in_game_name": name, "display_name": disp, "contact_prefs": [],
+                "trader_id": None, "source_site": site, "remote": True,
+                "listings": listings, "wishlist": wishlist, "history": history}
+
+    target = _resolve_local_trader_uuid(db, request.query_params, name)
+    if not target:
+        raise HTTPException(status_code=404, detail="Trader not found")
+    t = db.get_trader(target)
+    tname = t["in_game_name"]
+    disp = t.get("display_name")
+    tid = t.get("trader_id")
+
+    # Public view of this LOCAL trader's rows: open + non-expired only, stamped
+    # with their identity so the Browse-style table can message/block them. No
+    # remote merge — same name on another site is a different person.
+    def _enrich(rows):
+        out = []
+        for r in rows:
+            if r.get("status") not in (None, "open") or r.get("is_expired"):
+                continue
+            r = dict(r)
+            r["trader"] = tname
+            r["display_name"] = disp
+            r["trader_id"] = tid
+            out.append(r)
+        return out
+
+    listings = _enrich(db.get_listings(target))
+    wishlist = _enrich(db.get_wishlist(target))
+    history = [h for h in db.recent_history(200)
+               if tname in (h.get("party_a"), h.get("party_b"))][:25]
+    return {"in_game_name": tname, "display_name": disp,
+            "contact_prefs": t["contact_prefs"], "trader_id": tid,
+            "source_site": None, "remote": False,
+            "listings": listings, "wishlist": wishlist, "history": history}
+
+
+def _trading_owned_slugs(session_uuid: str) -> dict:
+    """The caller's bank as {slug: qty} for qty>0, from char_config.owned_quantities
+    (the same owned source Browse's 'owned' filter uses)."""
+    _, cc = _trading_char(session_uuid)
+    oq = (cc or {}).get("owned_quantities") or {}
+    out = {}
+    for k, v in oq.items():
+        try:
+            q = int(v or 0)
+        except (TypeError, ValueError):
+            q = 0
+        if k and q > 0:
+            out[k] = q
+    return out
+
+
+def _slug_is_tradable(slug: str) -> bool:
+    """Best-effort tradability of a bare owned-slug using the authoritative
+    canBeTraded flags. Conservative: only returns False when a flag EXPLICITLY
+    marks the item non-tradable (so unknown slugs are never hidden). Used to
+    keep non-tradable items (e.g. 'cape_of_the_trailblazer') out of the compare
+    'their owned you don't own' bucket, which has only a slug (no type) to go on.
+    """
+    if not slug:
+        return True
+    try:
+        from util.autogenerated.item_trade_flags import ITEM_TRADE_FLAGS
+    except Exception:
+        return True
+    nid = str(slug).lower().replace(" ", "_").replace("(", "").replace(")", "").replace("-", "_").replace("'", "")
+    flags = ITEM_TRADE_FLAGS.get(slug) or ITEM_TRADE_FLAGS.get(nid)
+    if flags and flags.get("canBeTraded") is False:
+        return False
+    return True
+
+
+@app.get("/api/trading/traders/{name}/compare")
+async def trading_trader_compare(name: str, request: Request):
+    """Compare the viewer with a trader: their wishlist vs the viewer's bank,
+    listing/wishlist cross-matches both ways, and (only when the target is a
+    LOCAL trader who opted into inventory sharing) their owned items the viewer
+    lacks. Remote (federated) traders expose no bank, so that section is omitted."""
+    session_uuid = request.state.session_uuid
+    _require_trading(session_uuid)
+    db = get_db()
+    qp = request.query_params
+    site = (qp.get("site") or "").strip()
+    is_remote = (qp.get("remote") or "").strip().lower() in ("1", "true", "yes")
+
+    my_name, _ = _trading_char(session_uuid)
+    db.get_or_create_trader(session_uuid, my_name)
+    my_owned = _trading_owned_slugs(session_uuid)   # slug -> total qty (their-owned-you-lack)
+    my_oq = _trading_owned_qualities(session_uuid)  # slug -> {token: qty} (quality-aware fill)
+    from ui.trading import quality_matches as _quality_matches
+
+    def _open(rows):
+        return [r for r in rows
+                if r.get("status") in (None, "open") and not r.get("is_expired")]
+
+    def _slug(r):
+        return ((r.get("item") or {}).get("slug")) or r.get("item_slug")
+
+    def _itype(r):
+        return (r.get("item") or {}).get("type")
+
+    def _iquality(r):
+        return (r.get("item") or {}).get("quality")
+
+    my_listings = _open(db.get_listings(session_uuid))
+    my_wishlist = _open(db.get_wishlist(session_uuid))
+
+    their_owned = None            # {slug: qty} or None when unavailable
+    inv_reason = "no_data"
+    shares = False
+
+    if is_remote and site:
+        their_listings = [l for l in db.remote_objects("listing")
+                          if l.get("trader") == name and l.get("source_site") == site]
+        their_wishlist = [w for w in db.remote_objects("wishlist")
+                          if w.get("trader") == name and w.get("source_site") == site]
+        disp = next((r.get("display_name") for r in (their_listings + their_wishlist)
+                     if r.get("display_name")), name)
+        inv_reason = "remote"   # peers don't federate full inventory
+        target = {"name": name, "display_name": disp, "remote": True, "site": site, "trader_id": None}
+    else:
+        target_uuid = _resolve_local_trader_uuid(db, qp, name)
+        if not target_uuid:
+            raise HTTPException(status_code=404, detail="Trader not found")
+        t = db.get_trader(target_uuid)
+        their_listings = _open(db.get_listings(target_uuid))
+        their_wishlist = _open(db.get_wishlist(target_uuid))
+        shares = bool(t.get("share_inventory"))
+        if shares:
+            their_owned = _trading_owned_slugs(target_uuid)
+            inv_reason = "ok"
+        else:
+            inv_reason = "not_shared"
+        target = {"name": t["in_game_name"], "display_name": t.get("display_name"),
+                  "remote": False, "site": None, "trader_id": t.get("trader_id")}
+
+    their_want_set = {_slug(r) for r in their_wishlist if _slug(r)}
+    _ = their_want_set  # retained slug-set (unused by quality-aware matching below)
+
+    # Per-slug wishlist entries (not just slugs) so listing<->wishlist matches can
+    # honor the wishlist's quality rule/floor. A Normal listing must NOT satisfy an
+    # "Eternal+" (this_or_better, floor=eternal) wishlist, etc.
+    def _wish_by_slug(rows):
+        out = {}
+        for w in rows:
+            s = _slug(w)
+            if s:
+                out.setdefault(s, []).append(w)
+        return out
+
+    their_wish_by_slug = _wish_by_slug(their_wishlist)
+    my_wish_by_slug = _wish_by_slug(my_wishlist)
+
+    def _listing_satisfies_any(listing, wish_entries):
+        """True if the listing's quality satisfies at least one of the given
+        wishlist entries (same quality_matches semantics as the fillable bucket)."""
+        lq = _iquality(listing) or ""
+        ltype = _itype(listing) or ""
+        for w in (wish_entries or []):
+            if _quality_matches(lq, w.get("quality_rule") or "exact",
+                                 w.get("quality_floor") or "", ltype):
+                return True
+        return False
+
+    # Their wishlist entries the viewer can fill straight from their bank.
+    fillable = []
+    for w in their_wishlist:
+        s = _slug(w)
+        if not s:
+            continue
+        toks = my_oq.get(s) or {}
+        if not toks:
+            continue
+        rule = w.get("quality_rule") or "exact"
+        floor = w.get("quality_floor") or ""
+        wtype = _itype(w) or ""
+        # Only count owned items whose quality satisfies the wishlist (exact floor,
+        # or this-or-better) — so a Fine wishlist is only fillable from Fine+ stock,
+        # and "you have" reflects the matching-quality count, not the slug total.
+        match_qty = 0
+        for tok, q in toks.items():
+            try:
+                qi = int(q or 0)
+            except (TypeError, ValueError):
+                qi = 0
+            if qi <= 0:
+                continue
+            if _quality_matches(tok or "", rule, floor, wtype):
+                match_qty += qi
+        if match_qty > 0:
+            fillable.append({"slug": s, "type": wtype, "quality_rule": rule,
+                             "quality": floor,
+                             "want_qty": w.get("qty") or 1, "my_bank_qty": match_qty})
+
+    # Their listings whose quality satisfies one of MY wishlist entries for that slug.
+    they_sell_you_want = [{"slug": _slug(l), "type": _itype(l), "quality": _iquality(l),
+                           "price_coins": l.get("price_coins"), "qty": l.get("qty"),
+                           "object_id": l.get("object_id")}
+                          for l in their_listings
+                          if _slug(l) in my_wish_by_slug
+                          and _listing_satisfies_any(l, my_wish_by_slug.get(_slug(l)))]
+    # My listings whose quality satisfies one of THEIR wishlist entries for that slug.
+    you_sell_they_want = [{"slug": _slug(l), "type": _itype(l), "quality": _iquality(l),
+                           "price_coins": l.get("price_coins"), "qty": l.get("qty"),
+                           "object_id": l.get("object_id")}
+                          for l in my_listings
+                          if _slug(l) in their_wish_by_slug
+                          and _listing_satisfies_any(l, their_wish_by_slug.get(_slug(l)))]
+
+    their_owned_you_lack = None
+    if their_owned is not None:
+        their_owned_you_lack = [{"slug": s, "qty": q} for s, q in sorted(their_owned.items())
+                                if s not in my_owned and _slug_is_tradable(s)]
+
+    summary = {
+        "their_wishlist_total": len(their_wishlist),
+        "fillable_from_bank": len(fillable),
+        "their_listings_total": len(their_listings),
+        "they_sell_you_want": len(they_sell_you_want),
+        "you_sell_they_want": len(you_sell_they_want),
+        "their_owned_total": (len(their_owned) if their_owned is not None else None),
+        "their_owned_you_lack_count": (len(their_owned_you_lack) if their_owned_you_lack is not None else None),
+    }
+    return {
+        "target": target, "shares_inventory": shares,
+        "inventory_available": their_owned is not None, "inventory_reason": inv_reason,
+        "summary": summary,
+        "buckets": {
+            "fillable": fillable,
+            "they_sell_you_want": they_sell_you_want,
+            "you_sell_they_want": you_sell_they_want,
+            "their_owned_you_lack": their_owned_you_lack,
+        },
+    }
+
+
+# ---- In-app inbox / messaging (FAC-gated; functionality-first, UI is P2) ----
+
+_MSG_MAX_BYTES = 4000  # per-message body cap
+
+
+def _has_here_pref(contact_prefs) -> bool:
+    """True when the trader has in-app ('here') messaging enabled. Tolerant of
+    both the string form ('here') and the dict form ({type|method|channel:'here'}).
+    An explicit {enabled: false} sentinel on the 'here' entry means OFF. When
+    there is no 'here' entry at all, in-app is on ONLY for a brand-new trader
+    (empty prefs); a non-empty list without 'here' means the user removed it."""
+    prefs = contact_prefs or []
+    for p in prefs:
+        if isinstance(p, str):
+            if p.strip().lower() == "here":
+                return True
+            continue
+        if isinstance(p, dict):
+            v = (p.get("type") or p.get("method") or p.get("channel") or "")
+            is_here = (isinstance(v, str) and v.strip().lower() == "here") or (p.get("here") is True)
+            if is_here:
+                return p.get("enabled") is not False
+    return len(prefs) == 0
+
+
+@app.get("/api/trading/unread")
+async def trading_unread(request: Request):
+    """Unread count (messages + wishlist match alerts) for the badge. Polled."""
+    session_uuid = request.state.session_uuid
+    _require_trading(session_uuid)
+    return {"unread": get_db().unread_count(session_uuid)}
+
+
+@app.get("/api/trading/inbox")
+async def trading_inbox(request: Request):
+    """Inbox: conversation threads (counterpart, last message, per-thread unread),
+    wishlist match alerts, and the total unread badge count."""
+    session_uuid = request.state.session_uuid
+    _require_trading(session_uuid)
+    name, _ = _trading_char(session_uuid)
+    get_db().get_or_create_trader(session_uuid, name, create=False)
+    blocked = set(get_db().list_blocks(session_uuid))
+    threads = [t for t in get_db().list_threads(session_uuid, name)
+               if t.get("counterpart") not in blocked]
+    return {"threads": threads,
+            "unread": get_db().unread_count(session_uuid)}
+
+
+@app.get("/api/trading/match-alerts")
+async def trading_match_alerts(request: Request):
+    """Unread wishlist/listing match-alert counts + items, for the My Wishlist /
+    My Listings tab badges and the top-of-page 'new match' surfacing."""
+    session_uuid = request.state.session_uuid
+    _require_trading(session_uuid)
+    return get_db().match_alert_summary(session_uuid)
+
+
+@app.post("/api/trading/match-alerts/read")
+async def trading_match_alerts_read(request: Request):
+    """Mark match alerts read for a kind ('wishlist' | 'listing' | 'all') — called
+    when the user opens that tab, so the badge clears on visit (not on click)."""
+    session_uuid = request.state.session_uuid
+    _require_trading(session_uuid)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    kind = (body.get("kind") or "all").strip().lower()
+    cleared = 0
+    if kind in ("wishlist", "all"):
+        cleared += get_db().mark_wishlist_matches_read(session_uuid)
+    if kind in ("listing", "listings", "all"):
+        cleared += get_db().mark_listing_matches_read(session_uuid)
+    return {"cleared": cleared, **get_db().match_alert_summary(session_uuid)}
+
+
+@app.get("/api/trading/messages")
+async def trading_thread_messages(request: Request):
+    """Messages in one thread (oldest first). Reading a thread marks the caller's
+    inbound messages in it as read. 404 if the caller is not a participant."""
+    session_uuid = request.state.session_uuid
+    _require_trading(session_uuid)
+    thread_key = (request.query_params.get("thread") or "").strip()
+    if not thread_key:
+        raise HTTPException(status_code=400, detail="thread query param required")
+    name, _ = _trading_char(session_uuid)
+    msgs = get_db().get_thread_messages(session_uuid, name, thread_key)
+    if msgs is None:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    # Which message was the first still-unread inbound one (before we mark read) —
+    # the client scrolls it to the top so you land on the first thing you missed.
+    first_unread_idx = next((i for i, m in enumerate(msgs)
+                             if (m.get("mine") is False) and not m.get("read")), None)
+    get_db().mark_thread_read(session_uuid, thread_key)
+    for m in msgs:
+        if m.get("to_name") == name or (m.get("mine") is False):
+            m["read"] = True
+    about_oid = next((m.get("about_object_id") for m in msgs if m.get("about_object_id")), None)
+    about_item = get_db().object_item(about_oid) if about_oid else None
+    about_detail = get_db().object_detail(about_oid) if about_oid else None
+    # Is the thread about one of the CALLER's own open listings? If so the client
+    # offers a "Close out" shortcut straight to that listing's detail page.
+    about_mine = False
+    about_listing_id = None
+    if about_oid and ":L" in about_oid and about_detail and not about_detail.get("remote"):
+        try:
+            _lid = int(about_oid.split(":L", 1)[1])
+        except (ValueError, IndexError):
+            _lid = None
+        if _lid is not None and any(l.get("id") == _lid and l.get("status") in (None, "open")
+                                    for l in get_db().get_listings(session_uuid)):
+            about_mine = True
+            about_listing_id = _lid
+    return {"thread_key": thread_key, "messages": msgs,
+            "about_object_id": about_oid, "about_item": about_item, "about_detail": about_detail,
+            "about_mine": about_mine, "about_listing_id": about_listing_id,
+            "first_unread_idx": first_unread_idx}
+
+
+@app.post("/api/trading/messages")
+async def trading_send_message(request: Request):
+    """Send an in-app message to another trader.
+
+    LOCAL recipient (resolved by in_game_name): enforces recipient exists, has
+    in-app ('here') enabled, and isn't blocked by the sender.
+    REMOTE recipient (an explicit to_trader_id on another site, e.g. 'wsdb:...'):
+    the message is stored addressed to that trader and pushed to the peer on the
+    next federation sync (kind:'message' on the /sync stream) — we can't verify a
+    remote recipient's contact prefs, so those local checks are skipped."""
+    session_uuid = request.state.session_uuid
+    _require_trading(session_uuid)
+    name, _ = _trading_char(session_uuid)
+    sender = get_db().get_or_create_trader(session_uuid, name)
+    # A sender who has turned OFF in-app ('here') messaging can't send either —
+    # disabling it disables messaging in both directions.
+    if not _has_here_pref(sender.get("contact_prefs")):
+        raise HTTPException(status_code=403,
+                            detail="Enable “Here (in app messages)” in your trading settings to send messages.")
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    to_name = (body.get("to_name") or "").strip()
+    to_trader_id = (body.get("to_trader_id") or "").strip() or None
+    text = (body.get("body") or "").strip()
+    about = body.get("about_object_id") or None
+    if not to_name and not to_trader_id:
+        raise HTTPException(status_code=400, detail="to_name or to_trader_id required")
+    if not text:
+        raise HTTPException(status_code=400, detail="body required")
+    if len(text.encode("utf-8")) > _MSG_MAX_BYTES:
+        raise HTTPException(status_code=400, detail="message too long")
+    from_trader_id = sender.get("trader_id")
+    our_prefix = (from_trader_id or "").split(":")[0] + ":"
+    is_remote = bool(to_trader_id) and not to_trader_id.startswith(our_prefix)
+    if is_remote:
+        if to_name in set(get_db().list_blocks(session_uuid)):
+            raise HTTPException(status_code=403, detail="You have blocked this trader")
+        sent = get_db().post_message(
+            session_uuid, sender.get("in_game_name") or name, to_name or to_trader_id,
+            None, text, about_object_id=about, to_trader_id=to_trader_id,
+            from_trader_id=from_trader_id)
+        return {"ok": True, "message": sent, "remote": True}
+    # Local recipient path.
+    if to_name == (sender.get("in_game_name") or name):
+        raise HTTPException(status_code=400, detail="cannot message yourself")
+    if to_name in set(get_db().list_blocks(session_uuid)):
+        raise HTTPException(status_code=403, detail="You have blocked this trader")
+    to_uuid = get_db().resolve_trader_by_name(to_name)
+    if not to_uuid:
+        raise HTTPException(status_code=404, detail="Recipient not found")
+    recipient = get_db().get_trader(to_uuid)
+    if not _has_here_pref((recipient or {}).get("contact_prefs")):
+        raise HTTPException(status_code=403,
+                            detail="Recipient does not accept in-app messages")
+    sent = get_db().post_message(session_uuid, sender.get("in_game_name") or name,
+                                 to_name, to_uuid, text, about_object_id=about,
+                                 to_trader_id=(recipient or {}).get("trader_id"),
+                                 from_trader_id=from_trader_id)
+    # Fire a push notification to the recipient (best-effort, non-blocking).
+    try:
+        import asyncio
+        sender_label = sender.get("display_name") or sender.get("in_game_name") or name
+        preview = text if len(text) <= 120 else (text[:117] + "…")
+        about_item = get_db().object_item(about) if about else None
+        title = f"Message from {sender_label}"
+        if about_item and about_item.get("slug"):
+            title += f" about {str(about_item['slug']).replace('_', ' ').title()}"
+        asyncio.create_task(_push_to_session(to_uuid, title, preview, thread=(sent or {}).get("thread_key")))
+    except Exception:
+        pass
+    return {"ok": True, "message": sent}
+
+
+@app.post("/api/trading/messages/read")
+async def trading_mark_read(request: Request):
+    """Mark messages read. With a {thread} body, scope to that thread; otherwise
+    mark ALL inbound messages + match alerts read."""
+    session_uuid = request.state.session_uuid
+    _require_trading(session_uuid)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    thread_key = (body or {}).get("thread")
+    if thread_key:
+        n = get_db().mark_thread_read(session_uuid, str(thread_key).strip())
+    else:
+        n = get_db().mark_messages_read(session_uuid)
+    return {"ok": True, "marked": n, "unread": get_db().unread_count(session_uuid)}
+
+
+@app.get("/api/trading/blocks")
+async def trading_list_blocks(request: Request):
+    """List the in-game names the caller has blocked (hidden/muted)."""
+    session_uuid = request.state.session_uuid
+    _require_trading(session_uuid)
+    return {"blocks": get_db().list_blocks(session_uuid)}
+
+
+@app.post("/api/trading/blocks")
+async def trading_add_block(request: Request):
+    """Block a trader by in_game_name: hides their listings/wishlists from the
+    caller's browse/search + item views, hides their inbox threads, drops them
+    from the unread badge, and prevents the caller from messaging them."""
+    session_uuid = request.state.session_uuid
+    _require_trading(session_uuid)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    name = (body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name required")
+    me, _ = _trading_char(session_uuid)
+    if name == me:
+        raise HTTPException(status_code=400, detail="cannot block yourself")
+    get_db().add_block(session_uuid, name)
+    return {"ok": True, "blocks": get_db().list_blocks(session_uuid)}
+
+
+@app.delete("/api/trading/blocks/{name}")
+async def trading_remove_block(name: str, request: Request):
+    """Unblock a trader by in_game_name."""
+    session_uuid = request.state.session_uuid
+    _require_trading(session_uuid)
+    get_db().remove_block(session_uuid, (name or "").strip())
+    return {"ok": True, "blocks": get_db().list_blocks(session_uuid)}
 
 
 # ============================================================================
@@ -11739,17 +15145,14 @@ _NOTE_MAX_COUNT = 200          # soft cap on notes per session
 
 
 def _require_notepad(session_uuid: str):
-    """Raise HTTPException(403) unless the notepad flag is enabled (ACTIONS only)."""
-    if not get_db().has_feature(session_uuid, 'notepad'):
-        raise HTTPException(status_code=403, detail="Notepad is not enabled for this session")
+    """Notepad is released to all users (beta); retained as a no-op for call sites."""
+    return
 
 
 @app.get("/api/notes")
 async def notes_list(request: Request):
     """List the session's notes. Benign 200 when the feature is off (polled on open)."""
     session_uuid = request.state.session_uuid
-    if not get_db().has_feature(session_uuid, 'notepad'):
-        return {"enabled": False, "notes": [], "selected_note_id": None}
     return {
         "enabled": True,
         "notes": get_db().list_notes(session_uuid),
@@ -11761,8 +15164,6 @@ async def notes_list(request: Request):
 async def notes_get(note_id: str, request: Request):
     """Return one note's full content. Benign 200 when the feature is off."""
     session_uuid = request.state.session_uuid
-    if not get_db().has_feature(session_uuid, 'notepad'):
-        return {"enabled": False, "note": None}
     note = get_db().get_note(session_uuid, note_id)
     if not note:
         raise HTTPException(status_code=404, detail="Note not found")
@@ -11971,9 +15372,10 @@ async def get_version():
                 "commit_date": commit_date,
                 "commit_relative": commit_relative,
                 "commit_hash": commit_hash,
+                "data_version": DATA_VERSION,
                 "last_updated": f"{commit_date} ({commit_relative})" if commit_relative else commit_date
             }
-        return {"version": "1.0.0", "error": "Version info unavailable"}
+        return {"version": "1.0.0", "data_version": DATA_VERSION, "error": "Version info unavailable"}
 
     try:
         git_dir = Path(__file__).parent.parent
@@ -12009,6 +15411,7 @@ async def get_version():
             "commit_date": commit_date,
             "commit_relative": commit_relative,
             "commit_hash": commit_hash,
+            "data_version": DATA_VERSION,
             "last_updated": f"{commit_date} ({commit_relative})"
         }
     except Exception as e:
@@ -12214,6 +15617,8 @@ def _default_travel_config() -> Dict[str, Any]:
         "ring_of_homesickness": True,
         "show_exception_routes": False,
         "show_movement_activities": False,
+        "optimize_pets": False,
+        "optimize_consumables": False,
         "panel_splits": {
             "travel_split_desktop": 33,
             "travel_split_mobile_portrait": 50,
@@ -12302,6 +15707,11 @@ class TravelOptimizeSimpleRequest(BaseModel):
     # client can run the travel optimizer in Pyodide and POST the result back to
     # /api/travel/optimize/local-result.
     run_local: Optional[bool] = False
+    # Optional: Part 3 "temporarily enable all stats" override — force every
+    # custom-stat gate satisfied for this run (non-destructive; per-run copy).
+    all_custom_stats_enabled: Optional[bool] = False
+    # Part: "Unlock all" — treat every item/stat as fully unlocked (max attrs).
+    unlock_all: Optional[bool] = False
 
 
 @app.post("/api/travel/optimize")
@@ -12392,6 +15802,20 @@ async def start_travel_optimize_simple(
     # worker builds owned candidate pools and the optimizer equips the best one.
     run_ui_config["include_pets"] = bool(data.include_pets)
     run_ui_config["include_consumables"] = bool(data.include_consumables)
+    # Part 3: force all custom-stat gates satisfied for this run when the
+    # "temporarily enable all stats" override is on. Non-destructive — operates
+    # on the per-run run_ui_config copy, leaving the stored session untouched.
+    if data.all_custom_stats_enabled or data.unlock_all:
+        from util.custom_stats_catalog import apply_all_stats_override
+        run_ui_config["custom_stats"] = apply_all_stats_override(
+            run_ui_config.get("custom_stats"), True)
+
+    # "Unlock all": max the character's gating attributes (AP/reputation/skills/
+    # steps/wealth) for this run so every item is equippable and gated stats
+    # resolve at max. Per-run copy — the stored session is untouched.
+    if data.unlock_all:
+        from util.unlock_all import apply_unlock_all_to_character_config
+        character_config = apply_unlock_all_to_character_config(character_config)
 
     # Derive a unique task_key so the popup flow doesn't collide with the main
     # Travel tab's running optimization for the same start/end pair.
@@ -12509,6 +15933,7 @@ async def travel_optimize_local_result(request: Request, data: TravelLocalResult
         "gearsets": response_data.get("gearsets"),
         "alternatives": response_data.get("alternatives"),
         "locked_alternatives": response_data.get("locked_alternatives"),
+        "hidden_alternatives": response_data.get("hidden_alternatives"),
     }
 
     _travel_optimization_tasks.setdefault(session_uuid, {})[task_key] = {
@@ -12538,6 +15963,8 @@ async def travel_optimize_local_result(request: Request, data: TravelLocalResult
                 slots_json["_locked_alternatives"] = task_result["locked_alternatives"]
             if task_result.get("alternatives") is not None:
                 slots_json["_alternatives"] = task_result["alternatives"]
+            if task_result.get("hidden_alternatives") is not None:
+                slots_json["_hidden_alternatives"] = task_result["hidden_alternatives"]
             # Optimizer-chosen pet / consumable (Optimize-among-owned) ride in
             # slots_json so loadGearSet's extraSlots merge equips them.
             if isinstance(task_result.get("pet"), dict) and task_result["pet"].get("name"):
@@ -12695,6 +16122,17 @@ class TravelOptimizeRequest(BaseModel):
     locked_slots: Optional[dict] = None
     from_location: Optional[str] = None  # For flipped cross-region routes
     to_location: Optional[str] = None    # For flipped cross-region routes
+    # Part 3 "temporarily enable all stats" override (non-destructive, per-run).
+    all_custom_stats_enabled: Optional[bool] = False
+    # "Unlock all" — treat every item/stat as fully unlocked (max attributes).
+    unlock_all: Optional[bool] = False
+    # Item 3: per-travel-config "Optimize Pets / Consumables" toggles. When set,
+    # the worker builds owned candidate pools and the optimizer equips the best
+    # pet/consumable for the route instead of pinning the equipped one.
+    include_pets: Optional[bool] = False
+    include_consumables: Optional[bool] = False
+    # Phase B: compute non-owned/locked slot alternatives for the slot popup.
+    show_non_owned_alternatives: Optional[bool] = False
 
 
 @app.post("/api/travel-config/optimize")
@@ -12784,6 +16222,25 @@ async def start_travel_optimization(
         ui_config = dict(ui_config) if ui_config else {}
         ui_config['lock_current_gear_slots'] = True
         ui_config['locked_slots_data'] = data.locked_slots
+
+    # Part 3: force all custom-stat gates satisfied for this run (per-run copy).
+    if data.all_custom_stats_enabled or data.unlock_all:
+        from util.custom_stats_catalog import apply_all_stats_override
+        ui_config = dict(ui_config) if ui_config else {}
+        ui_config['custom_stats'] = apply_all_stats_override(ui_config.get('custom_stats'), True)
+
+    # "Unlock all": max the character's gating attributes for this run.
+    if data.unlock_all:
+        from util.unlock_all import apply_unlock_all_to_character_config
+        character_config = apply_unlock_all_to_character_config(character_config)
+
+    # Item 3: forward the per-travel-config pet/consumable optimization toggles
+    # to the worker (which reads ui_config.include_pets / include_consumables and
+    # builds owned candidate pools). Copy first so we never mutate the session.
+    ui_config = dict(ui_config) if ui_config else {}
+    ui_config['include_pets'] = bool(data.include_pets)
+    ui_config['include_consumables'] = bool(data.include_consumables)
+    ui_config['show_non_owned_alternatives'] = bool(data.show_non_owned_alternatives)
 
     background_tasks.add_task(
         _run_travel_optimization_background,
@@ -13138,6 +16595,30 @@ def _enrich_session_data_with_regions(session_data: Optional[Dict[str, Any]]) ->
     return {**session_data, "region_unlocks": region_unlocks, "locked_locations": list(locked_locations)}
 
 
+def _enrich_ct_session_with_custom_stats(session_data, session):
+    """Merge ui_config-only fields the crafting-tree DISPLAY needs into
+    session_data — currently `custom_stats`.
+
+    custom_stats (region-explored toggles, activity-completion flags, etc.)
+    live in ui_config, but the display stat path
+    (calculate_tree -> calculate_node_metrics -> _decode_gearset_stats) only
+    receives character_config-derived session_data. Without custom_stats it
+    can't evaluate explore_realm / access_region / activity_completion gates,
+    so gated gear (e.g. Quickdraw map's +16% WE / +4% DA, unlocked by exploring
+    Wallisia) silently loses its bonus in the node stats — while the optimizer,
+    which is handed ui_config separately, credits it (bug 64eae6fa). Also flows
+    to the run_local (Pyodide) payload since that returns session_data verbatim.
+    """
+    if session_data is None:
+        return session_data
+    ui_config = (session or {}).get("ui_config")
+    if isinstance(ui_config, dict):
+        custom_stats = ui_config.get("custom_stats")
+        if custom_stats is not None:
+            session_data["custom_stats"] = custom_stats
+    return session_data
+
+
 # _auto_pick_input_items_for_activity moved to ui/crafting_tree_optimize.py
 # (shared with the local Pyodide path); nothing else in app.py uses it.
 
@@ -13170,6 +16651,7 @@ async def crafting_tree_build(request: Request):
         if not session:
             raise HTTPException(status_code=401, detail="Invalid or expired session")
         session_data = _enrich_session_data_with_regions(session.get("character_config"))
+        session_data = _enrich_ct_session_with_custom_stats(session_data, session)
 
     from ui.crafting_tree import build_crafting_tree, _load_game_data
     game_data = _load_game_data()
@@ -13228,6 +16710,7 @@ async def crafting_tree_calculate(request: Request):
         if not session:
             raise HTTPException(status_code=401, detail="Invalid or expired session")
         session_data = _enrich_session_data_with_regions(session.get("character_config"))
+        session_data = _enrich_ct_session_with_custom_stats(session_data, session)
         # Inject the LP feature-flag decision so calculate_tree can run the LP.
         lp_enabled = get_db().has_feature(session_uuid, "crafting_tree_lp")
         if session_data is None:
@@ -13273,6 +16756,7 @@ async def crafting_tree_aggregate_summary(request: Request):
         if not session:
             raise HTTPException(status_code=401, detail="Invalid or expired session")
         session_data = _enrich_session_data_with_regions(session.get("character_config"))
+        session_data = _enrich_ct_session_with_custom_stats(session_data, session)
         # Note: we deliberately do NOT inject _lp_enabled here. The
         # rerun-summary path ignores the LP solver regardless.
         if session_data is None:
@@ -13315,6 +16799,7 @@ async def crafting_tree_source_change(request: Request):
         if not session:
             raise HTTPException(status_code=401, detail="Invalid or expired session")
         session_data = _enrich_session_data_with_regions(session.get("character_config"))
+        session_data = _enrich_ct_session_with_custom_stats(session_data, session)
 
     from ui.crafting_tree import on_source_change, _load_game_data
     game_data = _load_game_data()
@@ -13347,6 +16832,7 @@ async def crafting_tree_material_group_change(request: Request):
         if not session:
             raise HTTPException(status_code=401, detail="Invalid or expired session")
         session_data = _enrich_session_data_with_regions(session.get("character_config"))
+        session_data = _enrich_ct_session_with_custom_stats(session_data, session)
 
     from ui.crafting_tree import on_material_group_change, _load_game_data
     game_data = _load_game_data()
@@ -13360,6 +16846,31 @@ async def crafting_tree_material_group_change(request: Request):
 
 
 _crafting_tree_optimization_tasks: Dict[str, dict] = {}
+
+
+def _crafting_tree_has_ambiguous_best_nodes(nodes, global_settings, node_ids=None):
+    """True if any in-scope, auto-mode Best(auto) node has >= 2 candidate
+    routes (bug d9272bd4). Mirrors the route-resolution loop's own gate in
+    ui.crafting_tree_optimize.optimize_crafting_tree so the run_local handshake
+    routes exactly the trees that would trigger the expensive route trials to
+    the native server path instead of the browser."""
+    try:
+        from ui.crafting_tree import route_candidates as _rc
+    except Exception:
+        return False
+    skip_shops = bool((global_settings or {}).get("skip_shops", True))
+    skip_chests = bool((global_settings or {}).get("skip_chests", True))
+    scope = set(node_ids) if node_ids else None
+    for n in (nodes or []):
+        if n.get("source_type") != "best":
+            continue
+        if (n.get("gear_config", {}) or {}).get("mode") != "auto":
+            continue
+        if scope is not None and n.get("node_id") not in scope:
+            continue
+        if len(_rc(n.get("available_sources") or [], skip_shops=skip_shops, skip_chests=skip_chests)) >= 2:
+            return True
+    return False
 
 
 @app.post("/api/crafting-tree/optimize")
@@ -13387,6 +16898,15 @@ async def crafting_tree_optimize(request: Request, background_tasks: BackgroundT
         if not session:
             raise HTTPException(status_code=401, detail="Invalid or expired session")
 
+    # FAC gate: the exact bottom-up optimizer (global_settings['exact_tree']) is
+    # only honored for sessions holding the 'crafting_tree_exact' feature. Strip
+    # it here (before the local-Pyodide handshake and the server task) so a
+    # crafted request from a non-FAC user can't run it on either path.
+    if global_settings.get("exact_tree") and not (
+        session_uuid and get_db().has_feature(session_uuid, "crafting_tree_exact")
+    ):
+        global_settings = {**global_settings, "exact_tree": False}
+
     import os
     optimization_id = os.urandom(8).hex()
 
@@ -13407,6 +16927,48 @@ async def crafting_tree_optimize(request: Request, background_tasks: BackgroundT
     # existing optimize-status poll. The task dict (status=running) set above
     # lets the poll work immediately while the browser computes.
     if run_local and session_uuid and get_db().has_feature(session_uuid, 'local_optimization'):
+        # Bug d9272bd4: Best(auto) route resolution re-optimizes every candidate
+        # route's subtree. On the in-browser (Pyodide) path each trial is a real
+        # per-node optimize, and a tree with route-ambiguous Best(auto) nodes
+        # (e.g. a material sourced from 15 chests/activities) blows past the
+        # 120s poll budget on mobile. Route resolution is the heavy combinatorial
+        # part and MUST run natively — so when the in-scope tree has any
+        # route-ambiguous Best(auto) node, run the WHOLE optimize on the server
+        # (fast, and identical logic via the shared core). Trees with no route
+        # ambiguity still run fully in the browser (the intended offload case).
+        if _crafting_tree_has_ambiguous_best_nodes(nodes, global_settings, node_ids):
+            log("[crafting-tree/optimize] run_local requested but tree has "
+                "route-ambiguous Best(auto) nodes — running on server instead "
+                "(route resolution can't finish in Pyodide on mobile)", session_uuid)
+            background_tasks.add_task(
+                _run_crafting_tree_optimization,
+                session_uuid, nodes, global_settings, node_ids, depth_optimize
+            )
+            return {"optimization_id": optimization_id}
+
+        # Bug 8a2a98f3: the exact bottom-up solver lives in
+        # ui.crafting_tree_exact_driver, which is NOT part of the Pyodide
+        # bundle. In the browser its import raises ModuleNotFoundError, so
+        # optimize_crafting_tree silently falls back to the per-node heuristic —
+        # which optimizes each recipe node in ISOLATION (no downstream material
+        # weighting m0), picking low-NMC gear that needs more of an expensive
+        # child material. The user-visible symptom: Best(auto) resolves on the
+        # server (real exact, e.g. 3180 steps) but a plain re-optimize of the
+        # now-pinned recipe runs locally and DEGRADES to the heuristic result
+        # (e.g. 4004). Exact is a bottom-up, whole-tree solve anyway (not the
+        # per-node offload the local path is built for), so route it to the
+        # server unconditionally — same treatment as ambiguous Best(auto) nodes.
+        if global_settings.get("exact_tree"):
+            log("[crafting-tree/optimize] run_local requested but exact_tree is "
+                "on — running on server instead (exact driver is not in the "
+                "Pyodide bundle; local would silently fall back to heuristic)",
+                session_uuid)
+            background_tasks.add_task(
+                _run_crafting_tree_optimization,
+                session_uuid, nodes, global_settings, node_ids, depth_optimize
+            )
+            return {"optimization_id": optimization_id}
+
         session_data = session.get("character_config") if session else None
         ui_config = session.get("ui_config", {}) if session else {}
         log("[crafting-tree/optimize] run_local — returning session payload to client", session_uuid)
@@ -13424,6 +16986,39 @@ async def crafting_tree_optimize(request: Request, background_tasks: BackgroundT
     )
 
     return {"optimization_id": optimization_id}
+
+
+@app.post("/api/crafting-tree/optimize-cancel")
+async def crafting_tree_optimize_cancel(request: Request):
+    """Cancel the in-flight crafting-tree optimization for this session.
+
+    The crafting-tree optimizer runs as an in-process background task that
+    optimizes nodes sequentially (server: per-node subprocess; local: Pyodide),
+    tracked in _crafting_tree_optimization_tasks. Unlike the activity/travel
+    optimizer there is no single long-lived worker PID to SIGTERM, so we
+    cooperatively cancel: set task["cancelled"], which the shared core
+    (ui.crafting_tree_optimize.optimize_crafting_tree) checks at each node
+    boundary and then breaks, marking status="cancelled". The next
+    optimize-status poll sees that and unsticks the UI.
+
+    Body: {session_uuid: str}
+    Returns: {cancelled: bool, had_task: bool}
+    """
+    body = await request.json()
+    session_uuid = body.get("session_uuid") or request.state.session_uuid
+    if not session_uuid:
+        raise HTTPException(status_code=400, detail="session_uuid is required")
+
+    task = _crafting_tree_optimization_tasks.get(session_uuid)
+    had_task = task is not None and task.get("status") == "running"
+    if task is not None:
+        # Flag for the core loop AND flip status now so a poll that races in
+        # before the loop hits its next node boundary still reports cancelled.
+        task["cancelled"] = True
+        if task.get("status") == "running":
+            task["status"] = "cancelled"
+    log(f"Crafting-tree optimize cancel requested (had_task={had_task})", session_uuid)
+    return {"cancelled": True, "had_task": had_task}
 
 
 @app.get("/api/crafting-tree/optimize-status")
@@ -13456,7 +17051,15 @@ async def crafting_tree_optimize_status(request: Request):
         # sent on completion to keep in-progress polls lightweight.
         if task.get("status") == "complete" and task.get("final_nodes") is not None:
             resp["nodes"] = task.get("final_nodes")
-        return resp
+        # Node metrics can contain inf/nan (e.g. an unresolvable shop-only
+        # Best(auto) node under skip_shops has steps_per_item = inf). FastAPI's
+        # JSON encoder rejects those ("Out of range float values are not JSON
+        # compliant") — and that failure happens AFTER this return, so the
+        # try/except below can't catch it. The result: the completion poll
+        # 500s forever and the client hangs ("optimization never finishes"),
+        # bug d9272bd4. Sanitize inf/nan -> null before returning, matching
+        # what /crafting-tree/calculate already does.
+        return _sanitize_for_json(resp)
     except Exception as e:
         return {"status": "error", "completed_nodes": [], "pending": 0, "error": str(e)}
 
@@ -13550,6 +17153,338 @@ async def delete_saved_crafting_tree(tree_id: str, request: Request):
     return {"success": True}
 
 
+# ============================================================================
+# ITEM UPGRADES TRACKER (FAC-gated: upgrades_tracker; spec .kiro/specs/item-upgrades-tracker/)
+# ============================================================================
+
+def _upgrades_tracker_enabled(session_uuid: str) -> bool:
+    try:
+        return bool(session_uuid) and get_db().has_feature(session_uuid, 'upgrades_tracker')
+    except Exception:
+        return False
+
+
+@app.get("/api/upgrades-tracker/working")
+async def get_upgrades_tracker_working(request: Request):
+    """Return the session's working-draft tracker. Benign empty (200) when disabled."""
+    session_uuid = request.query_params.get("session_uuid")
+    if not _upgrades_tracker_enabled(session_uuid):
+        return {"entries": []}
+    return get_db().get_working_tracker(session_uuid)
+
+
+@app.put("/api/upgrades-tracker/working")
+async def put_upgrades_tracker_working(request: Request):
+    """Replace the session's working-draft tracker entries."""
+    body = await request.json()
+    session_uuid = body.get("session_uuid")
+    if not _upgrades_tracker_enabled(session_uuid):
+        raise HTTPException(status_code=403, detail="Item Upgrades Tracker not enabled")
+    entries = body.get("entries", [])
+    get_db().save_working_tracker(session_uuid, entries)
+    return {"success": True}
+
+
+@app.get("/api/upgrades-tracker/list")
+async def list_upgrades_trackers(request: Request):
+    """List saved trackers. Benign empty (200) when disabled."""
+    session_uuid = request.query_params.get("session_uuid")
+    if not _upgrades_tracker_enabled(session_uuid):
+        return {"trackers": []}
+    return {"trackers": get_db().list_trackers(session_uuid)}
+
+
+@app.post("/api/upgrades-tracker/save")
+async def save_upgrades_tracker(request: Request):
+    """Create or overwrite a named tracker."""
+    body = await request.json()
+    session_uuid = body.get("session_uuid")
+    if not _upgrades_tracker_enabled(session_uuid):
+        raise HTTPException(status_code=403, detail="Item Upgrades Tracker not enabled")
+    name = (body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name required")
+    entries = body.get("entries", [])
+    tracker_id = get_db().save_tracker(session_uuid, name, entries, body.get("id"))
+    return {"id": tracker_id, "name": name}
+
+
+@app.get("/api/upgrades-tracker/load/{tracker_id}")
+async def load_upgrades_tracker(tracker_id: str, request: Request):
+    """Load a saved tracker."""
+    session_uuid = request.query_params.get("session_uuid")
+    if not _upgrades_tracker_enabled(session_uuid):
+        raise HTTPException(status_code=403, detail="Item Upgrades Tracker not enabled")
+    result = get_db().load_tracker(tracker_id, session_uuid)
+    if not result:
+        raise HTTPException(status_code=404, detail="Tracker not found")
+    return result
+
+
+@app.delete("/api/upgrades-tracker/{tracker_id}")
+async def delete_upgrades_tracker(tracker_id: str, request: Request):
+    """Delete a saved tracker."""
+    session_uuid = request.query_params.get("session_uuid")
+    if not _upgrades_tracker_enabled(session_uuid):
+        raise HTTPException(status_code=403, detail="Item Upgrades Tracker not enabled")
+    if not get_db().delete_tracker(tracker_id, session_uuid):
+        raise HTTPException(status_code=404, detail="Tracker not found")
+    return {"success": True}
+
+
+# ============================================================================
+# BANK LAYOUT SIMULATOR (FAC-gated: bank_layouts; spec .kiro/BANK_LAYOUT_SPEC.md)
+# ============================================================================
+
+_BANK_KILL_SWITCH_KEY = "community_search_enabled"
+
+
+def _require_bank(session_uuid: str):
+    """Bank Layouts is released to all users (beta); retained as a no-op for call sites."""
+    return
+
+
+def _bank_community_search_enabled() -> bool:
+    """Global kill switch (durable). Defaults ON when unset."""
+    return get_db().get_bank_config(_BANK_KILL_SWITCH_KEY, "1") != "0"
+
+
+def _bank_search_text(name: str, tabs: list) -> str:
+    """Build the searchable text for a shared layout: name + tab/category names + filter values."""
+    parts = [name or ""]
+    for tab in (tabs or []):
+        parts.append(tab.get("name", ""))
+        for f in (tab.get("filters", []) or []):
+            parts.append(str(f.get("value", "")))
+        for cat in (tab.get("categories", []) or []):
+            parts.append(cat.get("name", ""))
+            for f in (cat.get("filters", []) or []):
+                parts.append(str(f.get("value", "")))
+    return " ".join(p for p in parts if p).lower()
+
+
+@app.get("/api/bank/layouts")
+async def bank_list_layouts(request: Request):
+    """List the session's own bank layouts. Benign empty 200 when disabled (polled)."""
+    session_uuid = request.state.session_uuid
+    return {"layouts": get_db().list_bank_layouts(session_uuid)}
+
+
+@app.post("/api/bank/layouts")
+async def bank_create_layout(request: Request):
+    """Create a new bank layout (action)."""
+    session_uuid = request.state.session_uuid
+    _require_bank(session_uuid)
+    body = await request.json()
+    name = (body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name required")
+    layout_id = get_db().create_bank_layout(
+        session_uuid, name, body.get("tabs", []), body.get("settings", {}))
+    return {"id": layout_id, "name": name}
+
+
+@app.get("/api/bank/layouts/{layout_id}")
+async def bank_load_layout(layout_id: str, request: Request):
+    """Load one of the session's own layouts."""
+    session_uuid = request.state.session_uuid
+    _require_bank(session_uuid)
+    result = get_db().load_bank_layout(layout_id, session_uuid)
+    if not result:
+        raise HTTPException(status_code=404, detail="Layout not found")
+    return result
+
+
+@app.put("/api/bank/layouts/{layout_id}")
+async def bank_update_layout(layout_id: str, request: Request):
+    """Update an owned layout (action)."""
+    session_uuid = request.state.session_uuid
+    _require_bank(session_uuid)
+    body = await request.json()
+    name = (body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name required")
+    updated = get_db().update_bank_layout(
+        layout_id, session_uuid, name, body.get("tabs", []), body.get("settings", {}))
+    if not updated:
+        raise HTTPException(status_code=404, detail="Layout not found or not editable")
+    return {"success": True}
+
+
+@app.delete("/api/bank/layouts/{layout_id}")
+async def bank_delete_layout(layout_id: str, request: Request):
+    """Delete an owned layout (action)."""
+    session_uuid = request.state.session_uuid
+    _require_bank(session_uuid)
+    if not get_db().delete_bank_layout(layout_id, session_uuid):
+        raise HTTPException(status_code=404, detail="Layout not found")
+    return {"success": True}
+
+
+@app.post("/api/bank/layouts/{layout_id}/share")
+async def bank_share_layout(layout_id: str, request: Request):
+    """Publish/unpublish an owned layout to the community (action)."""
+    session_uuid = request.state.session_uuid
+    _require_bank(session_uuid)
+    body = await request.json()
+    shared = bool(body.get("shared", True))
+    search_text = ""
+    if shared:
+        layout = get_db().load_bank_layout(layout_id, session_uuid)
+        if not layout:
+            raise HTTPException(status_code=404, detail="Layout not found")
+        search_text = _bank_search_text(layout.get("name", ""), layout.get("tabs", []))
+    share_id = get_db().set_bank_share(layout_id, session_uuid, shared, search_text)
+    return {"shared": shared, "share_id": share_id}
+
+
+@app.get("/api/bank/community")
+async def bank_community_search(request: Request):
+    """Search shared community layouts (anonymous). Respects the global kill switch.
+    Benign empty 200 when the feature is disabled for the session (polled)."""
+    session_uuid = request.state.session_uuid
+    if not _bank_community_search_enabled():
+        return {"layouts": [], "search_enabled": False}
+    query = request.query_params.get("query", "")
+    return {"layouts": get_db().list_community_bank_layouts(query), "search_enabled": True}
+
+
+@app.get("/api/bank/community/{share_id}")
+async def bank_community_load(share_id: str, request: Request):
+    """Load a shared layout read-only + anonymous (action-adjacent; requires feature)."""
+    session_uuid = request.state.session_uuid
+    _require_bank(session_uuid)
+    if not _bank_community_search_enabled():
+        raise HTTPException(status_code=403, detail="Community sharing is currently disabled")
+    result = get_db().load_community_bank_layout(share_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Shared layout not found")
+    return result
+
+
+@app.post("/api/bank/community/{share_id}/copy")
+async def bank_community_copy(share_id: str, request: Request):
+    """Fork a shared layout into a new editable 'user' layout (action)."""
+    session_uuid = request.state.session_uuid
+    _require_bank(session_uuid)
+    body = await request.json()
+    new_id = get_db().copy_community_bank_layout(share_id, session_uuid, (body.get("name") or "").strip())
+    if not new_id:
+        raise HTTPException(status_code=404, detail="Shared layout not found")
+    return {"id": new_id}
+
+
+@app.get("/api/bank/item-history")
+async def bank_get_item_history(request: Request):
+    """Return the session's placeholder-history store. Benign empty 200 when disabled."""
+    session_uuid = request.state.session_uuid
+    return {"history": get_db().get_bank_item_history(session_uuid)}
+
+
+@app.put("/api/bank/item-history")
+async def bank_set_item_history(request: Request):
+    """Upsert placeholder-history placements (action)."""
+    session_uuid = request.state.session_uuid
+    _require_bank(session_uuid)
+    body = await request.json()
+    get_db().set_bank_item_history(session_uuid, body.get("placements", []))
+    return {"success": True}
+
+
+@app.get("/api/bank/working-layout")
+async def bank_get_working_layout(request: Request):
+    """Return the session's in-progress (unsaved) working layout so the same session
+    can resume it on any device. Benign empty 200 when the feature is disabled."""
+    session_uuid = request.state.session_uuid
+    return {"working": get_db().get_bank_working_layout(session_uuid)}
+
+
+@app.put("/api/bank/working-layout")
+async def bank_set_working_layout(request: Request):
+    """Upsert the session's in-progress working layout (per-session, cross-device)."""
+    session_uuid = request.state.session_uuid
+    _require_bank(session_uuid)
+    body = await request.json()
+    layout = body.get("layout")
+    if not isinstance(layout, dict) or not isinstance(layout.get("tabs"), list):
+        raise HTTPException(status_code=400, detail="invalid layout")
+    get_db().set_bank_working_layout(session_uuid, layout, body.get("currentId"))
+    return {"success": True}
+
+
+@app.get("/api/topbar-layout")
+async def topbar_get_layout(request: Request):
+    """Return the session's saved top-bar customization layout. Released to all users."""
+    session_uuid = request.state.session_uuid
+    return {"layout": get_db().get_topbar_layout(session_uuid)}
+
+
+@app.put("/api/topbar-layout")
+async def topbar_set_layout(request: Request):
+    """Upsert the session's top-bar customization layout (per-session, cross-device)."""
+    session_uuid = request.state.session_uuid
+    body = await request.json()
+    layout = body.get("layout")
+    if not isinstance(layout, dict):
+        raise HTTPException(status_code=400, detail="invalid layout")
+    get_db().set_topbar_layout(session_uuid, layout)
+    return {"success": True}
+
+
+@app.delete("/api/topbar-layout")
+async def topbar_reset_layout(request: Request):
+    """Reset the session's top-bar layout to default (removes the saved row)."""
+    session_uuid = request.state.session_uuid
+    get_db().delete_topbar_layout(session_uuid)
+    return {"success": True}
+
+
+
+
+_BANK_ICON_INDEX_CACHE = None
+
+
+def _build_bank_icon_index():
+    """Index every servable SVG for the icon picker: curated assets/icons/** plus
+    the wiki dump (served at /wiki-icons). Deduped by display name (curated wins).
+    Cached in-process."""
+    global _BANK_ICON_INDEX_CACHE
+    if _BANK_ICON_INDEX_CACHE is not None:
+        return _BANK_ICON_INDEX_CACHE
+    import os
+    icons, seen = [], set()
+    for url_prefix, root in (("/assets/icons", "assets/icons"),
+                             ("/wiki-icons", "wiki_all_svg_downloads")):
+        if not os.path.isdir(root):
+            continue
+        for dirpath, _dirs, files in os.walk(root):
+            for fn in files:
+                if not fn.lower().endswith(".svg"):
+                    continue
+                rel = os.path.relpath(os.path.join(dirpath, fn), root).replace(os.sep, "/")
+                name = os.path.splitext(fn)[0].replace("_", " ").strip()
+                key = name.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                icons.append({"name": name, "path": f"{url_prefix}/{rel}"})
+    icons.sort(key=lambda i: i["name"].lower())
+    _BANK_ICON_INDEX_CACHE = icons
+    return icons
+
+
+@app.get("/api/bank/icons")
+async def bank_icons(request: Request):
+    """Searchable icon index for the editor picker (all game icons). Requires feature."""
+    session_uuid = request.state.session_uuid
+    _require_bank(session_uuid)
+    q = (request.query_params.get("query") or "").strip().lower()
+    icons = _build_bank_icon_index()
+    if q:
+        icons = [i for i in icons if q in i["name"].lower()]
+    return {"count": len(icons), "icons": icons[:2000]}
+
+
 def _run_crafting_tree_optimization(
     session_uuid: str,
     nodes: list,
@@ -13595,8 +17530,50 @@ def _run_crafting_tree_optimization(
             except Exception:
                 pass
 
+    def _subprocess_exact_executor(exact_payload):
+        # Run the whole-tree EXACT B&B solve in a fresh, reniced subprocess
+        # (ui.exact_tree_worker). The exact solver is a pure-Python, GIL-bound
+        # CPU loop; running it inline in this background task's threadpool
+        # thread starved the event loop and took the main site down
+        # (incidents 2026-10-09). Out-of-process it frees the GIL (web keeps
+        # serving) and the worker self-renices (EXACT_TREE_WORKER_NICE) so it
+        # yields CPU under contention. Returns {"nodes", "diag", "stdout"};
+        # raises on failure so the core's exact branch falls back to heuristic.
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(exact_payload, f)
+            in_file = f.name
+        out_file = in_file + ".out.json"
+        cmd = [sys.executable, "-m", "ui.exact_tree_worker", in_file, out_file]
+        try:
+            proc = subprocess.run(
+                cmd,
+                cwd=project_root,
+                capture_output=True,
+                text=True,
+                timeout=int(os.environ.get("EXACT_TREE_WORKER_TIMEOUT", "600")),
+                env={**os.environ, "PYTHONPATH": project_root},
+            )
+            if proc.returncode != 0:
+                raise RuntimeError(
+                    f"exact_tree_worker exited {proc.returncode}: "
+                    f"{(proc.stderr or '')[-500:]}")
+            with open(out_file) as f:
+                res = json.load(f)
+            if not res.get("ok"):
+                raise RuntimeError(
+                    f"exact_tree_worker error: {res.get('error')}")
+            res["stdout"] = proc.stdout
+            return res
+        finally:
+            for _p in (in_file, out_file):
+                try:
+                    os.unlink(_p)
+                except Exception:
+                    pass
+
     optimize_crafting_tree(
         session_uuid, nodes, global_settings, session_data, ui_config, task,
         node_ids=node_ids, depth_optimize=depth_optimize,
-        node_executor=_subprocess_node_executor, log=log,
+        node_executor=_subprocess_node_executor,
+        exact_executor=_subprocess_exact_executor, log=log,
     )

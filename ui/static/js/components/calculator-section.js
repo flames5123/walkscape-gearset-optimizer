@@ -20,6 +20,10 @@ import { formatFixed } from '../utils/number-format.js';
 import { resolveItemIcon } from '../utils/resolve-item-icon.js';
 import { openDropdownUnder, closeGlobalDropdown } from './xy-activity-priority-list.js';
 import { wireInfoIcons } from '../info-popover.js';
+import { stackSizeForDrop, slotsForExpected, formatSlots } from '../utils/inventory-slots.js';
+
+// Icon shown in the "Inventory Slots" column header of the expected-drops table.
+const INVENTORY_SLOT_ICON = '/assets/icons/attributes/inventory_space.svg';
 
 // ============================================================================
 // DRY CHECK FLAVOUR TEXT
@@ -416,6 +420,24 @@ class CalculatorSection extends Component {
         }
     }
 
+    _ensureRelevantSkills() {
+        if (!this.values || !this.values.skills) return;
+        const character = store.state.character || {};
+        const overrides = store.state.ui?.user_overrides || {};
+        const skillXpOverrides = overrides.skills_xp || {};
+        const characterXp = character.skills_xp || {};
+        for (const skill of this.getRelevantSkills()) {
+            if (this.values.skills[skill]) continue;
+            const skillLower = skill.toLowerCase();
+            const currentXP = skillXpOverrides[skillLower] !== undefined
+                ? skillXpOverrides[skillLower] : (characterXp[skillLower] || 0);
+            const currentLevel = this.xpToLevel(currentXP);
+            const entry = { startXP: currentXP, gainedXP: 0, targetXP: currentXP, startLevel: currentLevel, endLevel: currentLevel };
+            this.values.skills[skill] = { ...entry };
+            if (this.values2 && this.values2.skills) this.values2.skills[skill] = { ...entry };
+        }
+    }
+
     /**
      * Get relevant skills for current activity/recipe
      * @returns {Array<string>} Array of skill names
@@ -431,6 +453,15 @@ class CalculatorSection extends Component {
                     }
                 }
             }
+            // Termite "Terminate" adds Carpentry as a relevant skill (converts
+            // found logs into Carpentry XP).
+            try {
+                const tc = window.dropsSection?.termiteCarpentry;
+                if (tc && tc.perStep > 0 && tc.skill) {
+                    const sn = tc.skill.charAt(0).toUpperCase() + tc.skill.slice(1);
+                    if (!skills.includes(sn)) skills.push(sn);
+                }
+            } catch (_e) { /* dropsSection not ready */ }
             return skills;
         } else if (this.mode === 'recipe' && this.recipe) {
             return [this.recipe.skill];
@@ -543,7 +574,7 @@ class CalculatorSection extends Component {
             // END of the chain. Applying ceil before the pct multiplier introduces
             // off-by-one errors (e.g. Flowing pocketwatch -5%).
             const cappedWE = Math.min(we, maxEfficiency);
-            const baseOverEff = baseSteps / (1 + cappedWE);
+            const baseOverEff = baseSteps / Math.max(1 + cappedWE, 0.01);  // floor total efficiency at 1% (game rule)
             const minSteps = baseSteps / (1 + maxEfficiency);
             const stepsWithWE = Math.max(baseOverEff, minSteps);
             const stepsWithPct = stepsWithWE * (1 + pct);
@@ -586,6 +617,17 @@ class CalculatorSection extends Component {
                 }
             }
 
+            // Termite "Terminate": logs -> Carpentry XP (drop-derived, computed
+            // by DropsSection). NOT bonus-XP scaled — added directly per action.
+            try {
+                const tc = window.dropsSection?.termiteCarpentry;
+                if (tc && tc.perStep > 0 && stepsPerAction > 0) {
+                    const base = tc.skill || 'carpentry';
+                    const skillName = base.charAt(0).toUpperCase() + base.slice(1);
+                    xpPerActionBySkill[skillName] = (xpPerActionBySkill[skillName] || 0) + tc.perStep * stepsPerAction;
+                }
+            } catch (_e) { /* dropsSection not ready */ }
+
             return {
                 stepsPerAction: stepsPerAction,
                 xpPerAction: totalXP,  // XP per action (with bonuses)
@@ -611,7 +653,7 @@ class CalculatorSection extends Component {
             // END of the chain. Applying ceil before the pct multiplier introduces
             // off-by-one errors (e.g. Flowing pocketwatch -5%).
             const cappedWE = Math.min(we, maxEfficiency);
-            const totalEfficiency = 1 + cappedWE;
+            const totalEfficiency = Math.max(1 + cappedWE, 0.01);  // floor total efficiency at 1% (game rule)
             const baseOverEff = baseSteps / totalEfficiency;
             const withPct = baseOverEff * (1 + pct);
             const stepsPerSingleAction = Math.max(Math.ceil(withPct + flat), 10);
@@ -2284,8 +2326,68 @@ class CalculatorSection extends Component {
     }
 
     /**
+     * Exact per-quality probabilities (0..1) for the current recipe's crafted
+     * output, at a given Quality Outcome. Uses recipe-info-section's
+     * calculateQualityWeights (the canonical quality_outcome.py port), returning
+     * the EXACT P(=tier) for each quality (Normal..Eternal) — not cumulative —
+     * so each crafted item lands in exactly one tier and the per-tier expected
+     * counts sum back to the total. Returns null when unavailable or the recipe
+     * isn't a quality item.
+     * @param {number} [qo] - Quality Outcome to use (defaults to the single-view
+     *   combined stats QO). Comparison mode passes each gearset's own QO.
+     */
+    _exactQualityProbs(qo) {
+        const ris = window.recipeInfoSection;
+        if (this.mode !== 'recipe' || !this.recipe || !ris
+            || typeof ris.calculateQualityWeights !== 'function') return null;
+        if (!this._recipeIsQualityItem()) return null;
+        const qoVal = (qo != null) ? qo : (window.combinedStatsSection?.cachedStats?.quality_outcome || 0);
+        const useFine = !!(store.state.column3?.useFine)
+            && (this.recipe.has_fine_option || this.recipe.has_equipment_input);
+        const hasEqInput = this.recipe.has_equipment_input || false;
+        const res = ris.calculateQualityWeights(this.recipe.level || 1, qoVal, useFine, hasEqInput);
+        const pct = res?.percentages;
+        if (!pct) return null;
+        const map = {};
+        for (const q of DRY_QUALITY_ORDER) map[q] = (pct[q] || 0) / 100;
+        return map;
+    }
+
+    /**
+     * Inline drop-shadow outline style for a crafted-output quality tier, using
+     * the same 4-direction outline (and the same --rarity-* colors) that every
+     * other quality icon in the tool uses.
+     */
+    _qualityOutlineStyle(tier) {
+        const c = DRY_QUALITY_COLORS[tier];
+        if (!c) return '';
+        return ` style="filter:drop-shadow(1px 0 0 ${c}) drop-shadow(-1px 0 0 ${c}) drop-shadow(0 1px 0 ${c}) drop-shadow(0 -1px 0 ${c});"`;
+    }
+
+    /** Icon + total badge markup for the "Inventory Slots" column header. */
+    _slotsHeaderInner(totalSlots) {
+        return `<span style="display:inline-flex; align-items:center; gap:4px;">`
+            + `<img src="${INVENTORY_SLOT_ICON}" alt="Inventory slots" title="Inventory slots" style="width:16px; height:16px; vertical-align:middle;" onerror="this.style.display='none'" />`
+            + `<span>SLOTS -</span>`
+            + `<span class="calc-slots-total" style="font-variant-numeric:tabular-nums; opacity:0.95;">${formatSlots(totalSlots)}</span>`
+            + `</span>`;
+    }
+
+    /**
      * Render the expected drops table for a given steps count and drop list.
      * Styled like the comparison view drops table — large icons, pill badges.
+     *
+     * Columns: ITEM | EXPECTED | INVENTORY SLOTS. The slots column shows how
+     * many inventory slots the expected haul occupies (one unique stack per
+     * slot, rounded up — see utils/inventory-slots.js), with a running total in
+     * the header. Fine variants are counted as their own separate slots (fine
+     * and normal don't stack together) and shown in a fine-outlined pill,
+     * mirroring the fine EXPECTED pill.
+     *
+     * For crafting (recipe quality items) the crafted output is expanded into
+     * one row per quality (Normal→Eternal) with the standard quality outline,
+     * each occupying its own inventory slots.
+     *
      * @param {number} steps - Number of steps
      * @param {Array} drops - Drop objects with steps_per_item
      * @param {boolean} showFine - Whether to show fine item rows
@@ -2310,6 +2412,28 @@ class CalculatorSection extends Component {
             if (v >= 1000) return Math.round(v).toLocaleString();
             if (v >= 10) return formatFixed(v, 1, { trim: true });
             return formatFixed(v, 2, { trim: true });
+        };
+
+        // Format a raw numeric expected count the same way the pills do.
+        const fmtNum = (v) => {
+            if (v == null || !isFinite(v) || v <= 0) return '—';
+            if (v >= 1000) return Math.round(v).toLocaleString();
+            if (v >= 10) return formatFixed(v, 1, { trim: true });
+            return formatFixed(v, 2, { trim: true });
+        };
+
+        // Numeric expected for a drop (same basis as calcExpected below).
+        const numExpectedOf = (drop) => {
+            if (this.mode === 'recipe' && drop.materials_per_item != null && isFinite(drop.materials_per_item) && drop.materials_per_item > 0) {
+                const materials = this.values.materials || 0;
+                return materials > 0 ? materials / drop.materials_per_item : NaN;
+            }
+            if (!steps || steps <= 0 || !drop.steps_per_item || !isFinite(drop.steps_per_item)) return NaN;
+            return steps / drop.steps_per_item;
+        };
+        const numFineOf = (drop) => {
+            if (!steps || steps <= 0 || !drop.steps_per_fine_item || !isFinite(drop.steps_per_fine_item)) return NaN;
+            return steps / drop.steps_per_fine_item;
         };
 
         // For recipe drops, use materials/materials_per_item when available (more accurate).
@@ -2357,31 +2481,82 @@ class CalculatorSection extends Component {
             return { icon: `/assets/icons/items/materials/${iconName}.svg`, name: drop.item_name };
         };
 
-        const rows = validDrops.map(drop => {
-            const { icon: iconPath, name: displayName } = getIconAndName(drop);
-            const expected = calcExpected(drop);
+        // Running total of inventory slots across every rendered row (normal +
+        // fine + per-quality), shown in the header. Bumped by the cell builders.
+        let totalSlots = 0;
+        const addSlots = (n) => { if (typeof n === 'number' && isFinite(n)) totalSlots += n; };
 
-            let finePill = '';
+        // Build the SLOTS cell for a normal drop row (normal pill + optional fine pill).
+        const slotsCell = (drop) => {
+            const stack = stackSizeForDrop(drop);
+            const slots = slotsForExpected(numExpectedOf(drop), stack);
+            addSlots(slots);
+            let html = `<div class="comparison-drop-steps calc-drops-pill">${formatSlots(slots)}</div>`;
             if (showFine && drop.steps_per_fine_item && isFinite(drop.steps_per_fine_item)) {
-                const fineExpected = fmtExpected(steps, drop.steps_per_fine_item);
-                finePill = `<div class="comparison-drop-steps fine-steps calc-drops-pill">${fineExpected}</div>`;
+                const fineSlots = slotsForExpected(numFineOf(drop), stack);
+                addSlots(fineSlots);
+                html += `<div class="comparison-drop-steps fine-steps calc-drops-pill">${formatSlots(fineSlots)}</div>`;
             }
+            return html;
+        };
 
-            return `
+        // Crafted-output quality expansion (recipe quality items only). When
+        // available, the single output row becomes one row per quality tier.
+        const qualityProbs = this._exactQualityProbs();
+        const outputDrop = (this.mode === 'recipe' && qualityProbs)
+            ? validDrops.find(d => d.source === 'output_synthetic')
+            : null;
+        const bodyDrops = outputDrop ? validDrops.filter(d => d !== outputDrop) : validDrops;
+
+        const rowHtml = (iconPath, displayName, expectedStr, slotsHtml, iconStyle = '') => `
                 <tr class="comparison-drop-row">
                     <td class="comparison-drop-label">
                         <div class="comparison-drop-label-inner">
-                            <img src="${iconPath}" alt="${displayName}" class="comparison-drop-icon"
+                            <img src="${iconPath}" alt="${displayName}" class="comparison-drop-icon"${iconStyle}
                                 onerror="if(this.src.endsWith('.svg')){this.src=this.src.replace('.svg','.png')}else{this.src='/assets/icons/items/containers/treasure_chest.svg'}"
                                 title="${displayName}" loading="lazy" />
                         </div>
                     </td>
                     <td class="comparison-drop-cell calc-drops-cell-left">
-                        <div class="comparison-drop-steps calc-drops-pill">${expected}</div>
-                        ${finePill}
+                        ${expectedStr}
+                    </td>
+                    <td class="comparison-drop-cell calc-drops-cell-left">
+                        ${slotsHtml}
                     </td>
                 </tr>`;
+
+        // Per-quality crafted output rows first (the primary product).
+        let outputRows = '';
+        if (outputDrop) {
+            const { icon: outIcon, name: outName } = getIconAndName(outputDrop);
+            const totalOutputs = numExpectedOf(outputDrop);
+            const outStack = stackSizeForDrop(outputDrop);
+            for (const tier of DRY_QUALITY_ORDER) {
+                const p = qualityProbs[tier];
+                if (!p || p <= 0) continue;
+                const qExpected = isFinite(totalOutputs) ? totalOutputs * p : NaN;
+                const qSlots = slotsForExpected(qExpected, outStack);
+                addSlots(qSlots);
+                const expPill = `<div class="comparison-drop-steps calc-drops-pill">${fmtNum(qExpected)}</div>`;
+                const slotPill = `<div class="comparison-drop-steps calc-drops-pill">${formatSlots(qSlots)}</div>`;
+                outputRows += rowHtml(outIcon, `${outName} (${tier})`, expPill, slotPill, this._qualityOutlineStyle(tier));
+            }
+        }
+
+        const bodyRows = bodyDrops.map(drop => {
+            const { icon: iconPath, name: displayName } = getIconAndName(drop);
+            const expected = calcExpected(drop);
+
+            let expectedHtml = `<div class="comparison-drop-steps calc-drops-pill">${expected}</div>`;
+            if (showFine && drop.steps_per_fine_item && isFinite(drop.steps_per_fine_item)) {
+                const fineExpected = fmtExpected(steps, drop.steps_per_fine_item);
+                expectedHtml += `<div class="comparison-drop-steps fine-steps calc-drops-pill">${fineExpected}</div>`;
+            }
+
+            return rowHtml(iconPath, displayName, expectedHtml, slotsCell(drop));
         }).join('');
+
+        const rows = outputRows + bodyRows;
 
         return `
             <div class="calc-drops-table-wrapper">
@@ -2390,6 +2565,7 @@ class CalculatorSection extends Component {
                         <tr>
                             <th class="calc-drops-header-item">ITEM</th>
                             <th class="calc-drops-header-count">EXPECTED</th>
+                            <th class="calc-drops-header-count calc-drops-header-slots">${this._slotsHeaderInner(totalSlots)}</th>
                         </tr>
                     </thead>
                     <tbody>${rows}</tbody>
@@ -2407,6 +2583,12 @@ class CalculatorSection extends Component {
             this.$element.html('');
             return;
         }
+
+        // Lazily pick up any newly-relevant skill (e.g. Carpentry added by the
+        // Termite ability once DropsSection has computed it) without resetting
+        // existing skill values. initializeSkillValues only runs on
+        // activity/recipe change, before DropsSection.termiteCarpentry exists.
+        this._ensureRelevantSkills();
 
         const arrowIcon = `<span class="expand-arrow ${this.isExpanded ? 'expanded' : ''}">▼</span>`;
         const isComparison = store.state.gearsets?.comparisonMode || false;
@@ -2465,14 +2647,49 @@ class CalculatorSection extends Component {
     _renderComparisonDropsTable(steps1, drops1, steps2, drops2, hasFine) {
         if ((steps1 <= 0 && steps2 <= 0) || (drops1.length === 0 && drops2.length === 0)) return '';
 
-        // Merge all item names preserving order
+        // Per-gearset Quality Outcome (used to expand the crafted output into
+        // per-quality rows). QO can differ between the two sets.
+        const compSection = window.gearsetComparisonSection;
+        const qo1 = compSection?._cachedStats1?.quality_outcome || 0;
+        const qo2 = compSection?._cachedStats2?.quality_outcome || 0;
+        const probs1 = this._exactQualityProbs(qo1);
+        const probs2 = this._exactQualityProbs(qo2);
+        const isQualityRecipe = this.mode === 'recipe' && (probs1 || probs2);
+
+        // Small inventory-slot icon used to distinguish the slot pills from the
+        // expected pills inside a gearset cell.
+        const slotIcon = `<img src="${INVENTORY_SLOT_ICON}" alt="" title="Inventory slots" style="width:12px; height:12px; vertical-align:middle; margin-right:3px;" onerror="this.style.display='none'" />`;
+
+        // Merge all item names preserving order. The crafted output is pulled
+        // out for per-quality expansion (isQualityRecipe) so it isn't also shown
+        // as a single merged row.
         const allNames = new Map();
-        for (const d of drops1) allNames.set(d.item_name, d);
-        for (const d of drops2) { if (!allNames.has(d.item_name)) allNames.set(d.item_name, d); }
+        for (const d of drops1) {
+            if (isQualityRecipe && d.source === 'output_synthetic') continue;
+            allNames.set(d.item_name, d);
+        }
+        for (const d of drops2) {
+            if (isQualityRecipe && d.source === 'output_synthetic') continue;
+            if (!allNames.has(d.item_name)) allNames.set(d.item_name, d);
+        }
+
+        // Per-gearset inventory-slot totals for the header.
+        let totalSlots1 = 0;
+        let totalSlots2 = 0;
+        const addSlots = (gsNum, n) => {
+            if (typeof n !== 'number' || !isFinite(n)) return;
+            if (gsNum === 1) totalSlots1 += n; else totalSlots2 += n;
+        };
 
         const fmtExpected = (steps, stepsPerItem) => {
             if (!steps || steps <= 0 || !stepsPerItem || !isFinite(stepsPerItem)) return '—';
             const v = steps / stepsPerItem;
+            if (v >= 1000) return Math.round(v).toLocaleString();
+            if (v >= 10) return formatFixed(v, 1, { trim: true });
+            return formatFixed(v, 2, { trim: true });
+        };
+        const fmtNum = (v) => {
+            if (v == null || !isFinite(v) || v <= 0) return '—';
             if (v >= 1000) return Math.round(v).toLocaleString();
             if (v >= 10) return formatFixed(v, 1, { trim: true });
             return formatFixed(v, 2, { trim: true });
@@ -2514,6 +2731,17 @@ class CalculatorSection extends Component {
             return myExp > otherExp ? 'comparison-better' : 'comparison-worse';
         };
 
+        // Numeric expected for a drop under a gearset (same basis as buildCell).
+        const numExpectedOf = (drop, steps, materials) => {
+            if (!drop) return NaN;
+            if (this.mode === 'recipe' && drop.materials_per_item != null && isFinite(drop.materials_per_item) && drop.materials_per_item > 0 && materials > 0) {
+                return materials / drop.materials_per_item;
+            }
+            if (steps > 0 && drop.steps_per_item && isFinite(drop.steps_per_item)) return steps / drop.steps_per_item;
+            return NaN;
+        };
+
+        // Expected pills for a gearset cell (unchanged behavior).
         const buildCell = (drop, steps, materials, otherDrop, otherSteps, otherMaterials) => {
             if (!drop) return '<div style="text-align:center;color:var(--text-secondary)">—</div>';
 
@@ -2545,7 +2773,77 @@ class CalculatorSection extends Component {
             return html;
         };
 
+        // Inventory-slot pills for a gearset cell (normal + optional fine),
+        // accumulating into that gearset's header total.
+        const buildSlots = (drop, steps, materials, gsNum) => {
+            if (!drop) return '';
+            const stack = stackSizeForDrop(drop);
+            const slots = slotsForExpected(numExpectedOf(drop, steps, materials), stack);
+            addSlots(gsNum, slots);
+            let html = `<div class="comparison-drop-steps calc-drops-pill">${slotIcon}${formatSlots(slots)}</div>`;
+            if (hasFine && drop.steps_per_fine_item && isFinite(drop.steps_per_fine_item) && steps > 0) {
+                const fineSlots = slotsForExpected(steps / drop.steps_per_fine_item, stack);
+                addSlots(gsNum, fineSlots);
+                html += `<div class="comparison-drop-steps fine-steps calc-drops-pill">${slotIcon}${formatSlots(fineSlots)}</div>`;
+            }
+            return html;
+        };
+
+        // A full gearset cell: expected pills on top, a dashed separator, then
+        // the inventory-slot pills below.
+        const gearsetCell = (drop, steps, materials, otherDrop, otherSteps, otherMaterials, gsNum) => {
+            const expectedHtml = buildCell(drop, steps, materials, otherDrop, otherSteps, otherMaterials);
+            const slotsHtml = buildSlots(drop, steps, materials, gsNum);
+            const slotsBlock = slotsHtml
+                ? `<div style="margin-top:4px; padding-top:4px; border-top:1px dashed var(--border-color);">${slotsHtml}</div>`
+                : '';
+            return `${expectedHtml}${slotsBlock}`;
+        };
+
         const rows = [];
+
+        // Per-quality crafted output rows first (recipe quality items).
+        if (isQualityRecipe) {
+            const out1 = drops1.find(d => d.source === 'output_synthetic');
+            const out2 = drops2.find(d => d.source === 'output_synthetic');
+            const { icon: outIcon, name: outName } = getIconAndName(out1 || out2);
+            const totalOut1 = numExpectedOf(out1, steps1, this.values.materials || 0);
+            const totalOut2 = numExpectedOf(out2, steps2, this.values2.materials || 0);
+            const stack1 = stackSizeForDrop(out1 || out2);
+            const stack2 = stackSizeForDrop(out2 || out1);
+            for (const tier of DRY_QUALITY_ORDER) {
+                const p1 = probs1 ? (probs1[tier] || 0) : 0;
+                const p2 = probs2 ? (probs2[tier] || 0) : 0;
+                if (p1 <= 0 && p2 <= 0) continue;
+                const e1 = (out1 && isFinite(totalOut1)) ? totalOut1 * p1 : NaN;
+                const e2 = (out2 && isFinite(totalOut2)) ? totalOut2 * p2 : NaN;
+                const s1 = slotsForExpected(e1, stack1);
+                const s2 = slotsForExpected(e2, stack2);
+                addSlots(1, s1);
+                addSlots(2, s2);
+                const cell1 = out1
+                    ? `<div class="comparison-drop-steps calc-drops-pill ${cls(e1, e2)}">${fmtNum(e1)}</div>`
+                      + `<div style="margin-top:4px; padding-top:4px; border-top:1px dashed var(--border-color);"><div class="comparison-drop-steps calc-drops-pill">${slotIcon}${formatSlots(s1)}</div></div>`
+                    : '<div style="text-align:center;color:var(--text-secondary)">—</div>';
+                const cell2 = out2
+                    ? `<div class="comparison-drop-steps calc-drops-pill ${cls(e2, e1)}">${fmtNum(e2)}</div>`
+                      + `<div style="margin-top:4px; padding-top:4px; border-top:1px dashed var(--border-color);"><div class="comparison-drop-steps calc-drops-pill">${slotIcon}${formatSlots(s2)}</div></div>`
+                    : '<div style="text-align:center;color:var(--text-secondary)">—</div>';
+                rows.push(`
+                <tr class="comparison-drop-row">
+                    <td class="comparison-drop-label">
+                        <div class="comparison-drop-label-inner">
+                            <img src="${outIcon}" alt="${outName} (${tier})" class="comparison-drop-icon"${this._qualityOutlineStyle(tier)}
+                                onerror="if(this.src.endsWith('.svg')){this.src=this.src.replace('.svg','.png')}else{this.src='/assets/icons/items/containers/treasure_chest.svg'}"
+                                title="${outName} (${tier})" loading="lazy" />
+                        </div>
+                    </td>
+                    <td class="comparison-drop-cell">${cell1}</td>
+                    <td class="comparison-drop-cell">${cell2}</td>
+                </tr>`);
+            }
+        }
+
         for (const [itemName, refDrop] of allNames) {
             const d1 = drops1.find(d => d.item_name === itemName);
             const d2 = drops2.find(d => d.item_name === itemName);
@@ -2562,12 +2860,15 @@ class CalculatorSection extends Component {
                                 title="${displayName}" loading="lazy" />
                         </div>
                     </td>
-                    <td class="comparison-drop-cell">${buildCell(d1, steps1, mat1, d2, steps2, mat2)}</td>
-                    <td class="comparison-drop-cell">${buildCell(d2, steps2, mat2, d1, steps1, mat1)}</td>
+                    <td class="comparison-drop-cell">${gearsetCell(d1, steps1, mat1, d2, steps2, mat2, 1)}</td>
+                    <td class="comparison-drop-cell">${gearsetCell(d2, steps2, mat2, d1, steps1, mat1, 2)}</td>
                 </tr>`);
         }
 
         if (rows.length === 0) return '';
+
+        // Per-gearset inventory-slot totals in the header (icon + total).
+        const hdrTotal = (n) => `<span style="display:inline-flex; align-items:center; gap:3px; font-weight:400; opacity:0.95;">${slotIcon}${formatSlots(n)}</span>`;
 
         return `
             <div class="calc-drops-table-wrapper">
@@ -2575,8 +2876,8 @@ class CalculatorSection extends Component {
                     <thead>
                         <tr>
                             <th></th>
-                            <th>GEAR SET 1</th>
-                            <th>GEAR SET 2</th>
+                            <th>GEAR SET 1<br>${hdrTotal(totalSlots1)}</th>
+                            <th>GEAR SET 2<br>${hdrTotal(totalSlots2)}</th>
                         </tr>
                     </thead>
                     <tbody>${rows.join('')}</tbody>
@@ -2905,7 +3206,7 @@ class CalculatorSection extends Component {
             const maxEfficiency = this.activity.max_efficiency;
             // Single ceil at the END (KamiTzayig reference).
             const cappedWE = Math.min(we, maxEfficiency);
-            const baseOverEff = baseSteps / (1 + cappedWE);
+            const baseOverEff = baseSteps / Math.max(1 + cappedWE, 0.01);  // floor total efficiency at 1% (game rule)
             const minSteps = baseSteps / (1 + maxEfficiency);
             const stepsWithWE = Math.max(baseOverEff, minSteps);
             const stepsWithPct = stepsWithWE * (1 + pct);
@@ -2918,12 +3219,31 @@ class CalculatorSection extends Component {
             }
             totalXP = (totalXP + bonusXPAdd) * (1 + bonusXPPercent);
 
-            return { stepsPerAction, xpPerAction: totalXP, materialsPerCraft: 1.0, stepsPerCraft: stepsPerAction };
+            // Build per-skill XP map so each skill's GAINED XP is calculated from
+            // its own XP share, not the combined total. Without this, the consumer
+            // (calculateComparisonXPFromActions) falls back to xpPerAction — the
+            // combined total — for EVERY skill, so a multi-skill activity
+            // (e.g. Foraging + Agility) shows the same summed XP for both skills
+            // in comparison mode. Mirrors single-mode getStats. (bug 6ae5088f)
+            const primarySkill = this.activity.primary_skill;
+            const xpPerActionBySkill = {};
+            const rawTotalXP = this.activity.base_xp + (this.activity.secondary_xp
+                ? Object.values(this.activity.secondary_xp).reduce((s, v) => s + v, 0) : 0);
+            xpPerActionBySkill[primarySkill] = rawTotalXP > 0
+                ? totalXP * (this.activity.base_xp / rawTotalXP) : totalXP;
+            if (this.activity.secondary_xp) {
+                for (const [skill, xp] of Object.entries(this.activity.secondary_xp)) {
+                    const skillName = skill.charAt(0).toUpperCase() + skill.slice(1);
+                    xpPerActionBySkill[skillName] = rawTotalXP > 0 ? totalXP * (xp / rawTotalXP) : 0;
+                }
+            }
+
+            return { stepsPerAction, xpPerAction: totalXP, xpPerActionBySkill, materialsPerCraft: 1.0, stepsPerCraft: stepsPerAction };
         } else if (this.mode === 'recipe' && this.recipe) {
             const baseSteps = this.recipe.base_steps;
             const maxEfficiency = this.recipe.max_efficiency;
             const cappedWE = Math.min(we, maxEfficiency);
-            const totalEfficiency = 1 + cappedWE;
+            const totalEfficiency = Math.max(1 + cappedWE, 0.01);  // floor total efficiency at 1% (game rule)
             // Single ceil at the END (KamiTzayig reference) — prevents off-by-one
             // errors when a pct modifier is applied.
             const baseOverEff = baseSteps / totalEfficiency;

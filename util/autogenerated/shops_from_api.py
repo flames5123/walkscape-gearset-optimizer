@@ -21,6 +21,7 @@ class ShopItem:
     currency: str  # 'coins' or 'adventurers_guild_token' or material name
     item_type: str  # Loot, Tool, Consumable, Material, Container, Collectible, Cosmetic
     item_ref: Optional[str] = None
+    sell_to_shop: bool = False  # True = player GIVES item to shop for the price (exchange/sell-back)
 
 
 @dataclass
@@ -44,19 +45,22 @@ ADVENTURERS_GUILD_CABIN_OUTPOST = ShopInfo(
     name='Adventurers guild cabin outpost', building_type='',
     location='', region='Unknown',
     inventory=[
-        ShopItem('Simple rope', 1, 2, 'coins', 'Loot', 'Item.SIMPLE_ROPE'),
-        ShopItem('Simple torch', 1, 2, 'coins', 'Loot', 'Item.SIMPLE_TORCH'),
-        ShopItem('Mysterious northern map', 1, 100, 'coins', 'Collectible', 'Collectible.MYSTERIOUS_NORTHERN_MAP'),
-        ShopItem('Black eye peak wilderness permit', 1, 100, 'coins', 'Collectible', 'Collectible.BLACK_EYE_PEAK_WILDERNESS_PERMIT'),
-        ShopItem('Tough rope', 1, 50, 'coins', 'Loot', 'Item.TOUGH_ROPE'),
-        ShopItem('Simple life vest', 1, 2, 'coins', 'Loot', 'Item.SIMPLE_LIFE_VEST'),
-        ShopItem('Cape of the trailblazer', 1, 2500, 'coins', 'Loot', 'Item.CAPE_OF_THE_TRAILBLAZER'),
-        ShopItem('Fishing line', 10, 15, 'coins', 'Material', 'Material.FISHING_LINE'),
-        ShopItem('Adventuring guild chest', 10, 20, 'coins', 'Container', 'Container.ADVENTURING_GUILD_CHEST'),
-        ShopItem('Bert\'s super-skis', 1, 750, 'coins', 'Loot', 'Item.BERTS_SUPER_SKIS'),
-        ShopItem('Quaint quiver', 1, 10, 'coins', 'Loot', 'Item.QUAINT_QUIVER'),
-        ShopItem('Bolstered quiver', 1, 150, 'coins', 'Loot', 'Item.BOLSTERED_QUIVER'),
-        ShopItem('Rusty diving torso', 1, 20, 'coins', 'Loot', 'Item.RUSTY_DIVING_TORSO'),
+        ShopItem('Simple rope', 1, 2, 'adventurers_guild_token', 'Loot', 'Item.SIMPLE_ROPE'),
+        ShopItem('Simple torch', 1, 2, 'adventurers_guild_token', 'Loot', 'Item.SIMPLE_TORCH'),
+        ShopItem('Mysterious northern map', 1, 100, 'adventurers_guild_token', 'Collectible', 'Collectible.MYSTERIOUS_NORTHERN_MAP'),
+        ShopItem('Black eye peak wilderness permit', 1, 100, 'adventurers_guild_token', 'Collectible', 'Collectible.BLACK_EYE_PEAK_WILDERNESS_PERMIT'),
+        ShopItem('Tough rope', 1, 50, 'adventurers_guild_token', 'Loot', 'Item.TOUGH_ROPE'),
+        ShopItem('Simple life vest', 1, 2, 'adventurers_guild_token', 'Loot', 'Item.SIMPLE_LIFE_VEST'),
+        ShopItem('Cape of the trailblazer', 1, 2500, 'adventurers_guild_token', 'Loot', 'Item.CAPE_OF_THE_TRAILBLAZER'),
+        ShopItem('Fishing line', 10, 15, 'adventurers_guild_token', 'Material', 'Material.FISHING_LINE'),
+        ShopItem('Adventurers\' Guild chest', 10, 20, 'adventurers_guild_token', 'Container', 'Container.ADVENTURERS_GUILD_CHEST'),
+        ShopItem('Bert\'s super-skis', 1, 750, 'adventurers_guild_token', 'Loot', 'Item.BERTS_SUPER_SKIS'),
+        ShopItem('Quaint quiver', 1, 10, 'adventurers_guild_token', 'Loot', 'Item.QUAINT_QUIVER'),
+        ShopItem('Bolstered quiver', 1, 150, 'adventurers_guild_token', 'Loot', 'Item.BOLSTERED_QUIVER'),
+        ShopItem('Rusty diving torso', 1, 20, 'adventurers_guild_token', 'Loot', 'Item.RUSTY_DIVING_TORSO'),
+        ShopItem('Unidentified remains', 1, 20, 'adventurers_guild_token', 'Material', 'Material.UNIDENTIFIED_REMAINS', True),
+        ShopItem('Name tag', 1, 10, 'adventurers_guild_token', 'Material', 'Material.NAME_TAG', True),
+        ShopItem('Adventurers\' enamel pin', 1, 2, 'adventurers_guild_token', 'Material', 'Material.ADVENTURERS_ENAMEL_PIN', True),
     ],
 )
 
@@ -65,6 +69,25 @@ ANIMAL_SHELTER = ShopInfo(
     location='', region='Unknown',
     inventory=[
         ShopItem('Camel egg', 1, 10000, 'coins', 'Egg', 'Egg.CAMEL_EGG'),
+    ],
+)
+
+CACTUS_CANYON_ADVENTURERS_GUILD_MIRAGEPOST = ShopInfo(
+    name='Cactus canyon adventurers guild miragepost', building_type='',
+    location='', region='Unknown',
+    inventory=[
+        ShopItem('Simple rope', 1, 2, 'adventurers_guild_token', 'Loot', 'Item.SIMPLE_ROPE'),
+        ShopItem('Simple torch', 1, 2, 'adventurers_guild_token', 'Loot', 'Item.SIMPLE_TORCH'),
+        ShopItem('Tough rope', 1, 50, 'adventurers_guild_token', 'Loot', 'Item.TOUGH_ROPE'),
+        ShopItem('Simple life vest', 1, 2, 'adventurers_guild_token', 'Loot', 'Item.SIMPLE_LIFE_VEST'),
+        ShopItem('Cape of the trailblazer', 1, 2500, 'adventurers_guild_token', 'Loot', 'Item.CAPE_OF_THE_TRAILBLAZER'),
+        ShopItem('Fishing line', 10, 15, 'adventurers_guild_token', 'Material', 'Material.FISHING_LINE'),
+        ShopItem('Adventurers\' Guild chest', 10, 20, 'adventurers_guild_token', 'Container', 'Container.ADVENTURERS_GUILD_CHEST'),
+        ShopItem('Zorre\'s desert gourdpack', 1, 750, 'adventurers_guild_token', 'Loot', 'Item.ZORRES_DESERT_GOURDPACK'),
+        ShopItem('Quaint quiver', 1, 10, 'adventurers_guild_token', 'Loot', 'Item.QUAINT_QUIVER'),
+        ShopItem('Bolstered quiver', 1, 150, 'adventurers_guild_token', 'Loot', 'Item.BOLSTERED_QUIVER'),
+        ShopItem('Strange fur', 1, 1, 'adventurers_guild_token', 'Material', 'Material.STRANGE_FUR', True),
+        ShopItem('Mysterious chitin', 1, 10, 'adventurers_guild_token', 'Material', 'Material.MYSTERIOUS_CHITIN', True),
     ],
 )
 
@@ -168,16 +191,18 @@ HALFMAW_HIDEOUT_ADVENTURERS_GUILD_CABIN_SWAMPOST = ShopInfo(
     name='Halfmaw hideout adventurers guild cabin swampost', building_type='',
     location='', region='Unknown',
     inventory=[
-        ShopItem('Simple rope', 1, 2, 'coins', 'Loot', 'Item.SIMPLE_ROPE'),
-        ShopItem('Simple torch', 1, 2, 'coins', 'Loot', 'Item.SIMPLE_TORCH'),
-        ShopItem('Tough rope', 1, 50, 'coins', 'Loot', 'Item.TOUGH_ROPE'),
-        ShopItem('Simple life vest', 1, 2, 'coins', 'Loot', 'Item.SIMPLE_LIFE_VEST'),
-        ShopItem('Cape of the trailblazer', 1, 2500, 'coins', 'Loot', 'Item.CAPE_OF_THE_TRAILBLAZER'),
-        ShopItem('Fishing line', 10, 15, 'coins', 'Material', 'Material.FISHING_LINE'),
-        ShopItem('Adventuring guild chest', 10, 20, 'coins', 'Container', 'Container.ADVENTURING_GUILD_CHEST'),
-        ShopItem('Seth\'s swamp compass', 1, 750, 'coins', 'Loot', 'Item.SETHS_SWAMP_COMPASS'),
-        ShopItem('Quaint quiver', 1, 10, 'coins', 'Loot', 'Item.QUAINT_QUIVER'),
-        ShopItem('Bolstered quiver', 1, 150, 'coins', 'Loot', 'Item.BOLSTERED_QUIVER'),
+        ShopItem('Simple rope', 1, 2, 'adventurers_guild_token', 'Loot', 'Item.SIMPLE_ROPE'),
+        ShopItem('Simple torch', 1, 2, 'adventurers_guild_token', 'Loot', 'Item.SIMPLE_TORCH'),
+        ShopItem('Tough rope', 1, 50, 'adventurers_guild_token', 'Loot', 'Item.TOUGH_ROPE'),
+        ShopItem('Simple life vest', 1, 2, 'adventurers_guild_token', 'Loot', 'Item.SIMPLE_LIFE_VEST'),
+        ShopItem('Cape of the trailblazer', 1, 2500, 'adventurers_guild_token', 'Loot', 'Item.CAPE_OF_THE_TRAILBLAZER'),
+        ShopItem('Fishing line', 10, 15, 'adventurers_guild_token', 'Material', 'Material.FISHING_LINE'),
+        ShopItem('Adventurers\' Guild chest', 10, 20, 'adventurers_guild_token', 'Container', 'Container.ADVENTURERS_GUILD_CHEST'),
+        ShopItem('Seth\'s swamp compass', 1, 750, 'adventurers_guild_token', 'Loot', 'Item.SETHS_SWAMP_COMPASS'),
+        ShopItem('Quaint quiver', 1, 10, 'adventurers_guild_token', 'Loot', 'Item.QUAINT_QUIVER'),
+        ShopItem('Bolstered quiver', 1, 150, 'adventurers_guild_token', 'Loot', 'Item.BOLSTERED_QUIVER'),
+        ShopItem('Halfmaw scales', 1, 1, 'adventurers_guild_token', 'Material', 'Material.HALFMAW_SCALES', True),
+        ShopItem('Halfmaw teeth', 1, 3, 'adventurers_guild_token', 'Material', 'Material.HALFMAW_TEETH', True),
     ],
 )
 
@@ -255,6 +280,7 @@ VASTALUME_TAVERN = ShopInfo(
         ShopItem('Sea spinach', 2, 5, 'coins', 'Material', 'Material.SEA_SPINACH'),
         ShopItem('Underwater lotus', 1, 10, 'coins', 'Material', 'Material.UNDERWATER_LOTUS'),
         ShopItem('Beer', 1, 3, 'coins', 'Consumable', 'Consumable.BEER'),
+        ShopItem('Sea shell', 1, 10, 'adventurers_guild_token', 'Material', 'Material.SEA_SHELL', True),
     ],
 )
 
@@ -463,14 +489,15 @@ SOUTHERN_GEM = ShopInfo(
 # ============================================================================
 
 ALL_SHOPS: List[ShopInfo] = [
-    ADVENTURERS_GUILD_CABIN_OUTPOST, ANIMAL_SHELTER, FINTASTIC_FASHION, GOLDN_GRAIL_BILGEMONT_TAVERN,
-    GOLDN_GRAIL_BLACKSPELL_TAVERN, GOLDN_GRAIL_EVERHAVEN_TAVERN, GRANFIDDICH_FISH_STALL, GRANFIDDICH_FOOD_STALL,
-    GRANFIDDICH_TOOL_STALL, HALFMAW_HIDEOUT_ADVENTURERS_GUILD_CABIN_SWAMPOST, KALLAHEIM_GENERAL_STORE, KALLAHEIM_TAVERN,
-    QUAGMIRE_COUTUR, TUTORIAL_CABIN, VASTALUME_GENERAL_STORE, VASTALUME_TAVERN,
-    BIGLOO, FORT_OF_PERMAFROST, FROSTHOOK_EMPORIUM, JARVOJOY,
-    NORTHSTAR_MERCANTILE, NOT_A_SHOP, TUNDRA_TRENDS, WOODCUTTERS_CABIN,
-    BUREAU_OF_MOSS, MOSSY_MERCHANTS_BREEZE_MART, WITCHS_HUT, CASBRANTS_SUNKEN_SHIP,
-    UNDERCURRENT, INNER_PEACE_EATS, LOST_SOULSOURCING, SOUTHERN_GEM,
+    ADVENTURERS_GUILD_CABIN_OUTPOST, ANIMAL_SHELTER, CACTUS_CANYON_ADVENTURERS_GUILD_MIRAGEPOST, FINTASTIC_FASHION,
+    GOLDN_GRAIL_BILGEMONT_TAVERN, GOLDN_GRAIL_BLACKSPELL_TAVERN, GOLDN_GRAIL_EVERHAVEN_TAVERN, GRANFIDDICH_FISH_STALL,
+    GRANFIDDICH_FOOD_STALL, GRANFIDDICH_TOOL_STALL, HALFMAW_HIDEOUT_ADVENTURERS_GUILD_CABIN_SWAMPOST, KALLAHEIM_GENERAL_STORE,
+    KALLAHEIM_TAVERN, QUAGMIRE_COUTUR, TUTORIAL_CABIN, VASTALUME_GENERAL_STORE,
+    VASTALUME_TAVERN, BIGLOO, FORT_OF_PERMAFROST, FROSTHOOK_EMPORIUM,
+    JARVOJOY, NORTHSTAR_MERCANTILE, NOT_A_SHOP, TUNDRA_TRENDS,
+    WOODCUTTERS_CABIN, BUREAU_OF_MOSS, MOSSY_MERCHANTS_BREEZE_MART, WITCHS_HUT,
+    CASBRANTS_SUNKEN_SHIP, UNDERCURRENT, INNER_PEACE_EATS, LOST_SOULSOURCING,
+    SOUTHERN_GEM,
 ]
 
 SHOPS_BY_NAME: Dict[str, ShopInfo] = {shop.name: shop for shop in ALL_SHOPS}

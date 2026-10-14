@@ -78,6 +78,29 @@ ICONS = [
         'https://wiki.walkscape.app/images/6/66/Find_Linens.svg',
         'assets/icons/attributes/find_linens.svg'
     ),
+    (
+        # Achievements tool header logo (indigo square button, left of Sell for Chips).
+        'https://wiki.walkscape.app/images/e/e2/Achievements.svg',
+        'assets/icons/achievements.svg'
+    ),
+    (
+        # Difficulty "back" cards for the Achievements tool. Color per difficulty:
+        # easy=green, normal=blue, hard=yellow, extreme=pink.
+        'https://wiki.walkscape.app/wiki/Special:FilePath/Achievement_Back_Green_Easy.svg',
+        'assets/icons/achievements/back/easy.svg'
+    ),
+    (
+        'https://wiki.walkscape.app/wiki/Special:FilePath/Achievement_Back_Blue_Normal.svg',
+        'assets/icons/achievements/back/normal.svg'
+    ),
+    (
+        'https://wiki.walkscape.app/wiki/Special:FilePath/Achievement_Back_Yellow_Hard.svg',
+        'assets/icons/achievements/back/hard.svg'
+    ),
+    (
+        'https://wiki.walkscape.app/wiki/Special:FilePath/Achievement_Back_Pink_Extreme.svg',
+        'assets/icons/achievements/back/extreme.svg'
+    ),
 ]
 
 # ============================================================================
