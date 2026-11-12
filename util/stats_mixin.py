@@ -589,7 +589,12 @@ class StatsMixin:
         skill_key = skill.value if hasattr(skill, 'value') else (skill if skill else None)
         location_key = location.name if hasattr(location, 'name') else (location if location else None)
         activity_key = activity.name if hasattr(activity, 'name') else (activity if activity else None)
-        set_key = frozenset(set_piece_counts.items()) if set_piece_counts else None
+        # Only the counts named in this item's set_pieces gate are read.
+        _gated = getattr(self, 'gated_stats', None)
+        if set_piece_counts and _gated and 'set_pieces' in _gated:
+            set_key = frozenset((n, set_piece_counts.get(n, 0)) for n in _gated['set_pieces'])
+        else:
+            set_key = None
 
         # STABLE identity key — NOT id(self). Non-composite quality/level
         # variants (e.g. "Elderhide tunic (Perfect)", "Omni-tool (265)") have
