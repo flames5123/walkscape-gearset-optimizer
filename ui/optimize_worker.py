@@ -1859,6 +1859,18 @@ def compute_slot_alternatives(final_gearset, character, opt_type, activity=None,
         if isinstance(base, CraftedItem):
             crafted_base_by_name[base.name] = base
 
+    # Map: base item name → {quality rank: owned qty}
+    owned_qty_by_base_rank = {}
+    for owned_item_obj, qty in character.items.items():
+        if qty <= 0:
+            continue
+        for oq_name, oq_attr in quality_attr_for_name.items():
+            if f'({oq_name})' in getattr(owned_item_obj, 'name', ''):
+                obase_name = owned_item_obj.name.replace(f' ({oq_name})', '').strip()
+                by_rank = owned_qty_by_base_rank.setdefault(obase_name, {})
+                orank = quality_rank.get(oq_attr, -1)
+                by_rank[orank] = by_rank.get(orank, 0) + qty
+
     # Map: id(base CraftedItem) → best owned quality rank (0-5)
     owned_crafted_best_rank = {}
     for owned_item, qty in character.items.items():
@@ -2328,18 +2340,9 @@ def compute_slot_alternatives(final_gearset, character, opt_type, activity=None,
                     if base is not None:
                         candidate_rank = quality_rank.get(q_attr, -1)
                         # Build the set of ranks the user actually owns for this base item
-                        owned_ranks_for_base = set()
-                        owned_qty_this_quality = 0
-                        for owned_item_obj, qty in character.items.items():
-                            if qty <= 0:
-                                continue
-                            for oq_name, oq_attr in quality_attr_for_name.items():
-                                if f'({oq_name})' in getattr(owned_item_obj, 'name', ''):
-                                    obase_name = owned_item_obj.name.replace(f' ({oq_name})', '').strip()
-                                    if obase_name == base_name:
-                                        owned_ranks_for_base.add(quality_rank.get(oq_attr, -1))
-                                        if quality_rank.get(oq_attr, -1) == candidate_rank:
-                                            owned_qty_this_quality += qty
+                        _owned_by_rank = owned_qty_by_base_rank.get(base_name, {})
+                        owned_ranks_for_base = set(_owned_by_rank)
+                        owned_qty_this_quality = _owned_by_rank.get(candidate_rank, 0)
                         # Skip if user owns this exact quality.
                         # RING EXCEPTION: if the other ring slot has this exact item and the
                         # user owns < 2, suggest acquiring a second copy as an upgrade.
@@ -2555,16 +2558,7 @@ def compute_slot_alternatives(final_gearset, character, opt_type, activity=None,
                         base = crafted_base_by_name.get(base_name)
                         if base is not None:
                             candidate_rank = quality_rank.get(q_attr, -1)
-                            owned_ranks_for_base = set()
-                            for owned_item_obj, qty in character.items.items():
-                                if qty <= 0:
-                                    continue
-                                for oq_name, oq_attr in quality_attr_for_name.items():
-                                    if f'({oq_name})' in getattr(owned_item_obj, 'name', ''):
-                                        obase_name = owned_item_obj.name.replace(f' ({oq_name})', '').strip()
-                                        if obase_name == base_name:
-                                            owned_ranks_for_base.add(quality_rank.get(oq_attr, -1))
-                            if candidate_rank in owned_ranks_for_base:
+                            if candidate_rank in owned_qty_by_base_rank.get(base_name, {}):
                                 is_owned = True
                         break
             

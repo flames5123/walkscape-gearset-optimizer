@@ -29,7 +29,10 @@ if TYPE_CHECKING:
 # few-thousand stable catalog entries stay hot (real hits), while ephemeral
 # ids evict harmlessly (they were never going to be queried again).
 _STATS_CACHE = OrderedDict()
-_STATS_CACHE_MAX = 100_000
+_CACHE_MAX = 100_000
+
+# (id(obj), id(obj._stats), skill, location) -> (obj, obj._stats, stats)
+_IDENTITY_STATS_CACHE = OrderedDict()
 
 # Cache mapping a location slug (e.g. 'bilgemont_port') -> LocationInfo.
 # The UI sends selectedLocation as a slug (loc.location.id), but
@@ -589,7 +592,12 @@ class StatsMixin:
         skill_key = skill.value if hasattr(skill, 'value') else (skill if skill else None)
         location_key = location.name if hasattr(location, 'name') else (location if location else None)
         activity_key = activity.name if hasattr(activity, 'name') else (activity if activity else None)
-        set_key = frozenset(set_piece_counts.items()) if set_piece_counts else None
+        # Only the counts named in this item's set_pieces gate are read.
+        _gated = getattr(self, 'gated_stats', None)
+        if set_piece_counts and _gated and 'set_pieces' in _gated:
+            set_key = frozenset((n, set_piece_counts.get(n, 0)) for n in _gated['set_pieces'])
+        else:
+            set_key = None
 
         # STABLE identity key — NOT id(self). Non-composite quality/level
         # variants (e.g. "Elderhide tunic (Perfect)", "Omni-tool (265)") have
@@ -638,6 +646,20 @@ class StatsMixin:
         )
         _cacheable = not _is_composite and not _char_dependent and _stable_id is not None
 
+        # Objects without a uuid (pets, consumables, services) miss the shared
+        # cache; ungated, their stats depend only on skill and location. _stats
+        # is in the key because pet levels get theirs replaced, and entries hold
+        # both objects so their ids can't be reused. Return copies so callers
+        # can modify the result.
+        _identity_key = None
+        if (not _is_composite and not _char_dependent and _stable_id is None
+                and not _gated and hasattr(self, '_stats')):
+            _identity_key = (id(self), id(self._stats), skill_key, location_key)
+            _identity_hit = _IDENTITY_STATS_CACHE.get(_identity_key)
+            if _identity_hit is not None:
+                _IDENTITY_STATS_CACHE.move_to_end(_identity_key)
+                return dict(_identity_hit[2])
+
         # Check cache (stable catalog singletons only -- see note above).
         # LRU: touch on hit so hot stable entries survive ephemeral churn.
         if _cacheable:
@@ -649,10 +671,15 @@ class StatsMixin:
         # Calculate stats (original logic)
         result = self._calculate_stats_uncached(skill, location, activity, set_piece_counts, character)
 
+        if _identity_key is not None:
+            _IDENTITY_STATS_CACHE[_identity_key] = (self, self._stats, dict(result))
+            if len(_IDENTITY_STATS_CACHE) > _CACHE_MAX:
+                _IDENTITY_STATS_CACHE.popitem(last=False)
+
         # Store in cache with an LRU bound (never for ephemeral composites).
         if _cacheable:
             _STATS_CACHE[cache_key] = result
-            if len(_STATS_CACHE) > _STATS_CACHE_MAX:
+            if len(_STATS_CACHE) > _CACHE_MAX:
                 _STATS_CACHE.popitem(last=False)  # evict oldest
 
         return result

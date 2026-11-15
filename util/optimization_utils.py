@@ -749,12 +749,8 @@ def validate_uuid_uniqueness(items: list, character, allow_ring_duplicates: bool
         if count_used <= 1:
             continue
         
-        # Check how many of this specific item object the character owns
-        item_owned = 0
-        for inv_item, qty in character.items.items():
-            if inv_item is item:
-                item_owned = qty
-                break
+        # Ring items hash by identity, so this is the count of this exact object.
+        item_owned = character.items.get(item, 0)
         
         if count_used > max(item_owned, 1):
             return False

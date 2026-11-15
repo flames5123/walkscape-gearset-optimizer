@@ -493,6 +493,14 @@ def _work_efficiency_saturated(activity, character, all_items, skill, location) 
 # HELPER FUNCTIONS
 # ============================================================================
 
+def _scoring_target_names():
+    """Names _compute_spr_for_target will look up, or None if they can't be determined."""
+    try:
+        return {name for _, name, _ in _effective_targets_for_scoring()}
+    except Exception:
+        return None
+
+
 def get_target_name(target) -> str:
     """Extract name from target (handles both string, object, and category values).
     
@@ -844,12 +852,17 @@ def calculate_gearset_metrics(gearset_dict: dict, activity, character, final: bo
     # _compute_spr_for_target's drop_rates lookup found nothing.
     # Each value stored is steps_per_coin (lower is better);
     # downstream display divides 1000 by it for coins/1k steps.
+    #
+    # drop_rates is local and only read back by _compute_spr_for_target, so
+    # each rollup below is skipped unless a scoring target names one of its keys.
+    _needed = _scoring_target_names()
     try:
-        from util.coin_value import compute_coin_targets_for_activity
-        coin_targets = compute_coin_targets_for_activity(
-            activity, drop_rates, total_stats,
-        )
-        drop_rates.update(coin_targets)
+        from util.coin_value import compute_coin_targets_for_activity, COIN_TARGETS
+        if _needed is None or _needed.intersection(COIN_TARGETS):
+            coin_targets = compute_coin_targets_for_activity(
+                activity, drop_rates, total_stats,
+            )
+            drop_rates.update(coin_targets)
     except Exception:
         # Non-fatal — coin scoring just falls through to the legacy
         # behavior. Other targets (XP, chests, etc.) are unaffected.
@@ -864,11 +877,12 @@ def calculate_gearset_metrics(gearset_dict: dict, activity, character, final: bo
     # into a single steps_per_shell value. Replaces the old
     # _FINE_FOLD_MULTIPLIER branch in _compute_spr_for_target.
     try:
-        from util.shell_value import compute_shell_targets_for_activity
-        shell_targets = compute_shell_targets_for_activity(
-            activity, drop_rates, total_stats,
-        )
-        drop_rates.update(shell_targets)
+        from util.shell_value import compute_shell_targets_for_activity, SHELL_TARGET
+        if _needed is None or SHELL_TARGET in _needed:
+            shell_targets = compute_shell_targets_for_activity(
+                activity, drop_rates, total_stats,
+            )
+            drop_rates.update(shell_targets)
     except Exception:
         pass
 
@@ -884,11 +898,12 @@ def calculate_gearset_metrics(gearset_dict: dict, activity, character, final: bo
     # ranks by AGT VALUE (matching the column-3 display) instead of the narrow
     # single-item IF drop rate.
     try:
-        from util.ag_token_value import compute_agt_targets_for_activity
-        agt_targets = compute_agt_targets_for_activity(
-            activity, drop_rates, total_stats,
-        )
-        drop_rates.update(agt_targets)
+        from util.ag_token_value import compute_agt_targets_for_activity, AGT_TARGET
+        if _needed is None or AGT_TARGET in _needed:
+            agt_targets = compute_agt_targets_for_activity(
+                activity, drop_rates, total_stats,
+            )
+            drop_rates.update(agt_targets)
     except Exception:
         pass
 
