@@ -2685,6 +2685,40 @@ def local_search_refine(initial_gearset: dict, activity, character, max_iteratio
                 def _partial_valid(gs):
                     return not _prune_partial or is_gearset_valid(gs, character, activity=None, check_requirements=False)
 
+                # With the first three items already valid, a fourth can only
+                # break the uuid rule for its own uuid (the quantity checks work
+                # per uuid) or the tool rule through a clash with itself or one
+                # other tool (every tool clash involves at most two tools).
+                # Neither check depends on order here: items sharing a uuid are
+                # all rings or all not, and a tool clash goes both ways.
+                _tool_slots = tuple(f'tool{i}' for i in range(6) if f'tool{i}' in current_gearset)
+                _tools_compatible = {}
+
+                def _uuid_groups(gs):
+                    groups = {}
+                    for it in gs.values():
+                        if it is not None and hasattr(it, 'uuid'):
+                            groups.setdefault(it.uuid, []).append(it)
+                    return groups
+
+                def _completes_validly(gs, groups, slot, new):
+                    if new is None:
+                        return True
+                    if hasattr(new, 'uuid') and not validate_uuid_uniqueness([*groups.get(new.uuid, ()), new], character):
+                        return False
+                    if slot not in _tool_slots:
+                        return True
+                    for other_slot in _tool_slots:
+                        other = gs[other_slot]
+                        a, b = id(other), id(new)
+                        key = (a, b) if a <= b else (b, a)
+                        ok = _tools_compatible.get(key)
+                        if ok is None:
+                            ok = _tools_compatible[key] = validate_tool_keywords([other, new], EXCLUDED_TOOL_KEYWORDS)
+                        if not ok:
+                            return False
+                    return True
+
                 for i1, slot1 in enumerate(unlocked_slots):
                     items1 = _get_items_for_slot(slot1)
                     for i2, slot2 in enumerate(unlocked_slots):
@@ -2728,19 +2762,24 @@ def local_search_refine(initial_gearset: dict, activity, character, max_iteratio
                                             partial[slot3] = new3
                                             if not _partial_valid(partial):
                                                 continue
+                                            if _prune_partial:
+                                                groups = _uuid_groups(partial)
                                             for new4 in items4:
                                                 if new4 == cur4:
                                                     continue
                                                 
                                                 four_swaps_tested += 1
                                                 
+                                                if _prune_partial and not _completes_validly(partial, groups, slot4, new4):
+                                                    continue
+
                                                 test_gearset = current_gearset.copy()
                                                 test_gearset[slot1] = new1
                                                 test_gearset[slot2] = new2
                                                 test_gearset[slot3] = new3
                                                 test_gearset[slot4] = new4
                                                 
-                                                if not is_gearset_valid(test_gearset, character, activity=None, check_requirements=False):
+                                                if not _prune_partial and not is_gearset_valid(test_gearset, character, activity=None, check_requirements=False):
                                                     continue
                                                 if not _check_keyword_requirements(test_gearset):
                                                     continue
