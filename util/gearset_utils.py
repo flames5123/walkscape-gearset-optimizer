@@ -9,6 +9,7 @@ import json
 from typing import Dict, List, Optional, Tuple, Union
 from util.walkscape_constants import *
 from util.stats_mixin import StatsMixin
+from util.collectibles_utils import calculate_collectible_stats, collectibles_are_static
 
 # Import validation functions at module level for performance
 from util.optimization_utils import (
@@ -388,7 +389,10 @@ def aggregate_gearset_stats(
         is_travel = level_skill == 'travel'
         if is_travel:
             level_skill = 'agility'
-        skill_level = character.get_skill_level(level_skill)
+        if item_stats is not None:
+            skill_level = item_stats.skill_level(character, level_skill)
+        else:
+            skill_level = character.get_skill_level(level_skill)
         
         if is_travel:
             # Travel: 0.5% per agility level (no cap). Level 1 = no boost
@@ -413,8 +417,11 @@ def aggregate_gearset_stats(
     # Add collectible stats
     if include_collectibles:
         try:
-            from util.collectibles_utils import calculate_collectible_stats
-            collectible_stats = calculate_collectible_stats(character.collectibles, skill, location)
+            if item_stats is not None:
+                collectible_stats = item_stats.collectible_stats(character, skill, location)
+            else:
+                from util.collectibles_utils import calculate_collectible_stats
+                collectible_stats = calculate_collectible_stats(character.collectibles, skill, location)
             for stat_name, stat_value in collectible_stats.items():
                 total_stats[stat_name] = total_stats.get(stat_name, 0.0) + stat_value
         except:
@@ -438,6 +445,30 @@ class _ItemStatsTable(dict):
         self.items = []
         self.set_members = {}
         self.set_gated = {}
+        self.collectibles = {}
+        self.skill_levels = {}
+
+    def skill_level(self, character, skill):
+        hit = self.skill_levels.get(skill)
+        if hit is not None and hit[0] is character:
+            return hit[1]
+        level = character.get_skill_level(skill)
+        self.skill_levels[skill] = (character, level)
+        return level
+
+    def collectible_stats(self, character, skill, location):
+        """calculate_collectible_stats for the character's collectibles, kept
+        when they are all static. The result must not be modified."""
+        collectibles = character.collectibles
+        key = (skill, id(location))
+        hit = self.collectibles.get(key)
+        if hit is not None and hit[0] is collectibles and hit[1] is location:
+            if hit[2] is not None:
+                return hit[2]
+            return calculate_collectible_stats(collectibles, skill, location)
+        stats = calculate_collectible_stats(collectibles, skill, location)
+        self.collectibles[key] = (collectibles, location, stats if collectibles_are_static(collectibles) else None)
+        return stats
 
     def _finish_set_members(self):
         gated_names = {name for names, _ in self.set_gated.values() for name in names}
