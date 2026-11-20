@@ -2022,18 +2022,29 @@ def local_search_refine(initial_gearset: dict, activity, character, max_iteratio
                     if kw:
                         _input_item_keywords.add(kw)
         
+        # id(item) -> (item, lower-cased keywords); holding the item keeps its id unique.
+        _lowered_keywords = {}
+
+        def _keywords_lower(it):
+            hit = _lowered_keywords.get(id(it))
+            if hit is None:
+                hit = _lowered_keywords[id(it)] = (it, frozenset(k.lower() for k in it.keywords))
+            return hit[1]
+
+        _required_keywords = [
+            (kw, kw.lower(), required) for kw, required in required_keywords_for_validation.items() if required > 0
+        ]
+
         def _check_keyword_requirements(gs_dict):
             """Check if gearset satisfies keyword_counts requirements."""
-            for kw, required in required_keywords_for_validation.items():
-                if required <= 0:
-                    continue
+            for kw, kw_lower, required in _required_keywords:
                 count = sum(
                     1 for s, it in gs_dict.items()
                     if it and hasattr(it, 'keywords') and
-                    any(kw.lower() == k.lower() for k in it.keywords)
+                    kw_lower in _keywords_lower(it)
                 )
                 # Input item (e.g. arrows) can satisfy keyword requirements
-                if count < required and kw.lower() in _input_item_keywords:
+                if count < required and kw_lower in _input_item_keywords:
                     count += 1
                 # The pet slot can satisfy a keyword via a passive ability
                 # (provides_keyword) rather than its .keywords list — e.g. the
