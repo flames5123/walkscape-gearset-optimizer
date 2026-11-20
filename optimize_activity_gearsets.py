@@ -733,7 +733,7 @@ def _effective_targets_for_scoring():
 
 
 def calculate_gearset_metrics(gearset_dict: dict, activity, character, final: bool = False, consumable=None,
-                              item_stats=None) -> Dict[str, float]:
+                              item_stats=None, score_cache=None) -> Dict[str, float]:
     """
     Calculate metrics for a complete gearset using Activity's get_expected_drop_rate.
     
@@ -755,6 +755,8 @@ def calculate_gearset_metrics(gearset_dict: dict, activity, character, final: bo
         final: Whether this is the final display calculation
         consumable: Optional consumable item to include in stats (if None, uses gearset's consumable slot)
         item_stats: Optional resolved_item_stats() table covering every item in the gearset
+        score_cache: Optional dict reusing results for identical stat totals. Only
+            valid while the scoring configuration (targets, input item, flags) is unchanged.
     """
     # Get all items from gearset (exclude consumable slot - handled separately)
     items = [item for slot, item in gearset_dict.items() if item is not None and slot != 'consumable']
@@ -818,6 +820,15 @@ def calculate_gearset_metrics(gearset_dict: dict, activity, character, final: bo
         total_stats['steps_add'] = 0
         total_stats['steps_percent'] = 0.0
     
+    # Scoring below reads only total_stats and per-run configuration. The key
+    # includes key order, which the drop-rate maths iterates.
+    cache_key = None
+    if score_cache is not None and not final and not EMIT_COMPONENT_STEPS:
+        cache_key = tuple(total_stats.items())
+        hit = score_cache.get(cache_key)
+        if hit is not None:
+            return _copy_metrics(hit), total_stats
+
     # Use activity's get_expected_drop_rate with verbose=True to get all metrics
     # 2026-05-21: when TARGET_ITEM is a synthetic 'cat:*' category
     # (e.g. cat:coins), pass target_item=None so the activity returns
@@ -979,7 +990,21 @@ def calculate_gearset_metrics(gearset_dict: dict, activity, character, final: bo
     # Alias current_steps with a unique key so it doesn't conflict with recipe's current_steps
     metrics['current_steps_activity'] = metrics.get('current_steps', 0)
 
+    if cache_key is not None:
+        if len(score_cache) >= _SCORE_CACHE_MAX:
+            score_cache.clear()
+        score_cache[cache_key] = _copy_metrics(metrics)
     return metrics, total_stats
+
+
+# Each entry is a few KB. Repeats are mostly close together in the sweep, so
+# a small cache keeps most of the hits while staying cheap for the browser.
+_SCORE_CACHE_MAX = 4096
+
+
+def _copy_metrics(metrics):
+    """Copy deep enough that callers can't alter a cached result."""
+    return {k: dict(v) if isinstance(v, dict) else v for k, v in metrics.items()}
 
 # ============================================================================
 # FLOOR CALCULATION FOR WEIGHT SLIDERS
@@ -2640,6 +2665,8 @@ def local_search_refine(initial_gearset: dict, activity, character, max_iteratio
             else:
                 print(f"  4-swap: ~{rough_estimate} estimated combinations across {len(unlocked_slots)} unlocked slots")
                 
+                _four_swap_scores = {}
+
                 for i1, slot1 in enumerate(unlocked_slots):
                     items1 = _get_items_for_slot(slot1)
                     for i2, slot2 in enumerate(unlocked_slots):
@@ -2689,7 +2716,10 @@ def local_search_refine(initial_gearset: dict, activity, character, max_iteratio
                                                 four_swaps_valid += 1
                                                 
                                                 try:
-                                                    test_metrics, test_stats = calculate_gearset_metrics(test_gearset, activity, character, consumable=consumable, item_stats=swap_item_stats)
+                                                    test_metrics, test_stats = calculate_gearset_metrics(
+                                                        test_gearset, activity, character, consumable=consumable,
+                                                        item_stats=swap_item_stats, score_cache=_four_swap_scores,
+                                                    )
                                                     
                                                     if use_floors:
                                                         is_better_result = Sorting.is_better_with_floors(
