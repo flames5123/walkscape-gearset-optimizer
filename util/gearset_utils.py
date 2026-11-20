@@ -8,6 +8,8 @@ import zlib
 import json
 from typing import Dict, List, Optional, Tuple, Union
 from util.walkscape_constants import *
+from util.stats_mixin import StatsMixin
+from util.collectibles_utils import calculate_collectible_stats, collectibles_are_static
 
 # Import validation functions at module level for performance
 from util.optimization_utils import (
@@ -321,7 +323,8 @@ def aggregate_gearset_stats(
     include_level_bonus: bool = True,
     include_collectibles: bool = True,
     activity_level: int = 1,
-    activity=None
+    activity=None,
+    item_stats: Optional['_ItemStatsTable'] = None,
 ) -> Dict[str, float]:
     """
     Aggregate stats from a list of items, character level, and collectibles.
@@ -345,6 +348,8 @@ def aggregate_gearset_stats(
             silently dropped. The resolver in util/stats_mixin._add_gated_stats
             gates by exact activity name, so passing it here cannot apply the
             bonus to any other activity.)
+        item_stats: Optional resolved_item_stats() table covering these
+            items, used instead of resolving each item's stats again.
         
     Returns:
         Dictionary of aggregated stats in decimal format
@@ -352,22 +357,29 @@ def aggregate_gearset_stats(
     total_stats = {}
     
     # Calculate set piece counts for set bonuses
-    set_piece_counts = _calculate_set_piece_counts_from_items(items)
+    set_piece_counts = _calculate_set_piece_counts_from_items(items) if item_stats is None else None
+    set_piece_keys = {}
     
     # Aggregate item stats (including set bonuses)
     for item in items:
         if item is None:
             continue
         
-        item_stats = item.get_stats_for_skill(
-            skill, 
-            location=location, 
-            character=character,
-            set_piece_counts=set_piece_counts,
-            activity=activity
-        )
+        stats = item_stats.get(id(item)) if item_stats is not None else None
+        if stats is None and item_stats is not None:
+            stats = item_stats.set_piece_stats(item, items, skill, location, character, activity, set_piece_keys)
+        if stats is None:
+            if set_piece_counts is None:
+                set_piece_counts = _calculate_set_piece_counts_from_items(items)
+            stats = item.get_stats_for_skill(
+                skill, 
+                location=location, 
+                character=character,
+                set_piece_counts=set_piece_counts,
+                activity=activity
+            )
         
-        for stat_name, stat_value in item_stats.items():
+        for stat_name, stat_value in stats.items():
             total_stats[stat_name] = total_stats.get(stat_name, 0.0) + stat_value
     
     # Add level bonus WE (capped at 20 levels ABOVE activity level)
@@ -377,7 +389,10 @@ def aggregate_gearset_stats(
         is_travel = level_skill == 'travel'
         if is_travel:
             level_skill = 'agility'
-        skill_level = character.get_skill_level(level_skill)
+        if item_stats is not None:
+            skill_level = item_stats.skill_level(character, level_skill)
+        else:
+            skill_level = character.get_skill_level(level_skill)
         
         if is_travel:
             # Travel: 0.5% per agility level (no cap). Level 1 = no boost
@@ -402,14 +417,148 @@ def aggregate_gearset_stats(
     # Add collectible stats
     if include_collectibles:
         try:
-            from util.collectibles_utils import calculate_collectible_stats
-            collectible_stats = calculate_collectible_stats(character.collectibles, skill, location)
+            if item_stats is not None:
+                collectible_stats = item_stats.collectible_stats(character, skill, location)
+            else:
+                from util.collectibles_utils import calculate_collectible_stats
+                collectible_stats = calculate_collectible_stats(character.collectibles, skill, location)
             for stat_name, stat_value in collectible_stats.items():
                 total_stats[stat_name] = total_stats.get(stat_name, 0.0) + stat_value
         except:
             pass
     
     return total_stats
+
+
+class _ItemStatsTable(dict):
+    """Item stats resolved once for a search, keyed by id(item).
+
+    Holds its items so that no other object can take one of their ids.
+
+    Stats of an item with a set piece gate depend only on whether the
+    gearset has any set keyword at all and on the counts of the sets its
+    gate names, so they are kept per item under that key.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.items = []
+        self.set_members = {}
+        self.set_gated = {}
+        self.collectibles = {}
+        self.skill_levels = {}
+        self.service = None
+
+    def skill_level(self, character, skill):
+        hit = self.skill_levels.get(skill)
+        if hit is not None and hit[0] is character:
+            return hit[1]
+        level = character.get_skill_level(skill)
+        self.skill_levels[skill] = (character, level)
+        return level
+
+    def collectible_stats(self, character, skill, location):
+        """calculate_collectible_stats for the character's collectibles, kept
+        when they are all static. The result must not be modified."""
+        collectibles = character.collectibles
+        key = (skill, id(location))
+        hit = self.collectibles.get(key)
+        if hit is not None and hit[0] is collectibles and hit[1] is location:
+            if hit[2] is not None:
+                return hit[2]
+            return calculate_collectible_stats(collectibles, skill, location)
+        stats = calculate_collectible_stats(collectibles, skill, location)
+        self.collectibles[key] = (collectibles, location, stats if collectibles_are_static(collectibles) else None)
+        return stats
+
+    def service_stats(self, service, skill, location, character):
+        """service.get_stats_for_skill, kept for the last service asked
+        about. The result must not be modified."""
+        hit = self.service
+        if hit is not None and hit[0] is service and hit[1] == skill and hit[2] is location and hit[3] is character:
+            return hit[4]
+        stats = service.get_stats_for_skill(skill=skill, location=location, character=character)
+        self.service = (service, skill, location, character, stats)
+        return stats
+
+    def _finish_set_members(self):
+        gated_names = {name for names, _ in self.set_gated.values() for name in names}
+        for item in self.items:
+            identity = item.uuid if hasattr(item, 'uuid') else item.name
+            keywords = {k.lower() for k in item.keywords} if hasattr(item, 'keywords') else ()
+            self.set_members[id(item)] = (identity, bool(keywords), tuple(gated_names.intersection(keywords)))
+
+    def set_piece_stats(self, item, items, skill, location, character, activity, keys):
+        gated = self.set_gated.get(id(item))
+        if gated is None:
+            return None
+        set_names, by_counts = gated
+        key = keys.get(set_names)
+        if key is None:
+            key = self._set_piece_key(items, set_names)
+            if key is None:
+                return None
+            keys[set_names] = key
+        stats = by_counts.get(key)
+        if stats is None:
+            stats = item.get_stats_for_skill(
+                skill,
+                location=location,
+                character=character,
+                set_piece_counts=_calculate_set_piece_counts_from_items(items),
+                activity=activity,
+            )
+            by_counts[key] = stats
+        return stats
+
+    def _set_piece_key(self, items, set_names):
+        members = self.set_members
+        any_keyword = False
+        pieces = {name: set() for name in set_names}
+        for other in items:
+            if other is None:
+                continue
+            member = members.get(id(other))
+            if member is None:
+                return None
+            identity, has_keywords, names = member
+            if has_keywords:
+                any_keyword = True
+                for name in names:
+                    if name in pieces:
+                        pieces[name].add(identity)
+        return any_keyword, tuple(len(pieces[name]) for name in set_names)
+
+
+def resolved_item_stats(items, skill, location, character, activity=None) -> _ItemStatsTable:
+    """Map id(item) to its stats for each of these items, or to None for an
+    item with a set piece gate, whose stats the table keeps per set piece
+    count. Items whose stats could depend on the rest of the gearset in
+    another way are left out and resolved per gearset: a composite other than
+    an achievement item (whose instance has no gates), or one with a custom
+    get_stats_for_skill.
+    """
+    from util.autogenerated.equipment import AchievementItem
+
+    fixed = _ItemStatsTable()
+    for item in items:
+        if item is None or id(item) in fixed:
+            continue
+        fixed.items.append(item)
+        if getattr(type(item), 'get_stats_for_skill', None) is not StatsMixin.get_stats_for_skill:
+            continue
+        if hasattr(item, 'has_instance') and type(item) is not AchievementItem:
+            continue
+        gated = getattr(item, 'gated_stats', None)
+        if gated and 'set_pieces' in gated:
+            fixed[id(item)] = None
+            fixed.set_gated[id(item)] = (tuple(gated['set_pieces']), {})
+        else:
+            fixed[id(item)] = item.get_stats_for_skill(
+                skill, location=location, character=character, set_piece_counts={}, activity=activity,
+            )
+    fixed._finish_set_members()
+    return fixed
 
 
 def _calculate_set_piece_counts_from_items(items: list) -> Dict[str, int]:

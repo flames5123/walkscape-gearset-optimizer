@@ -28,6 +28,10 @@ def _is_static(collectible):
     )
 
 
+def collectibles_are_static(collectibles):
+    return all(_is_static(c) for c in collectibles)
+
+
 def _key_part(value):
     return value if value is None or isinstance(value, str) else ('id', id(value))
 

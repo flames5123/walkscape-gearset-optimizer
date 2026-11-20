@@ -8,6 +8,10 @@ DO NOT EDIT MANUALLY
 from typing import List, Optional, Tuple, Any, Dict
 from util.stats_mixin import StatsMixin
 
+# Scoring asks once per drop for every gearset; the answer depends only on the name.
+_HAS_FINE_BY_NAME = {}
+
+
 class MaterialInstance(StatsMixin):
     """Base class for material instances. Optionally has stats (e.g., arrows with WE)."""
     def __init__(self, name: str, keywords: List[str], value: int, special_sell: Optional[Tuple[int, str]] = None, stats: Optional[Dict] = None, requirements: Optional[List] = None, effort: Optional[int] = None):
@@ -37,9 +41,14 @@ class MaterialInstance(StatsMixin):
 
     def has_fine_material(self) -> bool:
         """Check if this material has a fine counterpart."""
+        try:
+            return _HAS_FINE_BY_NAME[self.name]
+        except KeyError:
+            pass
         enum_name = self.name.upper().replace(" ", "_").replace("(", "").replace(")", "").replace("-", "_").replace("'", "")
         fine_enum_name = enum_name + "_FINE"
-        return hasattr(Material, fine_enum_name)
+        found = _HAS_FINE_BY_NAME[self.name] = hasattr(Material, fine_enum_name)
+        return found
 
 
 class Material:

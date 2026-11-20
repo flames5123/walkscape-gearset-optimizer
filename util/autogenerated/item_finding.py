@@ -14,22 +14,35 @@ class CategoryInstance:
     def __init__(self, name: str, drops: List[DropEntry]):
         self.name = name
         self.drops = drops  # List of DropEntry with relative chances
+        self._expanded = {}
 
     def expand_with_chance(self, base_chance: float) -> List[DropEntry]:
         """Expand this category to actual drops with adjusted chances.
 
         actual_chance = base_chance * (drop.chance_percent / 100.0)
+
+        Expansions are reused for the same base_chance, so the DropEntry
+        objects are shared between calls and must not be modified.
         """
-        expanded = []
-        for drop in self.drops:
-            actual_chance = base_chance * (drop.chance_percent / 100.0)
-            expanded.append(DropEntry(
-                item_name=drop.item_name,
-                item_ref=drop.item_ref,
-                quantity=drop.quantity,
-                chance_percent=actual_chance
-            ))
-        return expanded
+        # Zero isn't cached: 0.0 and -0.0 compare equal but give differently
+        # signed chances.
+        key = (type(base_chance), base_chance)
+        expanded = self._expanded.get(key) if base_chance else None
+        if expanded is None:
+            expanded = []
+            for drop in self.drops:
+                actual_chance = base_chance * (drop.chance_percent / 100.0)
+                expanded.append(DropEntry(
+                    item_name=drop.item_name,
+                    item_ref=drop.item_ref,
+                    quantity=drop.quantity,
+                    chance_percent=actual_chance
+                ))
+            if base_chance:
+                if len(self._expanded) >= 1024:
+                    self._expanded.clear()
+                self._expanded[key] = expanded
+        return list(expanded)
 
     def __repr__(self):
         return f"CategoryInstance({self.name}, {len(self.drops)} items)"
