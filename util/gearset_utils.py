@@ -447,6 +447,7 @@ class _ItemStatsTable(dict):
         self.set_gated = {}
         self.collectibles = {}
         self.skill_levels = {}
+        self.service = None
 
     def skill_level(self, character, skill):
         hit = self.skill_levels.get(skill)
@@ -468,6 +469,16 @@ class _ItemStatsTable(dict):
             return calculate_collectible_stats(collectibles, skill, location)
         stats = calculate_collectible_stats(collectibles, skill, location)
         self.collectibles[key] = (collectibles, location, stats if collectibles_are_static(collectibles) else None)
+        return stats
+
+    def service_stats(self, service, skill, location, character):
+        """service.get_stats_for_skill, kept for the last service asked
+        about. The result must not be modified."""
+        hit = self.service
+        if hit is not None and hit[0] is service and hit[1] == skill and hit[2] is location and hit[3] is character:
+            return hit[4]
+        stats = service.get_stats_for_skill(skill=skill, location=location, character=character)
+        self.service = (service, skill, location, character, stats)
         return stats
 
     def _finish_set_members(self):

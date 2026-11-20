@@ -570,11 +570,14 @@ def calculate_craft_metrics(
     
     # Add service stats
     if service:
-        service_stats = service.get_stats_for_skill(
-            skill=skill,
-            location=location,
-            character=character
-        )
+        if item_stats is not None:
+            service_stats = item_stats.service_stats(service, skill, location, character)
+        else:
+            service_stats = service.get_stats_for_skill(
+                skill=skill,
+                location=location,
+                character=character
+            )
         for stat_name, stat_value in service_stats.items():
             total_stats[stat_name] = total_stats.get(stat_name, 0.0) + stat_value
     
