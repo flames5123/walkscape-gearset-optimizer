@@ -2667,6 +2667,24 @@ def local_search_refine(initial_gearset: dict, activity, character, max_iteratio
                 
                 _four_swap_scores = {}
 
+                # The uuid and tool-keyword rules only get stricter as items are
+                # added, so a conflict among the items chosen so far rules out
+                # every completion. The one exception is a uuid carried by both a
+                # ring and a non-ring item: the slot of the last such item decides
+                # which quantity rule applies.
+                _uuid_is_ring = {}
+                _prune_partial = True
+                for _it in [*current_gearset.values(), *(i for s in unlocked_slots for i in _get_items_for_slot(s))]:
+                    if _it is None or not hasattr(_it, 'uuid'):
+                        continue
+                    _is_ring = hasattr(_it, 'slot') and _it.slot == 'ring'
+                    if _uuid_is_ring.setdefault(_it.uuid, _is_ring) != _is_ring:
+                        _prune_partial = False
+                        break
+
+                def _partial_valid(gs):
+                    return not _prune_partial or is_gearset_valid(gs, character, activity=None, check_requirements=False)
+
                 for i1, slot1 in enumerate(unlocked_slots):
                     items1 = _get_items_for_slot(slot1)
                     for i2, slot2 in enumerate(unlocked_slots):
@@ -2687,14 +2705,28 @@ def local_search_refine(initial_gearset: dict, activity, character, max_iteratio
                                 cur3 = current_gearset[slot3]
                                 cur4 = current_gearset[slot4]
                                 
+                                partial = current_gearset.copy()
+                                partial[slot2] = partial[slot3] = partial[slot4] = None
+
                                 for new1 in items1:
                                     if new1 == cur1:
+                                        continue
+                                    partial[slot1] = new1
+                                    partial[slot2] = partial[slot3] = None
+                                    if not _partial_valid(partial):
                                         continue
                                     for new2 in items2:
                                         if new2 == cur2:
                                             continue
+                                        partial[slot2] = new2
+                                        partial[slot3] = None
+                                        if not _partial_valid(partial):
+                                            continue
                                         for new3 in items3:
                                             if new3 == cur3:
+                                                continue
+                                            partial[slot3] = new3
+                                            if not _partial_valid(partial):
                                                 continue
                                             for new4 in items4:
                                                 if new4 == cur4:
