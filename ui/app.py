@@ -15,6 +15,7 @@ import sqlite3
 import uuid
 import logging
 import html as html_lib
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Any, List, Optional, Tuple, Union
 
 from fastapi import FastAPI, HTTPException, Request, Response, Cookie, BackgroundTasks
@@ -1176,22 +1177,32 @@ async def api_audit_middleware(request: Request, call_next):
         # Get real IP (handle proxies)
         ip_address = request.headers.get('x-forwarded-for', request.client.host if request.client else 'unknown')
 
-        try:
-            db = get_db()
-            db.log_api_access(
-                session_uuid=session_uuid,
-                endpoint=request.url.path,
-                method=request.method,
-                user_agent=user_agent,
-                ip_address=ip_address,
-                response_time_ms=elapsed_ms,
-                status_code=response.status_code
-            )
-        except Exception as e:
-            # Don't fail requests if logging fails
-            log(f"Failed to log API access: {e}", session_uuid)
+        _AUDIT_WRITER.submit(
+            _write_api_access,
+            session_uuid=session_uuid,
+            endpoint=request.url.path,
+            method=request.method,
+            user_agent=user_agent,
+            ip_address=ip_address,
+            timestamp=_utc_now(),
+            response_time_ms=elapsed_ms,
+            status_code=response.status_code,
+        )
 
     return response
+
+
+# Audit rows are written on one background thread, in request order, so the
+# INSERT and its commit don't hold up the event loop.
+_AUDIT_WRITER = ThreadPoolExecutor(max_workers=1, thread_name_prefix="api-audit")
+
+
+def _write_api_access(**row):
+    try:
+        get_db().log_api_access(**row)
+    except Exception as e:
+        # Don't fail requests if logging fails
+        log(f"Failed to log API access: {e}", row["session_uuid"])
 
 
 # ============================================================================
