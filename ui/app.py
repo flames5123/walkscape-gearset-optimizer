@@ -4734,7 +4734,16 @@ async def get_activities(request: Request, response: Response):
     # Collect all activities
     activities_by_skill = {}
     all_activities = []
-    
+
+    session_skills = None
+    if hasattr(request, 'state') and hasattr(request.state, 'session_uuid'):
+        try:
+            session = get_db().get_session(request.state.session_uuid)
+            if session and session.get('character_config'):
+                session_skills = session['character_config'].get('skills', {})
+        except:
+            pass
+
     for attr_name in dir(Activity):
         if attr_name.startswith('_'):
             continue
@@ -4859,13 +4868,9 @@ async def get_activities(request: Request, response: Response):
         
         # Get character skill level for level-based drops
         character_skill_level = 1
-        if hasattr(request, 'state') and hasattr(request.state, 'session_uuid'):
+        if session_skills is not None:
             try:
-                session = get_db().get_session(request.state.session_uuid)
-                if session and session.get('character_config'):
-                    char_config = session['character_config']
-                    skill_name = skill.lower()
-                    character_skill_level = char_config.get('skills', {}).get(skill_name, 1)
+                character_skill_level = session_skills.get(skill.lower(), 1)
             except:
                 pass
         
