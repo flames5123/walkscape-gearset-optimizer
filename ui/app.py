@@ -6,6 +6,7 @@ Provides REST API endpoints for session management, character import,
 and configuration updates. Serves static files for the frontend.
 """
 
+import functools
 import json
 import math
 import os
@@ -19,6 +20,7 @@ from typing import Dict, Any, List, Optional, Tuple, Union
 from fastapi import FastAPI, HTTPException, Request, Response, Cookie, BackgroundTasks
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, PlainTextResponse
+from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -287,6 +289,34 @@ def _maybe_static_304(request: Request, response: Response, etag_prefix: str, ma
     response.headers["ETag"] = etag
     response.headers["Cache-Control"] = f"public, max-age={max_age}, must-revalidate"
     return None
+
+
+_STATIC_RESPONSES: Dict[str, tuple] = {}
+
+
+def _static_payload(endpoint):
+    """Serialise a `_maybe_static_304` endpoint's payload once per process.
+
+    Only for endpoints whose payload depends on nothing but DATA_VERSION,
+    which is fixed for the life of the process: no session, query or
+    request state. Later requests get the stored bytes and headers, and a
+    matching If-None-Match gets the same 304 the endpoint would send.
+    """
+    @functools.wraps(endpoint)
+    async def wrapper(request: Request, response: Response):
+        stored = _STATIC_RESPONSES.get(endpoint.__name__)
+        if stored is None:
+            result = await endpoint(request, response)
+            if isinstance(result, Response):
+                return result
+            body = JSONResponse(content=jsonable_encoder(result)).body
+            headers = {"ETag": response.headers["etag"], "Cache-Control": response.headers["cache-control"]}
+            _STATIC_RESPONSES[endpoint.__name__] = stored = (body, headers)
+        body, headers = stored
+        if request.headers.get("if-none-match") == headers["ETag"]:
+            return Response(status_code=304, headers=headers)
+        return Response(content=body, media_type="application/json", headers=headers)
+    return wrapper
 
 # ============================================================================
 # PYDANTIC MODELS
@@ -4209,6 +4239,7 @@ async def get_xp_calibration_gearset(request: Request):
 # ============================================================================
 
 @app.get("/api/items")
+@_static_payload
 async def get_items(request: Request, response: Response):
     """
     Get full item catalog with categories.
@@ -4258,6 +4289,7 @@ def _load_internal_item_ids():
 
 
 @app.get("/api/catalog")
+@_static_payload
 async def get_catalog(request: Request, response: Response):
     """
     Get flat item catalog for gear selection popup.
@@ -4474,6 +4506,7 @@ async def get_catalog(request: Request, response: Response):
     }
 
 @app.get("/api/skills")
+@_static_payload
 async def get_skills(request: Request, response: Response):
     """
     Get skill definitions with categories.
@@ -5132,6 +5165,7 @@ REGION_CONFIG = {
 
 
 @app.get("/api/locations")
+@_static_payload
 async def get_locations(request: Request, response: Response):
     """
     Get all locations grouped by region for location dropdowns.
@@ -6192,6 +6226,7 @@ async def comparison_stats(request: Request):
 
 
 @app.get("/api/recipes")
+@_static_payload
 async def get_recipes(request: Request, response: Response):
     """
     Get all recipes organized by skill.
@@ -6499,6 +6534,7 @@ async def get_recipes(request: Request, response: Response):
 
 
 @app.get("/api/item-sources")
+@_static_payload
 async def get_item_sources(request: Request, response: Response):
     """
     Build a reverse lookup: item/material name → list of sources.
@@ -6959,6 +6995,7 @@ async def get_container_details(container_name: str, response: Response):
 
 
 @app.get("/api/services")
+@_static_payload
 async def get_services(request: Request, response: Response):
     """
     Get all services with unlock requirements.
@@ -7498,6 +7535,7 @@ async def get_custom_stats():
 
 
 @app.get("/api/item-finding-categories")
+@_static_payload
 async def get_item_finding_categories(request: Request, response: Response):
     """
     Get item finding category information for display.
