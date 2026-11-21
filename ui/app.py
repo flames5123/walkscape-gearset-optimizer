@@ -292,6 +292,16 @@ def _maybe_static_304(request: Request, response: Response, etag_prefix: str, ma
     return None
 
 
+def _plain_json(content, response: Optional[Response] = None) -> JSONResponse:
+    """Skip FastAPI's jsonable_encoder, which returns plain dicts, lists,
+    strings, numbers, booleans and None unchanged but walks large payloads
+    slowly. Only for content made of those types."""
+    out = JSONResponse(content=content)
+    if response is not None:
+        out.headers.raw.extend(response.headers.raw)
+    return out
+
+
 _STATIC_RESPONSES: Dict[str, tuple] = {}
 
 
@@ -5159,11 +5169,11 @@ async def get_activities(request: Request, response: Response):
     sorted_skills = sorted(activities_by_skill.keys())
     sorted_by_skill = {skill: activities_by_skill[skill] for skill in sorted_skills}
     
-    return {
+    return _plain_json({
         'activities': all_activities,
         'by_skill': sorted_by_skill,
         'count': len(all_activities)
-    }
+    }, response)
 
 
 # ============================================================================
@@ -12172,7 +12182,7 @@ def stats_report_stale_check(request: Request):
                     f"scopes={len(_cached.get('stale_scopes', []))}", session_uuid)
             except Exception:
                 pass
-            return _cached
+            return _plain_json(_cached)
     except Exception as _ce:
         print(f'[stale-check] cache key/get failed (non-fatal): {_ce}')
         _cache_key = None
@@ -12317,7 +12327,7 @@ def stats_report_stale_check(request: Request):
     except Exception:
         pass
 
-    return _response
+    return _plain_json(_response)
 
 
 @app.post("/api/stats-report/state-changed")
