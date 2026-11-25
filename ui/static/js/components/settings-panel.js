@@ -75,6 +75,24 @@ const SP_CSS = `
 .sp-chip img, .sp-subchip img { width: 32px; height: 32px; flex-shrink: 0; object-fit: contain;
   transition: filter .25s ease-in-out, opacity .25s ease-in-out; }
 .sp-chip:not(.selected) img, .sp-subchip:not(.selected) img { filter: grayscale(1); opacity: .6; }
+/* Opt-in uniform chip width: N equal columns (var --sp-cols). The parent chips
+   tile evenly instead of hugging their label width. Broad .sp-uniform .sp-chip
+   selector (sub-chips are .sp-subchip, unaffected); !important to beat the base
+   chip rule; width leaves room for the engine's inter-chip gap so N fit per row.
+   2026-11-17 (jwbail). */
+.sp-uniform .sp-chip {
+  width: calc((100% - var(--sp-cols, 3) * 12px) / var(--sp-cols, 3)) !important;
+  justify-content: flex-start;
+}
+/* Responsive: fewer columns as the screen narrows (2 on tablet, 1 on phone),
+   so labels don't truncate on mobile. 2026-11-18 (jwbail). */
+@media (max-width: 820px) {
+  .sp-uniform .sp-chip { width: calc((100% - 12px) / 2) !important; }
+}
+@media (max-width: 520px) {
+  .sp-uniform .sp-chip { width: 100% !important; }
+}
+.sp-align-left .sp-chiprow { justify-content: flex-start; }
 .sp-caret { font-size: .8em; flex-shrink: 0; display: none; position: relative; cursor: pointer; transition: transform .2s ease-in-out; }
 .sp-chip.has-caret .sp-caret { display: inline-block; } /* caret shows whenever the toggle has options, on or off */
 .sp-chip.collapsed .sp-caret { transform: rotate(-90deg); }
@@ -95,6 +113,14 @@ const SP_CSS = `
   padding: 6px 8px; transition: width .25s ease-in-out, height .25s ease-in-out;
 }
 .sp-subchip { position: absolute; }
+/* Opt-in inline header at the top of an options box (e.g. the target-item
+   per-category "Select all / Deselect all" text button). Absolutely placed so
+   it never disturbs the engine's absolute sub-chip layout; the engine reserves
+   vertical room for it in _boxLayouts. 2026-11-19 (jwbail). */
+.sp-box-header { position: absolute; top: 6px; left: 10px; z-index: 2;
+  cursor: pointer; user-select: none; font-size: 0.8em; font-weight: 600;
+  color: var(--accent-color, #5B8BD9); line-height: 1.4; }
+.sp-box-header:hover { text-decoration: underline; }
 .sp-line-engine .sp-subchip {
   transition: left .25s ease-in-out, top .25s ease-in-out,
               border-color .25s ease-in-out, background .25s ease-in-out, color .25s ease-in-out;
@@ -230,12 +256,12 @@ export class Toggle {
   hasOptions() { return this.options.length > 0; }
   isOn() { return this._readOn(); }
   isExpanded() {
-    // Linked-parent chips (opts.linkedSubs — e.g. the goals report's
-    // "Include unavailable") behave like a normal collapsible chip: clicking
-    // the parent OFF collapses the box. The ONE exception is when the parent
-    // was AUTO-unchecked because the user turned off every sub-option — then
-    // _keepOpenOverride forces the box to stay visible so the user can see the
-    // (now all-off) sub-options and understand why the parent went off.
+    // stayOpen chips (target-item categories): the box is driven purely by the
+    // caret, independent of selection — so a deselected category can still be
+    // expanded to pick items. 2026-11-18 (jwbail).
+    if (this.opts.stayOpen) {
+      return !this._collapsed;
+    }
     if (this.opts.linkedSubs) {
       return !this._collapsed && (this.isOn() || !!this._keepOpenOverride);
     }
@@ -268,6 +294,13 @@ export class Toggle {
       this._parent._reconcileLinkedParent();
     }
 
+    // 2026-11-18 (jwbail): the FIRST _syncChipState above runs BEFORE the
+    // cascade changes the sub counts, so a chip whose readOn is derived from
+    // its subs (e.g. count>0) would reflect the stale pre-cascade state. Re-sync
+    // after the cascade so the lit state matches the final counts. No-op for
+    // chips whose readOn is independent of subs.
+    this._syncChipState();
+
     if (!silentLayout && this.panel) this.panel.relayout();
   }
 
@@ -294,12 +327,17 @@ export class Toggle {
         }
       }
     } finally { this._cascading = false; }
-    // Direct parent click is a normal collapse interaction: clear the
-    // keep-open override so OFF collapses the box (isExpanded() -> false) and
-    // ON shows it again. (The "stay open while off" behavior is reserved for
-    // the sub-driven auto-uncheck path in _reconcileLinkedParent.)
-    this._keepOpenOverride = false;
-    if (on) { this._collapsed = false; this.chip.classList.remove('collapsed'); }
+    // Direct parent click toggles SELECTION. For a stayOpen chip (a target-item
+    // category) selection must NOT change the box's expand/collapse — the caret
+    // alone drives it (isExpanded returns !_collapsed for stayOpen). So leave
+    // _collapsed untouched on BOTH select and deselect. Non-stayOpen chips keep
+    // the prior behavior: turning the parent on expands its box. 2026-11-20.
+    if (this.opts.stayOpen) {
+      /* caret owns expand/collapse; selection leaves it alone */
+    } else {
+      this._keepOpenOverride = false;
+      if (on) { this._collapsed = false; this.chip.classList.remove('collapsed'); }
+    }
   }
 
   /* A sub of a linkedSubs parent changed: set parent = anySubOn (without
@@ -315,13 +353,21 @@ export class Toggle {
     if (anyOn) {
       // At least one sub is on -> normal: the parent is on, drop any override.
       this._keepOpenOverride = false;
-    } else {
+    } else if (!this.opts.stayOpen) {
       // User just turned off the LAST sub -> parent auto-unchecks but keep the
-      // box open so they can see every sub is now off.
+      // box open so they can see every sub is now off. (stayOpen chips let the
+      // caret own the box, so don't force it.)
       this._keepOpenOverride = true;
       this._collapsed = false;
       this.chip.classList.remove('collapsed');
     }
+    // Always reflect the parent's current state on the chip. When readOn is
+    // derived from the subs (count>0), the sub's own onToggle already updated
+    // the count BEFORE this reconcile, so isOn()===anyOn and the _setOn above
+    // is skipped — without this the parent chip would never light on a single
+    // item click. 2026-11-18 (jwbail).
+    this._syncChipState();
+    if (this.panel) this.panel.relayout();
   }
 
   _toggleCollapsed() {
@@ -331,6 +377,21 @@ export class Toggle {
       this.panel.onCollapseChange(this.opts.collapseKey, this._collapsed);
     }
     if (this.panel) this.panel.relayout();
+  }
+
+  /* Public: force collapsed state (used by a host "expand/collapse all"
+   * control). Fires onCollapseChange so persistence stays in sync. Pass
+   * relayout=false to batch many toggles and relayout the panel once. */
+  setCollapsed(collapsed, relayout = true) {
+    collapsed = !!collapsed;
+    if (this._collapsed === collapsed) return;
+    this._collapsed = collapsed;
+    this.chip.classList.toggle('collapsed', collapsed);
+    if (collapsed) this._keepOpenOverride = false;
+    if (this.opts.collapseKey && this.panel && this.panel.onCollapseChange) {
+      this.panel.onCollapseChange(this.opts.collapseKey, collapsed);
+    }
+    if (relayout && this.panel) this.panel.relayout();
   }
 
   /* Reflect current on/off into the chip without firing events (idempotent). */
@@ -357,6 +418,17 @@ export class SettingsPanel {
     this.lines = [[]]; // array of lines; each line is an array of Toggles
     this.element = document.createElement('div');
     this.element.className = 'sp-panel';
+    // 2026-11-17 (jwbail): opt-in uniform chip width (N equal columns). Only
+    // the target-item selector passes this; the optimizer panels are untouched.
+    if (opts.uniformCols) {
+      this.element.classList.add('sp-uniform');
+      this.element.style.setProperty('--sp-cols', String(opts.uniformCols));
+    }
+    // 2026-11-17 (jwbail): opt-in left alignment (default centered). Left-aligns
+    // each row so partial rows (e.g. a lone Ectoplasm/Other) sit in the first
+    // column instead of centering.
+    this.align = opts.align === 'left' ? 'left' : 'center';
+    if (this.align === 'left') this.element.classList.add('sp-align-left');
     this._built = false;
     this._ro = null;
   }
@@ -408,6 +480,11 @@ export class SettingsPanel {
             const box = document.createElement('div'); box.className = 'sp-box';
             box.style.setProperty('--sp-color', t.color);
             box.style.marginTop = this.connLen + 'px';   // leaves room for the connector above it
+            // Opt-in inline box header (e.g. per-category Select/Deselect all).
+            if (typeof t.opts.boxHeader === 'function') {
+              const hdr = t.opts.boxHeader();
+              if (hdr) { hdr.classList.add('sp-box-header'); box.appendChild(hdr); t._boxHeaderEl = hdr; }
+            }
             t.options.forEach((o) => box.appendChild(o.chip));
             clip.appendChild(conn); clip.appendChild(box); outer.appendChild(clip); slot.appendChild(outer);
             lineEl.appendChild(slot);
@@ -499,7 +576,7 @@ export class SettingsPanel {
       // (the two-phase "move a little, then the rest at the end" on toggle-on).
       const chipX = new Array(n);      // final left per chip (index-aligned to `line`)
       const cx = new Map();            // centered chip-center per toggle
-      let x = (lineW - chipsRowW) / 2;
+      let x = this.align === 'left' ? 0 : (lineW - chipsRowW) / 2;
       line.forEach((t, i) => { chipX[i] = x; cx.set(t, x + chipW[i] / 2); x += chipW[i] + gap; });
 
       const placements = [];           // {t, bx, lay, connCenter}
@@ -546,7 +623,7 @@ export class SettingsPanel {
       let y = 0;
       rows.forEach((r) => {
         const rowW = r.reduce((a, i) => a + chipW[i], 0) + gap * (r.length - 1);
-        let x = Math.max(0, (lineW - rowW) / 2);
+        let x = this.align === 'left' ? 0 : Math.max(0, (lineW - rowW) / 2);
         const center = {};
         r.forEach((i) => { this._setChip(line[i], x, y, animChips); center[i] = x + chipW[i] / 2; x += chipW[i] + gap; });
         y += chipH;
@@ -559,10 +636,18 @@ export class SettingsPanel {
         const openInRow = r.filter((i) => line[i].hasOptions() && line[i].isExpanded());
         if (openInRow.length) {
           let maxBoxH = 0;
+          let prevRight = 0; // right edge of the previously placed open box
           openInRow.forEach((idx, k) => {
             const t = line[idx];
             const c = center[idx];
-            const leftBound = k > 0 ? (center[openInRow[k - 1]] + c) / 2 + gap / 2 : 0;
+            // Cell left edge: the midpoint to the previous open chip, but never
+            // less than the previous box's ACTUAL right edge + gap. This shoves
+            // a right-column box rightward when its left neighbour's box
+            // overflows its own cell (e.g. a long sub-item name like "Cooling
+            // icicle trinket"), instead of letting the two boxes overlap.
+            // 2026-11-19 (jwbail).
+            const midLeftBound = k > 0 ? (center[openInRow[k - 1]] + c) / 2 + gap / 2 : 0;
+            const leftBound = k > 0 ? Math.max(midLeftBound, prevRight + gap) : 0;
             const rightBound = k < openInRow.length - 1 ? (c + center[openInRow[k + 1]]) / 2 - gap / 2 : lineW;
             // Width available to this box = the FULL span between its neighbour
             // midpoints (or line edges), NOT a cell forced symmetric around the
@@ -578,6 +663,7 @@ export class SettingsPanel {
             left = Math.max(0, Math.min(left, lineW - lay.width));
             this._showBox(t, left, y, lay, animChips);
             this._showConn(t, c, left, lay.width);
+            prevRight = left + lay.width;
             maxBoxH = Math.max(maxBoxH, lay.height);
           });
           y += conn + maxBoxH;
@@ -589,7 +675,7 @@ export class SettingsPanel {
       // ---- STACKED MODE: vertical units (chip, then its box) in order ----
       let y = 0;
       line.forEach((t, i) => {
-        this._setChip(t, (lineW - chipW[i]) / 2, y, animChips);
+        this._setChip(t, this.align === 'left' ? 0 : (lineW - chipW[i]) / 2, y, animChips);
         y += chipH;
         if (t.hasOptions() && t.isExpanded()) {
           const lay = this._fitBoxSingle(t, lineW);
@@ -632,6 +718,10 @@ export class SettingsPanel {
     const opts = t.options;
     const n = opts.length;
     const padX = 8, padY = 6, border = 2, subGap = 8;
+    // Reserve vertical room for an inline box header (if any) above the chips.
+    const headerH = t._boxHeaderEl ? (t._boxHeaderEl.offsetHeight || 0) : 0;
+    const headerGap = headerH ? 6 : 0;
+    const headerW = t._boxHeaderEl ? (t._boxHeaderEl.offsetWidth || 0) : 0;
     const w = opts.map((o) => o.chip.offsetWidth);
     const ch = Math.max.apply(null, opts.map((o) => o.chip.offsetHeight));
     const out = [];
@@ -639,15 +729,15 @@ export class SettingsPanel {
       const rows = [];
       for (let i = 0; i < n; i++) { (rows[Math.floor(i / k)] = rows[Math.floor(i / k)] || []).push(i); }
       const rowW = rows.map((r) => r.reduce((a, idx) => a + w[idx], 0) + subGap * (r.length - 1));
-      const contentW = Math.max.apply(null, rowW);
+      const contentW = Math.max(Math.max.apply(null, rowW), headerW);
       const contentH = rows.length * ch + subGap * (rows.length - 1);
       const positions = [];
       rows.forEach((r, ri) => {
         let x = padX + (contentW - rowW[ri]) / 2;         // center each row
-        const top = padY + ri * (ch + subGap);
+        const top = padY + headerH + headerGap + ri * (ch + subGap);
         r.forEach((idx) => { positions[idx] = { left: x, top }; x += w[idx] + subGap; });
       });
-      out.push({ k, width: Math.ceil(contentW + 2 * padX + 2 * border), height: Math.ceil(contentH + 2 * padY + 2 * border), positions });
+      out.push({ k, width: Math.ceil(contentW + 2 * padX + 2 * border), height: Math.ceil(contentH + headerH + headerGap + 2 * padY + 2 * border), positions });
     }
     return out.filter((c, i) => i === 0 || c.width !== out[i - 1].width);
   }

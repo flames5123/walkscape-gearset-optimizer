@@ -22,6 +22,10 @@ const DEFAULT_TITLE = 'Walkscape Optimizer';
 const EXCLUDE_IDS = new Set(['active-debug-swap-btn', HAMBURGER_ID]);
 // Icons WITHOUT a selectable/active (open-section) state — no "selected" colors.
 const NON_SELECTABLE = new Set(['info-btn', 'announcements-btn', 'report-btn', 'settings-btn', HAMBURGER_ID]);
+// Preferred default placement: when an icon isn't in the saved layout, restore
+// it immediately AFTER this anchor icon (if present) instead of by raw index —
+// keeps e.g. the Job Board icon to the right of the Bank icon.
+const PREFERRED_AFTER = { 'jobboard-nav-btn': 'bank-nav-btn' };
 const PAINT_SVG = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.71,4.63L19.37,3.29C19,2.9 18.35,2.9 17.96,3.29L9,12.25L11.75,15L20.71,6.04C21.1,5.65 21.1,5 20.71,4.63M7,14A3,3 0 0,0 4,17C4,18.31 2.84,19 2,19C2.92,20.22 4.5,21 6,21A4,4 0 0,0 10,17A3,3 0 0,0 7,14Z"/></svg>';
 // Monochrome <img> icons that CAN be recolored via CSS mask (our own white SVGs).
 const RECOLORABLE_IMG = {
@@ -400,6 +404,13 @@ function setHidden(id, hidden, fromDrawer) {
 function insertNearDefault(r) {
   const container = r.defaultSide === 'right' ? S.right : S.left;
   const kids = barIcons(container);
+  // Preferred anchor: drop it right AFTER a specific icon when that icon is
+  // present in the bar (e.g. Job Board to the right of Bank).
+  const anchorId = PREFERRED_AFTER[r.id];
+  if (anchorId) {
+    const anchor = kids.find((k) => k.id === anchorId);
+    if (anchor) { container.insertBefore(r.el, anchor.nextSibling); return; }
+  }
   let ref = null;
   for (const k of kids) {
     const kr = S.registry.get(k.id);

@@ -141,8 +141,8 @@ def build_walkdle_items() -> List[Dict]:
     if _CACHE is not None:
         return _CACHE
 
-    from ui.catalog import ItemCatalog
-    cat = ItemCatalog()
+    from ui.catalog import get_item_catalog
+    cat = get_item_catalog()
     activity_names = getattr(cat, '_activity_drop_names', set()) or set()
     chest_names = getattr(cat, '_chest_item_names', set()) or set()
     shop_names = getattr(cat, '_shop_item_names', set()) or set()

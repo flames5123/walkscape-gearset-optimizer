@@ -7,7 +7,7 @@
  * - Collapsible section (expanded by default)
  * - 3-column grid layout for factions
  * - Faction rows with icon, name, and editable reputation
- * - Input validation (0-999 for reputation)
+ * - Input validation (reputation >= 0, no upper bound)
  * - State updates on value changes
  */
 
@@ -104,7 +104,6 @@ class ReputationSection extends CollapsibleSection {
                        class="reputation-input" 
                        value="${intValue}" 
                        min="0" 
-                       max="999"
                        step="1"
                        data-faction="${faction.id}"
                        title="${faction.display_name}">
@@ -125,13 +124,10 @@ class ReputationSection extends CollapsibleSection {
             const factionId = $input.data('faction');
             let value = parseInt($input.val(), 10);
 
-            // Validate reputation (0-999)
+            // Validate reputation (>= 0, no upper bound)
             if (isNaN(value) || value < 0) {
                 value = 0;
                 $input.val(0);
-            } else if (value > 999) {
-                value = 999;
-                $input.val(999);
             }
 
             // Store as user override in ui_config
@@ -143,11 +139,9 @@ class ReputationSection extends CollapsibleSection {
             const $input = $(e.target);
             let value = parseInt($input.val(), 10);
 
-            // Validate reputation (0-999)
+            // Validate reputation (>= 0, no upper bound)
             if (isNaN(value) || value < 0) {
                 value = 0;
-            } else if (value > 999) {
-                value = 999;
             }
 
             $input.val(value);

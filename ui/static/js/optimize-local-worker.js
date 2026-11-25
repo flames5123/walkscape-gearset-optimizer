@@ -34,7 +34,7 @@ let readyPromise = null;
 function post(m) { self.postMessage(m); }
 // Build stamp so bug-report debug logs prove WHICH worker script actually ran
 // (stale-worker diagnosis). Keep in sync with WORKER_BUILD in local-compute.js.
-const WORKER_BUILD = 'target-items-11';
+const WORKER_BUILD = 'fc-gather-pull-1';
 
 // POST JSON with retry/backoff across transient server outages. Local
 // optimization compute is fully client-side, so a brief server blip (a deploy
@@ -490,7 +490,20 @@ def _sr_prepare(params_json, session_json, completed_json):
         # server precount reported N -> "0/N on local" (bug f2b386cf). Mirror
         # the server run_worker dispatch: build + include_fine + group filter.
         _incfine = bool(params.get("include_fine"))
-        ti = srw.build_target_items_jobs(run_id, sid, character, include_fine=_incfine)
+        _tislug = params.get("target_item_slug") or None
+        # 2026-11-20 (jwbail): the local build previously dropped the per-item
+        # narrowing (target_item_slugs / target_item_groups), so a LOCAL run
+        # ignored single-item selections and built the whole selected
+        # categories (the 118-vs-22 bug). Pass them through so
+        # build_target_items_jobs narrows each governed group to just the
+        # selected leaves (and their fine variants) — parity with the server
+        # run_worker dispatch.
+        _tis = params.get("target_item_slugs") or None
+        _tig = params.get("target_item_groups") or None
+        ti = srw.build_target_items_jobs(
+            run_id, sid, character, include_fine=_incfine,
+            target_item_slug=_tislug,
+            target_item_slugs=_tis, target_item_groups=_tig)
         _tgs = params.get("target_categories") or []
         _tgset = set(_tgs) if isinstance(_tgs, (list, tuple)) else set()
         if _tgset:
@@ -813,12 +826,21 @@ def _run_travel(request_json):
 const FC_DRIVER = `
 import json
 
-def _run_fastest_craft(payload_json, progress_cb=None):
+def _run_fastest_craft(payload_json, progress_cb=None, item_cb=None):
     p = json.loads(payload_json)
     session_data = p.get("session_data") or {}
     ui_config = p.get("ui_config") or {}
     selected = p.get("selected_ids")
     selected = set(selected) if selected else None
+    # Cross-run reuse (Phase 6): when /plan supplies only_refs, solve ONLY those
+    # todo cells. Absent key => None => solve all (safe fallback). An explicit
+    # empty list => solve nothing (every selected cell was fresh).
+    only_refs = p.get("only_refs")
+    only_refs = set(only_refs) if only_refs is not None else None
+    # fc-preopt A: native target-items gather-steps map, so FC pins its gather
+    # leaves to the same number the target-items report shows (the coordinator
+    # fetches it from /api/fastest-craft/gather-reuse before the FC phase).
+    gather_reuse = p.get("gather_reuse") or None
     import ui.fastest_craft as _fc
 
     def _prog(done, total):
@@ -828,10 +850,23 @@ def _run_fastest_craft(payload_json, progress_cb=None):
             except Exception:
                 pass
 
+    def _item(payload):
+        # Stream each finished item to JS so it can persist incrementally
+        # (cancel keeps finished items). Best-effort — never break the run.
+        if item_cb is not None:
+            try:
+                item_cb(json.dumps(_finite_safe(payload)))
+            except Exception:
+                pass
+
     try:
         res = _fc.run_fastest_craft(
             p.get("session_uuid"), selected, session_data, ui_config,
-            with_details=True, db=None, progress=_prog)
+            with_details=True, db=None, progress=_prog,
+            expand_intermediates=True, item_sink=_item, only_refs=only_refs,
+            fast=bool(p.get("fast", False)),
+            shard_index=p.get("shard_index"), shard_count=p.get("shard_count"),
+            gather_reuse=gather_reuse)
     except BaseException as e:
         import traceback
         return json.dumps({"error": str(e), "traceback": traceback.format_exc()})
@@ -844,6 +879,13 @@ self.onmessage = async (ev) => {
   const task = data.task || "optimize";
   try {
     await ensureReady();
+    if (task === "warmup") {
+      // Prewarm only: ensureReady() above booted Pyodide + loaded the bundle.
+      // Ack so the coordinator can serialize cold boots before FC fan-out and
+      // avoid the concurrent force-cache bundle-fetch abort.
+      post({ type: "result", id, result: { warm: true } });
+      return;
+    }
     if (task === "crafting-tree-calc") {
       const fn = pyodide.globals.get("_run_crafting_tree");
       const out = fn(JSON.stringify(data.payload || {}));
@@ -897,9 +939,13 @@ self.onmessage = async (ev) => {
       // persistence happens server-side (POST /api/fastest-craft/local-result).
       const fn = pyodide.globals.get("_run_fastest_craft");
       const progressCb = (done, total) => post({ type: "progress", id, done, total });
+      // Stream each finished item to the main thread so it can persist
+      // incrementally (cancel keeps finished items). The payload is a JSON
+      // string ({item, gather_scope_keys}) built in Python.
+      const itemCb = (itemJson) => post({ type: "fc-item", id, item: itemJson });
       let out;
       try {
-        out = fn(JSON.stringify(data.payload || {}), progressCb);
+        out = fn(JSON.stringify(data.payload || {}), progressCb, itemCb);
       } finally {
         fn.destroy();
       }

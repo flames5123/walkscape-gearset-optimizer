@@ -24,6 +24,7 @@ import { runTravelOptimizeLocal, isLocalComputeEnabled } from '../local-compute.
 import { maybeShowLocalSpeedWarning } from '../local-speed-warning.js';
 import { getInstantActionsPet, getAbilityStatsPet, SMELTING_RECIPE_NAMES } from '../utils/pet-utils.js';
 import { abilityExtraLines } from '../utils/ability-detail.js';
+import { resolveTravelLocations } from '../utils/travel-comparison.js';
 import { mountXyPriorityList, defaultRecipeEntries, ensureXyStyles } from './xy-recipe-priority-list.js';
 import { mountXyActivityPriorityList, defaultActivityEntries } from './xy-activity-priority-list.js';
 import { mountTravelPriorityList, defaultTravelEntries } from './travel-priority-list.js';
@@ -577,7 +578,10 @@ class OptimizeButton extends Component {
             return;
         }
 
-        const { start, end } = travelSection.getLocations();
+        const { start, end } = resolveTravelLocations(
+            travelSection.getLocations(),
+            store.state.column3
+        );
         // [TRAVEL-DIAG] Capture what the optimizer is being asked to optimize.
         // Bug d7c77316 / Primary-reset: if start/end here don't match the
         // dropdowns the user set, that's the dropdown→state-sync bug. If

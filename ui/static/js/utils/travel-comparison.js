@@ -18,6 +18,31 @@
 
 import { formatFixed } from './number-format.js';
 
+/**
+ * Resolve the Start/End travel locations for an optimize run.
+ *
+ * In single view the TravelInfoSection instance holds start/end. In comparison
+ * mode the Start/End dropdowns live in GearsetComparisonSection, which persists
+ * the pick to store.state.column3.{travelStart,travelEnd} but does NOT update
+ * the TravelInfoSection instance. So optimizeTravel must prefer the section's
+ * values and fall back to the shared column3 store, otherwise the comparison
+ * "Optimize Set 1/Set 2" buttons falsely warn "No Start/End location selected."
+ *
+ * Fixes bug 431cf261.
+ *
+ * @param {{start:?string,end:?string}} sectionLocations - TravelInfoSection.getLocations()
+ * @param {{travelStart:?string,travelEnd:?string}} [column3] - store.state.column3
+ * @returns {{start:?string,end:?string}}
+ */
+export function resolveTravelLocations(sectionLocations, column3) {
+    const sec = sectionLocations || {};
+    const col = column3 || {};
+    return {
+        start: sec.start || col.travelStart || null,
+        end: sec.end || col.travelEnd || null,
+    };
+}
+
 const STEPS_ICON = '/assets/icons/attributes/steps_required.svg';
 const WE_ICON = '/assets/icons/attributes/work_efficiency.svg';
 const DA_ICON = '/assets/icons/attributes/double_action.svg';

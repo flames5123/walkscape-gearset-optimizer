@@ -198,7 +198,30 @@ def _resolve_equipped_pet_ability_lock(equipped_pet, character_config, skill=Non
     return _merge_pet_ability_stats(level_info)
 
 
-def _resolve_category_target_for_activity(target, activity):
+# Sentinel returned by _resolve_category_target_for_activity when a category
+# target has no NEW thing left to score (currently: every droppable collectible
+# is already owned). Call sites treat it as "skip this metric" — the priority
+# entry is dropped and no headline target is set, rather than scoring steps
+# against a collectible the player already owns.
+_SKIP_METRIC_TARGET = '__skip_metric__'
+
+
+def _worker_owned_collectible_names(character):
+    """Lowercased display names of collectibles the character already owns.
+
+    Thin wrapper over optimize_activity_gearsets._owned_collectible_names so the
+    worker's alt-upgrade / headline-target resolution can exclude owned
+    collectibles (steps-to-ANY-NEW-collectible), matching the goals report.
+    Returns an empty set when ownership is unknown (safe default: nothing
+    treated as owned, i.e. pre-existing behavior)."""
+    try:
+        import optimize_activity_gearsets as _oag
+        return _oag._owned_collectible_names(character)
+    except Exception:
+        return set()
+
+
+def _resolve_category_target_for_activity(target, activity, owned_collectibles=None):
     """Resolve a UI category target (e.g. 'cat:chests') to a concrete
     scoring target for the given activity.
     
@@ -206,8 +229,13 @@ def _resolve_category_target_for_activity(target, activity):
       - 'cat:normal_items' → None (signals "no specific target")
       - 'cat:chests'       → first chest item name in the drop table,
                              or 'primary_chest' synthetic fallback
-      - 'cat:collectibles' → first collectible name in the drop table,
-                             or 'collectible' synthetic fallback
+      - 'cat:collectibles' → first UNOWNED collectible name in the drop table
+                             (owned collectibles are skipped — "steps to any NEW
+                             collectible"); _SKIP_METRIC_TARGET when every
+                             droppable collectible is already owned; or
+                             'collectible' synthetic fallback when none drop.
+                             `owned_collectibles` is a set of lowercased owned
+                             collectible names (empty/None = treat none as owned)
       - 'cat:fine'         → 'fine_item' synthetic
       - 'cat:gems'         → first gem material name in the drop table,
                              or None (raw rewards) if no gems drop
@@ -232,9 +260,22 @@ def _resolve_category_target_for_activity(target, activity):
     
     if target == 'cat:collectibles':
         all_drops = list(activity.drop_table) + list(activity.secondary_drop_table)
-        for drop in all_drops:
-            if drop.item_ref and drop.item_ref.startswith('Collectible.') and drop.item_name != 'Nothing':
+        coll_drops = [
+            drop for drop in all_drops
+            if drop.item_ref and drop.item_ref.startswith('Collectible.')
+            and drop.item_name != 'Nothing'
+        ]
+        owned = owned_collectibles or set()
+        # Prefer the first collectible the player does NOT already own — the
+        # useful "steps to any NEW collectible" comparison.
+        for drop in coll_drops:
+            if (drop.item_name or '').strip().lower() not in owned:
                 return drop.item_name
+        # Collectibles drop here but the player owns every one → nothing new to
+        # chase. Signal the callers to skip the collectibles metric entirely
+        # rather than score steps against an already-owned collectible.
+        if coll_drops:
+            return _SKIP_METRIC_TARGET
         return 'collectible'
     
     if target == 'cat:fine':
@@ -338,13 +379,18 @@ def _resolve_category_target_for_activity(target, activity):
     return None
 
 
-def _resolve_entry_target_for_activity(entry, activity):
+def _resolve_entry_target_for_activity(entry, activity, owned_collectibles=None):
     """Return a new SortingEntry whose target has been resolved against
     the activity's drop table. Leaves non-category targets untouched.
     
     This is only meaningful for duplicable metrics that carry a target
     (currently just steps_per_reward_roll). Other entries pass through
     unchanged.
+
+    Returns None when the entry's metric should be DROPPED entirely — currently
+    only when the target is 'cat:collectibles' and the player already owns every
+    droppable collectible (there is no new collectible to optimize for). The
+    caller must filter out None results.
     """
     from util.walkscape_constants import SortingEntry
     import dataclasses
@@ -352,7 +398,9 @@ def _resolve_entry_target_for_activity(entry, activity):
     if not entry.target or not entry.target.startswith('cat:'):
         return entry
     
-    resolved = _resolve_category_target_for_activity(entry.target, activity)
+    resolved = _resolve_category_target_for_activity(entry.target, activity, owned_collectibles)
+    if resolved == _SKIP_METRIC_TARGET:
+        return None
     if resolved == entry.target:
         return entry
     return dataclasses.replace(entry, target=resolved)
@@ -575,7 +623,33 @@ def _get_hidden_pet_ids(ui_config):
     return hidden
 
 
+# Memo: hide-config signature -> built hidden-items set. The build scans the
+# full Item/Material/Consumable catalogs (~0.14s profiled) and is called once
+# per FC cell (12×/item) with the same ui_config. The result is fully
+# determined by the hide/hide_fine flags, so key on those. (fc-preopt Phase 1 / 4c)
+_HIDDEN_ITEMS_CACHE = {}
+
+
 def build_hidden_items_set(ui_config):
+    if not ui_config:
+        return set()
+    ui_items = ui_config.get('items', {}) or {}
+    user_override_items = (ui_config.get('user_overrides') or {}).get('items') or {}
+    merged = {**ui_items, **user_override_items}
+    sig = frozenset(
+        (k, bool(v.get('hide')), bool(v.get('hide_fine')))
+        for k, v in merged.items()
+        if isinstance(v, dict) and (v.get('hide') or v.get('hide_fine'))
+    )
+    cached = _HIDDEN_ITEMS_CACHE.get(sig)
+    if cached is not None:
+        return cached
+    res = _build_hidden_items_set_impl(ui_config)
+    _HIDDEN_ITEMS_CACHE[sig] = res
+    return res
+
+
+def _build_hidden_items_set_impl(ui_config):
     """Return the set of Item / Material / Consumable objects the user has
     flagged as hidden via the column-1 eye icon / hide checkbox.
 
@@ -1524,7 +1598,7 @@ def _base_name_strip_quality(name):
     return _QUALITY_SUFFIX_RE.sub('', str(name)).strip()
 
 
-def _category_component_names(activity, cat_str):
+def _category_component_names(activity, cat_str, owned_collectibles=None):
     """Enumerate the individual drop names that make up a category target,
     in drop-table order, matching the keys used in the activity's
     drop_rates map (so 'cat:fine' yields "<name> (Fine)" keys).
@@ -1585,7 +1659,7 @@ def _category_component_names(activity, cat_str):
             if is_chest:
                 _add(iname)
         elif cat_str == 'cat:collectibles':
-            if is_collectible:
+            if is_collectible and iname.strip().lower() not in (owned_collectibles or set()):
                 _add(iname)
         elif cat_str == 'cat:normal_items':
             # "Normal items" = regular reward drops, excluding chests and
@@ -2109,7 +2183,8 @@ def compute_slot_alternatives(final_gearset, character, opt_type, activity=None,
     if opt_type == 'activity':
         _headline_target = getattr(priority[0], 'target', None) if priority else None
         _component_names = _category_component_names(
-            activity, _normalize_category_target(activity, _headline_target))
+            activity, _normalize_category_target(activity, _headline_target),
+            _worker_owned_collectible_names(character))
         if _component_names:
             def _component_steps_for_gs(gs):
                 opt_mod.EMIT_COMPONENT_STEPS = True
@@ -3161,10 +3236,11 @@ def compute_tree_node_slot_alternatives(
                 _tobj = None
                 if _tgt:
                     if isinstance(_tgt, str) and _tgt.startswith('cat:'):
-                        _tobj = _resolve_category_target_for_activity(_tgt, activity)
+                        _tobj = _resolve_category_target_for_activity(
+                            _tgt, activity, _worker_owned_collectible_names(character))
                     else:
                         _tobj = _tgt
-                    if _tobj == 'raw_rewards':
+                    if _tobj in ('raw_rewards', _SKIP_METRIC_TARGET):
                         _tobj = None
                 opt_mod.TARGET_ITEM = _tobj
                 return compute_slot_alternatives(
@@ -3308,8 +3384,8 @@ def save_result_to_db(response_data, session_uuid, db_path, sorting_priority, op
         
         if response_data.get('consumable'):
             consumable_info = response_data['consumable']
-            from ui.catalog import ItemCatalog
-            catalog = ItemCatalog()
+            from ui.catalog import get_item_catalog
+            catalog = get_item_catalog()
             
             def find_in_catalog(obj, name, item_type=None):
                 if isinstance(obj, dict):
@@ -3359,9 +3435,9 @@ def save_result_to_db(response_data, session_uuid, db_path, sorting_priority, op
         
         if response_data.get('pet'):
             pet_info = response_data['pet']
-            from ui.catalog import ItemCatalog
+            from ui.catalog import get_item_catalog
             if 'catalog' not in dir():
-                catalog = ItemCatalog()
+                catalog = get_item_catalog()
             
             def find_in_catalog_local(obj, name, item_type=None):
                 if isinstance(obj, dict):
@@ -4318,6 +4394,27 @@ def main():
                                     found_item = all_levels[highest]
                                     print(f"Locked slot {slot_name}: {found_item.name} (Level {highest}, no level info)")
                     if found_item:
+                        # Per-node pinned-pet ability (frog-ability per-node):
+                        # when the node pins THIS pet with "Use ability" checked
+                        # (slot_info.useAbility) and the global "Use pet
+                        # abilities" setting is on, merge the pet's active
+                        # ability stats into the locked level_info so a pet
+                        # pinned on this node (e.g. a Golden Frog -> Lucky Day
+                        # +20 QO) applies its ability — independent of the
+                        # equipped column-2 pet. Both tree consumers read
+                        # locked_items['pet'] (the activity path's `locked_pet`
+                        # and the recipe path's `_ct_locked_pet`), so this one
+                        # hook covers both. No-ops when the pet carries no
+                        # ability stats at its level. The equipped-pet resolver
+                        # below (_resolve_equipped_pet_ability_lock) still owns
+                        # the column-2 pet; it only overrides this slot when the
+                        # equipped pet IS this same pet, so a different pinned
+                        # pet keeps its own merged ability here.
+                        if (use_pet_ability and isinstance(slot_info, dict)
+                                and slot_info.get('useAbility')
+                                and getattr(found_item, 'abilities', None)):
+                            found_item = _merge_pet_ability_stats(found_item)
+                            print(f"Node-pinned pet use-ability: merged {getattr(found_item, 'name', '?')} ability stats")
                         locked_items[slot_name] = found_item
                         if not hasattr(found_item, 'level'):
                             print(f"Locked slot {slot_name}: {found_item.name}")
@@ -4409,6 +4506,11 @@ def main():
                 sys.exit(1)
             
             # Parse sorting priority early to extract per-entry target overrides
+            # Collectibles the player already owns — skip them when resolving
+            # 'cat:collectibles' targets so the optimizer scores "steps to any
+            # NEW collectible" (matching the goals report). Computed here so it
+            # is in scope for both the priority-entry and headline-target resolves.
+            _owned_coll = _worker_owned_collectible_names(character)
             if sorting_priority:
                 priority_entries, weights_dict = parse_sorting_priority(sorting_priority)
                 
@@ -4421,8 +4523,11 @@ def main():
                 # generic 'cat:chests' synthetic uses a 0.4% base rate
                 # that may not match the activity's real chest drop rate.
                 priority_entries = [
-                    _resolve_entry_target_for_activity(e, activity)
-                    for e in priority_entries
+                    r for r in (
+                        _resolve_entry_target_for_activity(e, activity, _owned_coll)
+                        for e in priority_entries
+                    )
+                    if r is not None
                 ]
                 
                 if priority_entries:
@@ -4457,7 +4562,11 @@ def main():
                 if isinstance(target_item, str) and target_item.startswith('cat:'):
                     # Use the shared resolver so category handling stays
                     # consistent with the priority-entry path above.
-                    resolved = _resolve_category_target_for_activity(target_item, activity)
+                    resolved = _resolve_category_target_for_activity(target_item, activity, _owned_coll)
+                    if resolved == _SKIP_METRIC_TARGET:
+                        # Every droppable collectible already owned → no NEW
+                        # collectible to target; drop the headline target.
+                        resolved = None
                     if resolved != target_item:
                         print(f"[worker] Resolved {target_item} to: {resolved!r}")
                     target_item = resolved

@@ -32,6 +32,33 @@ EGGS = {
         'canBeSold': True,
         'icon': 'assets/icons/pets/living_flame/living_flame_egg_static.png'
     },
+    'clockwork_bird_egg': {
+        'id': 'clockwork_bird_egg',
+        'name': 'Clockwork bird egg',
+        'desc': 'A strange egg from a clockwork bird. It shakes a little with each passing second and feels like it is churning inside.',
+        'keywords': [
+            'pet_egg',
+            'egg'
+        ],
+        'type': 'egg',
+        'quality': 'common',
+        'consumableType': None,
+        'gearType': None,
+        'requirements': [],
+        'itemAttrs': [],
+        'itemQualityAttrs': [],
+        'itemValue': {
+            'currency': 'money',
+            'value': {
+                'common': 100
+            }
+        },
+        'buffs': [],
+        'tables': [],
+        'canBeFine': False,
+        'canBeSold': True,
+        'icon': 'assets/icons/pets/clockwork_bird/clockwork_bird_egg_static.png'
+    },
     'camel_egg': {
         'id': 'camel_egg',
         'name': 'Camel egg',

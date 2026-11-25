@@ -68,6 +68,56 @@ self.addEventListener('fetch', (event) => {
 // PUSH NOTIFICATION HANDLERS
 // ============================================================================
 
+// VAPID base64url → Uint8Array (needed to re-subscribe inside the SW).
+function urlBase64ToUint8Array(base64String) {
+    const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
+    const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+    const raw = atob(base64);
+    const out = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+    return out;
+}
+
+// Endpoint-rotation self-heal. Browsers (esp. Firefox Android) rotate/expire the
+// push endpoint on updates and OS upgrades, firing 'pushsubscriptionchange'.
+// Without handling it the server keeps a dead endpoint and delivery silently
+// stops. Re-subscribe with our VAPID key, POST the new endpoint, and drop the
+// old one. Same-origin fetches carry the session cookie the API needs.
+self.addEventListener('pushsubscriptionchange', (event) => {
+    event.waitUntil((async () => {
+        try {
+            const oldEndpoint = event.oldSubscription && event.oldSubscription.endpoint;
+            let appServerKey = null;
+            try {
+                const r = await fetch('/api/push/vapid-public-key');
+                const j = await r.json();
+                if (j && j.public_key) appServerKey = urlBase64ToUint8Array(j.public_key);
+            } catch (e) { /* fall through to reusing the old options' key */ }
+            if (!appServerKey && event.oldSubscription && event.oldSubscription.options) {
+                appServerKey = event.oldSubscription.options.applicationServerKey || null;
+            }
+            if (!appServerKey) return;
+            const newSub = await self.registration.pushManager.subscribe({
+                userVisibleOnly: true,
+                applicationServerKey: appServerKey,
+            });
+            const nj = newSub.toJSON();
+            await fetch('/api/push/subscribe', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ endpoint: nj.endpoint, p256dh: nj.keys.p256dh, auth: nj.keys.auth }),
+            });
+            if (oldEndpoint && oldEndpoint !== nj.endpoint) {
+                await fetch('/api/push/subscribe', {
+                    method: 'DELETE',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ endpoint: oldEndpoint }),
+                }).catch(() => { });
+            }
+        } catch (e) { /* best effort */ }
+    })());
+});
+
 self.addEventListener('push', (event) => {
     let title = 'Walkscape Optimizer';
     let body = 'You have a new announcement.';

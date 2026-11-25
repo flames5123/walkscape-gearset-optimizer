@@ -1434,6 +1434,26 @@ body {
     flex-shrink: 0;
 }
 
+/* ============================================================================
+   TARGET-ITEM CATEGORY SELECTOR (2026-11-14 jwbail)
+   Built on the shared SettingsPanel component (.sp-panel / .sp-chip / .sp-box),
+   so the connector, border, full-collapse, width-shrink and open/off animation
+   all come from that component. Only a few local tweaks here.
+   ============================================================================ */
+.stats-report-titems-panel-slot {
+    margin-top: 6px;
+}
+/* (X/Y) count next to the category label. */
+.stats-report-titems-panel-slot .sr-titem-count {
+    color: var(--text-muted, var(--text-secondary));
+    font-weight: 500;
+}
+/* Leave room on the right of each category pill so the caret clears the
+   stale (!) badge that overlays the top-right corner. */
+.stats-report-titems-panel-slot .sp-chip.sr-titem-parent {
+    padding-right: 20px;
+}
+
 /* Global stats-report typography (2026-05-20 polish, per user direction):
    headers stay at 1em, body text drops to --font-size-sm (12px). The
    selectors are scoped to .stats-report-container so they don't touch
@@ -2513,6 +2533,24 @@ button.collapse-toggle {
     display: block;
 }
 
+/* Compact "Find source" button (owned-items row + item popover).
+   Small secondary pill — intentionally lighter than the big optimize button. */
+.btn-find-best-source {
+    border: 1px solid var(--border-color, #444);
+    border-radius: 4px;
+    background-color: var(--bg-secondary, #252540);
+    color: var(--text-primary, #eee);
+    padding: 2px 8px;
+    font-size: 0.78em;
+    line-height: 1.4;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.btn-find-best-source:hover {
+    background-color: var(--bg-hover, #30304d);
+}
+
 /* ============================================================================
    ITEM ROWS
    ============================================================================ */
@@ -2588,7 +2626,47 @@ button.collapse-toggle {
     margin: 0;
 }
 
-/* Clean item icon with 1px drop-shadow - 32px size */
+/* Quality-outline SVG filter colors (refactor:quality-outlines).
+   Binds each #outline-<token>-1 filter (defined in index.html <defs>) to its
+   rarity token via the CSS flood-color property, which resolves var() — so the
+   outline recolors automatically on theme change, exactly like the old
+   per-rarity drop-shadow() rules did. Fine uses --fine-color (not
+   --rarity-fine-border) to match the prior appearance 1:1. */
+#outline-common-1 feFlood    { flood-color: var(--rarity-common-border); }
+#outline-uncommon-1 feFlood  { flood-color: var(--rarity-uncommon-border); }
+#outline-rare-1 feFlood      { flood-color: var(--rarity-rare-border); }
+#outline-epic-1 feFlood      { flood-color: var(--rarity-epic-border); }
+#outline-legendary-1 feFlood { flood-color: var(--rarity-legendary-border); }
+#outline-ethereal-1 feFlood  { flood-color: var(--rarity-ethereal-border); }
+#outline-fine-1 feFlood      { flood-color: var(--fine-color); }
+
+/* 2px variants (gear-slot .slot-icon @ 2x scale) share the same colors. */
+#outline-common-2 feFlood    { flood-color: var(--rarity-common-border); }
+#outline-uncommon-2 feFlood  { flood-color: var(--rarity-uncommon-border); }
+#outline-rare-2 feFlood      { flood-color: var(--rarity-rare-border); }
+#outline-epic-2 feFlood      { flood-color: var(--rarity-epic-border); }
+#outline-legendary-2 feFlood { flood-color: var(--rarity-legendary-border); }
+#outline-ethereal-2 feFlood  { flood-color: var(--rarity-ethereal-border); }
+#outline-fine-2 feFlood      { flood-color: var(--fine-color); }
+
+/* Skill-icon 2px outline colors (skill-row .skill-icon). */
+#outline-skill-fishing-2 feFlood { flood-color: var(--skill-fishing-secondary-color); }
+#outline-skill-foraging-2 feFlood { flood-color: var(--skill-foraging-secondary-color); }
+#outline-skill-mining-2 feFlood { flood-color: var(--skill-mining-secondary-color); }
+#outline-skill-woodcutting-2 feFlood { flood-color: var(--skill-woodcutting-secondary-color); }
+#outline-skill-carpentry-2 feFlood { flood-color: var(--skill-carpentry-secondary-color); }
+#outline-skill-cooking-2 feFlood { flood-color: var(--skill-cooking-secondary-color); }
+#outline-skill-crafting-2 feFlood { flood-color: var(--skill-crafting-secondary-color); }
+#outline-skill-smithing-2 feFlood { flood-color: var(--skill-smithing-secondary-color); }
+#outline-skill-trinketry-2 feFlood { flood-color: var(--skill-trinketry-secondary-color); }
+#outline-skill-agility-2 feFlood { flood-color: var(--skill-agility-secondary-color); }
+#outline-skill-hunting-2 feFlood { flood-color: var(--skill-hunting-secondary-color); }
+#outline-skill-tailoring-2 feFlood { flood-color: var(--skill-tailoring-secondary-color); }
+
+/* Clean item icon with 1px outline - 32px size.
+   Outline via SVG filter (#outline-*-1 in index.html); color driven by the
+   #outline-* feFlood { flood-color } rules below. Replaces the old 4x
+   drop-shadow() stack (refactor:quality-outlines). */
 .item-row .item-icon {
     width: 32px;
     height: 32px;
@@ -2598,36 +2676,36 @@ button.collapse-toggle {
     margin-bottom: -12px;
     object-fit: contain;
     image-rendering: pixelated;
-    filter: drop-shadow(1px 0 0 var(--rarity-common-border)) drop-shadow(-1px 0 0 var(--rarity-common-border)) drop-shadow(0 1px 0 var(--rarity-common-border)) drop-shadow(0 -1px 0 var(--rarity-common-border));
+    filter: url("#outline-common-1");
 }
 
 .item-row.rarity-common .item-icon {
-    filter: drop-shadow(1px 0 0 var(--rarity-common-border)) drop-shadow(-1px 0 0 var(--rarity-common-border)) drop-shadow(0 1px 0 var(--rarity-common-border)) drop-shadow(0 -1px 0 var(--rarity-common-border));
+    filter: url("#outline-common-1");
 }
 
 .item-row.rarity-uncommon .item-icon {
-    filter: drop-shadow(1px 0 0 var(--rarity-uncommon-border)) drop-shadow(-1px 0 0 var(--rarity-uncommon-border)) drop-shadow(0 1px 0 var(--rarity-uncommon-border)) drop-shadow(0 -1px 0 var(--rarity-uncommon-border));
+    filter: url("#outline-uncommon-1");
 }
 
 .item-row.rarity-rare .item-icon {
-    filter: drop-shadow(1px 0 0 var(--rarity-rare-border)) drop-shadow(-1px 0 0 var(--rarity-rare-border)) drop-shadow(0 1px 0 var(--rarity-rare-border)) drop-shadow(0 -1px 0 var(--rarity-rare-border));
+    filter: url("#outline-rare-1");
 }
 
 .item-row.rarity-epic .item-icon {
-    filter: drop-shadow(1px 0 0 var(--rarity-epic-border)) drop-shadow(-1px 0 0 var(--rarity-epic-border)) drop-shadow(0 1px 0 var(--rarity-epic-border)) drop-shadow(0 -1px 0 var(--rarity-epic-border));
+    filter: url("#outline-epic-1");
 }
 
 .item-row.rarity-legendary .item-icon {
-    filter: drop-shadow(1px 0 0 var(--rarity-legendary-border)) drop-shadow(-1px 0 0 var(--rarity-legendary-border)) drop-shadow(0 1px 0 var(--rarity-legendary-border)) drop-shadow(0 -1px 0 var(--rarity-legendary-border));
+    filter: url("#outline-legendary-1");
 }
 
 .item-row.rarity-ethereal .item-icon {
-    filter: drop-shadow(1px 0 0 var(--rarity-ethereal-border)) drop-shadow(-1px 0 0 var(--rarity-ethereal-border)) drop-shadow(0 1px 0 var(--rarity-ethereal-border)) drop-shadow(0 -1px 0 var(--rarity-ethereal-border));
+    filter: url("#outline-ethereal-1");
 }
 
 /* Fine items get fine-colored outline */
 .item-row .item-icon.fine {
-    filter: drop-shadow(1px 0 0 var(--fine-color)) drop-shadow(-1px 0 0 var(--fine-color)) drop-shadow(0 1px 0 var(--fine-color)) drop-shadow(0 -1px 0 var(--fine-color));
+    filter: url("#outline-fine-1");
 }
 
 /* Emoji icon for generic items — matches .item-icon dimensions */
@@ -2668,7 +2746,7 @@ button.collapse-toggle {
 }
 
 .item-row .fine-checkbox {
-    filter: drop-shadow(2px 0 0 var(--fine-color)) drop-shadow(-2px 0 0 var(--fine-color)) drop-shadow(0 2px 0 var(--fine-color)) drop-shadow(0 -2px 0 var(--fine-color));
+    filter: url("#outline-fine-2");
 }
 
 /* Hide checkbox group for dual hide checkboxes */
@@ -2679,7 +2757,7 @@ button.collapse-toggle {
 }
 
 .item-details .hide-checkbox-fine-label input {
-    filter: drop-shadow(2px 0 0 var(--fine-color)) drop-shadow(-2px 0 0 var(--fine-color)) drop-shadow(0 2px 0 var(--fine-color)) drop-shadow(0 -2px 0 var(--fine-color));
+    filter: url("#outline-fine-2");
 }
 
 /* Fine stat name coloring */
@@ -4409,51 +4487,51 @@ label {
 
 /* Skill icons without glow effects */
 .skill-row[data-skill="fishing"] .skill-icon {
-    filter: drop-shadow(2px 0 0 var(--skill-fishing-secondary-color)) drop-shadow(-2px 0 0 var(--skill-fishing-secondary-color)) drop-shadow(0 2px 0 var(--skill-fishing-secondary-color)) drop-shadow(0 -2px 0 var(--skill-fishing-secondary-color));
+    filter: url("#outline-skill-fishing-2");
 }
 
 .skill-row[data-skill="foraging"] .skill-icon {
-    filter: drop-shadow(2px 0 0 var(--skill-foraging-secondary-color)) drop-shadow(-2px 0 0 var(--skill-foraging-secondary-color)) drop-shadow(0 2px 0 var(--skill-foraging-secondary-color)) drop-shadow(0 -2px 0 var(--skill-foraging-secondary-color));
+    filter: url("#outline-skill-foraging-2");
 }
 
 .skill-row[data-skill="mining"] .skill-icon {
-    filter: drop-shadow(2px 0 0 var(--skill-mining-secondary-color)) drop-shadow(-2px 0 0 var(--skill-mining-secondary-color)) drop-shadow(0 2px 0 var(--skill-mining-secondary-color)) drop-shadow(0 -2px 0 var(--skill-mining-secondary-color));
+    filter: url("#outline-skill-mining-2");
 }
 
 .skill-row[data-skill="woodcutting"] .skill-icon {
-    filter: drop-shadow(2px 0 0 var(--skill-woodcutting-secondary-color)) drop-shadow(-2px 0 0 var(--skill-woodcutting-secondary-color)) drop-shadow(0 2px 0 var(--skill-woodcutting-secondary-color)) drop-shadow(0 -2px 0 var(--skill-woodcutting-secondary-color));
+    filter: url("#outline-skill-woodcutting-2");
 }
 
 .skill-row[data-skill="carpentry"] .skill-icon {
-    filter: drop-shadow(2px 0 0 var(--skill-carpentry-secondary-color)) drop-shadow(-2px 0 0 var(--skill-carpentry-secondary-color)) drop-shadow(0 2px 0 var(--skill-carpentry-secondary-color)) drop-shadow(0 -2px 0 var(--skill-carpentry-secondary-color));
+    filter: url("#outline-skill-carpentry-2");
 }
 
 .skill-row[data-skill="cooking"] .skill-icon {
-    filter: drop-shadow(2px 0 0 var(--skill-cooking-secondary-color)) drop-shadow(-2px 0 0 var(--skill-cooking-secondary-color)) drop-shadow(0 2px 0 var(--skill-cooking-secondary-color)) drop-shadow(0 -2px 0 var(--skill-cooking-secondary-color));
+    filter: url("#outline-skill-cooking-2");
 }
 
 .skill-row[data-skill="crafting"] .skill-icon {
-    filter: drop-shadow(2px 0 0 var(--skill-crafting-secondary-color)) drop-shadow(-2px 0 0 var(--skill-crafting-secondary-color)) drop-shadow(0 2px 0 var(--skill-crafting-secondary-color)) drop-shadow(0 -2px 0 var(--skill-crafting-secondary-color));
+    filter: url("#outline-skill-crafting-2");
 }
 
 .skill-row[data-skill="smithing"] .skill-icon {
-    filter: drop-shadow(2px 0 0 var(--skill-smithing-secondary-color)) drop-shadow(-2px 0 0 var(--skill-smithing-secondary-color)) drop-shadow(0 2px 0 var(--skill-smithing-secondary-color)) drop-shadow(0 -2px 0 var(--skill-smithing-secondary-color));
+    filter: url("#outline-skill-smithing-2");
 }
 
 .skill-row[data-skill="trinketry"] .skill-icon {
-    filter: drop-shadow(2px 0 0 var(--skill-trinketry-secondary-color)) drop-shadow(-2px 0 0 var(--skill-trinketry-secondary-color)) drop-shadow(0 2px 0 var(--skill-trinketry-secondary-color)) drop-shadow(0 -2px 0 var(--skill-trinketry-secondary-color));
+    filter: url("#outline-skill-trinketry-2");
 }
 
 .skill-row[data-skill="agility"] .skill-icon {
-    filter: drop-shadow(2px 0 0 var(--skill-agility-secondary-color)) drop-shadow(-2px 0 0 var(--skill-agility-secondary-color)) drop-shadow(0 2px 0 var(--skill-agility-secondary-color)) drop-shadow(0 -2px 0 var(--skill-agility-secondary-color));
+    filter: url("#outline-skill-agility-2");
 }
 
 .skill-row[data-skill="hunting"] .skill-icon {
-    filter: drop-shadow(2px 0 0 var(--skill-hunting-secondary-color)) drop-shadow(-2px 0 0 var(--skill-hunting-secondary-color)) drop-shadow(0 2px 0 var(--skill-hunting-secondary-color)) drop-shadow(0 -2px 0 var(--skill-hunting-secondary-color));
+    filter: url("#outline-skill-hunting-2");
 }
 
 .skill-row[data-skill="tailoring"] .skill-icon {
-    filter: drop-shadow(2px 0 0 var(--skill-tailoring-secondary-color)) drop-shadow(-2px 0 0 var(--skill-tailoring-secondary-color)) drop-shadow(0 2px 0 var(--skill-tailoring-secondary-color)) drop-shadow(0 -2px 0 var(--skill-tailoring-secondary-color));
+    filter: url("#outline-skill-tailoring-2");
 }
 
 .skill-row .skill-name {
@@ -5178,37 +5256,39 @@ label {
     border-color: var(--rarity-ethereal-border);
 }
 
-/* Icon drop shadow based on rarity */
+/* Icon outline based on rarity (SVG filter #outline-*-2 — slot-icon renders at
+   2x sprite scale, so the 2px variant steps one full sprite-pixel;
+   refactor:quality-outlines) */
 .gear-slot.equipped .slot-icon {
-    filter: drop-shadow(1px 0 0 var(--rarity-common-border)) drop-shadow(-1px 0 0 var(--rarity-common-border)) drop-shadow(0 1px 0 var(--rarity-common-border)) drop-shadow(0 -1px 0 var(--rarity-common-border));
+    filter: url("#outline-common-2");
 }
 
 .gear-slot.rarity-common .slot-icon {
-    filter: drop-shadow(1px 0 0 var(--rarity-common-border)) drop-shadow(-1px 0 0 var(--rarity-common-border)) drop-shadow(0 1px 0 var(--rarity-common-border)) drop-shadow(0 -1px 0 var(--rarity-common-border));
+    filter: url("#outline-common-2");
 }
 
 .gear-slot.rarity-fine .slot-icon {
-    filter: drop-shadow(1px 0 0 var(--fine-color)) drop-shadow(-1px 0 0 var(--fine-color)) drop-shadow(0 1px 0 var(--fine-color)) drop-shadow(0 -1px 0 var(--fine-color));
+    filter: url("#outline-fine-2");
 }
 
 .gear-slot.rarity-uncommon .slot-icon {
-    filter: drop-shadow(1px 0 0 var(--rarity-uncommon-border)) drop-shadow(-1px 0 0 var(--rarity-uncommon-border)) drop-shadow(0 1px 0 var(--rarity-uncommon-border)) drop-shadow(0 -1px 0 var(--rarity-uncommon-border));
+    filter: url("#outline-uncommon-2");
 }
 
 .gear-slot.rarity-rare .slot-icon {
-    filter: drop-shadow(1px 0 0 var(--rarity-rare-border)) drop-shadow(-1px 0 0 var(--rarity-rare-border)) drop-shadow(0 1px 0 var(--rarity-rare-border)) drop-shadow(0 -1px 0 var(--rarity-rare-border));
+    filter: url("#outline-rare-2");
 }
 
 .gear-slot.rarity-epic .slot-icon {
-    filter: drop-shadow(1px 0 0 var(--rarity-epic-border)) drop-shadow(-1px 0 0 var(--rarity-epic-border)) drop-shadow(0 1px 0 var(--rarity-epic-border)) drop-shadow(0 -1px 0 var(--rarity-epic-border));
+    filter: url("#outline-epic-2");
 }
 
 .gear-slot.rarity-legendary .slot-icon {
-    filter: drop-shadow(1px 0 0 var(--rarity-legendary-border)) drop-shadow(-1px 0 0 var(--rarity-legendary-border)) drop-shadow(0 1px 0 var(--rarity-legendary-border)) drop-shadow(0 -1px 0 var(--rarity-legendary-border));
+    filter: url("#outline-legendary-2");
 }
 
 .gear-slot.rarity-ethereal .slot-icon {
-    filter: drop-shadow(1px 0 0 var(--rarity-ethereal-border)) drop-shadow(-1px 0 0 var(--rarity-ethereal-border)) drop-shadow(0 1px 0 var(--rarity-ethereal-border)) drop-shadow(0 -1px 0 var(--rarity-ethereal-border));
+    filter: url("#outline-ethereal-2");
 }
 
 /* ============================================================================
@@ -6233,35 +6313,35 @@ label {
 
 /* Icon drop shadow based on rarity - reuse Column 1 colors */
 .popup-item-row .popup-item-icon {
-    filter: drop-shadow(1px 0 0 var(--rarity-common-border)) drop-shadow(-1px 0 0 var(--rarity-common-border)) drop-shadow(0 1px 0 var(--rarity-common-border)) drop-shadow(0 -1px 0 var(--rarity-common-border));
+    filter: url("#outline-common-1");
 }
 
 .popup-item-row.rarity-common .popup-item-icon {
-    filter: drop-shadow(1px 0 0 var(--rarity-common-border)) drop-shadow(-1px 0 0 var(--rarity-common-border)) drop-shadow(0 1px 0 var(--rarity-common-border)) drop-shadow(0 -1px 0 var(--rarity-common-border));
+    filter: url("#outline-common-1");
 }
 
 .popup-item-row.rarity-fine .popup-item-icon {
-    filter: drop-shadow(1px 0 0 var(--fine-color)) drop-shadow(-1px 0 0 var(--fine-color)) drop-shadow(0 1px 0 var(--fine-color)) drop-shadow(0 -1px 0 var(--fine-color));
+    filter: url("#outline-fine-1");
 }
 
 .popup-item-row.rarity-uncommon .popup-item-icon {
-    filter: drop-shadow(1px 0 0 var(--rarity-uncommon-border)) drop-shadow(-1px 0 0 var(--rarity-uncommon-border)) drop-shadow(0 1px 0 var(--rarity-uncommon-border)) drop-shadow(0 -1px 0 var(--rarity-uncommon-border));
+    filter: url("#outline-uncommon-1");
 }
 
 .popup-item-row.rarity-rare .popup-item-icon {
-    filter: drop-shadow(1px 0 0 var(--rarity-rare-border)) drop-shadow(-1px 0 0 var(--rarity-rare-border)) drop-shadow(0 1px 0 var(--rarity-rare-border)) drop-shadow(0 -1px 0 var(--rarity-rare-border));
+    filter: url("#outline-rare-1");
 }
 
 .popup-item-row.rarity-epic .popup-item-icon {
-    filter: drop-shadow(1px 0 0 var(--rarity-epic-border)) drop-shadow(-1px 0 0 var(--rarity-epic-border)) drop-shadow(0 1px 0 var(--rarity-epic-border)) drop-shadow(0 -1px 0 var(--rarity-epic-border));
+    filter: url("#outline-epic-1");
 }
 
 .popup-item-row.rarity-legendary .popup-item-icon {
-    filter: drop-shadow(1px 0 0 var(--rarity-legendary-border)) drop-shadow(-1px 0 0 var(--rarity-legendary-border)) drop-shadow(0 1px 0 var(--rarity-legendary-border)) drop-shadow(0 -1px 0 var(--rarity-legendary-border));
+    filter: url("#outline-legendary-1");
 }
 
 .popup-item-row.rarity-ethereal .popup-item-icon {
-    filter: drop-shadow(1px 0 0 var(--rarity-ethereal-border)) drop-shadow(-1px 0 0 var(--rarity-ethereal-border)) drop-shadow(0 1px 0 var(--rarity-ethereal-border)) drop-shadow(0 -1px 0 var(--rarity-ethereal-border));
+    filter: url("#outline-ethereal-1");
 }
 
 .popup-item-name {
@@ -6631,27 +6711,27 @@ label {
 
 /* Rarity drop shadows for contributor icons */
 .combined-stats-container .contributor-icon.rarity-common {
-    filter: drop-shadow(1px 0 0 var(--rarity-common-border)) drop-shadow(-1px 0 0 var(--rarity-common-border)) drop-shadow(0 1px 0 var(--rarity-common-border)) drop-shadow(0 -1px 0 var(--rarity-common-border));
+    filter: url("#outline-common-1");
 }
 
 .combined-stats-container .contributor-icon.rarity-uncommon {
-    filter: drop-shadow(1px 0 0 var(--rarity-uncommon-border)) drop-shadow(-1px 0 0 var(--rarity-uncommon-border)) drop-shadow(0 1px 0 var(--rarity-uncommon-border)) drop-shadow(0 -1px 0 var(--rarity-uncommon-border));
+    filter: url("#outline-uncommon-1");
 }
 
 .combined-stats-container .contributor-icon.rarity-rare {
-    filter: drop-shadow(1px 0 0 var(--rarity-rare-border)) drop-shadow(-1px 0 0 var(--rarity-rare-border)) drop-shadow(0 1px 0 var(--rarity-rare-border)) drop-shadow(0 -1px 0 var(--rarity-rare-border));
+    filter: url("#outline-rare-1");
 }
 
 .combined-stats-container .contributor-icon.rarity-epic {
-    filter: drop-shadow(1px 0 0 var(--rarity-epic-border)) drop-shadow(-1px 0 0 var(--rarity-epic-border)) drop-shadow(0 1px 0 var(--rarity-epic-border)) drop-shadow(0 -1px 0 var(--rarity-epic-border));
+    filter: url("#outline-epic-1");
 }
 
 .combined-stats-container .contributor-icon.rarity-legendary {
-    filter: drop-shadow(1px 0 0 var(--rarity-legendary-border)) drop-shadow(-1px 0 0 var(--rarity-legendary-border)) drop-shadow(0 1px 0 var(--rarity-legendary-border)) drop-shadow(0 -1px 0 var(--rarity-legendary-border));
+    filter: url("#outline-legendary-1");
 }
 
 .combined-stats-container .contributor-icon.rarity-ethereal {
-    filter: drop-shadow(1px 0 0 var(--rarity-ethereal-border)) drop-shadow(-1px 0 0 var(--rarity-ethereal-border)) drop-shadow(0 1px 0 var(--rarity-ethereal-border)) drop-shadow(0 -1px 0 var(--rarity-ethereal-border));
+    filter: url("#outline-ethereal-1");
 }
 
 /* Fine consumables/materials get the cyan drop-shadow same as col-2's
@@ -6659,7 +6739,7 @@ label {
    stats listed the consumable name without the fine outline on the
    icon. */
 .combined-stats-container .contributor-icon.rarity-fine {
-    filter: drop-shadow(1px 0 0 var(--fine-color)) drop-shadow(-1px 0 0 var(--fine-color)) drop-shadow(0 1px 0 var(--fine-color)) drop-shadow(0 -1px 0 var(--fine-color));
+    filter: url("#outline-fine-1");
 }
 
 .combined-stats-container .contributor-name {
@@ -6820,31 +6900,31 @@ label {
 
 /* Icon drop shadows for currently equipped item */
 .popup-current-item-row .popup-item-icon {
-    filter: drop-shadow(1px 0 0 var(--rarity-common-border)) drop-shadow(-1px 0 0 var(--rarity-common-border)) drop-shadow(0 1px 0 var(--rarity-common-border)) drop-shadow(0 -1px 0 var(--rarity-common-border));
+    filter: url("#outline-common-1");
 }
 
 .popup-current-item-row.rarity-common .popup-item-icon {
-    filter: drop-shadow(1px 0 0 var(--rarity-common-border)) drop-shadow(-1px 0 0 var(--rarity-common-border)) drop-shadow(0 1px 0 var(--rarity-common-border)) drop-shadow(0 -1px 0 var(--rarity-common-border));
+    filter: url("#outline-common-1");
 }
 
 .popup-current-item-row.rarity-uncommon .popup-item-icon {
-    filter: drop-shadow(1px 0 0 var(--rarity-uncommon-border)) drop-shadow(-1px 0 0 var(--rarity-uncommon-border)) drop-shadow(0 1px 0 var(--rarity-uncommon-border)) drop-shadow(0 -1px 0 var(--rarity-uncommon-border));
+    filter: url("#outline-uncommon-1");
 }
 
 .popup-current-item-row.rarity-rare .popup-item-icon {
-    filter: drop-shadow(1px 0 0 var(--rarity-rare-border)) drop-shadow(-1px 0 0 var(--rarity-rare-border)) drop-shadow(0 1px 0 var(--rarity-rare-border)) drop-shadow(0 -1px 0 var(--rarity-rare-border));
+    filter: url("#outline-rare-1");
 }
 
 .popup-current-item-row.rarity-epic .popup-item-icon {
-    filter: drop-shadow(1px 0 0 var(--rarity-epic-border)) drop-shadow(-1px 0 0 var(--rarity-epic-border)) drop-shadow(0 1px 0 var(--rarity-epic-border)) drop-shadow(0 -1px 0 var(--rarity-epic-border));
+    filter: url("#outline-epic-1");
 }
 
 .popup-current-item-row.rarity-legendary .popup-item-icon {
-    filter: drop-shadow(1px 0 0 var(--rarity-legendary-border)) drop-shadow(-1px 0 0 var(--rarity-legendary-border)) drop-shadow(0 1px 0 var(--rarity-legendary-border)) drop-shadow(0 -1px 0 var(--rarity-legendary-border));
+    filter: url("#outline-legendary-1");
 }
 
 .popup-current-item-row.rarity-ethereal .popup-item-icon {
-    filter: drop-shadow(1px 0 0 var(--rarity-ethereal-border)) drop-shadow(-1px 0 0 var(--rarity-ethereal-border)) drop-shadow(0 1px 0 var(--rarity-ethereal-border)) drop-shadow(0 -1px 0 var(--rarity-ethereal-border));
+    filter: url("#outline-ethereal-1");
 }
 
 /* ============================================================================
@@ -7034,27 +7114,27 @@ label {
 
 /* Icon drop shadow based on rarity for non-owned/locked upgrade rows */
 .popup-alt-item.rarity-common .popup-item-icon {
-    filter: drop-shadow(1px 0 0 var(--rarity-common-border)) drop-shadow(-1px 0 0 var(--rarity-common-border)) drop-shadow(0 1px 0 var(--rarity-common-border)) drop-shadow(0 -1px 0 var(--rarity-common-border));
+    filter: url("#outline-common-1");
 }
 
 .popup-alt-item.rarity-uncommon .popup-item-icon {
-    filter: drop-shadow(1px 0 0 var(--rarity-uncommon-border)) drop-shadow(-1px 0 0 var(--rarity-uncommon-border)) drop-shadow(0 1px 0 var(--rarity-uncommon-border)) drop-shadow(0 -1px 0 var(--rarity-uncommon-border));
+    filter: url("#outline-uncommon-1");
 }
 
 .popup-alt-item.rarity-rare .popup-item-icon {
-    filter: drop-shadow(1px 0 0 var(--rarity-rare-border)) drop-shadow(-1px 0 0 var(--rarity-rare-border)) drop-shadow(0 1px 0 var(--rarity-rare-border)) drop-shadow(0 -1px 0 var(--rarity-rare-border));
+    filter: url("#outline-rare-1");
 }
 
 .popup-alt-item.rarity-epic .popup-item-icon {
-    filter: drop-shadow(1px 0 0 var(--rarity-epic-border)) drop-shadow(-1px 0 0 var(--rarity-epic-border)) drop-shadow(0 1px 0 var(--rarity-epic-border)) drop-shadow(0 -1px 0 var(--rarity-epic-border));
+    filter: url("#outline-epic-1");
 }
 
 .popup-alt-item.rarity-legendary .popup-item-icon {
-    filter: drop-shadow(1px 0 0 var(--rarity-legendary-border)) drop-shadow(-1px 0 0 var(--rarity-legendary-border)) drop-shadow(0 1px 0 var(--rarity-legendary-border)) drop-shadow(0 -1px 0 var(--rarity-legendary-border));
+    filter: url("#outline-legendary-1");
 }
 
 .popup-alt-item.rarity-ethereal .popup-item-icon {
-    filter: drop-shadow(1px 0 0 var(--rarity-ethereal-border)) drop-shadow(-1px 0 0 var(--rarity-ethereal-border)) drop-shadow(0 1px 0 var(--rarity-ethereal-border)) drop-shadow(0 -1px 0 var(--rarity-ethereal-border));
+    filter: url("#outline-ethereal-1");
 }
 
 .popup-alt-item-main .popup-item-name {
@@ -7299,13 +7379,13 @@ label {
 /* Fine items get fine-colored drop shadow in popup */
 .popup-item-row .popup-item-icon.fine,
 .popup-current-item-row .popup-item-icon.fine {
-    filter: drop-shadow(1px 0 0 var(--fine-color)) drop-shadow(-1px 0 0 var(--fine-color)) drop-shadow(0 1px 0 var(--fine-color)) drop-shadow(0 -1px 0 var(--fine-color)) !important;
+    filter: url("#outline-fine-1") !important;
 }
 
 
 /* Fine items in gear slots get fine-colored drop shadow */
 .gear-slot .slot-icon.fine {
-    filter: drop-shadow(1px 0 0 var(--fine-color)) drop-shadow(-1px 0 0 var(--fine-color)) drop-shadow(0 1px 0 var(--fine-color)) drop-shadow(0 -1px 0 var(--fine-color)) !important;
+    filter: url("#outline-fine-2") !important;
 }
 
 /* ============================================================================
@@ -9642,7 +9722,7 @@ label {
 }
 
 .fine-checkbox input[type="checkbox"]:checked {
-    filter: drop-shadow(2px 0 0 var(--fine-color)) drop-shadow(-2px 0 0 var(--fine-color)) drop-shadow(0 2px 0 var(--fine-color)) drop-shadow(0 -2px 0 var(--fine-color));
+    filter: url("#outline-fine-2");
 }
 
 .fine-checkbox-label {
@@ -9980,7 +10060,7 @@ label {
 }
 
 .material-item.material-fine .material-icon {
-    filter: drop-shadow(2px 0 0 var(--fine-color)) drop-shadow(-2px 0 0 var(--fine-color)) drop-shadow(0 2px 0 var(--fine-color)) drop-shadow(0 -2px 0 var(--fine-color));
+    filter: url("#outline-fine-2");
 }
 
 .material-quantity {
@@ -10870,31 +10950,31 @@ label {
 
 /* Counteract row brightness on icons, preserve rarity drop-shadows */
 .popup-item-row.keyboard-highlighted.rarity-common .popup-item-icon {
-    filter: drop-shadow(1px 0 0 var(--rarity-common-border)) drop-shadow(-1px 0 0 var(--rarity-common-border)) drop-shadow(0 1px 0 var(--rarity-common-border)) drop-shadow(0 -1px 0 var(--rarity-common-border)) brightness(calc(1 / 1.5));
+    filter: url("#outline-common-1") brightness(calc(1 / 1.5));
 }
 
 .popup-item-row.keyboard-highlighted.rarity-fine .popup-item-icon {
-    filter: drop-shadow(1px 0 0 var(--fine-color)) drop-shadow(-1px 0 0 var(--fine-color)) drop-shadow(0 1px 0 var(--fine-color)) drop-shadow(0 -1px 0 var(--fine-color)) brightness(calc(1 / 1.5));
+    filter: url("#outline-fine-1") brightness(calc(1 / 1.5));
 }
 
 .popup-item-row.keyboard-highlighted.rarity-uncommon .popup-item-icon {
-    filter: drop-shadow(1px 0 0 var(--rarity-uncommon-border)) drop-shadow(-1px 0 0 var(--rarity-uncommon-border)) drop-shadow(0 1px 0 var(--rarity-uncommon-border)) drop-shadow(0 -1px 0 var(--rarity-uncommon-border)) brightness(calc(1 / 1.5));
+    filter: url("#outline-uncommon-1") brightness(calc(1 / 1.5));
 }
 
 .popup-item-row.keyboard-highlighted.rarity-rare .popup-item-icon {
-    filter: drop-shadow(1px 0 0 var(--rarity-rare-border)) drop-shadow(-1px 0 0 var(--rarity-rare-border)) drop-shadow(0 1px 0 var(--rarity-rare-border)) drop-shadow(0 -1px 0 var(--rarity-rare-border)) brightness(calc(1 / 1.5));
+    filter: url("#outline-rare-1") brightness(calc(1 / 1.5));
 }
 
 .popup-item-row.keyboard-highlighted.rarity-epic .popup-item-icon {
-    filter: drop-shadow(1px 0 0 var(--rarity-epic-border)) drop-shadow(-1px 0 0 var(--rarity-epic-border)) drop-shadow(0 1px 0 var(--rarity-epic-border)) drop-shadow(0 -1px 0 var(--rarity-epic-border)) brightness(calc(1 / 1.5));
+    filter: url("#outline-epic-1") brightness(calc(1 / 1.5));
 }
 
 .popup-item-row.keyboard-highlighted.rarity-legendary .popup-item-icon {
-    filter: drop-shadow(1px 0 0 var(--rarity-legendary-border)) drop-shadow(-1px 0 0 var(--rarity-legendary-border)) drop-shadow(0 1px 0 var(--rarity-legendary-border)) drop-shadow(0 -1px 0 var(--rarity-legendary-border)) brightness(calc(1 / 1.5));
+    filter: url("#outline-legendary-1") brightness(calc(1 / 1.5));
 }
 
 .popup-item-row.keyboard-highlighted.rarity-ethereal .popup-item-icon {
-    filter: drop-shadow(1px 0 0 var(--rarity-ethereal-border)) drop-shadow(-1px 0 0 var(--rarity-ethereal-border)) drop-shadow(0 1px 0 var(--rarity-ethereal-border)) drop-shadow(0 -1px 0 var(--rarity-ethereal-border)) brightness(calc(1 / 1.5));
+    filter: url("#outline-ethereal-1") brightness(calc(1 / 1.5));
 }
 
 /* ============================================================================
@@ -12343,7 +12423,7 @@ select.opt-consumable-minowned-op {
 }
 
 .target-dropdown-icon.fine-icon {
-    filter: drop-shadow(1px 0 0 var(--fine-color)) drop-shadow(-1px 0 0 var(--fine-color)) drop-shadow(0 1px 0 var(--fine-color)) drop-shadow(0 -1px 0 var(--fine-color));
+    filter: url("#outline-fine-1");
 }
 
 .target-dropdown-toggle {
@@ -12427,7 +12507,7 @@ select.opt-consumable-minowned-op {
    - .target-icon.fine-item                    (selected chip, img-class variant used by XY + axisIconHtml) */
 .target-item.fine-item .target-icon,
 .target-icon.fine-item {
-    filter: drop-shadow(1px 0 0 var(--fine-color)) drop-shadow(-1px 0 0 var(--fine-color)) drop-shadow(0 1px 0 var(--fine-color)) drop-shadow(0 -1px 0 var(--fine-color));
+    filter: url("#outline-fine-1");
 }
 
 /* Activity optimization settings (detailed modal + inline + expanded quick
@@ -13174,6 +13254,33 @@ select.opt-consumable-minowned-op {
     color: var(--text-secondary);
     line-height: 1.8;
     margin-bottom: 8px;
+}
+
+.about-support .kofi-link {
+    display: inline-block;
+    margin-top: 6px;
+    padding: 12px 20px;
+    background: #2189ff;
+    color: white;
+    border: none;
+    border-radius: 8px;
+    font-size: max(var(--min-text, 5px), calc(15px * var(--text-scale, 1)));
+    font-weight: 600;
+    cursor: pointer;
+    text-decoration: none;
+    transition: all 0.5s;
+}
+
+.about-support p:last-child {
+    text-align: center;
+}
+
+.about-support .kofi-link:hover {
+    background: rgb(78, 160, 255);
+    box-shadow: 5px 5px 10px rgb(78, 160, 255, 0.3),
+        -5px 5px 10px rgb(78, 160, 255, 0.3),
+        -5px -5px 10px rgb(78, 160, 255, 0.3),
+        5px -5px 10px rgb(78, 160, 255, 0.3);
 }
 
 
@@ -15369,6 +15476,43 @@ select.opt-consumable-minowned-op {
     border-top: none;
 }
 
+/* Inline "Use <pet>'s ability" toggle at the end of the crafting-tree node
+   tools row (after the consumable tile). inline-flex so it sits on the row
+   rather than its own line; align-self center to line up with the square
+   gear tiles. The (i) icon is a sibling of the label so clicking it opens the
+   popover instead of toggling the checkbox. */
+.tree-pet-ability-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-left: 8px;
+    align-self: center;
+    font-size: 0.8rem;
+    white-space: nowrap;
+}
+.tree-pet-ability-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    cursor: pointer;
+}
+.tree-pet-ability-checkbox {
+    cursor: pointer;
+    margin: 0;
+    flex: 0 0 auto;
+}
+.tree-pet-ability-text {
+    color: var(--text-secondary);
+    user-select: none;
+}
+.tree-pet-ability-label:hover .tree-pet-ability-text {
+    color: var(--text-primary);
+}
+.tree-pet-ability-info-icon {
+    cursor: pointer;
+    flex: 0 0 auto;
+}
+
 .travel-gear-mini-slot {
     width: var(--travel-gear-slot-size);
     height: var(--travel-gear-slot-size);
@@ -15501,27 +15645,27 @@ select.opt-consumable-minowned-op {
 }
 
 .travel-gear-mini-slot.rarity-common .travel-gear-mini-icon {
-    filter: drop-shadow(1px 0 0 var(--rarity-common-border)) drop-shadow(-1px 0 0 var(--rarity-common-border)) drop-shadow(0 1px 0 var(--rarity-common-border)) drop-shadow(0 -1px 0 var(--rarity-common-border));
+    filter: url("#outline-common-1");
 }
 
 .travel-gear-mini-slot.rarity-uncommon .travel-gear-mini-icon {
-    filter: drop-shadow(1px 0 0 var(--rarity-uncommon-border)) drop-shadow(-1px 0 0 var(--rarity-uncommon-border)) drop-shadow(0 1px 0 var(--rarity-uncommon-border)) drop-shadow(0 -1px 0 var(--rarity-uncommon-border));
+    filter: url("#outline-uncommon-1");
 }
 
 .travel-gear-mini-slot.rarity-rare .travel-gear-mini-icon {
-    filter: drop-shadow(1px 0 0 var(--rarity-rare-border)) drop-shadow(-1px 0 0 var(--rarity-rare-border)) drop-shadow(0 1px 0 var(--rarity-rare-border)) drop-shadow(0 -1px 0 var(--rarity-rare-border));
+    filter: url("#outline-rare-1");
 }
 
 .travel-gear-mini-slot.rarity-epic .travel-gear-mini-icon {
-    filter: drop-shadow(1px 0 0 var(--rarity-epic-border)) drop-shadow(-1px 0 0 var(--rarity-epic-border)) drop-shadow(0 1px 0 var(--rarity-epic-border)) drop-shadow(0 -1px 0 var(--rarity-epic-border));
+    filter: url("#outline-epic-1");
 }
 
 .travel-gear-mini-slot.rarity-legendary .travel-gear-mini-icon {
-    filter: drop-shadow(1px 0 0 var(--rarity-legendary-border)) drop-shadow(-1px 0 0 var(--rarity-legendary-border)) drop-shadow(0 1px 0 var(--rarity-legendary-border)) drop-shadow(0 -1px 0 var(--rarity-legendary-border));
+    filter: url("#outline-legendary-1");
 }
 
 .travel-gear-mini-slot.rarity-ethereal .travel-gear-mini-icon {
-    filter: drop-shadow(1px 0 0 var(--rarity-ethereal-border)) drop-shadow(-1px 0 0 var(--rarity-ethereal-border)) drop-shadow(0 1px 0 var(--rarity-ethereal-border)) drop-shadow(0 -1px 0 var(--rarity-ethereal-border));
+    filter: url("#outline-ethereal-1");
 }
 
 /* Fine consumables / materials — same cyan outline that col-2's
@@ -15532,7 +15676,7 @@ select.opt-consumable-minowned-op {
    consumables (which are always rarity=common but have their own
    Fine tier orthogonal to rarity). */
 .travel-gear-mini-icon.fine {
-    filter: drop-shadow(1px 0 0 var(--fine-color)) drop-shadow(-1px 0 0 var(--fine-color)) drop-shadow(0 1px 0 var(--fine-color)) drop-shadow(0 -1px 0 var(--fine-color)) !important;
+    filter: url("#outline-fine-1") !important;
 }
 
 /* Terrain requirement validation warnings (Req 9.1-9.5) */
@@ -17625,7 +17769,7 @@ select.opt-consumable-minowned-op {
 .input-item-slot .input-slot-icon {
     width: 34px;
     height: 34px;
-    filter: drop-shadow(1px 0 0 var(--rarity-common-border)) drop-shadow(-1px 0 0 var(--rarity-common-border)) drop-shadow(0 1px 0 var(--rarity-common-border)) drop-shadow(0 -1px 0 var(--rarity-common-border));
+    filter: url("#outline-common-2");
     object-fit: contain;
     image-rendering: pixelated;
 }
@@ -17681,7 +17825,7 @@ select.opt-consumable-minowned-op {
 }
 
 .input-item-slot.fine .input-slot-icon {
-    filter: drop-shadow(1px 0 0 var(--fine-color)) drop-shadow(-1px 0 0 var(--fine-color)) drop-shadow(0 1px 0 var(--fine-color)) drop-shadow(0 -1px 0 var(--fine-color));
+    filter: url("#outline-fine-2");
 }
 
 .input-item-slot.fine .input-slot-emoji {
@@ -19535,11 +19679,7 @@ details[open] .ct-section-summary::before {
    in --fine-color rendered via 4 drop-shadows). User spec
    2026-05-15: "if it's a fine item, put the box shadow on it". */
 .tree-summary-row-icon.fine {
-    filter:
-        drop-shadow(1px 0 0 var(--fine-color))
-        drop-shadow(-1px 0 0 var(--fine-color))
-        drop-shadow(0 1px 0 var(--fine-color))
-        drop-shadow(0 -1px 0 var(--fine-color));
+    filter: url("#outline-fine-1");
 }
 
 /* Rarity drop-shadow border on summary-row icons. Mirrors the
@@ -19550,46 +19690,22 @@ details[open] .ct-section-summary::before {
    (Normal..Eternal) map to rarity tiers (common..ethereal) in
    crafting-tree-summary.js's _qualityToRarity(). */
 .tree-summary-row-icon.rarity-common {
-    filter:
-        drop-shadow(1px 0 0 var(--rarity-common-border))
-        drop-shadow(-1px 0 0 var(--rarity-common-border))
-        drop-shadow(0 1px 0 var(--rarity-common-border))
-        drop-shadow(0 -1px 0 var(--rarity-common-border));
+    filter: url("#outline-common-1");
 }
 .tree-summary-row-icon.rarity-uncommon {
-    filter:
-        drop-shadow(1px 0 0 var(--rarity-uncommon-border))
-        drop-shadow(-1px 0 0 var(--rarity-uncommon-border))
-        drop-shadow(0 1px 0 var(--rarity-uncommon-border))
-        drop-shadow(0 -1px 0 var(--rarity-uncommon-border));
+    filter: url("#outline-uncommon-1");
 }
 .tree-summary-row-icon.rarity-rare {
-    filter:
-        drop-shadow(1px 0 0 var(--rarity-rare-border))
-        drop-shadow(-1px 0 0 var(--rarity-rare-border))
-        drop-shadow(0 1px 0 var(--rarity-rare-border))
-        drop-shadow(0 -1px 0 var(--rarity-rare-border));
+    filter: url("#outline-rare-1");
 }
 .tree-summary-row-icon.rarity-epic {
-    filter:
-        drop-shadow(1px 0 0 var(--rarity-epic-border))
-        drop-shadow(-1px 0 0 var(--rarity-epic-border))
-        drop-shadow(0 1px 0 var(--rarity-epic-border))
-        drop-shadow(0 -1px 0 var(--rarity-epic-border));
+    filter: url("#outline-epic-1");
 }
 .tree-summary-row-icon.rarity-legendary {
-    filter:
-        drop-shadow(1px 0 0 var(--rarity-legendary-border))
-        drop-shadow(-1px 0 0 var(--rarity-legendary-border))
-        drop-shadow(0 1px 0 var(--rarity-legendary-border))
-        drop-shadow(0 -1px 0 var(--rarity-legendary-border));
+    filter: url("#outline-legendary-1");
 }
 .tree-summary-row-icon.rarity-ethereal {
-    filter:
-        drop-shadow(1px 0 0 var(--rarity-ethereal-border))
-        drop-shadow(-1px 0 0 var(--rarity-ethereal-border))
-        drop-shadow(0 1px 0 var(--rarity-ethereal-border))
-        drop-shadow(0 -1px 0 var(--rarity-ethereal-border));
+    filter: url("#outline-ethereal-1");
 }
 
 /* Collapsible section title — clickable, shows the standard expand
@@ -20128,7 +20244,7 @@ details[open] .ct-section-summary::before {
 }
 
 .comparison-table .fine-checkbox input[type="checkbox"]:checked {
-    filter: drop-shadow(2px 0 0 var(--fine-color)) drop-shadow(-2px 0 0 var(--fine-color)) drop-shadow(0 2px 0 var(--fine-color)) drop-shadow(0 -2px 0 var(--fine-color));
+    filter: url("#outline-fine-2");
 }
 
 .comparison-table .fine-checkbox.fine-checked {
@@ -23620,4 +23736,143 @@ body.trading-open #pin-mode-btn { display: none; }
     .trading-page {
         padding-bottom: calc(68px + env(safe-area-inset-bottom));
     }
+}
+
+
+/* ── Job Board nav icon + anchor-page overlay (mirrors Trading) ───────────── */
+.jobboard-nav-btn {
+    width: 48px;
+    height: 48px;
+    border-radius: 8px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s ease;
+    border: none;
+    color: white;
+    overflow: visible;
+    background: #1f7a8c;
+}
+.jobboard-nav-btn img { width: 32px; height: 32px; image-rendering: pixelated; }
+.jobboard-nav-btn:hover { background: #2a93a8; transform: scale(1.05); }
+.jobboard-nav-btn:active { transform: scale(0.95); }
+.jobboard-nav-btn.active {
+    background: radial-gradient(circle at center, #1f7a8c 0%, #46c0d4 100%);
+    box-shadow: 0 0 18px 6px rgba(70, 192, 212, 0.55), 0 0 4px 1px rgba(200, 240, 248, 0.4);
+}
+@media (max-width: 768px) {
+    .jobboard-nav-btn { width: 40px; height: 40px; border-radius: 6px; }
+    .jobboard-nav-btn img { width: 26px !important; height: 26px !important; flex-shrink: 0; }
+}
+
+body.jobboard-open .main-content { display: none; }
+body.jobboard-open #pinned-container { display: none !important; }
+body.jobboard-open #pin-mode-btn { display: none; }
+
+.jobboard-page {
+    position: fixed;
+    top: var(--header-height, 60px);
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: var(--bg-primary);
+    z-index: 10;
+    overflow-y: auto;
+    overflow-x: hidden;
+    overscroll-behavior: none;
+    scrollbar-gutter: stable;
+    /* Open/close animation — mirrors .walkdle-page / #achievements-page so the
+       Job Board slides in and out like every other sub-page. Hidden at rest;
+       .opening / .closing (toggled in jobboard-page.js) drive the transition. */
+    display: none;
+    opacity: 0;
+    transform: scale(0.95);
+}
+
+.jobboard-page.opening {
+    display: block;
+    /* iOS touch-desync fix — see .stats-report-page.opening (no `forwards`). */
+    opacity: 1;
+    transform: none;
+    animation: stats-report-open 0.3s ease-out;
+}
+
+.jobboard-page.closing {
+    display: block;
+    animation: stats-report-close 0.25s ease-in forwards;
+}
+@media (max-width: 768px) {
+    .jobboard-page input,
+    .jobboard-page textarea,
+    .jobboard-page select { font-size: 16px; }
+    .jobboard-page { padding-bottom: calc(68px + env(safe-area-inset-bottom)); }
+}
+
+/* ── Trading bulk-import wizard ─────────────────────────────────────────── */
+.ti-wizard { display: flex; flex-direction: column; gap: 12px; }
+.ti-help { color: var(--text-secondary); font-size: 0.9em; line-height: 1.45; }
+.ti-templates { font-size: 0.85em; color: var(--text-secondary); }
+.ti-templates a { color: var(--accent-primary); }
+.ti-file { color: var(--text-primary); }
+.ti-msg { min-height: 1em; font-size: 0.88em; color: var(--text-secondary); }
+.ti-err { color: var(--danger, #e06b6b); }
+.ti-ok { color: #4ade80; }
+.ti-bad { color: var(--danger, #e06b6b); }
+.ti-note { color: var(--text-secondary); font-size: 0.82em; margin-top: 4px; }
+.ti-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; margin-top: 6px; }
+
+/* column mapping */
+.ti-map-grid { display: grid; grid-template-columns: max-content 1fr; gap: 8px 12px; align-items: center; }
+.ti-map-label { color: var(--text-primary); font-size: 0.9em; }
+.ti-req { color: var(--danger, #e06b6b); }
+.ti-map-select {
+    width: 100%; padding: 6px 8px; border-radius: 6px;
+    background: var(--bg-primary, #1b1420); color: var(--text-primary);
+    border: 1px solid var(--border-color);
+}
+.ti-check { display: flex; align-items: center; gap: 8px; color: var(--text-secondary); font-size: 0.88em; }
+
+/* tables */
+.ti-sample { overflow-x: auto; }
+.ti-table { width: 100%; border-collapse: collapse; font-size: 0.82em; }
+.ti-table th, .ti-table td {
+    border: 1px solid var(--border-color); padding: 4px 7px; text-align: left;
+    color: var(--text-primary); white-space: nowrap;
+}
+.ti-table th { background: rgba(255,255,255,.04); color: var(--text-secondary); font-weight: 600; }
+.ti-why { color: var(--text-secondary); white-space: normal; }
+
+.ti-summary { color: var(--text-primary); font-size: 0.95em; }
+.ti-bad-block, .ti-flag-block, .ti-clean-block {
+    border: 1px solid var(--border-color); border-radius: 8px; padding: 8px 10px;
+    background: rgba(0,0,0,.12);
+}
+.ti-bad-block summary, .ti-flag-block summary, .ti-clean-block summary {
+    cursor: pointer; color: var(--text-primary); font-weight: 600; margin-bottom: 6px;
+}
+.ti-bad-list { max-height: 220px; overflow-y: auto; display: flex; flex-direction: column; gap: 3px; }
+.ti-bad-row { color: var(--danger, #e06b6b); font-size: 0.83em; }
+
+/* global + per-row handling choices */
+.ti-global {
+    border: 1px solid var(--accent-primary); border-radius: 8px; padding: 8px 10px;
+    background: rgba(63,166,90,.08);
+}
+.ti-global-label { color: var(--text-primary); font-size: 0.9em; margin-bottom: 6px; }
+
+/* Horizontal radio group: tiny caption ABOVE each radio (mobile-friendly). */
+.ti-radios { display: flex; gap: 10px; flex-wrap: wrap; }
+.ti-radio {
+    display: flex; flex-direction: column; align-items: center; gap: 2px;
+    font-size: 11px; color: var(--text-secondary); cursor: pointer; min-width: 44px;
+}
+.ti-radio-cap { line-height: 1.1; text-align: center; }
+.ti-radio input { margin: 0; }
+.ti-flag-table td:last-child { white-space: normal; }
+@media (max-width: 560px) {
+    .ti-map-grid { grid-template-columns: 1fr; }
+    .ti-radios { gap: 6px; }
+    .ti-radio { min-width: 38px; font-size: 10px; }
+    .ti-table { font-size: 0.78em; }
 }

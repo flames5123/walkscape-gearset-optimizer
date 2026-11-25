@@ -363,7 +363,25 @@ def _is_location_in_unlocked_region(location_obj, unlocked_regions: set) -> bool
     return True  # No region info — assume accessible
 
 
+# Pure-function cache: (recipe.service, svc.name, svc.tier) -> bool. The match is
+# pure string parsing over immutable catalog data, but calculate_tree re-scans
+# every service for every recipe node on every metric pass (~35.8k calls/item
+# profiled). Memoizing collapses that to a few dozen. Safe for the process
+# lifetime: services + recipes are static game data. (fc-preopt Phase 1 / 4d)
+_SVC_VALID_CACHE: Dict[tuple, bool] = {}
+
+
 def _service_valid_for_recipe(svc, recipe) -> bool:
+    key = (getattr(recipe, 'service', None),
+           getattr(svc, 'name', None), getattr(svc, 'tier', None))
+    if key in _SVC_VALID_CACHE:
+        return _SVC_VALID_CACHE[key]
+    res = _service_valid_for_recipe_impl(svc, recipe)
+    _SVC_VALID_CACHE[key] = res
+    return res
+
+
+def _service_valid_for_recipe_impl(svc, recipe) -> bool:
     """Recipe↔service match that respects "specific-service" requirements
     (e.g. 'Advanced Cursed Forge' only matches services named 'Cursed Forge',
     not plain 'Forge'). Mirrors the logic the recipe-info endpoint uses so
@@ -415,7 +433,22 @@ def _service_valid_for_recipe(svc, recipe) -> bool:
     return True
 
 
+# Pure-function cache: recipe.service -> region. services_dict is static game
+# data, so the region a recipe's service resolves to is immutable per process.
+# (fc-preopt Phase 1 / 4d)
+_REGION_FOR_RECIPE_CACHE: Dict[Optional[str], Optional[str]] = {}
+
+
 def _get_region_for_recipe(recipe, services_dict: dict) -> Optional[str]:
+    key = getattr(recipe, 'service', None)
+    if key in _REGION_FOR_RECIPE_CACHE:
+        return _REGION_FOR_RECIPE_CACHE[key]
+    res = _get_region_for_recipe_impl(recipe, services_dict)
+    _REGION_FOR_RECIPE_CACHE[key] = res
+    return res
+
+
+def _get_region_for_recipe_impl(recipe, services_dict: dict) -> Optional[str]:
     """Get the region for a recipe based on its service requirement.
 
     Returns the region of the first matching service, used only as a fallback.
@@ -6619,6 +6652,23 @@ def calculate_node_metrics(
         steps_from_drops = _get_activity_drop_steps(activity, item_ref, stats, skill_level)
         if steps_from_drops and steps_from_drops > 0 and quality_prob > 0:
             steps_per_item = steps_from_drops / quality_prob
+            # FC gather-leaf reuse (fc-preopt A): when the Fastest Craft solve
+            # has pinned a Fastest-Target-Items-derived steps/item on this gather
+            # node, use it VERBATIM instead of the crafting-tree's own gather
+            # formula, so FC and the Fastest Target Items report show the SAME
+            # number for the same gather (the two subsystems' gather math
+            # otherwise diverge — e.g. bamboo-logs-fine 475 here vs 397 there).
+            # Guarded on the pin field, which ONLY the FC path sets, so normal
+            # crafting-tree use is byte-identical. Drops/xp/actions below stay
+            # computed from the real activity so material accounting is intact.
+            _fc_pin = node.get('_fc_pinned_steps_per_item')
+            if _fc_pin is not None:
+                try:
+                    _fc_pv = float(_fc_pin)
+                    if _fc_pv > 0:
+                        steps_per_item = _fc_pv
+                except (TypeError, ValueError):
+                    pass
             result['steps_per_item'] = steps_per_item
             result['total_steps'] = steps_per_item
             result['steps_breakdown'][f"Activity: {activity.name}"] = steps_per_item
@@ -6794,6 +6844,7 @@ def calculate_tree(
     game_data: Optional[dict] = None,
     session_data: Optional[dict] = None,
     skip_recompute: bool = False,
+    refresh_sources: bool = True,
 ) -> dict:
     """Calculate metrics for the entire tree bottom-up.
 
@@ -6841,7 +6892,11 @@ def calculate_tree(
         # saved (e.g. a patch adds the "Adobe jumping" activity as a new rough-
         # gem source). Without this, a pre-patch tree keeps its stale menu and
         # the optimizer can never display or route through the new source.
-        _refresh_available_sources(tree_nodes, game_data, session_data)
+        # Skipped when refresh_sources=False (FC scoring: it only reads
+        # summary.total_steps, never the dropdown menus — this is the single
+        # biggest per-cell cost, ~0.26s/cell profiled). (fc-preopt Phase 1 / 4e)
+        if refresh_sources:
+            _refresh_available_sources(tree_nodes, game_data, session_data)
 
     target_quantity = global_settings.get('target_quantity', 1)
     daily_steps = global_settings.get('daily_steps', 30000)
@@ -7110,6 +7165,16 @@ def calculate_tree(
         root_metrics.get('total_actions', 0.0) * target_quantity
         + root_self_actions * buffer_overhead
     )
+    # Degenerate-root guard (bug e08894bf): when the exact per-node solve BAILS
+    # on the root (B&B node-budget exhaustion on a hard quality cell, e.g. a
+    # pine toolbox at Excellent), it returns root_metrics total_steps/self_steps
+    # = 0 while still populating the per-source steps_breakdown. Without a guard
+    # the summary then reports a blank total (total_steps=0) even though real
+    # per-source steps exist. Capture the degenerate signal from the PRE-banked
+    # total (so a legitimate banked-covered 0 below is NOT misread as
+    # degenerate); the breakdown-sum fallback is applied after the breakdown is
+    # assembled further down.
+    _degenerate_root_total = (total_steps not in (float('inf'),)) and total_steps <= 0.0
     # "Use banked materials": remove the steps/actions we no longer perform
     # because owned stock covers part of the non-root demand. Clamp at 0 so
     # over-owning never yields a negative total.
@@ -7221,6 +7286,17 @@ def calculate_tree(
             'steps': scaled,
             'source_icon': sb_icons.get(src),
         })
+
+    # Degenerate-root fallback (bug e08894bf): if the root solve bailed
+    # (_degenerate_root_total captured pre-banked above) the from-scratch total
+    # is 0 while the per-source breakdown still holds real steps — fall back to
+    # the summed breakdown so the summary is never blank. Only fires on a true
+    # degenerate root; a legitimate banked-covered 0 keeps its 0.
+    if _degenerate_root_total:
+        _bd_sum = sum(e['steps'] for e in steps_breakdown
+                      if isinstance(e.get('steps'), (int, float)) and e['steps'] > 0)
+        if _bd_sum > 0:
+            total_steps = _bd_sum
 
     time_days = total_steps / daily_steps if daily_steps > 0 else 0.0
 
@@ -8068,6 +8144,26 @@ def _aggregate_tree_upgrades(tree_nodes, effective_qty=1.0):
                         else primary_metric
                     )
                     if base_metric not in _TREE_UPGRADE_STEP_METRICS:
+                        continue
+                    # Tree-soundness guard (bug 1612aa0a): a recipe node's
+                    # LOCAL `steps_for_target` metric is BLIND to downstream
+                    # material cost — it cannot see the `no_materials_consumed`
+                    # / double-rewards savings the equipped item delivers on
+                    # the inputs produced by this node's CHILDREN. When such a
+                    # node has children, rescaling its tree-blind local delta
+                    # across the whole subtree (delta_pct × subtree LP steps)
+                    # fabricates enormous "upgrades" for items that are
+                    # actually a major loss: a Spectral/Bronze pan (high
+                    # work_efficiency, no NMC) falsely "saved 30k steps" over
+                    # the Adventuring frying pan (NMC 9) for Saltrum, and a
+                    # Cape of Half-Achiever over the Coral cape (global NMC 3).
+                    # Only `total_tree_steps_for_target` (tree-aware) and the
+                    # activity `steps_per_reward_roll`/leaf-recipe local metric
+                    # are trustworthy. Drop local-metric alts for any node that
+                    # has a material subtree; the tree-aware pass (when wired)
+                    # still surfaces the same items with correct magnitudes.
+                    if (base_metric == 'steps_for_target'
+                            and _children_by_parent.get(node_id)):
                         continue
                     name = alt.get('name')
                     if not name:

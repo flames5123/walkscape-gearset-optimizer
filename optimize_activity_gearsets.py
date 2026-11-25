@@ -101,6 +101,15 @@ SELECTED_LOCATION = None  # Set by UI/worker; Location object or None
 INPUT_ITEM = None  # Set by UI/worker; resolved Item/Material object or None
 USE_FINE_INPUTS = False  # Whether to apply fine input bonuses
 
+# ---- Balanced ("well_rounded") optimization target state -------------------
+# Normalization constants for the Balanced blend: a list of resolved
+# per-sub-metric best-achievable values, (re)built lazily the first time a
+# gearset is scored for a given (activity, character, location, consumable).
+# See _ensure_well_rounded_norm / _compute_well_rounded_blend below.
+_WELL_ROUNDED_NORM = None       # list[dict] or None (not yet computed)
+_WELL_ROUNDED_NORM_KEY = None   # cache key the current norm was built for
+_COMPUTING_WELL_ROUNDED_NORM = False  # re-entrance guard for the greedy pre-pass
+
 # Debug specific 2-swap combinations
 DEBUG_2_SWAP = True
 DEBUG_SLOT_PAIRS = [('head', 'legs')]  # Specific slot pairs to debug
@@ -732,6 +741,239 @@ def _effective_targets_for_scoring():
                 yield TARGET_ITEM, target_name, composite
 
 
+# ----------------------------------------------------------------------------
+# Balanced ("well_rounded") optimization target
+#
+# A single "optimize for everything" objective for the column-3 ad-hoc
+# activity optimizer. Instead of the all-or-nothing lexicographic priority
+# stack (where whichever metric has the largest raw magnitude dominates and
+# the rest are ignored), Balanced scores a gearset by the GEOMETRIC MEAN of
+# every droppable reward sub-metric, each normalized to its own
+# best-achievable value:
+#
+#   ratio_i = best_i / value_i   (minimize metrics: steps-per-reward)
+#   ratio_i = value_i / best_i   (maximize metrics: total XP/step)
+#   well_rounded = (Π ratio_i) ** (1 / n)        (each ratio clamped to (0, 1])
+#
+# The geometric mean craters if ANY single dimension is tanked, so the
+# optimizer is structurally forced to keep every reward respectably high —
+# that is what makes it "balanced" rather than all-or-nothing. Reward types
+# the activity does not drop are excluded from the blend entirely.
+#
+# best_i is computed by a one-time greedy pass per sub-metric (mirroring
+# calculate_optimization_floors' max_metrics passes) the first time a gearset
+# is scored for a given (activity, character, location, consumable).
+# _COMPUTING_WELL_ROUNDED_NORM guards that pre-pass so the greedy solves don't
+# recurse back into the blend.
+# ----------------------------------------------------------------------------
+
+_WR_PENALTY = 999999999.0  # mirrors _compute_spr_for_target's unresolved value
+
+# Candidate sub-metrics for the blend. 'min' entries are steps-per-target
+# (lower = better), scored via _compute_spr_for_target against the category
+# target; they are only included when the activity actually drops that reward
+# type. The 'max' entry is total XP per step (higher = better), read off the
+# metrics dict and always applicable.
+_WELL_ROUNDED_CANDIDATES = [
+    {'kind': 'min', 'target': 'cat:normal_items'},
+    {'kind': 'min', 'target': 'cat:chests'},
+    {'kind': 'min', 'target': 'cat:collectibles'},
+    {'kind': 'min', 'target': 'cat:fine'},
+    {'kind': 'max', 'key': 'total_xp_per_step'},
+]
+
+
+def _well_rounded_active() -> bool:
+    """True when any active SORTING_PRIORITY entry is the Balanced metric."""
+    for raw in SORTING_PRIORITY:
+        try:
+            if Sorting._as_entry(raw).metric_key == 'well_rounded':
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _owned_collectible_names(character) -> set:
+    """Lowercased display names of collectibles the character already owns.
+
+    character.collectibles is a list of CollectibleInstance objects (parsed
+    from the export's owned-collectible list), each with a `.name` display
+    string that matches a collectible drop's item_name. Returns an empty set
+    when ownership is unknown (then nothing is treated as owned — the safe,
+    pre-existing behavior)."""
+    owned = set()
+    for c in (getattr(character, 'collectibles', None) or []):
+        nm = getattr(c, 'name', None)
+        if nm:
+            owned.add(nm.strip().lower())
+    return owned
+
+
+def _activity_drops_reward_type(activity, target, character=None) -> bool:
+    """True if the activity's drop table actually contains the given reward
+    category. Used to auto-skip Balanced sub-metrics for reward types the
+    activity can't produce (e.g. chests on a fishing activity with no chests).
+
+    For collectibles this is ALSO ownership-aware: a collectible is a one-time
+    drop, so if the character already owns every collectible the activity drops,
+    there is nothing left to find and the collectibles sub-metric is excluded
+    (otherwise Balanced wastes slots on collectible-finding gear like Treasure
+    Hunter for an activity whose collectibles are all collected).
+    """
+    if target == 'cat:normal_items':
+        return True
+    all_drops = (list(getattr(activity, 'drop_table', []) or []) +
+                 list(getattr(activity, 'secondary_drop_table', []) or []))
+    def _real(d):
+        return d is not None and getattr(d, 'item_name', None) != 'Nothing'
+    if target == 'cat:chests':
+        return any(
+            _real(d) and getattr(d, 'item_ref', None)
+            and 'Container.' in d.item_ref and 'BIRD_NEST' not in d.item_ref
+            for d in all_drops
+        )
+    if target == 'cat:collectibles':
+        coll_drops = [
+            d for d in all_drops
+            if _real(d) and getattr(d, 'item_ref', None) and 'Collectible.' in d.item_ref
+        ]
+        if not coll_drops:
+            return False
+        owned = _owned_collectible_names(character)
+        if not owned:
+            return True  # ownership unknown → keep collectibles (safe default)
+        # Include only if at least one droppable collectible is still UNOWNED.
+        return any(
+            (getattr(d, 'item_name', '') or '').strip().lower() not in owned
+            for d in coll_drops
+        )
+    if target == 'cat:fine':
+        try:
+            from util.stats_report.target_items import _has_fine_material
+        except Exception:
+            return False
+        return any(_real(d) and _has_fine_material(d) for d in all_drops)
+    return True
+
+
+def _well_rounded_norm_key(activity, character):
+    """Cache key for the Balanced normalization constants. Recomputed when the
+    activity, item pool, or location changes — but NOT per candidate consumable.
+
+    The normalization is a per-RUN "best achievable" reference; it must be
+    independent of which consumable a given candidate gearset happens to use.
+    Keying on the per-candidate consumable caused the greedy pre-pass to re-run
+    on every consumable the local search trialed (optimize loop at the
+    `consumable=item` scoring call), which hung the local/Pyodide optimizer.
+    """
+    try:
+        loc = SELECTED_LOCATION.name if SELECTED_LOCATION is not None else None
+    except Exception:
+        loc = None
+    return (
+        getattr(activity, 'name', None),
+        id(character),
+        loc,
+        bool(INSTANT_ACTIONS),
+    )
+
+
+def _geometric_mean(ratios):
+    """Geometric mean of a list of positive ratios. Returns 0.0 when empty."""
+    if not ratios:
+        return 0.0
+    return math.exp(sum(math.log(r) for r in ratios) / len(ratios))
+
+
+def _ensure_well_rounded_norm(activity, character, consumable):
+    """Build (once, cached) the per-sub-metric best-achievable normalization
+    constants for the Balanced blend. Runs a greedy pass per applicable
+    sub-metric; reward types the activity doesn't drop are excluded."""
+    global _WELL_ROUNDED_NORM, _WELL_ROUNDED_NORM_KEY, _COMPUTING_WELL_ROUNDED_NORM
+    global SORTING_PRIORITY
+
+    key = _well_rounded_norm_key(activity, character)
+    if _WELL_ROUNDED_NORM is not None and _WELL_ROUNDED_NORM_KEY == key:
+        return
+
+    norm = []
+    saved_priority = SORTING_PRIORITY
+    _COMPUTING_WELL_ROUNDED_NORM = True
+    try:
+        for cand in _WELL_ROUNDED_CANDIDATES:
+            if cand['kind'] == 'min':
+                if not _activity_drops_reward_type(activity, cand['target'], character):
+                    continue
+                entry = SortingEntry(sort=Sorting.STEPS_PER_REWARD_ROLL, target=cand['target'])
+                metric_key = f"steps_per_reward_roll::{cand['target']}"
+            else:
+                entry = SortingEntry(sort=Sorting.TOTAL_XP_PER_STEP)
+                metric_key = 'total_xp_per_step'
+            SORTING_PRIORITY = [entry]
+            try:
+                # consumable=None: let greedy pick the best consumable for this
+                # sub-metric. The norm is per-RUN, not per-candidate-consumable.
+                greedy = get_greedy_initial_solution(activity, character, consumable=None)
+                gmetrics, _ = calculate_gearset_metrics(
+                    greedy, activity, character, consumable=None
+                )
+                best = gmetrics.get(metric_key, 0.0)
+            except Exception:
+                best = 0.0
+            if best is None or best <= 0 or not math.isfinite(best):
+                continue
+            if cand['kind'] == 'min':
+                if best >= _WR_PENALTY:  # unresolved — treat as undroppable
+                    continue
+                norm.append({'kind': 'min', 'target': cand['target'], 'best': best})
+            else:
+                norm.append({'kind': 'max', 'key': metric_key, 'best': best})
+    finally:
+        SORTING_PRIORITY = saved_priority
+        _COMPUTING_WELL_ROUNDED_NORM = False
+
+    _WELL_ROUNDED_NORM = norm
+    _WELL_ROUNDED_NORM_KEY = key
+
+
+def _compute_well_rounded_blend(base_spr, drop_rates, total_stats, metrics, norm=None):
+    """Geometric-mean blend of normalized droppable-reward sub-metrics for the
+    current gearset. `norm` defaults to the cached module normalization.
+    Returns 0.0 when no sub-metrics apply."""
+    if norm is None:
+        norm = _WELL_ROUNDED_NORM
+    if not norm:
+        return 0.0
+    ratios = []
+    for n in norm:
+        best = n.get('best', 0.0)
+        if best is None or best <= 0 or not math.isfinite(best):
+            continue
+        if n['kind'] == 'min':
+            v = _compute_spr_for_target(
+                target=n['target'],
+                base_spr=base_spr,
+                drop_rates=drop_rates,
+                total_stats=total_stats,
+                target_drop_rate=TARGET_DROP_RATE,
+            )
+            if v is None or v <= 0 or not math.isfinite(v) or v >= _WR_PENALTY:
+                continue
+            ratio = best / v
+        else:
+            v = metrics.get(n['key'], 0.0)
+            if v is None or v <= 0 or not math.isfinite(v):
+                continue
+            ratio = v / best
+        # Clamp to (0, 1]: a candidate can slightly beat the greedy "best"
+        # (greedy isn't globally optimal), so cap at 1.0 to keep the blend a
+        # clean "fraction of best" in every dimension.
+        ratio = max(1e-6, min(1.0, ratio))
+        ratios.append(ratio)
+    return _geometric_mean(ratios)
+
+
 def calculate_gearset_metrics(gearset_dict: dict, activity, character, final: bool = False, consumable=None,
                               item_stats=None, score_cache=None) -> Dict[str, float]:
     """
@@ -949,6 +1191,23 @@ def calculate_gearset_metrics(gearset_dict: dict, activity, character, final: bo
         # Penalty on each configured target so the gearset is deprioritized.
         for raw_target, target_name, composite_key in _effective_targets_for_scoring():
             metrics[composite_key] = 999999999.0
+
+    # ---- Balanced ("well_rounded") composite -------------------------------
+    # When a Balanced priority is active, score this gearset by a geometric
+    # mean of every droppable reward sub-metric normalized to its own
+    # best-achievable. Computed here (before the `final` re-aggregation) so it
+    # uses the same total_stats/drop_rates that produced base_spr. The
+    # re-entrance guard keeps the one-time greedy normalization pre-pass (which
+    # re-enters this function) from recursing into the blend.
+    if not _COMPUTING_WELL_ROUNDED_NORM and _well_rounded_active():
+        try:
+            _ensure_well_rounded_norm(activity, character, consumable)
+            metrics['well_rounded'] = _compute_well_rounded_blend(
+                base_spr, drop_rates, total_stats, metrics
+            )
+        except Exception as e:
+            print(f"  WARNING: Could not compute Balanced (well_rounded) metric: {e}")
+            metrics['well_rounded'] = 0.0
 
     # Display-only: stash the FULL per-drop steps map so the non-owned
     # upgrade popup can render a per-individual-drop breakdown. Uses the
@@ -1996,7 +2255,7 @@ def local_search_refine(initial_gearset: dict, activity, character, max_iteratio
     for _rs, _ri in _required_item_locked_slots(activity, character).items():
         if _rs in current_gearset and current_gearset.get(_rs) is _ri:
             locked.setdefault(_rs, _ri)
-
+    
     swap_item_stats = resolved_item_stats(
         [*current_gearset.values(), consumable, *(item for pool in items_by_slot.values() for item in pool)],
         activity.primary_skill.lower(), _get_location(activity), character, activity=activity,
@@ -2170,7 +2429,7 @@ def local_search_refine(initial_gearset: dict, activity, character, max_iteratio
                 
                 # Calculate metrics
                 try:
-                    test_metrics, test_stats = calculate_gearset_metrics(test_gearset, activity, character, consumable=consumable, item_stats=swap_item_stats)
+                    test_metrics, test_stats = calculate_gearset_metrics(test_gearset, activity, character, consumable=consumable)
                     
                     if _debug_this_swap:
                         print(f"    DEBUG: Metrics calculated. SPR: new={test_metrics.get('steps_per_reward_roll', 'N/A'):.4f} cur={current_metrics.get('steps_per_reward_roll', 'N/A'):.4f}")
@@ -2520,7 +2779,7 @@ def local_search_refine(initial_gearset: dict, activity, character, max_iteratio
                             
                             # Calculate metrics
                             try:
-                                test_metrics, test_stats = calculate_gearset_metrics(test_gearset, activity, character, consumable=consumable, item_stats=swap_item_stats)
+                                test_metrics, test_stats = calculate_gearset_metrics(test_gearset, activity, character, consumable=consumable)
                                 
                                 if is_debug_combo:
                                     print(f"      Metrics calculated successfully")
@@ -3128,7 +3387,7 @@ def local_search_refine(initial_gearset: dict, activity, character, max_iteratio
                 continue
             
             try:
-                test_metrics, test_total_stats = calculate_gearset_metrics(test_gearset, activity, character, consumable=consumable, item_stats=swap_item_stats)
+                test_metrics, test_total_stats = calculate_gearset_metrics(test_gearset, activity, character, consumable=consumable)
             except Exception:
                 continue
             
@@ -3188,7 +3447,7 @@ def local_search_refine(initial_gearset: dict, activity, character, max_iteratio
                                 _effective_stat_count(test_gearset, slot))
                 if current_stat_key is None:
                     _cur_metrics, _cur_total_stats = calculate_gearset_metrics(
-                        current_gearset, activity, character, consumable=consumable, item_stats=swap_item_stats)
+                        current_gearset, activity, character, consumable=consumable)
                     current_stat_key = (metric_neutral_utility(_cur_total_stats, we_cap=getattr(activity, 'max_efficiency', None)),
                                         _effective_stat_count(current_gearset, slot))
 

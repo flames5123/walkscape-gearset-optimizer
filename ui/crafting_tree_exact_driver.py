@@ -28,6 +28,12 @@ import copy
 import json
 import time
 
+# Test observability: incremented each time a gather-leaf solve is served from
+# the run-scoped leaf_memo instead of re-running the exact optimizer. Lets a
+# test assert that repeated gathers are actually deduplicated. Reset by callers
+# that want a clean count.
+_LEAF_MEMO_HITS = []
+
 
 # ── character reconstruction ──────────────────────────────────────────────
 def _build_character_from_config(character_config, ui_config=None):
@@ -176,6 +182,21 @@ def _build_gear_pools(character, character_config, ui_config, global_settings,
             from ui.optimize_worker import _build_pet_items_from_character_config
             pets = _build_pet_items_from_character_config(
                 character_config or {}, ui_config or {}) or []
+            # Merge each candidate pet's ACTIVE ability stats into its per-skill
+            # stats when "use pet abilities" is on (default True), so an artisan
+            # quality ability (e.g. the Golden Frog's Lucky Day = +20 QO) is
+            # applied to the exact solve. Mirrors optimize_worker's include_pets
+            # path (_augment_pet_items_for_all_items) and the heuristic
+            # ct-worker (crafting_tree_optimize node request). Without this the
+            # exact driver silently ignored pet abilities even with the setting
+            # on (frog-ability #5 gap). Only ADULT-level pets carry an
+            # `abilities` list, so this naturally no-ops for juveniles.
+            if global_settings.get('use_pet_ability', True) and pets:
+                from ui.optimize_worker import _merge_pet_ability_stats
+                pets = [
+                    _merge_pet_ability_stats(p) if getattr(p, 'abilities', None) else p
+                    for p in pets
+                ]
         except Exception as e:  # noqa: BLE001 — never crash the optimize
             log(f"  [ct-exact] pet pool build failed: {e!r}", session_uuid)
             pets = []
@@ -344,18 +365,40 @@ def _resolve_pinned_pet(slot_info, character_config):
 
 
 def _pinned_overlay_and_meta(n, node_skill, location, character, character_config,
-                             log, session_uuid):
+                             log, session_uuid, use_pet_ability=True):
     """For a node, resolve its pinned consumable + pet (locked_slots), returning
     (overlay_stats, cons_obj, cons_meta, pet_obj, pet_meta). overlay_stats is the
     additive stat dict (consumable + pet) folded into the exact gear solve so the
     gearset is optimized WITH the pinned items active and the displayed QO is
     correct. cons_meta / pet_meta are the gc['optimized_consumable'] /
-    gc['optimized_pet'] shapes to force into the solved node."""
+    gc['optimized_pet'] shapes to force into the solved node.
+
+    use_pet_ability (default True): when on AND the node pins the pet with
+    "Use ability" checked (locked_slots['pet'].useAbility), the pinned pet's
+    ACTIVE ability stats (e.g. a Golden Frog pinned on this node -> Lucky Day
+    +20 QO) are merged into pet_obj so they fold into the exact gear solve's
+    overlay — the per-node analogue of the heuristic path's locked-pet ability
+    merge."""
     locked = (n.get('locked_slots') or {}) if isinstance(n.get('locked_slots'), dict) else {}
     overlay = {}
     cons_obj = cons_meta = pet_obj = pet_meta = None
     cons_obj = _resolve_pinned_consumable(locked.get('consumable'))
     pet_obj = _resolve_pinned_pet(locked.get('pet'), character_config)
+    # Per-node pinned-pet ability: merge the pinned pet's active ability stats
+    # into the resolved PetInfo so the overlay (and thus the exact solve) sees
+    # them. Gated on the global "Use pet abilities" setting AND the node pin's
+    # own useAbility flag. No-ops when the pet has no abilities at its level.
+    _pet_lock = locked.get('pet')
+    if (use_pet_ability and pet_obj is not None
+            and isinstance(_pet_lock, dict) and _pet_lock.get('useAbility')
+            and getattr(pet_obj, 'abilities', None)):
+        try:
+            from ui.optimize_worker import _merge_pet_ability_stats
+            pet_obj = _merge_pet_ability_stats(pet_obj)
+            log(f"  [ct-exact] node-pinned pet use-ability: merged "
+                f"{getattr(pet_obj, 'name', '?')} ability stats", session_uuid)
+        except Exception as e:  # noqa: BLE001 — ability merge is best-effort
+            log(f"  [ct-exact] pinned pet ability merge failed: {e!r}", session_uuid)
     for obj in (cons_obj, pet_obj):
         if obj is None:
             continue
@@ -385,6 +428,9 @@ def _pinned_overlay_and_meta(n, node_skill, location, character, character_confi
             'level': int(getattr(pet_obj, 'level', 0) or 0),
             'variant': getattr(pet_obj, 'variant', None) or 'normal',
             'rarity': 'common', 'type': 'pet',
+            # Reflect the node pin's "Use ability" state so the rendered pet
+            # tile / toggle stays consistent after an exact solve.
+            'useAbility': bool(_pet_lock.get('useAbility')) if isinstance(_pet_lock, dict) else False,
         }
     return overlay, cons_obj, cons_meta, pet_obj, pet_meta
 
@@ -601,13 +647,18 @@ def _resolve_node_service(node):
 def _solve_node(n, kids, cum, character, session_data, global_settings, tq,
                 use_fine, node_budget, helpers, log, session_uuid,
                 pets_pool=None, consumables_pool=None, hidden_items=None,
-                compute_alternatives=True):
+                compute_alternatives=True, leaf_memo=None):
     """Solve ONE node's exact gearset (leaf via target-rate, recipe via
     craft-steps with downstream M0) and set its optimized_export. Then compute
     cum[node_id] = cumulative steps to produce one output item, from the solved
     stats. Children must already be resolved (post-order). Never raises."""
     (encode_gearset, RECIPES_BY_NAME, ACTIVITIES_BY_NAME, exact_target_rate_optimize,
      exact_craft_steps_optimize, quality_prob_for, _get_gear_stats, _spa) = helpers
+    # Fast (greedy-seed) mode: FC sets global_settings['fast'] from the "Fast
+    # (greedy)" toggle. When on, every exact gear solve below returns its
+    # best-first greedy seed instead of running the full B&B (~10x+ faster,
+    # suboptimal). Off => byte-identical exact behaviour.
+    _fast = bool(global_settings.get('fast'))
     nid = n['node_id']
     st = n.get('source_type')
     if st == 'bank':
@@ -745,18 +796,80 @@ def _solve_node(n, kids, cum, character, session_data, global_settings, tq,
                 # can't swap in a different one (bug cccc3581 / 1f19d6da).
                 _pin_overlay, _pc_obj, _pin_cons_meta, _pp_obj, _pin_pet_meta = \
                     _pinned_overlay_and_meta(n, node_skill, loc or act_loc,
-                                             character, session_data, log, session_uuid)
+                                             character, session_data, log, session_uuid,
+                                             use_pet_ability=global_settings.get('use_pet_ability', True))
                 if _pc_obj is not None:
                     _cons = []
                 if _pp_obj is not None:
                     _pets = []
-                gear = _leaf_opt(
-                    act, character, tgt, skill=node_skill,
-                    location=loc or act_loc, pets=_pets, consumables=_cons,
-                    input_item=_ct_input_obj, base_stats=_pin_overlay or None)
-                if gear:
-                    gear = _dominance_swap_gear(
-                        gear, node_skill, loc or act_loc, character, log, session_uuid)
+                # WITHIN-RUN gather-leaf memo: a gather leaf's exact gearset is a
+                # pure function of (activity, target, skill, location, use_fine,
+                # fine-target, input) given the run's constant character + pools,
+                # and is quality-invariant (same premise root-only reuse relies
+                # on). So the FIRST solve of e.g. "Cut pine trees"/"Firewood
+                # making" is cached and every later tree/variant/route-trial that
+                # gathers the same material reuses it instead of re-running the
+                # expensive [MITM-ONLY] branch-and-bound. Only plain (unpinned)
+                # leaves are memoized — a pinned consumable/pet makes the solve
+                # node-specific, so those fall through to a fresh solve. Any
+                # miss/failure solves normally, so numbers can never regress.
+                _memo_key = None
+                if (leaf_memo is not None and not _pin_overlay
+                        and _pc_obj is None and _pp_obj is None):
+                    _memo_key = (ut, aid, item, tgt, node_skill,
+                                 str(loc or act_loc), bool(use_fine),
+                                 bool(_is_fine_target),
+                                 str(getattr(_ct_input_obj, 'name', None)))
+                if _memo_key is not None and _memo_key in leaf_memo:
+                    gear = leaf_memo[_memo_key]
+                    _LEAF_MEMO_HITS.append(_memo_key)
+                    log(f"  [ct-exact] leaf-memo HIT {item} {ut}:{aid} "
+                        f"@ {loc or act_loc} fine={bool(use_fine)}", session_uuid)
+                else:
+                    # fc-preopt C: when a native Fastest-Target-Items number will
+                    # be PINNED on this gather leaf (fastest_craft._record_cell),
+                    # its gear B&B result is discarded anyway — so SKIP the
+                    # expensive [MITM-ONLY] solve entirely. This removes the
+                    # per-shard re-solve of shared gathers (A+B fixed the number
+                    # but the solve still ran). Gated on _fc_skip_pinned_gather_
+                    # solve so only the grid path skips; the opened-tree builder
+                    # leaves it unset and still solves real gear for display.
+                    _skip_solve = False
+                    _gr = (global_settings.get('_fc_gather_reuse')
+                           if global_settings.get('_fc_skip_pinned_gather_solve') else None)
+                    if _gr:
+                        try:
+                            from ui.fastest_craft import (
+                                _target_items_scope_index as _tsi,
+                                _target_items_fine_scope_index as _tfsi)
+                            _isf = bool(use_fine) or bool(_is_fine_target)
+                            _sk = (_tfsi().get(item) if _isf else None) or _tsi().get(item)
+                            if _sk and f"{_sk[0]}::{_sk[1]}" in _gr:
+                                _skip_solve = True
+                        except Exception:
+                            _skip_solve = False
+                    if _skip_solve:
+                        gear = {}
+                        log(f"  [ct-exact] gather-pull SKIP solve {item} "
+                            f"@ {loc or act_loc} fine={bool(use_fine)}", session_uuid)
+                        if _memo_key is not None:
+                            leaf_memo[_memo_key] = gear
+                    else:
+                        gear = _leaf_opt(
+                            act, character, tgt, skill=node_skill,
+                            location=loc or act_loc, pets=_pets, consumables=_cons,
+                            input_item=_ct_input_obj, base_stats=_pin_overlay or None,
+                            fast=_fast)
+                        if gear:
+                            gear = _dominance_swap_gear(
+                                gear, node_skill, loc or act_loc, character, log, session_uuid)
+                        # Cache the result (including an empty "no gear is best" or
+                        # a None "infeasible" outcome): the expensive [MITM-ONLY]
+                        # solve ran regardless, and reusing any deterministic
+                        # result skips re-running it. Downstream treats {}/None
+                        # exactly like a fresh solve, so results stay identical.
+                        if _memo_key is not None:
+                            leaf_memo[_memo_key] = gear
         elif ut == 'recipe':
             r = RECIPES_BY_NAME.get(uid)
             if r is not None:
@@ -771,43 +884,141 @@ def _solve_node(n, kids, cum, character, session_data, global_settings, tq,
                 _pets = _filter_pool(pets_pool, node_skill, 'pet', is_recipe=True)
                 _cons = _filter_pool(consumables_pool, node_skill, 'consumable', is_recipe=True)
                 n_pets, n_cons = len(_pets), len(_cons)
-                # Resolve the node's pinned crafting service (if any) so the
-                # exact solve honours it. Without this the exact recipe path
-                # ignored the service entirely: an underwater kitchen's
-                # 'diving gear': 3 requirement was never enforced, so overriding
-                # a recipe to an underwater service produced a gearset missing
-                # the required diving pieces (bug c1ab7499). When the node has a
-                # pinned service but no explicit location, fall back to the
-                # service's own location so gear is scored in the right region.
-                _svc = _resolve_node_service(n)
-                _rec_loc = loc
-                if _rec_loc is None and _svc is not None and getattr(_svc, 'location', None) is not None:
-                    _rec_loc = _svc.location
-                # Pinned consumable/pet: fold stats into the gear solve and
-                # suppress the engine's pool pick for the pinned slot (bug
-                # cccc3581 / 1f19d6da). Overlay restores the correct QO/DR
-                # baseline the objective divides by, so a close back-slot swap
-                # (gourd vs bandolier) is decided on real stats and the displayed
-                # QO stops flickering 242<->237.
-                _pin_overlay, _pc_obj, _pin_cons_meta, _pp_obj, _pin_pet_meta = \
-                    _pinned_overlay_and_meta(n, node_skill, _rec_loc,
-                                             character, session_data, log, session_uuid)
-                if _pc_obj is not None:
-                    _cons = []
-                if _pp_obj is not None:
-                    _pets = []
-                gear = exact_craft_steps_optimize(
-                    r, character, skill=r.skill, location=_rec_loc,
-                    output_qty=r.quantity or 1, if_bonus=0.0, m0=m0,
-                    recipe_level=r.level, level_bonus_qo=lbq, target_quality=tq,
-                    use_fine=use_fine, has_equipment_input=False,
-                    apply_quality=apply_q, node_budget=node_budget,
-                    pets=_pets, consumables=_cons, service=_svc,
-                    base_stats_extra=_pin_overlay or None)
-                if gear:
-                    gear = _dominance_swap_gear(
-                        gear, node_skill, _rec_loc, character, log, session_uuid,
-                        more_axes=_DOM_CRAFT_MORE, less_axes=_DOM_LESS_IS_BETTER)
+                # Reusable single-service solve: solve the gear B&B for ONE
+                # (service, location) with its own pinned-slot overlay. Used
+                # once per node normally, or once per Phase-1 frontier survivor.
+                def _solve_recipe_once(_svc_obj, _rl):
+                    ov, pc, pcm, pp, ppm = _pinned_overlay_and_meta(
+                        n, node_skill, _rl, character, session_data, log, session_uuid,
+                        use_pet_ability=global_settings.get('use_pet_ability', True))
+                    _c = [] if pc is not None else _cons
+                    _p = [] if pp is not None else _pets
+                    # Per-run recipe-node solve memo (mirrors the gather-leaf memo
+                    # above). exact_craft_steps_optimize's gearset is a pure
+                    # function of (recipe, skill, service, location, use_fine,
+                    # apply_quality, target_quality-when-applied, m0, recipe_level,
+                    # level_bonus_qo) given the run-constant character + pools, so
+                    # the SAME recipe solved again this run (another route trial,
+                    # variant, or parent context) reuses the first result instead
+                    # of re-running the expensive gear B&B — e.g. a pine plank that
+                    # today re-solves ~15x/run. Only UNPINNED solves are memoized
+                    # (a pinned consumable/pet makes the solve node-specific) — the
+                    # same guard the gather-leaf memo uses. Stored in a nested dict
+                    # under a STRING key so the tuple-keyed
+                    # gather_scope_keys_from_leaf_memo never mis-reads these recipe
+                    # tuples as gather leaves. Exact: equivalence-gated by
+                    # tests/test_fastest_craft_frontier_cache_equivalence.py.
+                    _rk = None
+                    if leaf_memo is not None and not ov and pc is None and pp is None:
+                        _svc_id = (getattr(_svc_obj, 'id', None)
+                                   or getattr(_svc_obj, 'name', None) or 'none')
+                        _rk = (uid, node_skill, str(_svc_id), str(_rl),
+                               bool(use_fine), bool(apply_q),
+                               (tq if apply_q else None), float(m0),
+                               int(r.level or 0), int(lbq))
+                    if _rk is not None:
+                        _hit = leaf_memo.setdefault('__recipe_memo__', {}).get(_rk)
+                        if _hit is not None:
+                            log(f"  [ct-exact] recipe-memo HIT {item} recipe:{uid} "
+                                f"@ {_rl} fine={bool(use_fine)} q={tq}", session_uuid)
+                            return _hit
+                    g = exact_craft_steps_optimize(
+                        r, character, skill=r.skill, location=_rl,
+                        output_qty=r.quantity or 1, if_bonus=0.0, m0=m0,
+                        recipe_level=r.level, level_bonus_qo=lbq, target_quality=tq,
+                        use_fine=use_fine, has_equipment_input=False,
+                        apply_quality=apply_q, node_budget=node_budget,
+                        pets=_p, consumables=_c, service=_svc_obj,
+                        base_stats_extra=ov or None, fast=_fast,
+                        tool_frontier_cache=(leaf_memo.setdefault('__tool_frontier_memo__', {})
+                                             if leaf_memo is not None else None))
+                    if g:
+                        g = _dominance_swap_gear(
+                            g, node_skill, _rl, character, log, session_uuid,
+                            more_axes=_DOM_CRAFT_MORE, less_axes=_DOM_LESS_IS_BETTER)
+                    _result = (g, pcm, ppm)
+                    if _rk is not None:
+                        leaf_memo.setdefault('__recipe_memo__', {})[_rk] = _result
+                    return _result
+
+                # Phase 1 (opt-in via global_settings['fc_service_frontier']):
+                # replace the WE-greedy single-service pick with a real
+                # survivor-solve — solve the gear at each non-dominated
+                # (service, region) survivor from the per-skill frontier and keep
+                # the one with the lowest ACTUAL node steps. This is what lets a
+                # cursed/spectral station win when its region's gear outweighs
+                # the station penalty (gear is only region-scoped when solved at
+                # that location). Default OFF -> the original single solve below
+                # runs unchanged (byte-identical behaviour).
+                _survivors = []
+                if (global_settings.get('fc_service_frontier')
+                        and r.service and str(r.service).lower() != 'none'):
+                    try:
+                        from ui.fastest_craft_service_frontier import frontier_survivors_for_recipe
+                        from ui.crafting_tree import _load_game_data as _ld_gd
+                        _memo = global_settings.setdefault('_fc_frontier_memo', {})
+                        _survivors = frontier_survivors_for_recipe(
+                            r, _ld_gd(), session_data,
+                            include_quality=bool(apply_q or tq != 'Normal'),
+                            run_memo=_memo)
+                    except Exception as _fe:  # noqa: BLE001 — fall back to default pick
+                        log(f"  [ct-exact] node {nid} frontier failed, "
+                            f"using default service pick: {_fe!r}", session_uuid)
+                        _survivors = []
+
+                if _survivors:
+                    _best = None  # (steps, gear, sid, loc_name, svc_obj, pcm, ppm)
+                    for _sv in _survivors:
+                        _svc_obj = _sv.get('service')
+                        _sid = _sv.get('service_id')
+                        _loc_name = _sv.get('location')
+                        _rl = loc if loc is not None else getattr(_svc_obj, 'location', None)
+                        _g, _pcm, _ppm = _solve_recipe_once(_svc_obj, _rl)
+                        # Score this survivor by the node's REAL cumulative steps,
+                        # with the service pinned so the metric folds in its stats.
+                        n['selected_service_id'] = _sid
+                        n['selected_location_id'] = _loc_name
+                        _gc = n.setdefault('gear_config', {})
+                        _gc['optimized_export'] = encode_gearset(_g) if _g else None
+                        try:
+                            _steps = _node_cumulative_steps(
+                                n, ut, uid, kids.get(nid, []), cum, character,
+                                session_data, global_settings, tq, use_fine,
+                                _get_gear_stats, _spa, quality_prob_for, RECIPES_BY_NAME)
+                        except Exception:
+                            _steps = None
+                        if _best is None or (_steps is not None
+                                             and (_best[0] is None or _steps < _best[0])):
+                            _best = (_steps, _g, _sid, _loc_name, _svc_obj, _pcm, _ppm)
+                    _b_steps, gear, _b_sid, _b_loc, _svc, _pin_cons_meta, _pin_pet_meta = _best
+                    n['selected_service_id'] = _b_sid
+                    n['selected_location_id'] = _b_loc
+                    _rec_loc = loc if loc is not None else getattr(_svc, 'location', None)
+                    log(f"  [ct-exact] node {nid} frontier picked service={_b_sid} "
+                        f"@ {_b_loc} from {len(_survivors)} survivor(s), steps={_b_steps}",
+                        session_uuid)
+                else:
+                    # Default (flag off / serviceless / no survivors): the WE-greedy
+                    # single-service pick, solved exactly as before.
+                    # Resolve the node's pinned crafting service (if any) so the
+                    # exact solve honours it. Without this the exact recipe path
+                    # ignored the service entirely: an underwater kitchen's
+                    # 'diving gear': 3 requirement was never enforced, so overriding
+                    # a recipe to an underwater service produced a gearset missing
+                    # the required diving pieces (bug c1ab7499). When the node has a
+                    # pinned service but no explicit location, fall back to the
+                    # service's own location so gear is scored in the right region.
+                    _svc = _resolve_node_service(n)
+                    _rec_loc = loc
+                    if _rec_loc is None and _svc is not None and getattr(_svc, 'location', None) is not None:
+                        _rec_loc = _svc.location
+                    # Pinned consumable/pet: fold stats into the gear solve and
+                    # suppress the engine's pool pick for the pinned slot (bug
+                    # cccc3581 / 1f19d6da). Overlay restores the correct QO/DR
+                    # baseline the objective divides by, so a close back-slot swap
+                    # (gourd vs bandolier) is decided on real stats and the displayed
+                    # QO stops flickering 242<->237.
+                    gear, _pin_cons_meta, _pin_pet_meta = _solve_recipe_once(_svc, _rec_loc)
     except Exception as e:  # noqa: BLE001 — never crash the whole optimize
         log(f"  [ct-exact] node {nid} ({ut}) solve failed: {e!r}", session_uuid)
         gear = None
@@ -987,6 +1198,33 @@ def _solve_node(n, kids, cum, character, session_data, global_settings, tq,
         n, ut, uid, kids.get(nid, []), cum, character, session_data,
         global_settings, tq, use_fine, _get_gear_stats, _spa, quality_prob_for,
         RECIPES_BY_NAME)
+    # fc-preopt C: when a native Fastest-Target-Items number is pulled for this
+    # gather leaf, use IT as the leaf's cumulative cost — so the PARENT recipe's
+    # m0 (Σ material_req × cum[child]) and therefore its gear B&B optimize
+    # against the SAME number FC displays, not the leaf's own divergent solve.
+    # Without this the toolbox was geared against the solve cost (475) but shown
+    # the pulled cost (397), and C's skip shifted the total because it changed
+    # which gear the parent picked. Applied whenever the map is present (A+B too)
+    # so the whole m0 chain is consistent; mirrors pin_gather_reuse's key pick.
+    _grc = global_settings.get('_fc_gather_reuse')
+    if _grc and ut in ('activity', 'chest') and item:
+        try:
+            from ui.fastest_craft import (
+                _target_items_scope_index as _tsi2,
+                _target_items_fine_scope_index as _tfsi2)
+            _sk2 = None
+            if bool(use_fine):
+                _fk2 = _tfsi2().get(item)
+                if _fk2 and f"{_fk2[0]}::{_fk2[1]}" in _grc:
+                    _sk2 = _fk2
+            if _sk2 is None:
+                _sk2 = _tsi2().get(item)
+            if _sk2:
+                _pv2 = _grc.get(f"{_sk2[0]}::{_sk2[1]}")
+                if _pv2 is not None and float(_pv2) > 0:
+                    cum[nid] = float(_pv2)
+        except Exception:
+            pass
     return {'node_id': nid, 'item': item, 'kind': ut, 'source': uid,
             'seconds': round(dt, 3),
             'slots_filled': slots_filled, 'tools_used': tool_slots_used,
@@ -997,7 +1235,7 @@ def _solve_node(n, kids, cum, character, session_data, global_settings, tq,
 def _run_bottom_up(nodes, character, session_data, global_settings, node_budget,
                    helpers, log, session_uuid, scope_ids=None,
                    pets_pool=None, consumables_pool=None, hidden_items=None,
-                   compute_alternatives=True, cum_seed=None):
+                   compute_alternatives=True, cum_seed=None, leaf_memo=None):
     """Solve every eligible node in `nodes` (optionally restricted to scope_ids)
     bottom-up. Returns (cum dict, list of per-node diagnostics).
 
@@ -1020,7 +1258,8 @@ def _run_bottom_up(nodes, character, session_data, global_settings, node_budget,
                         tq, use_fine, node_budget, helpers, log, session_uuid,
                         pets_pool=pets_pool, consumables_pool=consumables_pool,
                         hidden_items=hidden_items,
-                        compute_alternatives=compute_alternatives)
+                        compute_alternatives=compute_alternatives,
+                        leaf_memo=leaf_memo)
         if d:
             per_node.append(d)
     return cum, per_node
@@ -1029,7 +1268,7 @@ def _run_bottom_up(nodes, character, session_data, global_settings, node_budget,
 # ── Phase 0: exact Best(auto) route re-resolution ──────────────────────────
 def _resolve_best_routes_exact(nodes, global_settings, session_data, character,
                                game_data, node_budget, helpers, log, session_uuid,
-                               pets_pool=None, consumables_pool=None):
+                               pets_pool=None, consumables_pool=None, leaf_memo=None):
     """For each route-ambiguous Best(auto) node (deepest-first), solve each
     candidate source subtree exactly and keep the one with the lowest cumulative
     steps/target; splice it into the live tree. Returns a list of resolutions."""
@@ -1074,7 +1313,7 @@ def _resolve_best_routes_exact(nodes, global_settings, session_data, character,
                                         node_budget, helpers, log, session_uuid,
                                         scope_ids=sub_ids,
                                         pets_pool=pets_pool, consumables_pool=consumables_pool,
-                                        compute_alternatives=False)
+                                        compute_alternatives=False, leaf_memo=leaf_memo)
                 spi = cum.get(bid, float('inf'))
             except Exception as e:  # noqa: BLE001
                 log(f"  [ct-exact-route] trial solve failed {bid} "
@@ -1168,7 +1407,7 @@ def _exact_solve_context(session_uuid, global_settings, session_data, ui_config,
 def optimize_tree_exact(session_uuid, nodes, global_settings, session_data,
                         ui_config=None, *, node_budget=400_000, log=None,
                         return_cum=False, compute_alternatives=True,
-                        scope_ids=None, cum_seed=None):
+                        scope_ids=None, cum_seed=None, leaf_memo=None):
     """Solve every eligible node's gearset (with exact Best(auto) route
     re-resolution) bottom-up. Mutates nodes' gear_config.optimized_export.
     Returns a diagnostics dict. Never raises.
@@ -1195,12 +1434,13 @@ def optimize_tree_exact(session_uuid, nodes, global_settings, session_data,
         resolutions = _resolve_best_routes_exact(
             nodes, global_settings, session_data, character, game_data, node_budget,
             helpers, log, session_uuid,
-            pets_pool=pets_pool, consumables_pool=consumables_pool)
+            pets_pool=pets_pool, consumables_pool=consumables_pool, leaf_memo=leaf_memo)
     cum, per_node = _run_bottom_up(
         nodes, character, session_data, global_settings, node_budget, helpers,
         log, session_uuid, scope_ids=scope_ids, cum_seed=cum_seed,
         pets_pool=pets_pool, consumables_pool=consumables_pool,
-        hidden_items=hidden_items, compute_alternatives=compute_alternatives)
+        hidden_items=hidden_items, compute_alternatives=compute_alternatives,
+        leaf_memo=leaf_memo)
     diag = {'per_node': per_node, 'routes_resolved': resolutions,
             'wall_time': round(time.perf_counter() - t_all, 3)}
     if return_cum:
@@ -1210,7 +1450,7 @@ def optimize_tree_exact(session_uuid, nodes, global_settings, session_data,
 
 def optimize_root_only(session_uuid, nodes, global_settings, session_data,
                        ui_config=None, cum_seed=None, *, node_budget=400_000,
-                       log=None, compute_alternatives=True):
+                       log=None, compute_alternatives=True, leaf_memo=None):
     """Re-solve ONLY the root node of an already-solved tree, reusing the
     children's cumulative steps from cum_seed (the 'cum' of a prior
     optimize_tree_exact(..., return_cum=True) on the same nodes).
@@ -1247,7 +1487,7 @@ def optimize_root_only(session_uuid, nodes, global_settings, session_data,
         log, session_uuid, scope_ids={root_id},
         pets_pool=pets_pool, consumables_pool=consumables_pool,
         hidden_items=hidden_items, compute_alternatives=compute_alternatives,
-        cum_seed=seed)
+        cum_seed=seed, leaf_memo=leaf_memo)
     if not gc.get('optimized_export'):
         return None
     return cum

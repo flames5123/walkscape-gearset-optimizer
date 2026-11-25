@@ -229,6 +229,10 @@ const ALL_TARGET_CATEGORIES = (() => {
 const TARGET_CATEGORY_META = TARGET_GROUP_META;
 // Legacy key name (unused, renamed to v2)
 const SELECTED_TARGET_CATEGORIES_KEY = SELECTED_TARGET_GROUPS_KEY;
+// 2026-11-14 (jwbail): per-item target selection ({slug: [itemSlug,...]}).
+const SELECTED_TARGET_ITEMS_KEY = 'stats_report_selected_target_items_v1';
+// Per-category details-panel open state ({slug: true}).
+const TARGET_ITEMS_OPEN_KEY = 'stats_report_target_items_open_v1';
 
 // Fastest Craft WTO sub-filter: grouped chips (Gear / Tools / Consumables /
 // Materials) fetched from /api/fastest-craft/categories. Each chip carries a
@@ -236,6 +240,33 @@ const SELECTED_TARGET_CATEGORIES_KEY = SELECTED_TARGET_GROUPS_KEY;
 // plus its own icon + color. DESELECTIONS are persisted so chips added later
 // default to selected.
 const FASTEST_CRAFT_DESELECTED_KEY = 'stats_report_fastest_craft_deselected_v2';
+// Per-item quality selection for Steps-per-Recipe rows (ref -> quality label).
+// Persisted like the collapse/expanded state so a reload keeps each row's
+// chosen quality.
+const FASTEST_CRAFT_QUALITY_KEY = 'stats_report_fastest_craft_quality_v1';
+// Per-item Normal/Fine input-variant selection for Steps-per-Recipe
+// Material/Consumable rows (ref -> 'normal'|'fine'), persisted the same way.
+const FASTEST_CRAFT_VARIANT_KEY = 'stats_report_fastest_craft_variant_v1';
+// Quality dropdown colors — kept byte-identical to the crafting-tree target-
+// quality selector (ui/static/js/components/crafting-tree-settings.js) so the
+// Fastest Craft per-row quality dropdown looks exactly the same.
+const FC_QUALITY_BG = {
+    'Normal': 'var(--rarity-common)', 'Good': 'var(--rarity-uncommon)',
+    'Great': 'var(--rarity-rare)', 'Excellent': 'var(--rarity-epic)',
+    'Perfect': 'var(--rarity-legendary)', 'Eternal': 'var(--rarity-ethereal)',
+};
+const FC_QUALITY_BORDER = {
+    'Normal': 'var(--rarity-common-border)', 'Good': 'var(--rarity-uncommon-border)',
+    'Great': 'var(--rarity-rare-border)', 'Excellent': 'var(--rarity-epic-border)',
+    'Perfect': 'var(--rarity-legendary-border)', 'Eternal': 'var(--rarity-ethereal-border)',
+};
+// Quality tier -> rarity token for the item-icon outline (drop-shadow filter).
+// The outline reflects the row's currently-shown quality; a "fine" variant
+// row outlines in the fine color instead (see _fcIconOutline).
+const FC_QUALITY_RARITY = {
+    'Normal': 'common', 'Good': 'uncommon', 'Great': 'rare',
+    'Excellent': 'epic', 'Perfect': 'legendary', 'Eternal': 'ethereal',
+};
 const fastestCraftChipIconHtml = (chip, size) => (chip && chip.icon
     ? `<img src="${escapeHtml(chip.icon)}" alt="" onerror="this.style.display='none'" style="width:${size}px;height:${size}px;margin-top:1px;margin-bottom:1px">`
     : `<span aria-hidden="true" style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${(chip && chip.color) || 'var(--text-secondary)'};margin:10px 4px"></span>`);
@@ -372,7 +403,7 @@ const FINISHING_WATCHDOG_MS = 12000;
 // server state. If a run's log shows an old/absent tag, the tab is running a
 // stale in-memory module; if it shows this tag, the fix IS loaded. Bump this
 // string whenever this file changes materially.
-const STATS_REPORT_JS_BUILD = 'goals-build-2026-08-13-globalif';
+const STATS_REPORT_JS_BUILD = 'goals-build-2026-11-20-fcfine';
 
 // ============================================================================
 // STATS REPORT PAGE CLASS
@@ -425,6 +456,7 @@ export class StatsReportPage {
         this._finishingSince = null;
         this._finishingRecoveryFired = false;
         this._isPageOpen = false;
+        this._activitiesCacheReady = false;   // set true once the open-time activities-cache render lands (gates revealReportItem)
         this._pollInterval = null;
         this._elapsedInterval = null;
         this._results = {};
@@ -465,6 +497,17 @@ export class StatsReportPage {
         // 2026-08-11 (jwbail): WTO sub-filter selection for target_items.
         this._selectedTargetCategories = new Set();
         this._selectedTargetCategoriesHydrated = false;
+        // 2026-11-14 (jwbail): per-item selection inside each target category.
+        // Roster (items per category) is fetched once from the backend; the
+        // selection is a map slug -> Set(itemSlug). _selectedTargetCategories
+        // is kept as a DERIVED view (slug has >=1 selected item) so existing
+        // readers (run body, persistence) keep working unchanged.
+        this._targetItemsRoster = null;        // [{slug,label,kind,items:[{slug,name}]}]
+        this._rosterBySlug = {};               // slug -> group
+        this._targetItemsRosterLoaded = false;
+        this._targetItemsRosterLoading = false;
+        this._selectedTargetItems = {};        // slug -> Set(itemSlug)
+        this._selectedTargetItemsHydrated = false;
         // Fastest Craft WTO sub-filter. The grouped chip taxonomy arrives async
         // from /api/fastest-craft/categories; the selected set (prefixed chip
         // ids) is derived from it minus the persisted deselections.
@@ -483,6 +526,18 @@ export class StatsReportPage {
         this._fastestCraftItems = [];
         this._fastestCraftRunning = null;
         this._fastestCraftPollTimer = null;
+        // Per-row Normal/Fine input-variant pick for Material/Consumable rows
+        // (ref -> 'normal'|'fine'); unset = default to whichever variant owns
+        // the headline at the row's quality. Persisted so a reload keeps it.
+        this._fcRowVariant = this._loadFcRowVariant();
+        // Per-item quality pick for Steps-per-Recipe rows (ref -> quality),
+        // persisted to localStorage so a reload keeps each row's choice.
+        this._fcRowQuality = this._loadFcRowQuality();
+        // "Hold until Steps-per-Recipe done" unified render: when a run includes
+        // fastest_craft, suppress incremental results painting until FC finishes
+        // so the whole report appears at once (set in _startRun, cleared when FC
+        // completes / run fails / cancel / reset).
+        this._fcHoldActive = false;
         // 2026-08-12 (jwbail): v2 "Include fine variants" toggle for target_items.
         this._includeFine = false;
         try {
@@ -987,9 +1042,170 @@ export class StatsReportPage {
     /** Sync the "Select all / Deselect all" toggle label to current state. */
     _refreshTargetcatAllToggle($wrap) {
         if (!$wrap || !$wrap.length) return;
-        const allSelected = ALL_TARGET_CATEGORIES.length > 0
-            && ALL_TARGET_CATEGORIES.every(tc => this._selectedTargetCategories.has(tc));
-        $wrap.find('.stats-report-targetcat-all-toggle').text(allSelected ? 'Deselect all' : 'Select all');
+        $wrap.find('.stats-report-targetcat-all-toggle')
+            .text(this._allTargetItemsSelected() ? 'Deselect all' : 'Select all');
+    }
+
+    // ========================================================================
+    // TARGET-ITEMS ROSTER + PER-ITEM SELECTION (2026-11-14 jwbail)
+    // ========================================================================
+
+    /** Fetch the per-category item roster once, then re-render the list. */
+    _ensureTargetItemsRoster(attempt = 0) {
+        if (this._targetItemsRosterLoaded || this._targetItemsRosterLoading) return;
+        this._targetItemsRosterLoading = true;
+        fetch('/api/stats-report/target-items-roster')
+            .then(r => (r.ok ? r.json() : null))
+            .then((resp) => {
+                if (resp && Array.isArray(resp.roster)) this._ingestTargetItemsRoster(resp.roster);
+            })
+            .catch((err) => {
+                console.warn('[StatsReportPage] target-items roster fetch failed:', err);
+                if (attempt < 3) {
+                    this._targetItemsRosterLoading = false;
+                    setTimeout(() => this._ensureTargetItemsRoster(attempt + 1), 800);
+                }
+            })
+            .finally(() => { this._targetItemsRosterLoading = false; });
+    }
+
+    _ingestTargetItemsRoster(roster) {
+        this._targetItemsRoster = roster;
+        this._rosterBySlug = {};
+        for (const g of roster) this._rosterBySlug[g.slug] = g;
+        this._targetItemsRosterLoaded = true;
+        this._hydrateSelectedTargetItems();
+        this._recomputeSelectedTargetCategories();
+        // Refresh the top "select/deselect all" label, then build+mount the
+        // SettingsPanel into the (previously "Loading…") slot.
+        const $row = this._$el && this._$el.find('.stats-report-category-row[data-category="target_items"]');
+        if ($row && $row.length) {
+            $row.find('.stats-report-targetcat-all-toggle')
+                .text(this._allTargetItemsSelected() ? 'Deselect all' : 'Select all');
+        }
+        this._targetItemsPanel = null; // rebuild from fresh roster
+        this._mountTargetItemsPanel();
+    }
+
+    _itemsForCat(slug) {
+        const g = this._rosterBySlug[slug];
+        return (g && Array.isArray(g.items)) ? g.items : [];
+    }
+
+    _selItemsFor(slug) {
+        if (!this._selectedTargetItems[slug]) this._selectedTargetItems[slug] = new Set();
+        return this._selectedTargetItems[slug];
+    }
+
+    _catSelCount(slug) { return this._selItemsFor(slug).size; }
+    _catTotal(slug) { return this._itemsForCat(slug).length; }
+    _catIsLit(slug) { return this._catSelCount(slug) > 0; }
+    _catAllSelected(slug) {
+        const t = this._catTotal(slug);
+        return t > 0 && this._catSelCount(slug) === t;
+    }
+
+    _allTargetItemsSelected() {
+        const roster = this._targetItemsRoster || [];
+        return roster.length > 0 && roster.every(g => this._catAllSelected(g.slug));
+    }
+
+    /** The multi-item category parent toggles (those with an options box). */
+    _multiTargetCats() {
+        return Object.values(this._titemParentToggles || {}).filter(t => t && t.hasOptions && t.hasOptions());
+    }
+    /** True if ANY multi-item category is currently expanded. */
+    _anyTargetCatExpanded() {
+        return this._multiTargetCats().some(t => !t._collapsed);
+    }
+    /** Refresh the top "Select all" + "Expand all" labels to current state. */
+    _refreshTitemHeaderButtons() {
+        if (!this._$el) return;
+        const $row = this._$el.find('.stats-report-category-row[data-category="target_items"]');
+        if (!$row || !$row.length) return;
+        $row.find('.stats-report-targetcat-all-toggle')
+            .text(this._allTargetItemsSelected() ? 'Deselect all' : 'Select all');
+        $row.find('.stats-report-targetcat-expand-toggle')
+            .text(this._anyTargetCatExpanded() ? 'Collapse all' : 'Expand all');
+    }
+    /** Refresh one category's inline box-header "Select all / Deselect all". */
+    _refreshCatHeader(slug) {
+        const el = this._titemCatHeaderSpans && this._titemCatHeaderSpans[slug];
+        if (el) el.textContent = this._catAllSelected(slug) ? 'Deselect all' : 'Select all';
+    }
+
+    _loadTargetItemsOpen() {
+        if (this._targetItemsOpen) return;
+        this._targetItemsOpen = new Set();
+        try {
+            const raw = localStorage.getItem(TARGET_ITEMS_OPEN_KEY);
+            const obj = raw ? JSON.parse(raw) : null;
+            if (obj && typeof obj === 'object') {
+                for (const k of Object.keys(obj)) if (obj[k]) this._targetItemsOpen.add(k);
+            }
+        } catch (_) { /* default none-open */ }
+    }
+    _isTargetCatOpen(slug) { this._loadTargetItemsOpen(); return this._targetItemsOpen.has(slug); }
+    _setTargetCatOpen(slug, open) {
+        this._loadTargetItemsOpen();
+        if (open) this._targetItemsOpen.add(slug); else this._targetItemsOpen.delete(slug);
+        try {
+            const obj = {};
+            for (const k of this._targetItemsOpen) obj[k] = true;
+            localStorage.setItem(TARGET_ITEMS_OPEN_KEY, JSON.stringify(obj));
+        } catch (_) { /* non-fatal */ }
+    }
+
+    /** Hydrate per-item selection from localStorage; default = all items. */
+    _hydrateSelectedTargetItems() {
+        if (this._selectedTargetItemsHydrated) return;
+        if (!this._targetItemsRosterLoaded) return; // need roster to validate slugs
+        this._selectedTargetItemsHydrated = true;
+        let persisted = null;
+        try {
+            const raw = localStorage.getItem(SELECTED_TARGET_ITEMS_KEY);
+            persisted = raw ? JSON.parse(raw) : null;
+        } catch (_) { persisted = null; }
+        this._selectedTargetItems = {};
+        for (const g of (this._targetItemsRoster || [])) {
+            const all = g.items.map(it => it.slug);
+            let chosen;
+            if (persisted && Array.isArray(persisted[g.slug])) {
+                // Keep only slugs that still exist in the roster.
+                const valid = new Set(all);
+                chosen = persisted[g.slug].filter(s => valid.has(s));
+            } else {
+                chosen = all; // default: every item selected
+            }
+            this._selectedTargetItems[g.slug] = new Set(chosen);
+        }
+    }
+
+    _saveSelectedTargetItems() {
+        try {
+            const obj = {};
+            for (const slug of Object.keys(this._selectedTargetItems)) {
+                obj[slug] = Array.from(this._selectedTargetItems[slug]);
+            }
+            localStorage.setItem(SELECTED_TARGET_ITEMS_KEY, JSON.stringify(obj));
+        } catch (_) { /* non-fatal */ }
+        this._recomputeSelectedTargetCategories();
+        this._persistGoalsReportConfig();
+    }
+
+    /** Derive _selectedTargetCategories (>=1 item selected) from item state. */
+    _recomputeSelectedTargetCategories() {
+        const set = new Set();
+        for (const g of (this._targetItemsRoster || [])) {
+            if (this._catSelCount(g.slug) > 0) set.add(g.slug);
+        }
+        this._selectedTargetCategories = set;
+        this._selectedTargetCategoriesHydrated = true;
+    }
+
+    /** Re-mount the target-items SettingsPanel (counts/lit reflect state). */
+    _rerenderTargetList() {
+        this._mountTargetItemsPanel();
     }
 
     _recomputeSelectedFastestCraftCategories() {
@@ -1370,6 +1586,45 @@ export class StatsReportPage {
         this._saveCollapseState();
     }
 
+    /** Load persisted per-item Steps-per-Recipe quality picks (ref -> quality). */
+    _loadFcRowQuality() {
+        try {
+            const raw = localStorage.getItem(FASTEST_CRAFT_QUALITY_KEY);
+            const obj = raw ? JSON.parse(raw) : null;
+            return (obj && typeof obj === 'object') ? obj : {};
+        } catch (_) {
+            return {};
+        }
+    }
+
+    /** Persist per-item Steps-per-Recipe quality picks (same store style as the
+     *  collapse/expanded state — localStorage, keyed per session browser). */
+    _saveFcRowQuality() {
+        try {
+            localStorage.setItem(FASTEST_CRAFT_QUALITY_KEY,
+                JSON.stringify(this._fcRowQuality || {}));
+        } catch (_) { /* localStorage full or disabled — non-fatal */ }
+    }
+
+    /** Load persisted per-item Normal/Fine picks (ref -> 'normal'|'fine'). */
+    _loadFcRowVariant() {
+        try {
+            const raw = localStorage.getItem(FASTEST_CRAFT_VARIANT_KEY);
+            const obj = raw ? JSON.parse(raw) : null;
+            return (obj && typeof obj === 'object') ? obj : {};
+        } catch (_) {
+            return {};
+        }
+    }
+
+    /** Persist per-item Normal/Fine picks (same localStorage store style). */
+    _saveFcRowVariant() {
+        try {
+            localStorage.setItem(FASTEST_CRAFT_VARIANT_KEY,
+                JSON.stringify(this._fcRowVariant || {}));
+        } catch (_) { /* localStorage full or disabled — non-fatal */ }
+    }
+
     /**
      * Cache /api/activities once per page session and build a name→record
      * map keyed by activity display name (matches the worker's activity_name
@@ -1479,6 +1734,10 @@ export class StatsReportPage {
             // resolved before we set scrollTop.
             requestAnimationFrame(() => {
                 if (!this._isPageOpen) return;
+                // A pending Job Board "Steps for you" reveal owns the scroll —
+                // don't restore the old position on top of it (that was the
+                // "jumps to the right row, then rejumps to another section").
+                if (this._suppressScrollRestore) { console.log('[reveal] skip saved-scroll restore (reveal pending)'); return; }
                 const saved = this._savedScrollTop || 0;
                 if (window.innerWidth <= 768) {
                     // Body-scroll model: the window scrolls the overlay.
@@ -1529,7 +1788,7 @@ export class StatsReportPage {
             // Body-scroll model (mobile): first open lands at the top (the
             // window scroll may be non-zero from a previously-scrolled column).
             if (window.innerWidth <= 768) {
-                requestAnimationFrame(() => { if (this._isPageOpen) window.scrollTo(0, this._savedScrollTop || 0); });
+                requestAnimationFrame(() => { if (this._isPageOpen && !this._suppressScrollRestore) window.scrollTo(0, this._savedScrollTop || 0); });
             }
             // 2026-06-19 (jwbail): first-open render is async (it awaits
             // loadSkillGroups), so it completes AFTER the
@@ -1545,6 +1804,7 @@ export class StatsReportPage {
         // Kick off activities catalog fetch in parallel — _renderResults
         // tolerates a missing cache and re-renders once it arrives.
         this._loadActivitiesCache().then(() => {
+            this._activitiesCacheReady = true;   // gate for revealReportItem
             if (this._isPageOpen) {
                 this._renderResults();
                 // Results DOM was just (re)built; re-annotate so stale
@@ -1713,7 +1973,7 @@ export class StatsReportPage {
                                                 <input type="checkbox" id="stats-report-include-fine-checkbox" ${this._includeFine ? 'checked' : ''} />
                                                 <span>Include fine variants</span>
                                             </label>
-                                            ${this._renderTargetCategoryList(cat.key)}
+                                            <div class="stats-report-targetcat-list-wrap">${this._renderTargetCategoryList(cat.key)}</div>
                                             </div>
                                         </div>
                                     ` : ''}
@@ -1809,6 +2069,7 @@ export class StatsReportPage {
         // + pets / run-locally + fast) into its slot. Append the persistent
         // element (no rebuild) so its in-place animations survive re-render.
         this._mountReportPanel();
+        this._mountTargetItemsPanel();
         // Wire (i) info popovers in the main page render. The WTO
         // "Run locally" info icon lives in this markup, NOT in the
         // results body that the separate wireInfoIcons($body) call in
@@ -1999,49 +2260,153 @@ export class StatsReportPage {
 
     /**
      * Render the target-category chips for the "Fastest Target Item Activities"
-     * sub-filter (Gems, Normal Items, Fine Items, etc.). Mirrors
-     * `_renderKindList`. Default = all selected; toggle/persist via the
-     * .stats-report-targetcat-chip click handler.
+     * sub-filter (Gems, Normal Items, etc.). 2026-11-14 (jwbail): rebuilt on the
+     * shared SettingsPanel component — each category is a parent chip (linkedSubs)
+     * whose caret opens an attached, bordered options box of per-item sub-chips.
+     * This returns only the top "select all" link + an empty slot; the panel is
+     * mounted into the slot by _mountTargetItemsPanel() after render.
      */
     _renderTargetCategoryList(categoryKey) {
-        this._hydrateSelectedTargetCategories();
-        const allSelected = ALL_TARGET_CATEGORIES.length > 0
-            && ALL_TARGET_CATEGORIES.every(tc => this._selectedTargetCategories.has(tc));
-        let html = `<div style="margin:8px 0 2px 2px">
+        this._ensureTargetItemsRoster();
+        const loaded = this._targetItemsRosterLoaded;
+        const allSelected = loaded && this._allTargetItemsSelected();
+        const anyExpanded = loaded && this._anyTargetCatExpanded();
+        const btnStyle = 'cursor:pointer;font-size:0.82em;font-weight:600;color:var(--accent-color,#5B8BD9);user-select:none';
+        return `<div style="margin:8px 0 6px 2px;display:flex;gap:16px;align-items:center">
             <span class="stats-report-targetcat-all-toggle" data-category="${categoryKey}"
-                role="button" tabindex="0"
-                style="cursor:pointer;font-size:0.82em;font-weight:600;color:var(--accent-color,#5B8BD9);user-select:none">
+                role="button" tabindex="0" style="${btnStyle}">
                 ${allSelected ? 'Deselect all' : 'Select all'}
             </span>
-        </div>`;
-        // Render one grid per KIND so each group starts on its own line
-        // (user request 2026-08-13): line 1 currency (AGT, Sea Shells), line 2
-        // finding (Bird Nest, Ectoplasm), line 3 material keyword
-        // groups (alphabetical, wraps within its own grid), line 4 Other.
-        // ALL_TARGET_CATEGORIES is already ordered, so filtering per kind
-        // preserves the within-group order.
-        const _chipHtml = (tc) => {
-            const meta = TARGET_CATEGORY_META[tc] || { label: tc, color: 'var(--text-secondary)', icon: '' };
-            const selected = this._selectedTargetCategories.has(tc);
-            const iconHtml = meta.icon
-                ? `<img src="${meta.icon}" alt="${meta.label}" onerror="this.style.display='none'" style="width:30px;height:30px;margin-top:1px;margin-bottom:1px">`
-                : '';
-            return `
-                <div class="stats-report-skill-chip stats-report-targetcat-chip ${selected ? 'selected' : ''}"
-                    data-targetcat-name="${tc}" data-category="${categoryKey}"
-                    style="--chip-color:${meta.color}">
-                    ${iconHtml}<span style="font-weight:500">${meta.label}</span>
-                </div>`;
-        };
-        for (const kind of ['currency', 'finding', 'material', 'other']) {
-            const slugs = ALL_TARGET_CATEGORIES.filter(
-                tc => ((TARGET_CATEGORY_META[tc] || {}).kind || 'material') === kind);
-            if (!slugs.length) continue;
-            html += '<div class="sr-skill-flat-grid" style="margin-top:4px">';
-            for (const tc of slugs) html += _chipHtml(tc);
-            html += '</div>';
+            <span class="stats-report-targetcat-expand-toggle" data-category="${categoryKey}"
+                role="button" tabindex="0" style="${btnStyle}">
+                ${anyExpanded ? 'Collapse all' : 'Expand all'}
+            </span>
+        </div>
+        <div class="stats-report-titems-panel-slot">${loaded ? '' : '<span style="color:var(--text-muted);font-size:0.85em">Loading target items…</span>'}</div>`;
+    }
+
+    /**
+     * Build the target-items SettingsPanel: one parent chip per category, with
+     * item sub-chips attached as its collapsable options box. linkedSubs gives
+     * the "lit iff >=1 item" + "box stays open with none selected" behavior; the
+     * sub-chips carry item icons (grayscale when off). Clicking the parent
+     * selects/deselects all its items (restoring the prior set when re-enabled).
+     */
+    _buildTargetItemsPanel() {
+        if (!this._targetItemsRosterLoaded) return null;
+        this._hydrateSelectedTargetItems();
+        const ST = 'stats-report';
+        const panel = new SettingsPanel({
+            settingType: ST,
+            uniformCols: 3, // 1/3-width category chips (consistent columns)
+            align: 'left',  // partial rows sit in the first column, not centered
+            // Persist each category's expand/collapse so a reload restores it.
+            // Store the OPEN set (default none → all collapsed on first load).
+            onCollapseChange: (key, collapsed) => {
+                if (typeof key === 'string' && key.startsWith('titem:')) {
+                    this._setTargetCatOpen(key.slice('titem:'.length), !collapsed);
+                    this._refreshTitemHeaderButtons();
+                }
+            },
+        });
+        this._titemCountSpans = {};
+        this._titemParentToggles = {};
+        this._titemCatHeaderSpans = {};
+        let _brokeForMaterial = false;
+        for (const g of (this._targetItemsRoster || [])) {
+            // Line break after the currency + finding groups (before the
+            // keyword material groups) — a fresh row after Ectoplasm.
+            if (!_brokeForMaterial && g.kind === 'material') { panel.addNewLine(); _brokeForMaterial = true; }
+            const slug = g.slug;
+            const meta = TARGET_CATEGORY_META[slug] || { label: g.label, color: 'var(--text-secondary)', icon: '' };
+            const total = g.items.length;
+            const multi = total > 1;
+            const labelHtml = `<span class="sr-titem-label">${escapeHtml(meta.label)}</span>`
+                + (multi ? ` <span class="sr-titem-count">(${this._catSelCount(slug)}/${total})</span>` : '');
+            const parent = new Toggle(meta.icon || '', labelHtml, meta.color, ST, null, {
+                linkedSubs: multi ? true : undefined,
+                stayOpen: multi ? true : undefined, // deselect-all keeps the box open
+                collapseKey: multi ? ('titem:' + slug) : undefined,
+                // Inline "Select all / Deselect all" at the top of the box, before
+                // the first item. Multi categories only (single-item cats have no box).
+                boxHeader: multi ? (() => {
+                    const span = document.createElement('span');
+                    span.className = 'sr-titem-cat-selall';
+                    span.setAttribute('role', 'button');
+                    span.setAttribute('tabindex', '0');
+                    span.dataset.slug = slug;
+                    span.textContent = this._catAllSelected(slug) ? 'Deselect all' : 'Select all';
+                    this._titemCatHeaderSpans[slug] = span;
+                    return span;
+                }) : undefined,
+                readOn: () => this._catSelCount(slug) > 0,
+                onToggle: (on) => {
+                    if (!multi) {
+                        const only = g.items[0].slug;
+                        const sel = this._selItemsFor(slug);
+                        if (on) sel.add(only); else sel.delete(only);
+                        this._afterTitemChange(slug);
+                    }
+                    // multi: linkedSubs cascade drives each sub's onToggle below.
+                },
+            });
+            parent.chip.dataset.targetcatName = slug; // keep for stale-badge attach
+            parent.chip.dataset.category = 'target_items'; // stale annotator needs both attrs
+            parent.chip.classList.add('sr-titem-parent');
+            if (multi) {
+                const subs = g.items.map((it) => {
+                    const sel = this._selItemsFor(slug);
+                    const icon = resolveItemIcon({ itemRef: it.ref, itemName: it.name }) || '';
+                    return new Toggle(icon, escapeHtml(it.name), meta.color, ST, null, {
+                        defaultOn: true, // so a parent "select all" restores every item
+                        readOn: () => sel.has(it.slug),
+                        onToggle: (on) => {
+                            if (on) sel.add(it.slug); else sel.delete(it.slug);
+                            this._afterTitemChange(slug);
+                        },
+                    });
+                });
+                parent.attachCollapsableOption(...subs);
+                // Default collapsed; restore the persisted open state on reload.
+                parent._collapsed = !this._isTargetCatOpen(slug);
+            }
+            this._titemParentToggles[slug] = parent;
+            const cspan = parent.chip.querySelector('.sr-titem-count');
+            if (cspan) this._titemCountSpans[slug] = cspan;
+            panel.addToggle(parent);
         }
-        return html;
+        return panel;
+    }
+
+    /** Mount (or re-mount) the target-items panel into the current slot. */
+    _mountTargetItemsPanel() {
+        if (!this._$el || !this._targetItemsRosterLoaded) return;
+        const slot = this._$el.find('.stats-report-titems-panel-slot')[0];
+        if (!slot) return;
+        if (!this._targetItemsPanel) this._targetItemsPanel = this._buildTargetItemsPanel();
+        if (!this._targetItemsPanel) return;
+        slot.innerHTML = '';
+        this._targetItemsPanel.mount(slot);
+        this._targetItemsPanel.syncState();
+        this._refreshTitemHeaderButtons();
+    }
+
+    _updateTitemCount(slug) {
+        const el = this._titemCountSpans && this._titemCountSpans[slug];
+        if (el) el.textContent = `(${this._catSelCount(slug)}/${this._catTotal(slug)})`;
+    }
+
+    _afterTitemChange(slug) {
+        this._updateTitemCount(slug);
+        // Re-sync the parent chip directly from the current selection count so
+        // it lights the moment ≥1 item is selected, independent of the
+        // component's internal reconcile timing.
+        const p = this._titemParentToggles && this._titemParentToggles[slug];
+        if (p && typeof p._syncChipState === 'function') p._syncChipState();
+        this._refreshCatHeader(slug);
+        this._refreshTitemHeaderButtons();
+        clearTimeout(this._titemPersistT);
+        this._titemPersistT = setTimeout(() => this._saveSelectedTargetItems(), 150);
     }
 
     /**
@@ -2321,18 +2686,112 @@ export class StatsReportPage {
         // (the sub-group is the CATEGORY). Switching re-renders the row's steps,
         // fine pill, and ranking. Guard click/mousedown so opening the native
         // select doesn't bubble up and toggle a group/section collapse.
-        $el.on('click.statsReport mousedown.statsReport', '.stats-report-fc-quality', (e) => {
-            e.stopPropagation();
+        $el.on('click.statsReport mousedown.statsReport', '.sr-fc-qsel .target-dropdown-button', (e) => {
+            e.stopPropagation();                       // don't toggle the group/section
+            if (e.type !== 'click') return;            // mousedown only guards bubbling
+            const $sel = $(e.currentTarget).closest('.sr-fc-qsel');
+            const $panel = $sel.find('.sr-fc-qpanel');
+            const open = $panel.is(':visible');
+            // close any other open FC quality panels first
+            this._$el.find('.sr-fc-qpanel:visible').not($panel).slideUp(150)
+                .closest('.sr-fc-qsel').find('.expand-arrow').removeClass('expanded');
+            this._fcCloseOtherPanels($panel);   // also collapse the Normal/Fine dropdown
+            if (open) {
+                $panel.slideUp(150);
+                $sel.find('.expand-arrow').removeClass('expanded');
+            } else {
+                this._fcFloatPanel($sel, $panel);
+                $panel.stop(true, true).slideDown(180);
+                $sel.find('.expand-arrow').addClass('expanded');
+            }
         });
-        $el.on('change.statsReport', '.stats-report-fc-quality', (e) => {
+        $el.on('click.statsReport', '.sr-fc-qsel .target-item', (e) => {
             e.stopPropagation();
-            const ref = $(e.currentTarget).attr('data-item-ref');
-            if (!ref) return;
+            const $item = $(e.currentTarget);
+            const ref = $item.closest('.sr-fc-qsel').attr('data-item-ref');
+            const val = $item.attr('data-value');
+            if (!ref || !val) return;
             if (!this._fcRowQuality) this._fcRowQuality = {};
-            this._fcRowQuality[ref] = e.target.value;
+            this._fcRowQuality[ref] = val;
+            this._saveFcRowQuality();
             this._renderResults();
             try { this._applyFastestCraftSearch(); } catch (_) { /* non-fatal */ }
         });
+        // Steps-per-Recipe per-row "with owned materials" checkbox. Toggles the
+        // row between from-scratch (default) and banked (owned-deducted) steps.
+        // State is persisted to the session ui_config (server) + localStorage.
+        $el.on('change.statsReport', '.sr-fc-owned-cb', (e) => {
+            const cb = e.currentTarget;
+            const ref = cb && cb.getAttribute('data-item-ref');
+            if (!ref) return;
+            const m = this._fcOwnedMap();
+            if (cb.checked) m[ref] = true; else delete m[ref];
+            this._persistFcOwned();
+            this._renderResults();
+            try { this._applyFastestCraftSearch(); } catch (_) { /* non-fatal */ }
+        });
+        // Close any open FC quality dropdown on an outside click (bound once).
+        if (!this._fcQselOutsideBound) {
+            this._fcQselOutsideBound = true;
+            $(document).on('click.srFcQsel', (e) => {
+                if ($(e.target).closest('.sr-fc-qsel').length) return;
+                if (this._$el && this._$el.find) {
+                    this._$el.find('.sr-fc-qpanel:visible').slideUp(150)
+                        .closest('.sr-fc-qsel').find('.expand-arrow').removeClass('expanded');
+                }
+            });
+        }
+        // Normal/Fine input-variant dropdown (Material/Consumable rows). Mirrors
+        // the quality selector's open/close/select behavior; sets _fcRowVariant
+        // and re-renders so the row's steps + icon outline switch to that variant.
+        $el.on('click.statsReport mousedown.statsReport', '.sr-fc-vsel .target-dropdown-button', (e) => {
+            e.stopPropagation();
+            if (e.type !== 'click') return;
+            const $sel = $(e.currentTarget).closest('.sr-fc-vsel');
+            const $panel = $sel.find('.sr-fc-vpanel');
+            const open = $panel.is(':visible');
+            this._$el.find('.sr-fc-vpanel:visible').not($panel).slideUp(150)
+                .closest('.sr-fc-vsel').find('.expand-arrow').removeClass('expanded');
+            this._fcCloseOtherPanels($panel);   // also collapse the quality dropdown
+            if (open) {
+                $panel.slideUp(150);
+                $sel.find('.expand-arrow').removeClass('expanded');
+            } else {
+                this._fcFloatPanel($sel, $panel);
+                $panel.stop(true, true).slideDown(180);
+                $sel.find('.expand-arrow').addClass('expanded');
+            }
+        });
+        $el.on('click.statsReport', '.sr-fc-vsel .variant-item', (e) => {
+            e.stopPropagation();
+            const $item = $(e.currentTarget);
+            const ref = $item.closest('.sr-fc-vsel').attr('data-item-ref');
+            const val = $item.attr('data-value');
+            if (!ref || (val !== 'normal' && val !== 'fine')) return;
+            if (!this._fcRowVariant) this._fcRowVariant = {};
+            this._fcRowVariant[ref] = val;
+            this._saveFcRowVariant();
+            this._renderResults();
+            try { this._applyFastestCraftSearch(); } catch (_) { /* non-fatal */ }
+        });
+        if (!this._fcVselOutsideBound) {
+            this._fcVselOutsideBound = true;
+            $(document).on('click.srFcVsel', (e) => {
+                if ($(e.target).closest('.sr-fc-vsel').length) return;
+                if (this._$el && this._$el.find) {
+                    this._$el.find('.sr-fc-vpanel:visible').slideUp(150)
+                        .closest('.sr-fc-vsel').find('.expand-arrow').removeClass('expanded');
+                }
+            });
+        }
+        // Floated (position:fixed) FC dropdown panels don't track their button
+        // on scroll/resize — close them so they never hang detached. Bound once.
+        if (!this._fcPanelReflowBound) {
+            this._fcPanelReflowBound = true;
+            const close = () => { try { this._fcCloseAllPanels(); } catch (_) {} };
+            window.addEventListener('scroll', close, true);
+            window.addEventListener('resize', close);
+        }
         // Steps-per-Recipe Reset (section / master-category). Distinct from the
         // goals-report reset — hits the FC store endpoint.
         $el.on('click.statsReport', '.stats-report-fc-reset', (e) => {
@@ -2518,40 +2977,58 @@ export class StatsReportPage {
             this._saveSelectedKinds();
         });
 
-        // 2026-08-11 (jwbail): target-category chips for "Fastest Target Item
-        // Activities" sub-filter (Gems / Normal Items / Fine Items / etc.).
-        $el.on('click.statsReport', '.stats-report-targetcat-chip', (e) => {
-            const $chip = $(e.currentTarget);
-            const tc = $chip.data('targetcat-name');
-            if (!tc) return;
-            if (this._selectedTargetCategories.has(tc)) {
-                this._selectedTargetCategories.delete(tc);
-                $chip.removeClass('selected');
-            } else {
-                this._selectedTargetCategories.add(tc);
-                $chip.addClass('selected');
+        // 2026-11-14 (jwbail): top "Select all / Deselect all" for the
+        // target-items SettingsPanel. Category pills + item sub-chips handle
+        // their own clicks via the component; this only drives the bulk toggle.
+        $el.on('click.statsReport', '.stats-report-targetcat-all-toggle', (e) => {
+            const selectAll = !this._allTargetItemsSelected();
+            // Mutate each category's Set IN PLACE (clear/add) — do NOT replace
+            // it. The item toggles captured a reference to this Set at build
+            // time; replacing it detaches them so re-selecting never registers.
+            for (const g of (this._targetItemsRoster || [])) {
+                const sel = this._selItemsFor(g.slug);
+                sel.clear();
+                if (selectAll) for (const it of g.items) sel.add(it.slug);
             }
-            this._saveSelectedTargetCategories();
-            this._refreshTargetcatAllToggle($chip.closest('.stats-report-kind-list'));
+            this._saveSelectedTargetItems();
+            if (this._targetItemsPanel) this._targetItemsPanel.syncState();
+            for (const g of (this._targetItemsRoster || [])) { this._updateTitemCount(g.slug); this._refreshCatHeader(g.slug); }
+            this._refreshTitemHeaderButtons();
+        });
+        $el.on('keydown.statsReport', '.stats-report-targetcat-all-toggle', (e) => {
+            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); $(e.currentTarget).trigger('click'); }
         });
 
-        // 2026-08-12 (jwbail): select/deselect-all toggle for target-group chips.
-        $el.on('click.statsReport', '.stats-report-targetcat-all-toggle', (e) => {
-            const $btn = $(e.currentTarget);
-            const allSelected = ALL_TARGET_CATEGORIES.length > 0
-                && ALL_TARGET_CATEGORIES.every(tc => this._selectedTargetCategories.has(tc));
-            if (allSelected) {
-                this._selectedTargetCategories.clear();
-            } else {
-                this._selectedTargetCategories = new Set(ALL_TARGET_CATEGORIES);
-            }
-            this._saveSelectedTargetCategories();
-            const $wrap = $btn.closest('.stats-report-kind-list');
-            const sel = this._selectedTargetCategories;
-            $wrap.find('.stats-report-targetcat-chip').each((_i, el) => {
-                $(el).toggleClass('selected', sel.has($(el).data('targetcat-name')));
-            });
-            this._refreshTargetcatAllToggle($wrap);
+        // 2026-11-19 (jwbail): top "Expand all / Collapse all" for the
+        // target-items categories. Collapse if ANY is open, else expand all.
+        $el.on('click.statsReport', '.stats-report-targetcat-expand-toggle', () => {
+            const expand = !this._anyTargetCatExpanded();
+            const cats = this._multiTargetCats();
+            cats.forEach(t => t.setCollapsed(!expand, false)); // persists via onCollapseChange
+            if (this._targetItemsPanel) this._targetItemsPanel.relayout();
+            this._refreshTitemHeaderButtons();
+        });
+        $el.on('keydown.statsReport', '.stats-report-targetcat-expand-toggle', (e) => {
+            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); $(e.currentTarget).trigger('click'); }
+        });
+
+        // 2026-11-19 (jwbail): per-category inline "Select all / Deselect all"
+        // at the top of each expanded category box.
+        $el.on('click.statsReport', '.sr-titem-cat-selall', (e) => {
+            e.stopPropagation();
+            const slug = $(e.currentTarget).attr('data-slug');
+            const g = slug && this._rosterBySlug[slug];
+            if (!g) return;
+            const selectAll = !this._catAllSelected(slug);
+            const sel = this._selItemsFor(slug); // mutate IN PLACE (see note above)
+            sel.clear();
+            if (selectAll) for (const it of g.items) sel.add(it.slug);
+            this._saveSelectedTargetItems();
+            if (this._targetItemsPanel) this._targetItemsPanel.syncState();
+            this._afterTitemChange(slug);
+        });
+        $el.on('keydown.statsReport', '.sr-titem-cat-selall', (e) => {
+            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); $(e.currentTarget).trigger('click'); }
         });
 
         $el.on('click.statsReport', '.stats-report-fccat-chip', (e) => {
@@ -2582,12 +3059,50 @@ export class StatsReportPage {
             $(e.currentTarget).trigger('click');
         });
 
-        $el.on('click.statsReport', '.stats-report-fc-tree-btn', (e) => {
+        $el.on('click.statsReport', '.stats-report-fc-tree-btn', async (e) => {
             e.stopPropagation();
-            const ref = $(e.currentTarget).attr('data-item-ref');
-            if (ref && typeof window._openCraftingTreeGlobal === 'function') {
-                window._openCraftingTreeGlobal(ref);
+            const $btn = $(e.currentTarget);
+            const ref = $btn.attr('data-item-ref');
+            if (!ref || typeof window._openCraftingTreeGlobal !== 'function') return;
+            if ($btn.prop('disabled')) return;
+            // Port the row's current quality + fine mode so the crafting tree
+            // opens matching what the FC row shows (5.8).
+            const it = (this._fastestCraftItems || []).find(x => x.item_ref === ref);
+            const q = (this._fcRowQuality || {})[ref] || 'Normal';
+            let variant = 'normal';
+            try {
+                variant = (it && this._fcHasVariantSelector(it))
+                    ? this._fcRowVariantFor(it, q)
+                    : ((it && this._fcFineWins(it, q)) ? 'fine' : 'normal');
+            } catch (_) { variant = 'normal'; }
+            // #5: build the FC-solved tree server-side and stash it so the
+            // crafting tree opens with the SAME gearsets/locations/services the
+            // row computed, instead of re-optimizing from scratch. Transient
+            // (no saved_crafting_trees row). On failure, fall back to the plain
+            // item open so the button still works.
+            const label = $btn.text();
+            $btn.prop('disabled', true).text('Opening…');
+            try {
+                const r = await fetch('/api/fastest-craft/build-tree', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ item_ref: ref, quality: q, variant }),
+                }).then(x => (x.ok ? x.json() : null));
+                if (r && r.ok && r.tree_data) {
+                    window._fcPendingTreeData = {
+                        tree_data: r.tree_data,
+                        target_item_id: r.target_item_id || ref,
+                    };
+                }
+            } catch (err) {
+                console.warn('[StatsReportPage] FC build-tree failed; opening plain tree:', err);
+            } finally {
+                $btn.prop('disabled', false).text(label);
             }
+            // Port the row's "use banked materials" state so the crafting tree
+            // opens with the same banked toggle as the FC row (bug e08894bf #3).
+            const useBanked = this._fcUseBanked(it);
+            window._openCraftingTreeGlobal(ref, { quality: q, useFine: variant === 'fine', useBanked: useBanked });
         });
 
         $el.on('click.statsReport', '.stats-report-fc-save-btn', async (e) => {
@@ -2595,12 +3110,21 @@ export class StatsReportPage {
             const $btn = $(e.currentTarget);
             const ref = $btn.attr('data-item-ref');
             if (!ref || $btn.prop('disabled')) return;
+            // Save the row's CURRENT quality + variant, not a hardcoded Normal (5.9).
+            const it = (this._fastestCraftItems || []).find(x => x.item_ref === ref);
+            const q = (this._fcRowQuality || {})[ref] || 'Normal';
+            let variant = 'normal';
+            try {
+                variant = (it && this._fcHasVariantSelector(it))
+                    ? this._fcRowVariantFor(it, q)
+                    : ((it && this._fcFineWins(it, q)) ? 'fine' : 'normal');
+            } catch (_) { variant = 'normal'; }
             $btn.prop('disabled', true).text('Saving…');
             try {
                 const r = await fetch('/api/fastest-craft/save-tree', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ item_ref: ref, quality: 'Normal', variant: 'normal' }),
+                    body: JSON.stringify({ item_ref: ref, quality: q, variant: variant }),
                 });
                 if (!r.ok) throw new Error(`HTTP ${r.status}`);
                 $btn.text('Saved');
@@ -2609,6 +3133,51 @@ export class StatsReportPage {
                 console.warn('[StatsReportPage] fastest-craft save failed:', err);
                 $btn.prop('disabled', false).text('Save');
                 api.showError('Could not save crafting tree');
+            }
+        });
+
+        // Steps-per-Recipe per-row "Preview" button: toggle an inline mini
+        // breakdown tree (main node steps/item -> children name+icon+qty+steps/
+        // item, recursing) built on demand from /api/fastest-craft/tree at the
+        // row's current quality + variant.
+        $el.on('click.statsReport', '.stats-report-fc-preview-btn', async (e) => {
+            e.stopPropagation();
+            const $btn = $(e.currentTarget);
+            const ref = $btn.attr('data-item-ref');
+            if (!ref) return;
+            const $box = $btn.closest('.stats-report-result-row').find('.sr-fc-preview').first();
+            if (!$box.length) return;
+            const $arrow = $btn.find('.expand-arrow');
+            if ($box.is(':visible')) { $box.slideUp(140); $arrow.removeClass('expanded'); return; }
+            const it = (this._fastestCraftItems || []).find(x => x.item_ref === ref);
+            const q = (this._fcRowQuality || {})[ref] || 'Normal';
+            let variant = 'normal';
+            try {
+                variant = (it && this._fcHasVariantSelector(it))
+                    ? this._fcRowVariantFor(it, q)
+                    : ((it && this._fcFineWins(it, q)) ? 'fine' : 'normal');
+            } catch (_) { variant = 'normal'; }
+            const cacheKey = `${ref}::${q}::${variant}`;
+            if ($box.attr('data-loaded') === cacheKey) { $box.slideDown(140); $arrow.addClass('expanded'); return; }
+            $box.html('<span style="color:var(--text-muted,#9aa)">Building preview…</span>').slideDown(140);
+            $arrow.addClass('expanded');
+            $btn.prop('disabled', true);
+            try {
+                const url = `/api/fastest-craft/tree?item_ref=${encodeURIComponent(ref)}`
+                    + `&quality=${encodeURIComponent(q)}&variant=${encodeURIComponent(variant)}`;
+                const r = await fetch(url, { credentials: 'same-origin' });
+                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                const data = await r.json();
+                const tree = data && data.tree;
+                $box.html(tree ? this._fcPreviewTreeHtml(tree, 0, variant === 'fine', q)
+                    : '<span style="color:var(--text-muted,#9aa)">No preview available.</span>');
+                $box.attr('data-loaded', cacheKey);
+            } catch (err) {
+                console.warn('[StatsReportPage] fastest-craft preview failed:', err);
+                $box.html('<span style="color:#e57373">Preview failed to build.</span>');
+                $arrow.removeClass('expanded');
+            } finally {
+                $btn.prop('disabled', false);
             }
         });
 
@@ -2736,6 +3305,7 @@ export class StatsReportPage {
                         // the optimize button back to its idle face.
                         try { this._stopPolling && this._stopPolling(); } catch (_) {}
                         this._isRunning = false;
+                        this._fcHoldActive = false;
                         this._hideProgressSection && this._hideProgressSection();
                         this._updateOptimizeButtonRunningState();
                         // Re-fetch status so we pick up the now-failed
@@ -2810,6 +3380,7 @@ export class StatsReportPage {
                     try { this._stopPolling && this._stopPolling(); } catch (_) {}
                     this._isRunning = false;
                     this._localRunActive = false;
+                    this._fcHoldActive = false;
                     this._runId = null;
                     this._totalJobs = 0;
                     this._completedJobs = 0;
@@ -3604,13 +4175,373 @@ export class StatsReportPage {
         // appears (or disappears) in step with the push-granted state.
         this._reportPanel = null;
         this._mountReportPanel();
+        this._mountTargetItemsPanel();
     }
 
     // ========================================================================
     // RUN MANAGEMENT
     // ========================================================================
 
-    async _startRun() {
+    /**
+     * 2026-10-27 (jwbail): "Find Best Source" entry point, called from the
+     * owned-items list / item popup (item-row.js) for an activity-sourced
+     * material. Opens the goals report overlay (if not already open) and kicks
+     * a run scoped to a SINGLE target item, so the report computes only that
+     * one material's best activity source instead of the full grind.
+     *
+     * `itemName` is the display name (e.g. "Oak logs"); the backend scopes
+     * build_target_items_jobs by normalize_item_id(itemName) — mirrored here by
+     * _normalizeItemId so the leaf slug matches exactly.
+     */
+    async runForTargetItem(itemName) {
+        const slug = this._normalizeItemId(itemName);
+        if (!slug) return;
+        // Open the report overlay if it isn't already the active hash. The
+        // hash-change handler shows the page and runs onNavigatedTo().
+        if (window.location.hash !== '#goals-report') {
+            window.location.hash = '#goals-report';
+            // Let the hash handler paint the page before we touch its DOM.
+            await new Promise((r) => setTimeout(r, 80));
+        }
+        // Don't stack a second run on top of an in-progress one.
+        if (this._isRunning) {
+            try { api.showError('A run is already in progress — let it finish, then Find Best Source again.'); } catch (_) {}
+            return;
+        }
+        this._scopedTargetItemName = itemName;
+        this._scopedChestName = null;
+        // Make target_items the only visible/active section for this scoped run
+        // and surface which item we're finding a source for.
+        try {
+            const $summary = this._$el.find('#stats-report-run-summary');
+            if ($summary.length) $summary.show().text(`Finding best source for: ${itemName}…`);
+        } catch (_) { /* non-fatal */ }
+        await this._startRun({ targetItemSlug: slug, targetItemName: itemName });
+        this._scrollToTopProgress();
+    }
+
+    // "Find source" for a chest goal item — runs ONLY the Best Chest Farming
+    // for Activities report, scoped to this one chest.
+    async runForChest(chestName) {
+        if (!chestName) return;
+        if (window.location.hash !== '#goals-report') {
+            window.location.hash = '#goals-report';
+            await new Promise((r) => setTimeout(r, 80));
+        }
+        if (this._isRunning) {
+            try { api.showError('A run is already in progress — let it finish, then try again.'); } catch (_) {}
+            return;
+        }
+        try {
+            const $summary = this._$el.find('#stats-report-run-summary');
+            if ($summary.length) $summary.show().text(`Finding best chest farming for: ${chestName}…`);
+        } catch (_) { /* non-fatal */ }
+        this._scopedChestName = chestName;
+        this._scopedTargetItemName = null;
+        await this._startRun({ chestScopeName: chestName });
+        this._scrollToTopProgress();
+    }
+
+    // "Find and rerun steps for you" — run every stale / newly-unlocked scope
+    // (the standard stale run), which refreshes the job items that need it.
+    async runAllStale() {
+        if (window.location.hash !== '#goals-report') {
+            window.location.hash = '#goals-report';
+            await new Promise((r) => setTimeout(r, 80));
+        }
+        if (this._isRunning) {
+            try { api.showError('A run is already in progress — let it finish, then try again.'); } catch (_) {}
+            return;
+        }
+        this._scopedTargetItemName = null;
+        this._scopedChestName = null;
+        await this._startRun();
+        this._scrollToTopProgress();
+    }
+
+    /**
+     * JS mirror of util/stats_report/normalize.normalize_item_id. Turns a
+     * display name ("Oak logs", "Adventurer's enamel pin", "99-year-old wine")
+     * into its canonical snake_case leaf id. MUST stay byte-identical to the
+     * Python transform — the backend scopes jobs on that exact slug.
+     */
+    _normalizeItemId(name) {
+        if (!name) return '';
+        let s = String(name).toLowerCase();
+        s = s.replace(/['\u2019]/g, '');      // drop straight + curly apostrophes
+        s = s.replace(/[ \-/]/g, '_');        // space / hyphen / slash -> underscore
+        while (s.indexOf('__') !== -1) s = s.split('__').join('_');  // collapse repeats
+        return s.replace(/^_+|_+$/g, '');      // strip leading/trailing underscores
+    }
+
+    // Navigate to an item/chest in the report WITHOUT running anything (used
+    // when the Job Board "Steps for you" number is already fresh).
+    async revealReportItem(name, isChest) {
+        if (!name) return;
+        // cat is a HINT, not a hard filter: the finder searches this section
+        // first, then falls back to every other section (see _revealInSection).
+        const cat = isChest ? 'chests' : 'target_items';
+        // A self-retrying "pending reveal": the page finishes rendering in
+        // several async stages (first-open render, activities-cache re-render,
+        // results-data load), and any of them can rebuild the DOM and collapse
+        // what we expanded. So we keep re-asserting the expand+scroll until the
+        // item row actually exists AND survives a few trailing renders — rather
+        // than guessing a single moment. Also handles "report not loaded yet":
+        // it keeps trying until the data renders the row, then scrolls.
+        this._pendingReveal = { cat, name, deadline: Date.now() + 15000, hits: 0, stable: 0, lastOff: undefined };
+        this._suppressScrollRestore = true;   // this reveal owns the scroll until it settles
+        console.log('[reveal] start name=' + name + ' cat=' + cat + ' pageOpen=' + this._isPageOpen + ' rendered=' + this._hasRendered + ' cacheReady=' + this._activitiesCacheReady);
+        if (window.location.hash !== '#goals-report') {
+            window.location.hash = '#goals-report';
+        }
+        // The Job Board only shows a clickable "Steps for you" link when the
+        // goals report already has a STORED result for this item — but on a
+        // re-warm navigation the stats-report page reuses its old DOM and does
+        // NOT reload/re-render results, so #stats-report-results can be empty
+        // (zero .stats-report-section elements). Then the reveal loop searches
+        // an empty DOM for 15s and "nothing happens". Ensure results are loaded
+        // + rendered so there's actually a row to find. Fire-and-forget: the
+        // 150ms retry loop picks the row up as soon as the render lands.
+        this._ensureResultsForReveal();
+        this._runPendingReveal();
+    }
+
+    // Make sure the goals-report result sections are in the DOM before/while a
+    // reveal searches for a row. No-op when sections already exist. If results
+    // are held in memory, just (re)render; otherwise fetch the session's stored
+    // results and render. Best-effort and non-fatal.
+    async _ensureResultsForReveal() {
+        try {
+            const root = this._$el && this._$el[0];
+            if (root && root.querySelector('.stats-report-section')) return; // already rendered
+            if (this._results && Object.keys(this._results).length) {
+                if (this._isPageOpen) this._renderResults();
+                if (root && root.querySelector('.stats-report-section')) return;
+            }
+            const uuid = store && store.state && store.state.session && store.state.session.uuid;
+            if (!uuid) return;
+            const resp = await api.getStatsReportResults(uuid);
+            if (resp && resp.success && resp.results) {
+                this._results = resp.results;
+                if (this._isPageOpen) this._renderResults();
+                console.log('[reveal] ensured results rendered sections=' + ((root && root.querySelectorAll('.stats-report-section').length) || 0));
+            }
+        } catch (e) {
+            console.warn('[reveal] _ensureResultsForReveal failed:', (e && (e.stack || e.message)) || e);
+        }
+    }
+
+    _runPendingReveal() {
+        if (this._pendingRevealTimer) { clearTimeout(this._pendingRevealTimer); this._pendingRevealTimer = null; }
+        const pr = this._pendingReveal;
+        if (!pr) return;
+        if (Date.now() > pr.deadline) {
+            // Best-effort on timeout: if we ever located the row, land on it
+            // once; otherwise just release scroll ownership WITHOUT yanking the
+            // user somewhere arbitrary.
+            let ok = false;
+            try {
+                ok = this._revealInSection(pr.cat, pr.name, false);
+                if (ok && this._lastRevealEl) this._lastRevealEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            } catch (_) {}
+            console.log('[reveal] deadline reached name=' + pr.name + ' hits=' + pr.hits + ' finalFound=' + ok);
+            this._pendingReveal = null; this._suppressScrollRestore = false; return;
+        }
+        if (this._isPageOpen && this._hasRendered) {
+            // Locate the row across ALL sections (no scroll yet) and MEASURE its
+            // absolute document offset. _absTop walks the offsetParent chain, so
+            // it is invariant to the current scroll position — our own
+            // scrollIntoView never registers as "movement". Only a genuine
+            // reflow (the late activities-cache re-render, lazy rows rendering
+            // above it) actually moves it. The old code measured viewport-
+            // relative rect.top while scrolling every tick, so the smooth-scroll
+            // animation itself looked like movement and re-pinned forever — that
+            // feedback loop was the "jumping around".
+            const found = this._revealInSection(pr.cat, pr.name, false);
+            const el = this._lastRevealEl;
+            if (found && el) {
+                if (this._lastRevealCat) { try { this._setExpanded(`section:${this._lastRevealCat}`, true); } catch (_) {} }
+                const off = this._absTop(el);
+                const moved = (pr.lastOff === undefined) || (Math.abs(off - pr.lastOff) > 2);
+                pr.stable = moved ? 0 : (pr.stable + 1);
+                pr.lastOff = off;
+                pr.hits += 1;
+                console.log('[reveal] tick name=' + pr.name + ' sect=' + this._lastRevealCat + ' absTop=' + off + ' moved=' + moved + ' cacheReady=' + this._activitiesCacheReady + ' stable=' + pr.stable + ' hits=' + pr.hits);
+                // Row held the same absolute position for ~600ms AND the results
+                // DOM is fully built: the reflow is done. Scroll ONCE and hold
+                // scroll ownership through a short grace window so the trailing
+                // reflow + saved-scroll restore can't steal it back.
+                if (pr.stable >= 4 && this._activitiesCacheReady) {
+                    this._finalizeReveal(el, pr.name);
+                    return;
+                }
+            } else {
+                console.log('[reveal] tick name=' + pr.name + ' row-not-rendered-yet');
+                // If no result sections are in the DOM, the results aren't
+                // rendered yet (re-warm nav reused an empty DOM). Re-assert the
+                // load+render, throttled to ~1s, so we recover once the page has
+                // finished opening (the up-front call may have run before
+                // _isPageOpen flipped true).
+                const root = this._$el && this._$el[0];
+                if (root && !root.querySelector('.stats-report-section')) {
+                    const now = Date.now();
+                    if (!pr.lastEnsure || (now - pr.lastEnsure) > 1000) {
+                        pr.lastEnsure = now;
+                        this._ensureResultsForReveal();
+                    }
+                }
+            }
+        } else {
+            console.log('[reveal] tick waiting-for-page isOpen=' + this._isPageOpen + ' rendered=' + this._hasRendered);
+        }
+        this._pendingRevealTimer = setTimeout(() => this._runPendingReveal(), 150);
+    }
+
+    // Scroll-invariant absolute top of an element: sum of offsetTop up the
+    // offsetParent chain. Unlike getBoundingClientRect().top it does NOT change
+    // when the page/container scrolls, so comparing it tick-to-tick detects
+    // genuine relayout only — not our own scrollIntoView.
+    _absTop(el) {
+        let y = 0, n = el;
+        while (n) { y += (n.offsetTop || 0); n = n.offsetParent; }
+        return Math.round(y);
+    }
+
+    // One authoritative scroll to the settled row, then re-assert it twice over
+    // ~500ms to beat any final reflow / saved-scroll restore, then release
+    // scroll ownership. Keeping _suppressScrollRestore true across the grace
+    // window is what stops the post-settle re-render from stealing the scroll.
+    _finalizeReveal(el, name) {
+        this._pendingReveal = null;
+        if (this._pendingRevealTimer) { clearTimeout(this._pendingRevealTimer); this._pendingRevealTimer = null; }
+        const doScroll = () => { try { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (_) {} };
+        doScroll();
+        console.log('[reveal] settled -> scrolled name=' + name);
+        setTimeout(doScroll, 220);
+        setTimeout(() => {
+            doScroll();
+            this._suppressScrollRestore = false;
+            console.log('[reveal] released name=' + name);
+        }, 500);
+    }
+
+    // On a scoped Find / Rerun, jump to the TOP so the progress bar is in view
+    // while it computes; _scrollToScopedResult hops down to the result after
+    // the run finalizes. Setting _savedScrollTop=0 defeats onNavigatedTo's
+    // saved-scroll restore (which otherwise lands back on a prior item).
+    _scrollToTopProgress() {
+        this._savedScrollTop = 0;
+        const doScroll = () => {
+            if (!this._isPageOpen) return;
+            if (window.innerWidth <= 768) { window.scrollTo(0, 0); }
+            else if (this._$el && this._$el[0]) {
+                this._$el[0].scrollTop = 0;
+                const $inner = this._$el.find('.stats-report-container, .stats-report-page');
+                if ($inner.length) $inner[0].scrollTop = 0;
+            }
+            const prog = this._$el && this._$el.find('#stats-report-progress')[0];
+            if (prog && prog.scrollIntoView) prog.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        };
+        requestAnimationFrame(() => requestAnimationFrame(doScroll));
+    }
+
+    // Expand the section + its nested groups and scroll to the named row.
+    // Returns true only when the SPECIFIC item/chest row was found (so the
+    // caller's retry loop knows when the results have actually rendered).
+    _revealInSection(cat, name, scroll = true) {
+        this._lastRevealEl = null;
+        this._lastRevealCat = null;
+        try {
+            if (!this._$el || !this._$el[0]) return false;
+            const needle = name ? String(name).trim().toLowerCase() : '';
+            const needleId = name ? this._normalizeItemId(name) : '';
+            // Search the caller's hinted section FIRST, then every other
+            // section. The Job Board "Steps for you" deep-link can't know which
+            // report section an item renders in: a loot drop like "Rough opal"
+            // or "Basic hide" lives in new_items / chests, NOT target_items, so
+            // a fixed cat hint used to miss the row entirely (15s deadline,
+            // hits=0, then a blind scroll to the wrong place). We now fall back
+            // to scanning all sections and reveal whichever one holds the row.
+            // _findInSection queries the DOM even inside collapsed (display:none)
+            // bodies, so we can locate the match BEFORE expanding anything and
+            // then expand only the one section that actually contains it.
+            const all = Array.from(this._$el[0].querySelectorAll('.stats-report-section'));
+            const hinted = cat ? all.filter((s) => s.getAttribute('data-section') === cat) : [];
+            const ordered = hinted.concat(all.filter((s) => hinted.indexOf(s) === -1));
+            let target = null, foundSection = null;
+            if (needle || needleId) {
+                for (const section of ordered) {
+                    const cand = this._findInSection(section, needle, needleId);
+                    if (cand) { target = cand; foundSection = section; break; }
+                }
+            }
+            if (target && foundSection) {
+                this._expandSection(foundSection);     // open the matched section + all its nested groups
+                target.classList.add('open');
+                this._lastRevealEl = target;
+                this._lastRevealCat = foundSection.getAttribute('data-section');
+                if (scroll) target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                return true;
+            }
+            // Not found in any section. On a best-effort scroll, at least open +
+            // land on the hinted section header rather than yanking elsewhere.
+            if (scroll && hinted[0]) { this._expandSection(hinted[0]); hinted[0].scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+            return false;
+        } catch (_) { /* non-fatal */ return false; }
+    }
+
+    // Locate the item/chest row inside one section WITHOUT mutating the DOM.
+    // Rows render each item as a sub-group carrying data-item-name (the display
+    // name, e.g. "Pine logs (Fine)"); match by NORMALIZED id so a fine goal
+    // lands on its "(Fine)" sub-group, not the cheaper normal one. Chests group
+    // by data-chest-group. Fall back to exact header text. querySelectorAll
+    // sees collapsed (display:none) subtrees, so this works pre-expansion.
+    _findInSection(section, needle, needleId) {
+        if (!section) return null;
+        let cand = needleId
+            ? Array.from(section.querySelectorAll('[data-item-name]'))
+                .find((el) => this._normalizeItemId(el.getAttribute('data-item-name')) === needleId)
+            : null;
+        if (!cand && needleId) {
+            cand = Array.from(section.querySelectorAll('[data-chest-group]'))
+                .find((el) => this._normalizeItemId(el.getAttribute('data-chest-group')) === needleId);
+        }
+        if (!cand && needle) {
+            cand = Array.from(section.querySelectorAll('h3, h4, strong, .stats-report-skill-header, .stats-report-cat-header, .stats-report-result-name'))
+                .find((el) => (el.textContent || '').trim().toLowerCase() === needle);
+        }
+        return cand || null;
+    }
+
+    // Open a section and every nested collapsible group so the target row is
+    // visible. Collapsed groups render their body with an INLINE display:none,
+    // which the .open CSS class cannot override — so clear the inline none on
+    // every body too, otherwise previously-collapsed sub-groups stay hidden.
+    _expandSection(section) {
+        if (!section) return;
+        section.classList.add('open');
+        section.querySelectorAll('.stats-report-section').forEach((s) => s.classList.add('open'));
+        section.querySelectorAll('.stats-report-skill-group, .stats-report-cat-group, .stats-report-skill-extras')
+            .forEach((g) => g.classList.add('open'));
+        section.querySelectorAll('.stats-report-section-body, .stats-report-cat-body, .stats-report-skill-body')
+            .forEach((b) => { if (b.style.display === 'none') b.style.display = ''; });
+    }
+
+    // After a scoped single-item / single-chest run, expand that result section
+    // and scroll to it (the scoped run leaves only that item/chest in it).
+    _scrollToScopedResult() {
+        const name = this._scopedTargetItemName || this._scopedChestName || null;
+        const cat = this._scopedTargetItemName ? 'target_items'
+            : (this._scopedChestName ? 'chests' : null);
+        this._scopedTargetItemName = null;
+        this._scopedChestName = null;
+        if (!cat || !this._isPageOpen) return;
+        try { this._setExpanded(`section:${cat}`, true); } catch (_) {}
+        try { this._renderResults(); } catch (_) {}
+        setTimeout(() => this._revealInSection(cat, name), 160);
+    }
+
+    async _startRun(runOpts = {}) {
         const uuid = store.state.session?.uuid;
         if (!uuid) return;
 
@@ -3647,8 +4578,62 @@ export class StatsReportPage {
             categories = categories.filter((key) => key !== 'fastest_craft');
         }
         const kinds = Array.from(this._selectedKinds);
-        this._hydrateSelectedTargetCategories();
-        const targetCategories = Array.from(this._selectedTargetCategories);
+        // 2026-10-27 (jwbail): "Find Best Source" single-item scope. When the
+        // run is scoped to one target item, force the category list to just
+        // target_items (no point running XP/Coins/Chests/etc. for a single
+        // material) and carry the leaf slug through to the backend, which
+        // restricts build_target_items_jobs to that one item.
+        const _targetItemSlug = (runOpts && typeof runOpts.targetItemSlug === 'string' && runOpts.targetItemSlug)
+            ? runOpts.targetItemSlug : null;
+        if (_targetItemSlug) {
+            categories = ['target_items'];
+        }
+        const _chestScope = (runOpts && typeof runOpts.chestScopeName === 'string' && runOpts.chestScopeName)
+            ? runOpts.chestScopeName : null;
+        if (_chestScope) {
+            categories = ['chests'];
+        }
+        // 2026-11-16 (jwbail): "Find & rerun steps for you" (Job Board bulk
+        // button). The Steps-for-you column is backed by the target_items +
+        // chests report scopes, which the user may have DESELECTED in
+        // What-to-optimize. Force those categories in regardless of the WTO
+        // selection so the bulk button actually refreshes the column — this is
+        // why the individual Find buttons worked (they force the category) but
+        // the top button did nothing. stale_only (below) still limits the run
+        // to missing + stale scopes, so fresh items are skipped.
+        const _forceCategories = (runOpts && Array.isArray(runOpts.forceCategories) && runOpts.forceCategories.length)
+            ? runOpts.forceCategories.slice() : null;
+        if (_forceCategories) {
+            categories = _forceCategories.filter(
+                (key) => isCategoryVisible(CATEGORIES.find((c) => c.key === key) || {}));
+        }
+        this._ensureTargetItemsRoster();
+        let targetCategories;
+        let targetItemSlugs = null;
+        let targetItemGroups = null;
+        // A forced bulk run ("do it for all") must build the FULL target_items
+        // set — never the partial per-item roster scope — so every missing
+        // board item is covered. _targetItemSlug and _forceCategories both skip
+        // the partial-roster scoping below.
+        if (this._targetItemsRosterLoaded && !_targetItemSlug && !_forceCategories) {
+            this._hydrateSelectedTargetItems();
+            this._recomputeSelectedTargetCategories();
+            targetCategories = Array.from(this._selectedTargetCategories);
+            const groups = [];
+            const slugs = [];
+            for (const g of (this._targetItemsRoster || [])) {
+                const total = this._catTotal(g.slug);
+                const sel = this._selItemsFor(g.slug);
+                if (total > 1 && sel.size > 0 && sel.size < total) {
+                    groups.push(g.slug);
+                    for (const it of g.items) if (sel.has(it.slug)) slugs.push(it.slug);
+                }
+            }
+            if (groups.length) { targetItemGroups = groups; targetItemSlugs = slugs; }
+        } else {
+            this._hydrateSelectedTargetCategories();
+            targetCategories = Array.from(this._selectedTargetCategories);
+        }
         // 2026-06-16 (jwbail): per-category skill/chest selections. XP and
         // Coins keep independent skill picks; Chests (activities) and
         // Chests-recipes keep independent chest picks. The worker applies each
@@ -3658,6 +4643,7 @@ export class StatsReportPage {
         for (const c of SKILL_CHIP_CATEGORIES) skillsByCategory[c] = Array.from(this._skillsFor(c));
         const chestsByCategory = {};
         for (const c of CHEST_CHIP_CATEGORIES) chestsByCategory[c] = Array.from(this._chestsFor(c));
+        if (_chestScope) chestsByCategory['chests'] = [_chestScope];   // scope to one chest
         const skills = Array.from(new Set([].concat(...Object.values(skillsByCategory))));
         const chests = Array.from(new Set([].concat(...Object.values(chestsByCategory))));
 
@@ -3702,7 +4688,25 @@ export class StatsReportPage {
             // To force a full rerun (e.g. for debugging), the user can clear
             // stats_report_results manually OR a future "Force full rerun"
             // override button can pass stale_only=false explicitly.
-            const staleOnly = true;
+            const staleOnly = (_targetItemSlug || _chestScope) ? false : true;
+            // 2026-11-20 (jwbail): client-side trace of the per-item narrowing
+            // payload. Open DevTools console and grep '[titem-send]' to see
+            // EXACTLY what the browser sends — this is the fastest way to tell
+            // whether the selection reaches the backend (vs the server logs,
+            // which aren't always reachable).
+            try {
+                console.log('[titem-send]', JSON.stringify({
+                    targetCategories: targetCategories,
+                    targetItemGroups: targetItemGroups,
+                    targetItemSlugs: targetItemSlugs,
+                    rosterLoaded: this._targetItemsRosterLoaded,
+                    perGroup: (this._targetItemsRoster || []).map(g => ({
+                        slug: g.slug,
+                        total: this._catTotal(g.slug),
+                        selected: this._catSelCount(g.slug),
+                    })),
+                }));
+            } catch (_) { /* non-fatal */ }
             const result = await api.startStatsReportRun(uuid, categories, skills, this._notifyOnComplete, {
                 include_pets: this._includePets,
                 include_consumables: this._includeConsumables,
@@ -3722,6 +4726,11 @@ export class StatsReportPage {
                 kinds: kinds,
                 target_categories: targetCategories,
                 include_fine: this._includeFine,
+                // 2026-10-27 (jwbail): single-item "Find Best Source" scope.
+                target_item_slug: _targetItemSlug,
+                // 2026-11-14 (jwbail): per-item target selection (null = all).
+                target_item_slugs: targetItemSlugs,
+                target_item_groups: targetItemGroups,
                 fastest_craft_categories: fastestCraftCategories,
                 chests: chests,
                 skills_by_category: skillsByCategory,
@@ -3743,6 +4752,14 @@ export class StatsReportPage {
             }
             this._runId = result.run_id;
             this._isRunning = true;
+            // _fcHoldActive now ONLY defers the run-summary swap until FC
+            // finishes (see the is_complete path + _loadFastestCraftResults).
+            // Results — including Steps per Recipe — paint INCREMENTALLY during
+            // the run (the poll refreshes FC items via _refreshFastestCraftItems
+            // and _renderResults no longer holds the paint), so FC streams in
+            // like every other category instead of all-at-once at the end.
+            this._fcHoldActive = !!(window._featureFlags?.fastest_craft_goals
+                && Array.isArray(categories) && categories.includes('fastest_craft'));
             this._totalJobs = result.total_jobs || 0;
             this._completedJobs = 0;
             this._startedAt = new Date().toISOString();
@@ -4061,6 +5078,14 @@ export class StatsReportPage {
                 if (resultsResp.success && resultsResp.results &&
                         (this._pollInterval || status.is_complete)) {
                     this._results = resultsResp.results;
+                    // Stream Steps-per-Recipe rows too: refresh FC items from the
+                    // server's growing fastest_craft_results so the FC section
+                    // fills in as cells land (like every other category), not
+                    // only at completion. Best-effort; never blocks the paint.
+                    if (!status.is_complete) {
+                        try { await this._refreshFastestCraftItems(status.categories); }
+                        catch (_) { /* non-fatal */ }
+                    }
                     this._lastRenderedCompleted = this._completedJobs;
                     this._lastResultsRenderAt = nowMs;
                     this._renderResults();
@@ -4090,11 +5115,17 @@ export class StatsReportPage {
                 // (empty pools) and on a clean local finish (already drained).
                 try { terminateLocalComputeWorkers(); } catch (_) { /* non-fatal */ }
                 this._stopPolling();
-                this._hideProgressSection();
+                // When this run includes Steps per Recipe, keep the progress
+                // card up and defer the run summary until FC finishes — the
+                // unified render releases both via _loadFastestCraftResults.
+                const holdForFc = !!this._fcHoldActive;
+                if (!holdForFc) this._hideProgressSection();
 
                 if (status.is_failed) {
                     // Surface the failure to the user so they don't stare at a
                     // silent progress bar. Worker logs at /tmp/stats_report_worker_*.log.
+                    this._fcHoldActive = false;   // release hold so results can paint
+                    this._hideProgressSection();
                     this._updateNavIconState('idle');
                     api.showError('Goals report failed. Check server logs and try again.');
                     return;
@@ -4102,7 +5133,7 @@ export class StatsReportPage {
 
                 if (this._isPageOpen) {
                     this._updateNavIconState('idle');
-                    this._showRunSummary();
+                    if (!holdForFc) this._showRunSummary();
                     this._loadFastestCraftResults(status.categories);
                     // Show stale banner if needed
                     if (status.is_stale && !this._staleDismissed &&
@@ -4125,6 +5156,9 @@ export class StatsReportPage {
                 api.showSuccess('Goals report complete — your optimization report is ready to view', {
                     onClick: () => { window.location.hash = '#goals-report'; }
                 });
+                // Scoped single-item / single-chest run → scroll to it
+                // (expanding its category section).
+                try { this._scrollToScopedResult(); } catch (_) { /* non-fatal */ }
             }
 
         } catch (err) {
@@ -4149,8 +5183,16 @@ export class StatsReportPage {
 
     _showRunSummary() {
         try {
-            const total = this._totalJobs || 0;
+            // On a LOCAL Fastest-Craft-only run the server run row has
+            // total_jobs=0 (FC isn't a sharded job), so _pollProgress keeps
+            // reassigning this._totalJobs = status.total_jobs (0) each tick,
+            // while this._completedJobs is monotonic (Math.max of FC's own
+            // done). That produced "26/0". completed can never exceed the true
+            // total in a correct run, so clamp the denominator up to completed:
+            // fixes "26/0" -> "26/26" and never regresses server runs (where
+            // total >= completed already).
             const completed = this._completedJobs || 0;
+            const total = Math.max(this._totalJobs || 0, completed);
             let elapsedMs = 0;
             if (this._startedAt) {
                 const start = new Date(this._startedAt).getTime();
@@ -4335,6 +5377,16 @@ export class StatsReportPage {
         const $body = this._$el.find('#stats-report-results-body');
         if (!$body.length) return;
 
+        // Steps-per-Recipe streams in like every other category: while a run
+        // that includes FC is still computing, keep the progress card up but
+        // STILL paint whatever has landed so far (regular sections + the FC
+        // rows the poll has fetched incrementally), instead of holding the
+        // whole report back until FC finishes. _fcHoldActive now only defers
+        // the run-summary swap at completion (see _pollProgress), not the paint.
+        if (this._fcHoldActive) {
+            try { this._showProgressSection(); } catch (_) { /* non-fatal */ }
+        }
+
         const hasResults = Object.values(this._results).some(arr => arr.length > 0)
             || this._fastestCraftItems.length > 0;
         if (!hasResults) {
@@ -4386,6 +5438,11 @@ export class StatsReportPage {
         // bar with the item icon's dominant (non-black/white) color. Async —
         // loads each icon, samples pixels, sets --chip-color/--glow-color.
         try { this._applyTargetItemColors($body); } catch (_) { /* non-fatal */ }
+        try { this._applyFastestCraftRowColors($body); } catch (_) { /* non-fatal */ }
+        // Wire the blue (i) info popovers rendered inside the results body (e.g.
+        // the Steps-per-Recipe per-row material-usage icon). The main page
+        // render wires the shell before this body exists, so re-wire here.
+        try { wireInfoIcons($body[0]); } catch (_) { /* non-fatal */ }
 
         // Re-apply the target_items search filter (if any) so a live query
         // survives poll / stale-refresh re-renders instead of resetting.
@@ -4548,6 +5605,37 @@ export class StatsReportPage {
     }
 
     /**
+     * Lightweight incremental refresh of the Fastest Craft items DURING a run:
+     * pull the server's growing fastest_craft_results and update
+     * _fastestCraftItems (+ the "Solving N/M" banner) so the FC section streams
+     * in like every other category. Unlike _loadFastestCraftResults it schedules
+     * NO re-poll timer and runs NO completion/finalize logic — the main poll
+     * loop owns cadence and the is_complete path owns finalize. Best-effort.
+     */
+    async _refreshFastestCraftItems(runCategories) {
+        let cats = runCategories;
+        if (typeof cats === 'string') {
+            try { cats = JSON.parse(cats); } catch (_) { cats = []; }
+        }
+        const included = Array.isArray(cats) && cats.includes('fastest_craft')
+            && !!window._featureFlags?.fastest_craft_goals;
+        if (!included) return;
+        const resp = await fetch('/api/fastest-craft/results').then(r => (r.ok ? r.json() : null));
+        const items = (resp && resp.count > 0 && resp.items) ? Object.values(resp.items) : [];
+        this._fastestCraftItems = items
+            .map(it => ({ ...it, _steps: this._fastestCraftSteps(it) }))
+            .sort((a, b) => (a._steps ?? Infinity) - (b._steps ?? Infinity)
+                || String(a.output_name || a.item_ref).localeCompare(String(b.output_name || b.item_ref)));
+        try {
+            const st = await fetch('/api/fastest-craft/run-status').then(r => (r.ok ? r.json() : null));
+            const active = !!st && (st.status === 'running' || st.status === 'pending');
+            this._fastestCraftRunning = active
+                ? { done: Number(st.done) || 0, total: Number(st.total) || 0 }
+                : this._fastestCraftRunning;
+        } catch (_) { /* banner is best-effort */ }
+    }
+
+    /**
      * Load stored Fastest Craft rows when the latest run included the
      * fastest_craft category, then re-render the results. While a background
      * Fastest Craft compute is still running (local-compute runs host it in a
@@ -4565,11 +5653,14 @@ export class StatsReportPage {
         const included = Array.isArray(cats) && cats.includes('fastest_craft')
             && !!window._featureFlags?.fastest_craft_goals;
         if (!included) {
-            if (this._fastestCraftItems.length) {
+            const releasedHold = !!this._fcHoldActive;
+            this._fcHoldActive = false;
+            const hadItems = this._fastestCraftItems.length > 0;
+            if (hadItems) {
                 this._fastestCraftItems = [];
-        this._fastestCraftRunning = null;
-                this._renderResults();
+                this._fastestCraftRunning = null;
             }
+            if (hadItems || releasedHold) this._renderResults();
             return;
         }
         try {
@@ -4587,9 +5678,13 @@ export class StatsReportPage {
             // FC section instead (see _renderFastestCraftSection), driven here.
             const active = !!st && (st.status === 'running' || st.status === 'pending');
             const wasActive = !!this._fastestCraftRunning;
+            const heldBefore = !!this._fcHoldActive;
             this._fastestCraftRunning = active
                 ? { done: Number(st.done) || 0, total: Number(st.total) || 0 }
                 : null;
+            // FC done -> release the unified-render hold BEFORE painting so the
+            // full report (regular + Steps per Recipe) renders in one shot.
+            if (!active && this._fcHoldActive) this._fcHoldActive = false;
             if (this._isPageOpen) this._renderResults();
             if (active && this._isPageOpen) {
                 // Keep the progress card visible and the MAIN bar moving while
@@ -4600,12 +5695,16 @@ export class StatsReportPage {
                 this._updateProgressBar();
                 this._fastestCraftPollTimer = setTimeout(
                     () => this._loadFastestCraftResults(cats), 5000);
-            } else if (wasActive && !active) {
-                // FC just finished: refresh the bar, and if the base run is also
-                // done, hide the progress card and show the summary.
+            } else if (!active && (wasActive || heldBefore)) {
+                // FC just finished (server background task ended, or local path
+                // where FC was already done at is_complete). Now that the base
+                // run is done too, finalize the progress UI + run summary. The
+                // (wasActive || heldBefore) guard keeps this from firing on a
+                // passive page-open of an already-finished run.
                 this._updateProgressBar();
                 if (!this._isRunning) {
                     this._hideProgressSection();
+                    this._showRunSummary();
                 }
             }
         } catch (err) {
@@ -4686,22 +5785,33 @@ export class StatsReportPage {
                 const chip = this._fastestCraftChipByLabel[catLabel]
                     || { label: catLabel, color: masterColor };
                 const chipColor = chip.color || masterColor;   // DISTINCT from master -> clean 2-tone nesting
-                // Rank items in this category by the row's chosen-quality steps
-                // (default Normal), ascending. One row per item.
+                // One row per item, ordered ALPHABETICALLY by item name (not by
+                // steps). All rows shown — no podium/"show more" collapsing. The
+                // per-row left bar is recolored from the item icon async
+                // (_applyFastestCraftRowColors), matching Target Items.
                 const seen = new Set();
-                const ranked = cats[catLabel]
+                const rows = cats[catLabel]
                     .filter(it => (seen.has(it.item_ref) ? false : seen.add(it.item_ref)))
-                    .map(it => ({ it, steps: this._fcQualitySteps(it, rowQ(it)) }))
+                    .map(it => ({ it, steps: this._fcRowSteps(it, rowQ(it)) }))
                     .filter(x => x.steps != null)
-                    .sort((a, b) => a.steps - b.steps);
-                if (!ranked.length) continue;
-                masterCount += ranked.length;
+                    .sort((a, b) => String(a.it.output_name || a.it.item_ref)
+                        .localeCompare(String(b.it.output_name || b.it.item_ref),
+                            undefined, { sensitivity: 'base', numeric: true }));
+                if (!rows.length) continue;
+                masterCount += rows.length;
+                // Steps/craft gradient domain: min/max across EVERY (item,
+                // variant, quality) cell in this category, so the green→red
+                // scale is stable regardless of which quality each row shows.
+                let gLo = Infinity, gHi = -Infinity;
+                for (const x of rows) {
+                    for (const v of this._fcAllStepValues(x.it)) {
+                        if (v < gLo) gLo = v;
+                        if (v > gHi) gHi = v;
+                    }
+                }
                 const sg = `${gk}::${catLabel}`;             // unique skill-group key per (master, category)
                 const sgExpanded = this._isExpanded(`skill:${key}:${sg}`);
-                const showMore = this._showMoreExpanded.has(`${key}::${sg}`);
-                const total = ranked.length;
-                const top = ranked[0];
-                const rest = ranked.slice(1);
+                const total = rows.length;
                 const catIcon = fastestCraftChipIconHtml(chip, 28);
                 catBody += `
                     <div class="stats-report-skill-group ${sgExpanded ? 'open' : ''}"
@@ -4715,18 +5825,7 @@ export class StatsReportPage {
                             <span class="stats-report-group-meta">${total} item${total === 1 ? '' : 's'}</span>
                         </div>
                         <div class="stats-report-skill-body" style="${sgExpanded ? '' : 'display:none'}">
-                            ${this._renderFastestCraftRow(top.it, rowQ(top.it), top.steps, 0, total, chipColor)}
-                            ${rest.length ? `
-                                <div class="stats-report-show-more-wrap">
-                                    <button class="button button-secondary stats-report-show-more-btn ${showMore ? 'open' : ''}"
-                                        data-section="${key}" data-skill-group="${sg}">
-                                        <span class="stats-report-show-more-arrow">▼</span>
-                                        <span class="stats-report-show-more-label">${showMore ? 'Show fewer' : `Show ${rest.length} more`}</span>
-                                    </button>
-                                </div>
-                                <div class="stats-report-skill-extras" data-section="${key}" data-skill-group="${sg}" style="${showMore ? '' : 'display:none'}">
-                                    ${rest.map((x, i) => this._renderFastestCraftRow(x.it, rowQ(x.it), x.steps, i + 1, total, chipColor)).join('')}
-                                </div>` : ''}
+                            ${rows.map(x => this._renderFastestCraftRow(x.it, rowQ(x.it), x.steps, chipColor, this._fcStepsGradientColor(x.steps, gLo, gHi))).join('')}
                         </div>
                     </div>`;
             }
@@ -4771,26 +5870,245 @@ export class StatsReportPage {
             </div>`;
     }
 
-    /** Steps/craft for one item at a quality tier (banked if present, else total). */
-    _fcQualitySteps(it, q) {
-        const h = (it.headline || {})[q];
+    /** Per-row "with owned materials" flag map (item_ref -> true). Default
+     *  OFF: FC shows FROM-SCRATCH steps (total_steps). When a row's flag is on,
+     *  it shows the banked (owned-deducted) number instead. Persisted to the
+     *  session's ui_config (ui.fcOwnedMaterials) + localStorage fallback. The
+     *  gear/route solve is unchanged either way — banked is pure arithmetic on
+     *  the stored from-scratch solve. */
+    _fcOwnedMap() {
+        if (!this._fcOwned) {
+            let m = null;
+            try {
+                if (store && store.state && store.state.ui && store.state.ui.fcOwnedMaterials) {
+                    m = store.state.ui.fcOwnedMaterials;
+                }
+            } catch (_) { /* fall through */ }
+            if (!m) {
+                try { const raw = localStorage.getItem('stats_report_fc_owned_v1'); if (raw) m = JSON.parse(raw); } catch (_) { /* ignore */ }
+            }
+            this._fcOwned = (m && typeof m === 'object' && !Array.isArray(m)) ? m : {};
+        }
+        return this._fcOwned;
+    }
+
+    _persistFcOwned() {
+        const m = this._fcOwned || {};
+        try { localStorage.setItem('stats_report_fc_owned_v1', JSON.stringify(m)); } catch (_) { /* ignore */ }
+        try {
+            if (store && store.state) { if (!store.state.ui) store.state.ui = {}; store.state.ui.fcOwnedMaterials = m; }
+            const uuid = store && store.state && store.state.session && store.state.session.uuid;
+            if (uuid && api && typeof api.updateConfig === 'function') {
+                api.updateConfig(uuid, 'ui.fcOwnedMaterials', m);   // server-persist, best-effort
+            }
+        } catch (_) { /* non-fatal — localStorage holds it */ }
+    }
+
+    /** Whether this row currently shows the owned-deducted (banked) number. */
+    _fcUseBanked(it) { return !!(this._fcOwnedMap()[it && it.item_ref]); }
+
+    /** Pick the shown steps from a headline/variant cell: from-scratch
+     *  (total_steps) by default, banked (with_banked_steps) when the row's
+     *  "with owned materials" flag is on. Falls back to the other field if the
+     *  preferred one is absent. */
+    _fcCellVal(it, h) {
         if (!h) return null;
-        const v = (h.with_banked_steps != null) ? h.with_banked_steps : h.total_steps;
-        return (v != null && Number.isFinite(Number(v))) ? Number(v) : null;
+        // A real craft never costs <= 0 steps; treat a stored 0/negative value
+        // (a stale/degenerate solve) as "no value" so it never renders as
+        // "0 steps". Falls back to the other field, else null -> row shows "—".
+        const pos = (x) => (x != null && Number.isFinite(Number(x)) && Number(x) > 0) ? Number(x) : null;
+        const useB = this._fcUseBanked(it);
+        let v = useB ? pos(h.with_banked_steps) : pos(h.total_steps);
+        if (v == null) v = useB ? pos(h.total_steps) : pos(h.with_banked_steps);
+        return v;
+    }
+
+    /** Steps/craft for one item at a quality tier (owned-flag aware). */
+    _fcQualitySteps(it, q) {
+        return this._fcCellVal(it, (it.headline || {})[q]);
+    }
+
+    /** Steps/craft for a specific input variant ('normal'|'fine') at quality q. */
+    _fcVariantSteps(it, variant, q) {
+        return this._fcCellVal(it, ((it.variants || {})[variant] || {})[q]);
+    }
+
+    /** Material/Consumable rows get a Normal/Fine input-variant dropdown, but
+     *  only when a fine variant was actually solved (has data). Items
+     *  (gear/tools) never show it — fine inputs don't apply to their rows. */
+    _fcHasVariantSelector(it) {
+        const g = (it && it.group) || 'mat';
+        if (g !== 'mat' && g !== 'cons') return false;
+        const fine = (it.variants || {}).fine || {};
+        return Object.values(fine).some(v =>
+            v && (v.total_steps != null || v.with_banked_steps != null));
+    }
+
+    /** The input variant a row currently shows: an explicit user pick, else the
+     *  variant that owns the headline (min) at this quality — so the default
+     *  number matches what was shown before the selector existed. */
+    _fcRowVariantFor(it, q) {
+        const picked = this._fcRowVariant && this._fcRowVariant[it.item_ref];
+        if (picked === 'normal' || picked === 'fine') return picked;
+        return this._fcFineWins(it, q) ? 'fine' : 'normal';
+    }
+
+    /** Steps shown for a row: variant-aware for Material/Consumable rows with a
+     *  Normal/Fine selector, else the headline (min across variants). */
+    _fcRowSteps(it, q) {
+        if (this._fcHasVariantSelector(it)) {
+            const s = this._fcVariantSteps(it, this._fcRowVariantFor(it, q), q);
+            if (s != null) return s;
+        }
+        return this._fcQualitySteps(it, q);
+    }
+
+    /** Every (variant, quality) steps value for an item — the domain used to
+     *  scale the per-category green→red steps/craft gradient so it covers ALL
+     *  qualities, not just each row's current one. */
+    _fcAllStepValues(it) {
+        // FIXED gradient domain: the FROM-SCRATCH headline (min across variants)
+        // at every quality. Deliberately independent of the row's current
+        // quality / variant / "with owned materials" toggle, so a given steps
+        // value always maps to the SAME color across re-renders (toggling one
+        // row never recolors the others). Using the headline min (not both
+        // variants' cells) avoids the non-displayed variant's larger cells
+        // inflating the category max.
+        const hl = it.headline || {};
+        const out = [];
+        for (const q of Object.keys(hl)) {
+            const v = hl[q] && hl[q].total_steps;
+            if (v != null && Number.isFinite(Number(v)) && Number(v) > 0) out.push(Number(v));
+        }
+        return out;
+    }
+
+    /** Green (fewest steps) → red (most) gradient color for a steps value within
+     *  a category's [lo, hi] domain. Dark enough (L=35%) that white text stays
+     *  readable even at the yellow midpoint. */
+    _fcStepsGradientColor(steps, lo, hi) {
+        if (steps == null || !Number.isFinite(Number(steps))) return 'var(--text-secondary)';
+        let t = (Number.isFinite(lo) && Number.isFinite(hi) && hi > lo)
+            ? (Number(steps) - lo) / (hi - lo) : 0;
+        t = Math.max(0, Math.min(1, t));
+        const hue = Math.round(120 * (1 - t));   // 120 = green … 0 = red
+        return `hsl(${hue}, 70%, 35%)`;
+    }
+
+    /** 4-direction drop-shadow outline for an FC row icon. Reflects the row's
+     *  shown quality (rarity color); a fine-variant row outlines in the fine
+     *  color so switching Normal<->Fine recolors the icon just like quality. */
+    _fcIconOutline(q, variant) {
+        const c = (variant === 'fine')
+            ? 'var(--fine-color)'
+            : `var(--rarity-${FC_QUALITY_RARITY[q] || 'common'}-border)`;
+        return `drop-shadow(1px 0 0 ${c}) drop-shadow(-1px 0 0 ${c})`
+            + ` drop-shadow(0 1px 0 ${c}) drop-shadow(0 -1px 0 ${c})`;
+    }
+
+    /** Normal/Fine input-variant dropdown for an FC Material/Consumable row —
+     *  same crafting-tree selector markup/animation as the quality dropdown. */
+    _fcVariantSelectorHtml(ref, current) {
+        // Darker fine background (vs the light --fine-color #B1F7ED, which made
+        // the white "Fine" text unreadable). Mirrors the quality dropdown's
+        // bg + darker-border formatting. Normal reuses the common rarity colors.
+        const VBG = { normal: 'var(--rarity-common)', fine: '#0e7a70' };
+        const VBORDER = { normal: 'var(--rarity-common-border)', fine: 'var(--fine-color)' };
+        const VLABEL = { normal: 'Normal', fine: 'Fine' };
+        const cur = (current === 'fine') ? 'fine' : 'normal';
+        const btnStyle = `background:${VBG[cur]};border:2px solid ${VBORDER[cur]};`;
+        const items = ['normal', 'fine'].map(v =>
+            `<div class="target-item quality-item variant-item" data-value="${v}" style="background:${VBG[v]};color:#fff;"><span>${VLABEL[v]}</span></div>`
+        ).join('');
+        return `<div class="target-selector sr-fc-vsel" data-item-ref="${ref}" style="margin:0;display:inline-block;vertical-align:middle;width:150px">
+            <div class="target-dropdown-button" style="${btnStyle}width:100%;box-sizing:border-box">
+                <div class="target-dropdown-value"><span style="color:#fff">${VLABEL[cur]}</span></div>
+                <button class="target-dropdown-toggle" type="button"><span class="expand-arrow">▼</span></button>
+            </div>
+            <div class="target-dropdown sr-fc-vpanel" data-item-ref="${ref}" style="display:none;">${items}</div>
+        </div>`;
+    }
+
+    /** Float an open FC dropdown panel with position:fixed so it renders on top
+     *  of everything. FC rows use isolation:isolate, which traps an absolutely
+     *  positioned panel's z-index inside the row (later rows paint over it) and
+     *  can clip it. Fixed positioning escapes to the viewport stacking context.
+     *  Flips upward when there isn't room below. */
+    _fcFloatPanel($sel, $panel) {
+        try {
+            const btn = $sel.find('.target-dropdown-button')[0];
+            const panel = $panel[0];
+            if (!btn || !panel) return;
+            const r = btn.getBoundingClientRect();
+            const vh = window.innerHeight || document.documentElement.clientHeight || 800;
+            const n = panel.children.length || 1;
+            const estH = Math.min(300, n * 44 + 8);
+            const openUp = (r.bottom + 6 + estH > vh) && (r.top - 6 - estH > 0);
+            panel.style.position = 'fixed';
+            panel.style.right = 'auto';
+            panel.style.left = Math.round(r.left) + 'px';
+            panel.style.minWidth = Math.round(r.width) + 'px';
+            panel.style.zIndex = '10001';
+            if (openUp) {
+                panel.style.top = 'auto';
+                panel.style.bottom = Math.round(vh - r.top + 6) + 'px';
+            } else {
+                panel.style.bottom = 'auto';
+                panel.style.top = Math.round(r.bottom + 6) + 'px';
+            }
+        } catch (_) { /* non-fatal — falls back to CSS absolute */ }
+    }
+
+    /** Close any open FC quality / variant dropdown panels. */
+    _fcCloseAllPanels() {
+        if (!this._$el || !this._$el.find) return;
+        this._$el.find('.sr-fc-qpanel:visible, .sr-fc-vpanel:visible').slideUp(120)
+            .closest('.target-selector').find('.expand-arrow').removeClass('expanded');
+    }
+
+    /** Close every open FC dropdown panel EXCEPT $keep — so opening one
+     *  (quality or variant) collapses the other, which stopPropagation on the
+     *  toggle button otherwise prevents the document outside-handler from doing. */
+    _fcCloseOtherPanels($keep) {
+        if (!this._$el || !this._$el.find) return;
+        const keepEl = ($keep && $keep[0]) || null;
+        this._$el.find('.sr-fc-qpanel:visible, .sr-fc-vpanel:visible').each((_i, el) => {
+            if (el === keepEl) return;
+            $(el).slideUp(120).closest('.target-selector')
+                .find('.expand-arrow').removeClass('expanded');
+        });
     }
 
     /** True when the fine-materials variant wins (<= normal) at this quality. */
     _fcFineWins(it, q) {
         const n = ((it.variants || {}).normal || {})[q];
         const f = ((it.variants || {}).fine || {})[q];
-        const nv = n && (n.with_banked_steps != null ? n.with_banked_steps : n.total_steps);
-        const fv = f && (f.with_banked_steps != null ? f.with_banked_steps : f.total_steps);
+        const nv = this._fcCellVal(it, n);
+        const fv = this._fcCellVal(it, f);
         if (fv == null) return false;
         if (nv == null) return true;
         return Number(fv) <= Number(nv);
     }
 
-    _renderFastestCraftRow(it, q, steps, idx, total, color) {
+    /** Crafting-tree-style target-quality dropdown for an FC row (same markup,
+     * CSS classes, colors and slide animation as the Column-3 selector). */
+    _fcQualitySelectorHtml(ref, current, availQ) {
+        const bg = FC_QUALITY_BG[current] || '';
+        const border = FC_QUALITY_BORDER[current] || '';
+        const btnStyle = bg ? `background:${bg};border:2px solid ${border};` : '';
+        const items = availQ.map(qq =>
+            `<div class="target-item quality-item" data-value="${escapeHtml(qq)}" style="background:${FC_QUALITY_BG[qq] || ''};"><span>${escapeHtml(qq)}</span></div>`
+        ).join('');
+        return `<div class="target-selector sr-fc-qsel" data-item-ref="${ref}" style="margin:0;display:inline-block;vertical-align:middle;width:150px">
+            <div class="target-dropdown-button" style="${btnStyle}width:100%;box-sizing:border-box">
+                <div class="target-dropdown-value"><span>${escapeHtml(current)}</span></div>
+                <button class="target-dropdown-toggle" type="button"><span class="expand-arrow">▼</span></button>
+            </div>
+            <div class="target-dropdown sr-fc-qpanel" data-item-ref="${ref}" style="display:none;">${items}</div>
+        </div>`;
+    }
+
+    _renderFastestCraftRow(it, q, steps, color, metricColor) {
         const name = it.output_name || it.item_ref;
         const icon = resolveItemIcon({ itemRef: it.item_ref, itemName: it.output_name });
         const ref = escapeHtml(it.item_ref);
@@ -4799,40 +6117,178 @@ export class StatsReportPage {
         // sub-group). Default Normal; dropdown lists only qualities with data.
         const QUALS = ['Normal', 'Good', 'Great', 'Excellent', 'Perfect', 'Eternal'];
         const availQ = QUALS.filter(qq => this._fcQualitySteps(it, qq) != null);
+        // Only render a quality control when there's more than one quality to
+        // pick. Single-quality rows (e.g. plank materials) show NO quality pill.
         const qSel = availQ.length > 1
-            ? `<select class="stats-report-fc-quality" data-item-ref="${ref}" title="Quality to show"
-                   style="padding:1px 6px;border-radius:9px;font-size:0.78em;border:1px solid var(--border-color,#555);background:var(--bg-secondary,#252540);color:var(--text-primary,#eee)">
-                   ${availQ.map(qq => `<option value="${qq}" ${qq === q ? 'selected' : ''}>${qq}</option>`).join('')}
-               </select>`
-            : `<span style="display:inline-block;padding:1px 7px;border-radius:9px;font-size:0.75em;border:1px solid var(--border-color,#555);color:var(--text-secondary)">${escapeHtml(q)}</span>`;
-        const finePill = this._fcFineWins(it, q)
-            ? `<span title="Fine materials win at this quality" style="display:inline-block;padding:1px 7px;border-radius:9px;font-size:0.75em;border:1px solid var(--fine-color,#22d3ee);color:var(--fine-color,#22d3ee)">fine</span>`
+            ? this._fcQualitySelectorHtml(ref, q, availQ)
             : '';
+        // Material/Consumable rows get a Normal/Fine input-variant dropdown; the
+        // row's steps + icon outline follow the chosen variant. Item (gear/tools)
+        // rows have no variant selector and keep the informational "fine" pill.
+        const hasVar = this._fcHasVariantSelector(it);
+        const variant = hasVar ? this._fcRowVariantFor(it, q) : null;
+        const vSel = hasVar ? this._fcVariantSelectorHtml(ref, variant) : '';
+        // Gear/tools rows (no variant selector) that solve cheaper with fine
+        // inputs get an italic "Using fine materials" note UNDER the name, in
+        // the fine color — replaces the old right-side "fine" pill.
+        const fineNote = (!hasVar && this._fcFineWins(it, q))
+            ? `<span style="font-style:italic;color:var(--fine-color,#22d3ee);font-size:0.8em">Using fine materials</span>`
+            : '';
+        const iconOutline = this._fcIconOutline(q, variant);
+        // Per-row "with owned materials" toggle. Default OFF (from-scratch).
+        // When on, the row shows the banked (owned-deducted) number — pure
+        // arithmetic on the same solve, no gear/route change.
+        const ownedChecked = this._fcUseBanked(it);
+        // (i) popup: nested recipe material breakdown (per-craft qty + owned),
+        // from the server-built material_usage_tree. Catalog-structured and
+        // owned-independent, so the (i) ALWAYS shows for a craftable with inputs.
+        let infoIcon = '';
+        const _mlist = this._fcMaterialList(it, q);
+        if (_mlist && _mlist.length) {
+            const listHtml = this._fcMaterialListHtml(_mlist);
+            infoIcon = `<span class="travel-info-icon" role="button" tabindex="0" aria-label="Materials per craft" data-info-title="Materials needed" data-info-html="${listHtml.replace(/"/g, '&quot;')}" style="font-style:normal;flex:0 0 auto">ⓘ</span>`;
+        }
+        // Own row below the name + quality selector. The label is content-width
+        // so the blue (i) sits right next to the checkbox text.
+        const ownedRow = `<div class="sr-fc-owned-row" style="display:flex;align-items:center;gap:6px;width:100%;margin-top:4px">
+                    <label class="sr-fc-owned" title="Deduct materials you already own (your current stock). Does NOT change the optimized gear/route, just the step math." style="display:flex;align-items:center;gap:6px;font-size:0.82em;color:var(--text-muted,#9aa);cursor:pointer;user-select:none">
+                        <input type="checkbox" class="sr-fc-owned-cb" data-item-ref="${ref}"${ownedChecked ? ' checked' : ''} style="margin:0;cursor:pointer">                        <span>with owned materials</span>
+                    </label>${infoIcon}</div>`;
         const staleBadge = it.stale
             ? `<span title="Inputs changed since this was computed — re-run Optimize to refresh" style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#e53935;color:#fff;font-size:0.72em;font-weight:700;margin-left:6px">!</span>`
             : '';
-        const rankBox = ['stats-report-rank-box-gold', 'stats-report-rank-box-silver', 'stats-report-rank-box-bronze'][idx] || '';
         return `
             <div class="stats-report-result-row" data-item-ref="${ref}" data-item-name="${nameAttr}"
-                 style="border-left:6px solid ${color}">
-                <span class="stats-report-rank stats-report-rank-floating ${rankBox}">${idx + 1}</span>
-                <div class="stats-report-row-top" style="display:flex;align-items:flex-start;gap:10px">
-                    ${icon ? `<img src="${escapeHtml(icon)}" alt="" width="50" height="50" class="stats-report-activity-icon" style="flex-shrink:0" onerror="this.style.visibility='hidden'">` : ''}
-                    <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:4px;text-align:left">
-                        <span class="stats-report-activity-name">${escapeHtml(name)}${staleBadge}</span>
-                        <span style="display:flex;flex-wrap:wrap;gap:4px;align-items:center">${qSel} ${finePill}</span>
+                 data-fc-icon="${escapeHtml(icon || '')}"
+                 style="border-left:6px solid ${color};isolation:auto">
+                <div class="stats-report-row-top" style="display:flex;align-items:center;gap:10px">
+                    ${icon ? `<img src="${escapeHtml(icon)}" alt="" width="50" height="50" class="stats-report-activity-icon" style="flex-shrink:0;image-rendering:pixelated;filter:${iconOutline}" onerror="this.style.visibility='hidden'">` : ''}
+                    <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;text-align:left">
+                        <span class="stats-report-activity-name" style="overflow:hidden;text-overflow:ellipsis">${escapeHtml(name)}${staleBadge}</span>
+                        ${fineNote}
                     </div>
+                    <span style="display:flex;gap:6px;align-items:center;flex-shrink:0;flex-wrap:wrap;justify-content:flex-end">${qSel} ${vSel}</span>
                 </div>
+                ${ownedRow}
                 <div class="stats-report-metric-row" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-                    <span class="stats-report-metric-value" style="background:${color};color:#fff;padding:3px 8px;border-radius:4px;font-size:0.95em;text-align:center;font-weight:600">
+                    <span class="stats-report-metric-value" style="background:${metricColor || color};color:#fff;padding:3px 8px;border-radius:4px;font-size:0.95em;text-align:center;font-weight:600">
                         ${steps != null ? formatFixed(steps, 1) : '—'} <span style="font-size:0.75em;opacity:0.8;font-weight:400">steps/craft</span>
                     </span>
+                    <button class="button button-secondary stats-report-fc-preview-btn" data-item-ref="${ref}"
+                        style="font-size:0.9em;padding:6px 12px" title="Show a mini breakdown tree (steps/item per node)">Preview <span class="expand-arrow" style="display:inline-block;transition:transform 0.15s ease">▼</span></button>
                     <button class="button button-secondary stats-report-fc-tree-btn" data-item-ref="${ref}"
                         style="font-size:0.9em;padding:6px 12px" title="Open this item in the crafting tree">Crafting tree</button>
                     <button class="button button-secondary stats-report-fc-save-btn" data-item-ref="${ref}"
-                        style="font-size:0.9em;padding:6px 12px" title="Save the optimized crafting tree (Normal quality)">Save</button>
+                        style="font-size:0.9em;padding:6px 12px" title="Save the optimized crafting tree at this row's quality/variant">Save</button>
                 </div>
+                <div class="sr-fc-preview" data-item-ref="${ref}" style="display:none;margin-top:6px;padding:8px 10px;border:1px solid var(--border-color,#444);border-radius:6px;background:var(--bg-secondary,#1c1c2e);font-size:0.85em;overflow-x:auto"></div>
             </div>`;
+    }
+
+    /** The effective input variant whose number the row is CURRENTLY showing:
+     *  the variant that owns the min of the displayed field (banked when the
+     *  "with owned materials" box is on, else from-scratch). This is why a pine
+     *  toolbox can read "normal materials" from-scratch but flip to fine once
+     *  banked — and the (i) tooltip must follow it. */
+    _fcEffectiveVariant(it, q) {
+        const field = this._fcUseBanked(it) ? 'with_banked_steps' : 'total_steps';
+        const pick = (vv) => {
+            const cell = ((it.variants || {})[vv] || {})[q];
+            const val = cell && cell[field];
+            return (val != null && Number.isFinite(Number(val))) ? Number(val) : null;
+        };
+        const nv = pick('normal');
+        const fv = pick('fine');
+        if (fv == null) return 'normal';
+        if (nv == null) return 'fine';
+        return fv <= nv ? 'fine' : 'normal';
+    }
+
+    /** The material breakdown list for the (i) tooltip at the row's current
+     *  quality + effective variant. Server payload is {variant:{quality:[...]}}
+     *  (solved totals, fine-aware owned, shortfall); falls back through Normal /
+     *  normal and the legacy flat array shape. */
+    _fcMaterialList(it, q) {
+        const mut = it && it.material_usage_tree;
+        if (!mut) return null;
+        if (Array.isArray(mut)) return mut;            // legacy flat payload
+        if (typeof mut !== 'object') return null;
+        const v = this._fcEffectiveVariant(it, q);
+        const at = (vv, qq) => (mut[vv] && mut[vv][qq]) || null;
+        if (at(v, q)) return at(v, q);
+        if (at(v, 'Normal')) return at(v, 'Normal');
+        if (at('normal', q)) return at('normal', q);
+        if (at('normal', 'Normal')) return at('normal', 'Normal');
+        // Any first available combo as a last resort.
+        for (const vv of Object.keys(mut)) {
+            for (const qq of Object.keys(mut[vv] || {})) {
+                if (mut[vv][qq] && mut[vv][qq].length) return mut[vv][qq];
+            }
+        }
+        return null;
+    }
+
+    /** Nested bulleted material list for the "with owned materials" (i) popup:
+     *  each node is "Nx Name (M owned)" with children indented under it. Shows
+     *  the TOTAL units the craft needs (not per-single-craft), colors the owned
+     *  count green when you have enough / red + "need K more" when short, and
+     *  the fine breakdown shows fine names + fine stock. */
+    _fcMaterialListHtml(list) {
+        if (!list || !list.length) return '';
+        const lis = list.map(m => {
+            const amt = (m.needed != null) ? m.needed : m.per_craft;
+            const per = (amt != null) ? `${amt}x ` : '';
+            const nm = escapeHtml(m.name || m.ref || '');
+            const own = Number(m.owned) || 0;
+            const needed = (m.needed != null && Number.isFinite(Number(m.needed)))
+                ? Number(m.needed) : null;
+            const enough = (m.enough != null)
+                ? !!m.enough
+                : (needed != null ? own >= needed : true);
+            const col = enough ? '#4ade80' : '#f87171';
+            let own_s = `<span style='color:${col}'>(${own} owned)</span>`;
+            if (needed != null && !enough) {
+                own_s += ` <span style='color:#f87171;opacity:0.85'>need ${needed - own} more</span>`;
+            }
+            const kids = this._fcMaterialListHtml(m.children);
+            return `<li>${per}${nm} ${own_s}${kids}</li>`;
+        }).join('');
+        return `<ul style='margin:4px 0;padding-left:18px'>${lis}</ul>`;
+    }
+
+    /** Recursive HTML for the inline Preview mini-tree (Task 5.7): each node is
+     *  icon + name + ×qty + steps/item, children indented beneath. V1 is a clean
+     *  nested/indented layout; the fancy forking layout is a fast-follow. */
+    _fcPreviewTreeHtml(node, depth, fine, quality) {
+        if (!node) return '';
+        depth = depth || 0;
+        const pad = 10 + depth * 20;
+        // Outline: the ROOT (the crafted output item) reflects the SELECTED
+        // quality color — the quality is a property of the output, not the
+        // materials. Only the fine-material inputs BELOW it get the fine-color
+        // outline. (Previously the whole tree used the fine color when the
+        // variant was fine, so the output item wrongly showed the fine color
+        // instead of its own quality.)
+        const outline = (depth === 0)
+            ? this._fcIconOutline(quality || 'Normal', 'normal')
+            : (fine ? this._fcIconOutline('Normal', 'fine') : '');
+        const icon = node.icon
+            ? `<img src="${escapeHtml(node.icon)}" width="32" height="32" style="image-rendering:pixelated;vertical-align:middle;flex:0 0 auto;margin:-4px 0${outline ? `;filter:${outline}` : ''}" onerror="this.style.display='none'">`
+            : '';
+        const nm = escapeHtml(node.name || node.item_ref || '');
+        let qty = '';
+        if (node.qty != null && Number.isFinite(Number(node.qty))) {
+            const nq = Number(node.qty);
+            qty = `<span style="opacity:0.7">×${formatFixed(nq, nq >= 10 || Number.isInteger(nq) ? 0 : 2)}</span>`;
+        }
+        // steps/item sits right after the item (not pushed to the far side).
+        const spi = (node.steps_per_item != null && Number.isFinite(Number(node.steps_per_item)))
+            ? `<span style="color:var(--text-muted,#9aa)">${formatFixed(Number(node.steps_per_item), 1)} steps/item</span>`
+            : '';
+        const branch = depth > 0 ? '<span style="opacity:0.45;flex:0 0 auto">└</span>' : '';
+        const kids = (node.children || []).map(c => this._fcPreviewTreeHtml(c, depth + 1, fine, quality)).join('');
+        return `<div style="display:flex;align-items:center;gap:6px;padding:1px 0 1px ${pad}px">`
+            + `${branch}${icon}<span>${nm}</span>${qty ? ' ' + qty : ''}${spi ? ' ' + spi : ''}</div>${kids}`;
     }
 
     /** Small Reset button for a Steps-per-Recipe scope (section/category/quality). */
@@ -5336,6 +6792,16 @@ export class StatsReportPage {
 
     _renderSectionGroupedByTargetCategory(sectionKey, rows) {
         // Bucket rows by group_slug, carrying the parsed metrics_json.
+        // 2026-11-17 (jwbail): respect the per-item selection — a re-run with
+        // stale_only leaves previously-computed (now-deselected) items in the
+        // cache; hide them so the results match what's selected. Only filter
+        // KNOWN roster leaves, so fine variants / unknown leaves still show.
+        const _rosterSet = {};
+        if (this._targetItemsRosterLoaded) {
+            for (const gg of (this._targetItemsRoster || [])) {
+                _rosterSet[gg.slug] = new Set((gg.items || []).map(i => i.slug));
+            }
+        }
         const buckets = {};
         for (const r of rows) {
             // Hide impossible/worthless rows: the gear-gated global-IF expansion
@@ -5346,6 +6812,21 @@ export class StatsReportPage {
             if (!Number.isFinite(_mv) || _mv <= 0 || _mv >= 9e8) continue;
             const mj = (typeof r.metrics_json === 'string') ? JSON.parse(r.metrics_json || '{}') : (r.metrics_json || {});
             const groupSlug = mj.group_slug || mj.target_category || r.subcategory || r.skill_name || 'other';
+            // Per-item selection filter (display only). FC-generated gather
+            // rows (mj.fc_gather) are needed by a craftable, not a deselected
+            // roster item, so they always show regardless of the selection.
+            const _sel = this._selectedTargetItems ? this._selectedTargetItems[groupSlug] : null;
+            const _rset = _rosterSet[groupSlug];
+            // Match on the BASE leaf: fine-variant rows carry a '<base>_(fine)'
+            // item_slug that is NOT in the roster set (roster lists base items
+            // only). Without stripping, a DESELECTED item's fine row was never
+            // hidden — so fines of unselected items leaked into results while
+            // their normals were correctly hidden. Strip the suffix so a fine
+            // row follows its base item's selection. 2026-11-20 (jwbail).
+            const _rawSlug = mj.item_slug || '';
+            const _baseSlug = _rawSlug.endsWith('_(fine)')
+                ? _rawSlug.slice(0, -'_(fine)'.length) : _rawSlug;
+            if (!mj.fc_gather && _sel && _rset && _baseSlug && _rset.has(_baseSlug) && !_sel.has(_baseSlug)) continue;
             if (!buckets[groupSlug]) buckets[groupSlug] = [];
             buckets[groupSlug].push({ row: r, mj });
         }
@@ -5507,55 +6988,79 @@ export class StatsReportPage {
     _applyTargetItemColors($body) {
         const root = ($body && $body[0]) ? $body[0] : (this._$el && this._$el[0]);
         if (!root) return;
-        this._tiColorCache = this._tiColorCache || {};
-        const groups = root.querySelectorAll('.stats-report-skill-group[data-ti-icon]');
-        const apply = (el, color) => {
-            if (!color) return;
-            el.style.setProperty('--chip-color', color);
-            el.style.setProperty('--glow-color', color);
-        };
-        groups.forEach((el) => {
-            const url = el.getAttribute('data-ti-icon');
-            if (!url) return;
-            if (this._tiColorCache[url]) { apply(el, this._tiColorCache[url]); return; }
-            const img = new Image();
-            img.crossOrigin = 'anonymous';
-            img.onload = () => {
-                try {
-                    const c = document.createElement('canvas');
-                    const w = c.width = 24, h = c.height = 24;
-                    const ctx = c.getContext('2d');
-                    ctx.drawImage(img, 0, 0, w, h);
-                    const d = ctx.getImageData(0, 0, w, h).data;
-                    const counts = {};
-                    let best = null, bestScore = 0;
-                    for (let i = 0; i < d.length; i += 4) {
-                        const r = d[i], g = d[i + 1], b = d[i + 2], a = d[i + 3];
-                        if (a < 128) continue;                 // transparent
-                        const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
-                        if (mx < 45) continue;                 // near-black
-                        if (mn > 210) continue;                // near-white
-                        const sat = mx - mn;                   // rough saturation
-                        // quantize to 4 bits/channel to bucket similar colors
-                        const key = ((r >> 4) << 8) | ((g >> 4) << 4) | (b >> 4);
-                        const bucket = (counts[key] = counts[key] || { n: 0, r: 0, g: 0, b: 0 });
-                        bucket.n++; bucket.r += r; bucket.g += g; bucket.b += b;
-                        // score favors frequent AND saturated colors
-                        const score = bucket.n * (1 + sat / 64);
-                        if (score > bestScore) {
-                            bestScore = score;
-                            best = [Math.round(bucket.r / bucket.n), Math.round(bucket.g / bucket.n), Math.round(bucket.b / bucket.n)];
-                        }
-                    }
-                    if (best) {
-                        const color = `rgb(${best[0]},${best[1]},${best[2]})`;
-                        this._tiColorCache[url] = color;
-                        apply(el, color);
-                    }
-                } catch (_) { /* canvas/CORS — leave default */ }
-            };
-            img.src = url;
+        root.querySelectorAll('.stats-report-skill-group[data-ti-icon]').forEach((el) => {
+            this._sampleDominantIconColor(el.getAttribute('data-ti-icon'), (color) => {
+                el.style.setProperty('--chip-color', color);
+                el.style.setProperty('--glow-color', color);
+            });
         });
+    }
+
+    /**
+     * Steps-per-Recipe row left-bar coloring — mirrors Target Items. Each row
+     * carries data-fc-icon; recolor its left border from the item icon's
+     * dominant color (instead of the flat category chip color).
+     */
+    _applyFastestCraftRowColors($body) {
+        const root = ($body && $body[0]) ? $body[0] : (this._$el && this._$el[0]);
+        if (!root) return;
+        root.querySelectorAll('.stats-report-result-row[data-fc-icon]').forEach((el) => {
+            this._sampleDominantIconColor(el.getAttribute('data-fc-icon'), (color) => {
+                el.style.borderLeftColor = color;
+                el.style.setProperty('--glow-color', color);
+            });
+        });
+    }
+
+    /**
+     * Sample an icon's dominant vivid (non-black/white) color, cached by URL,
+     * and invoke cb(color). Loads the icon into a 24x24 canvas, buckets pixels
+     * by quantized color, and scores by frequency x saturation. Same-origin
+     * icons (/assets) so canvas isn't tainted. Best-effort — failures just
+     * leave the caller's default. Shared by _applyTargetItemColors and
+     * _applyFastestCraftRowColors.
+     */
+    _sampleDominantIconColor(url, cb) {
+        if (!url) return;
+        this._tiColorCache = this._tiColorCache || {};
+        if (this._tiColorCache[url]) { cb(this._tiColorCache[url]); return; }
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.onload = () => {
+            try {
+                const c = document.createElement('canvas');
+                const w = c.width = 24, h = c.height = 24;
+                const ctx = c.getContext('2d');
+                ctx.drawImage(img, 0, 0, w, h);
+                const d = ctx.getImageData(0, 0, w, h).data;
+                const counts = {};
+                let best = null, bestScore = 0;
+                for (let i = 0; i < d.length; i += 4) {
+                    const r = d[i], g = d[i + 1], b = d[i + 2], a = d[i + 3];
+                    if (a < 128) continue;                 // transparent
+                    const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+                    if (mx < 45) continue;                 // near-black
+                    if (mn > 210) continue;                // near-white
+                    const sat = mx - mn;                   // rough saturation
+                    // quantize to 4 bits/channel to bucket similar colors
+                    const key = ((r >> 4) << 8) | ((g >> 4) << 4) | (b >> 4);
+                    const bucket = (counts[key] = counts[key] || { n: 0, r: 0, g: 0, b: 0 });
+                    bucket.n++; bucket.r += r; bucket.g += g; bucket.b += b;
+                    // score favors frequent AND saturated colors
+                    const score = bucket.n * (1 + sat / 64);
+                    if (score > bestScore) {
+                        bestScore = score;
+                        best = [Math.round(bucket.r / bucket.n), Math.round(bucket.g / bucket.n), Math.round(bucket.b / bucket.n)];
+                    }
+                }
+                if (best) {
+                    const color = `rgb(${best[0]},${best[1]},${best[2]})`;
+                    this._tiColorCache[url] = color;
+                    cb(color);
+                }
+            } catch (_) { /* canvas/CORS — leave default */ }
+        };
+        img.src = url;
     }
 
     /**

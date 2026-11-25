@@ -20,13 +20,15 @@ import store from '../state.js';
 import api from '../api.js';
 import { getPetIconPath, getPetStageLabel, getPetVariants } from '../utils/pet-utils.js';
 import { abilityExtraLines } from '../utils/ability-detail.js';
+import { wireInfoIcons } from '../info-popover.js';
+import { terminateStatLineHtml, buildTerminateTableHtml } from '../utils/terminate-info.js';
 import { ownedCountLabel } from '../utils/owned-quantity.js';
 import { ownedByQualityCache, ownedBlockHtml } from '../utils/owned-quality-breakdown.js';
 import { renderRequirementsRow } from '../utils/requirements.js';
 import { wikiDarkModeSuffix } from '../utils/wiki-link.js';
 import { switchToTab } from '../pull-to-refresh.js';
 
-import { formatFixed } from '../utils/number-format.js';
+import { formatFixed, formatInt } from '../utils/number-format.js';
 import { getOwnedCollectiblesCount } from '../utils/collectibles-ownership.js';
 import { consumableDurationHtml } from '../utils/consumable-duration.js';
 
@@ -219,7 +221,25 @@ class ItemRow extends Component {
         `;
 
         this.$element.html(html);
+        this._wireAbilityInfoIcons();
         return html;
+    }
+
+    /**
+     * Set the Terminate (i) popover HTML on any terminate-info-icon in the
+     * rendered details (looked up per-icon from the data-driven table stashed
+     * during HTML build) and wire hover/click behavior. Safe when none present.
+     */
+    _wireAbilityInfoIcons() {
+        const icons = this.$element.find('.terminate-info-icon');
+        if (icons.length === 0) return;
+        const pending = this._pendingTerminateInfo || [];
+        icons.each((_, el) => {
+            const idx = el.dataset.terminateIdx;
+            el.dataset.infoHtml = (idx != null && pending[idx] != null)
+                ? pending[idx] : buildTerminateTableHtml();
+        });
+        wireInfoIcons(this.$element[0]);
     }
 
     /**
@@ -359,19 +379,28 @@ class ItemRow extends Component {
 
         // Generate wiki URL + edit button for generic items, or just wiki link for wiki items
         let actionLinkHtml;
+        // 2026-10-27 (jwbail): "Find Best Source" — only for activity-sourced
+        // materials/consumables (everything in the target-items goals report).
+        // Clicking opens the goals report scoped to just this item.
+        const _isActivityMat = this.props.item.type === 'material' || this.props.item.type === 'consumable';
+        const findBestSourceBtn = _isActivityMat
+            ? `<button class="btn-find-best-source" title="Run the optimized goals report for just this item to find its best activity source" data-item-name="${String(this.props.item.name || '').replace(/"/g, '&quot;')}">Find source</button>`
+            : '';
         if (this.props.item.is_generic) {
             const wikiName = this.props.item.name.replace(/ /g, '_');
             const wikiUrl = `https://wiki.walkscape.app/wiki/${encodeURIComponent(wikiName).replace(/%2F/g, '/').replace(/%5F/g, '_')}${wikiDarkModeSuffix()}`;
             actionLinkHtml = `
                 <a href="${wikiUrl}" target="_blank" rel="noopener noreferrer" class="wiki-link">Wiki</a>
                 <button class="btn-source-dropdown" title="Show sources for this item">Sources <span class="source-arrow">▼</span></button>
+                ${findBestSourceBtn}
                 <button class="btn-edit-generic-item optimize-btn" data-item-id="${this.props.item.generic_id || this.props.item.id}">🔧 Edit</button>`;
         } else {
             const wikiName = this.props.item.name.replace(/ /g, '_');
             const wikiUrl = `https://wiki.walkscape.app/wiki/${encodeURIComponent(wikiName).replace(/%2F/g, '/').replace(/%5F/g, '_')}${wikiDarkModeSuffix()}`;
             actionLinkHtml = `
                 <a href="${wikiUrl}" target="_blank" rel="noopener noreferrer" class="wiki-link">Wiki</a>
-                <button class="btn-source-dropdown" title="Show sources for this item">Sources <span class="source-arrow">▼</span></button>`;
+                <button class="btn-source-dropdown" title="Show sources for this item">Sources <span class="source-arrow">▼</span></button>
+                ${findBestSourceBtn}`;
         }
 
         // "N owned" line — same data source + gating as the notepad/drop
@@ -457,7 +486,7 @@ class ItemRow extends Component {
             let metaHtml = '';
             metaHtml += abilityExtraLines(ability, 'pet-ability-meta');
             if (ability.cooldown) metaHtml += `<div class="pet-ability-meta">Cooldown: ${ability.cooldown}</div>`;
-            if (ability.charges) metaHtml += `<div class="pet-ability-meta">Charges: ${ability.charges}</div>`;
+            if (ability.charges && !ability.passive) metaHtml += `<div class="pet-ability-meta">Charges: ${formatInt(ability.charges)}</div>`;
             html += `
                 <div class="pet-ability">
                     <span class="pet-ability-name">${abIcon}${ability.name || 'Unknown'}</span>
@@ -635,6 +664,9 @@ class ItemRow extends Component {
      * @returns {string} HTML for pet details
      */
     renderPetDetails(itemState) {
+        // Reset per-render store of Terminate (i) popover bodies (index-keyed
+        // by the data-terminate-idx on each icon; filled during HTML build).
+        this._pendingTerminateInfo = [];
         const levels = this.props.item.levels || {};
         const currentLevel = itemState.level || 0;
         const levelData = levels[String(currentLevel)];
@@ -691,8 +723,27 @@ class ItemRow extends Component {
                 for (const ability of levelData.abilities) {
                     // Build a clean effect display from structured data when available
                     let effectHtml = '';
-                    if (ability.ability_stats && Object.keys(ability.ability_stats).length > 0) {
-                        // Structured stats available — render cleanly
+                    if (ability.item_swap) {
+                        // Terminate (Termite): render a bold stat line plus an
+                        // (i) opening the per-log Carpentry-XP table. The table
+                        // is data-driven (ability.item_swap.conversion_table from
+                        // the materials catalog); its HTML is stashed per-icon and
+                        // set after render by _wireAbilityInfoIcons().
+                        this._pendingTerminateInfo = this._pendingTerminateInfo || [];
+                        const _tIdx = this._pendingTerminateInfo.length;
+                        this._pendingTerminateInfo.push(
+                            buildTerminateTableHtml(ability.item_swap.conversion_table));
+                        effectHtml = `<div class="pet-ability-swap-stat">`
+                            + terminateStatLineHtml(ability.item_swap)
+                            + ` <span class="travel-info-icon terminate-info-icon" role="button" tabindex="0" data-terminate-idx="${_tIdx}" aria-label="Conversion XP table">\u24D8</span>`
+                            + `</div>`;
+                    } else if ((ability.ability_stats && Object.keys(ability.ability_stats).length > 0) ||
+                               (ability.passive_stats && Object.keys(ability.passive_stats).length > 0)) {
+                        // Structured stats available — render cleanly. passive_stats
+                        // (e.g. Mummy's "That's A Wrap" +7% Find linens) render the
+                        // same way; they are always-on (no "Use ability" toggle).
+                        const statsObj = (ability.ability_stats && Object.keys(ability.ability_stats).length > 0)
+                            ? ability.ability_stats : ability.passive_stats;
                         const effectLines = [];
                         // Extract flavor text (everything before "Effect lasts for")
                         const rawEffect = ability.effect || '';
@@ -701,15 +752,27 @@ class ItemRow extends Component {
                             const flavor = flavorMatch[1].trim().replace(/\.$/, '');
                             if (flavor) effectLines.push(flavor);
                         }
-                        if (ability.duration) {
-                            effectLines.push(`Effect lasts for ${ability.duration} ${ability.duration_unit || 'actions'}`);
-                        }
+                        // NOTE: the "Effect lasts for: N" line is rendered once,
+                        // grayer, by abilityExtraLines() below. Do NOT push a
+                        // second (white) copy here or it duplicates.
                         // Render each stat as a line
-                        for (const [skill, locations] of Object.entries(ability.ability_stats)) {
+                        for (const [skill, locations] of Object.entries(statsObj)) {
                             for (const [location, stats] of Object.entries(locations)) {
                                 for (const [stat, value] of Object.entries(stats)) {
                                     const sign = value > 0 ? '+' : '';
-                                    const skillLabel = skill === 'global' ? '' : ` While doing ${skill.charAt(0).toUpperCase() + skill.slice(1)}`;
+                                    // Skill-group names read "... skills" / "Smelting
+                                    // recipes" to match the drop-popover wording
+                                    // (e.g. "While doing Artisan skills", not
+                                    // "While doing Artisan").
+                                    const SKILL_GROUP_LABELS = {
+                                        artisan: 'Artisan skills',
+                                        gathering: 'Gathering skills',
+                                        utility: 'Utility skills',
+                                        smelting: 'Smelting recipes',
+                                    };
+                                    const skillLabel = skill === 'global'
+                                        ? ''
+                                        : ` While doing ${SKILL_GROUP_LABELS[skill] || (skill.charAt(0).toUpperCase() + skill.slice(1))}`;
                                     const locLabel = location === 'global' ? '' : ` in ${location}`;
                                     // ItemFindingCategory stats (e.g. Pet Rock's
                                     // Rockslide -> RANDOM_GEM) use the same
@@ -731,7 +794,11 @@ class ItemRow extends Component {
                                         const iconImg = `<img src="/assets/icons/attributes/${iconName}.svg" width="16" height="16" style="vertical-align:middle;margin-right:4px" alt="" onerror="this.style.display='none'">`;
                                         effectLines.push(`${iconImg}${sign}${value}% ${label}${skillLabel}${locLabel}`);
                                     } else {
-                                        const statName = stat.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+                                        // "Steps Percent"/"Steps Pct" read just
+                                        // "Steps" — the % value already conveys it.
+                                        const statName = (stat === 'steps_percent' || stat === 'steps_pct')
+                                            ? 'Steps'
+                                            : stat.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
                                         // quality_outcome and *_add / inventory are flat values, not percentages.
                                         const isFlat = stat.includes('_add') || stat.includes('inventory') || stat === 'quality_outcome';
                                         const suffix = isFlat ? '' : '%';
@@ -742,10 +809,13 @@ class ItemRow extends Component {
                         }
                         effectHtml = effectLines.map(l => `<div>${l}</div>`).join('');
                     } else {
-                        // No structured stats — clean up raw effect text
+                        // No structured stats — clean up raw effect text.
+                        // Strip any embedded "Effect lasts for..." clause; the
+                        // grayer meta line from abilityExtraLines() below is the
+                        // single source of that line (no white duplicate).
                         let cleanEffect = (ability.effect || '')
-                            .replace(/\.(?=[A-Z+\-])/g, '.\n')  // Add newline after periods before caps/signs
-                            .replace(/Effect lasts for:\s*(\d+)/g, `Effect lasts for $1 ${ability.duration_unit || 'actions'}`);
+                            .replace(/\s*Effect lasts for:?\s*\d+\s*\w*\.?/gi, '')
+                            .replace(/\.(?=[A-Z+\-])/g, '.\n');
                         effectHtml = cleanEffect.split('\n').map(l => `<div>${l.trim()}</div>`).join('');
                     }
 
@@ -792,7 +862,7 @@ class ItemRow extends Component {
                                 cooldownHtml += `<div class="pet-ability-meta pet-ability-items">${inlineIcon} <strong>${ci.qty}</strong> gained from ${coinIcon} ${ci.src}</div>`;
                             }
                         } else {
-                            cooldownHtml = `<div class="pet-ability-meta">Cooldown: ${cooldown}</div>`;
+                            cooldownHtml = `<div class="pet-ability-meta">Cooldown: ${cooldown.replace(/\d[\d,]*/g, m => formatInt(Number(m.replace(/,/g, ''))))}</div>`;
                         }
                     }
 
@@ -805,7 +875,7 @@ class ItemRow extends Component {
                             <div class="pet-ability-effect">${effectHtml}</div>
                             ${abilityExtraLines(ability, 'pet-ability-meta')}
                             ${cooldownHtml}
-                            ${ability.charges ? `<div class="pet-ability-meta">Charges: ${ability.charges}</div>` : ''}
+                            ${ability.charges && !ability.passive ? `<div class="pet-ability-meta">Charges: ${formatInt(ability.charges)}</div>` : ''}
                         </div>
                     `;
                 }
@@ -943,9 +1013,20 @@ class ItemRow extends Component {
             }
         });
 
-        // Source dropdown toggle
-        this.$element.on('click', '.btn-source-dropdown', (e) => {
+        // 2026-10-27 (jwbail): "Find Best Source" — open the optimized goals
+        // report scoped to ONLY this material and start it running.
+        this.$element.on('click', '.btn-find-best-source', (e) => {
+            e.preventDefault();
             e.stopPropagation();
+            const name = $(e.currentTarget).attr('data-item-name') || this.props.item.name || '';
+            if (name && window._statsReportPage
+                && typeof window._statsReportPage.runForTargetItem === 'function') {
+                window._statsReportPage.runForTargetItem(name);
+            }
+        });
+
+        // Source dropdown toggle
+        this.$element.on('click', '.btn-source-dropdown', (e) => {            e.stopPropagation();
             const $container = this.$element.find('.source-dropdown-container');
             const $arrow = $(e.currentTarget).find('.source-arrow');
             if ($container.is(':visible')) {
@@ -1124,6 +1205,7 @@ class ItemRow extends Component {
             this.$element.find('.item-details').hide().slideDown(200, () => {
                 this._scrollToFitIfNeeded();
             });
+            this._wireAbilityInfoIcons();
         } else {
             // Animate out and remove
             $details.slideUp(200, () => {

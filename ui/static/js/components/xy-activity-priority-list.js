@@ -133,6 +133,12 @@ export const AXIS_OPTIONS = [
     // doesn't need to change. Only the user-facing label differs from recipe.
     { value: 'xp',          label: 'Primary XP',  yOnly: false, xOnly: false, icon: '/assets/icons/attributes/bonus_experience.svg' },
     { value: 'total_xp',    label: 'Total XP',    yOnly: false, xOnly: false, icon: '/assets/icons/attributes/bonus_experience.svg' },
+    // 'well_rounded' (Balanced) is a self-contained objective — it has no
+    // denominator (no Y) and no target item. It scores a geometric-mean blend
+    // of every droppable reward metric normalized to its best achievable, so
+    // one click gets a balanced set instead of the all-or-nothing priority
+    // stack. X-only (never a Y). Released to all users (FAC gate removed).
+    { value: 'well_rounded', label: 'Balanced', yOnly: false, xOnly: true, icon: '/assets/icons/attributes/double_rewards.svg' },
 ];
 
 const X_OPTIONS = AXIS_OPTIONS.filter(o => !o.yOnly);
@@ -705,9 +711,14 @@ export function openDropdownUnder($trigger, itemsHtml, onSelect, forKey) {
 // ----------------------------------------------------------------------------
 
 function renderXOptionsHtml() {
-    return X_OPTIONS.map(o =>
-        `<div class="target-item" data-value="${o.value}">${axisIconHtml(o.value)}<span>${o.label}</span></div>`
-    ).join('');
+    // Hide FAC-gated axis options (e.g. 'well_rounded'/Balanced) unless the
+    // session has the feature flag. Evaluated at render time because flags
+    // load asynchronously after module init.
+    return X_OPTIONS
+        .filter(o => !o.fac || !!(window._featureFlags && window._featureFlags[o.fac]))
+        .map(o =>
+            `<div class="target-item" data-value="${o.value}">${axisIconHtml(o.value)}<span>${o.label}</span></div>`
+        ).join('');
 }
 
 function renderYOptionsHtml(currentX) {
@@ -970,11 +981,22 @@ export function mountXyActivityPriorityList($container, options = {}) {
 
         const compactRow = entry.mode === 'budget' ? '' : `
                 <div class="xy-row-compact" style="display: ${entry.editing ? 'none' : 'flex'};" data-entry-id="${entry.id}">
-                    <span class="xy-compact-label">${xLabel(entry.x)}/${yLabel(entry.y)}</span>
+                    <span class="xy-compact-label">${entry.x === 'well_rounded' ? 'Balanced' : `${xLabel(entry.x)}/${yLabel(entry.y)}`}</span>
                 </div>
               `;
 
-        const xyRow = entry.mode === 'budget' ? '' : `
+        const xyRow = entry.mode === 'budget' ? '' : (entry.x === 'well_rounded' ? `
+                <div class="xy-row xy-row-wellrounded" style="display: ${entry.editing ? 'flex' : 'none'}; flex-direction: column; align-items: stretch; gap: 4px;">
+                    <div class="xy-wrap" data-entry-id="${entry.id}" data-xy-axis="x" style="width:100%;">
+                        <span class="mockup-dropdown-label xy-label-x">What to Optimize</span>
+                        <div class="target-dropdown-button xy-dropdown-btn" style="width:100%;">
+                            <div class="target-dropdown-value">${axisIconHtml(entry.x)}<span>${xLabel(entry.x)}</span></div>
+                            <button class="target-dropdown-toggle" tabindex="-1"><span class="expand-arrow">▼</span></button>
+                        </div>
+                    </div>
+                    <div class="xy-wellrounded-hint" style="font-size:0.8em;font-style:italic;color:var(--text-muted);line-height:1.3;">Balances every reward this activity drops (chests, collectibles, fine items, XP/step) into one set instead of maxing a single metric.</div>
+                </div>
+              ` : `
                 <div class="xy-row" style="display: ${entry.editing ? 'flex' : 'none'};">
                     <div class="xy-wrap" data-entry-id="${entry.id}" data-xy-axis="x">
                         <span class="mockup-dropdown-label xy-label-x">What to Optimize</span>
@@ -992,7 +1014,7 @@ export function mountXyActivityPriorityList($container, options = {}) {
                         </div>
                     </div>
                 </div>
-              `;
+              `);
 
         const revealHtml = renderEntryReveal(entry, state.activityDropTable);
 
@@ -1610,7 +1632,14 @@ export function mountXyActivityPriorityList($container, options = {}) {
                 let changed = false;
                 if (axis === 'x' && entry.x !== val) {
                     entry.x = val;
-                    if (!isValidAsY(val, entry.y)) entry.y = 'craft';
+                    if (val === 'well_rounded') {
+                        // Balanced has no denominator; park a valid placeholder
+                        // Y (the bridge ignores it) and clear any target item.
+                        entry.y = 'steps';
+                        entry.targetItem = null;
+                    } else if (!isValidAsY(val, entry.y)) {
+                        entry.y = 'steps';
+                    }
                     changed = true;
                 } else if (axis === 'y' && entry.y !== val) {
                     entry.y = val;

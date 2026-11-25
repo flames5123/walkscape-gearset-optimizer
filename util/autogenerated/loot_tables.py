@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Loot tables — drop tables referenced by activities/items/recipes.
+Loot tables - drop tables referenced by activities/items/recipes.
 DO NOT EDIT MANUALLY
 """
 
@@ -10983,6 +10983,18 @@ LOOT_TABLES = {
                         'xpBonus': 0
                     }
                 ]
+            },
+            {
+                'rowItemID': 'double_trouble_mittens',
+                'name': 'Double trouble mittens',
+                'icon': 'assets/icons/items/gear/hands/double_trouble_mittens.png',
+                'isMoney': False,
+                'linearWeightScaling': True,
+                'rowWeight': 0.078,
+                'rowMinimumAmount': 1,
+                'rowMaximumAmount': 1,
+                'minWeightScale': None,
+                'requirementsBonuses': None
             }
         ],
         'subTables': []
@@ -13474,6 +13486,27 @@ LOOT_TABLES = {
         ],
         'subTables': []
     },
+    'tinkering_clockwork_bird_egg': {
+        'id': 'tinkering_clockwork_bird_egg',
+        'name': 'tinkering clockwork bird egg',
+        'category': 'petEgg',
+        'noDropChance': 0.99945,
+        'tableRows': [
+            {
+                'rowItemID': 'clockwork_bird_egg',
+                'name': 'Clockwork bird egg',
+                'icon': 'assets/icons/pets/clockwork_bird/clockwork_bird_egg_static.png',
+                'isMoney': False,
+                'linearWeightScaling': True,
+                'rowWeight': 10,
+                'rowMinimumAmount': 1,
+                'rowMaximumAmount': 1,
+                'minWeightScale': 0.05,
+                'requirementsBonuses': []
+            }
+        ],
+        'subTables': None
+    },
     'tiny_swan_ice_sculpture': {
         'id': 'tiny_swan_ice_sculpture',
         'name': 'tiny swan ice sculpture',
@@ -15066,6 +15099,18 @@ LOOT_TABLES = {
                 'rowMaximumAmount': 2,
                 'minWeightScale': 0.05,
                 'requirementsBonuses': []
+            },
+            {
+                'rowItemID': 'engraved_leash',
+                'name': 'Engraved leash',
+                'icon': 'assets/icons/items/gear/engraved_leash.png',
+                'isMoney': False,
+                'linearWeightScaling': True,
+                'rowWeight': 0.1964,
+                'rowMinimumAmount': 1,
+                'rowMaximumAmount': 1,
+                'minWeightScale': None,
+                'requirementsBonuses': None
             }
         ],
         'subTables': []

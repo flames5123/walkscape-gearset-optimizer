@@ -687,7 +687,12 @@ DEFAULT_ACTIVITY_ORDER: List[Tuple[str, Optional[str]]] = [
 # reward_roll entry into (steps, target_item, cat:normal_items)
 # BEFORE this validation runs, so reward_roll never reaches the
 # validity check.
-_VALID_ACTIVITY_X_AXES = {'action', 'steps', 'xp', 'total_xp'}
+_VALID_ACTIVITY_X_AXES = {'action', 'steps', 'xp', 'total_xp', 'well_rounded'}
+# `well_rounded` (Balanced) is a self-contained objective with no real
+# denominator — the UI pairs it with a placeholder Y ('steps') that the
+# scoring bridge (xy_activity_entry_to_sorting_entry) ignores. It must be
+# accepted here or the entry is silently stripped on save/load and never
+# persists to the gear set. It is FAC-gated client-side ('well_rounded').
 # `xp` (Primary XP) and `total_xp` (Total XP) are valid on BOTH axes in the
 # UI (AXIS_OPTIONS marks them yOnly:false, xOnly:false), so they must be
 # accepted on Y here too. Omitting them previously dropped any XP-on-Y

@@ -1308,7 +1308,7 @@ class SettingsModal extends Component {
                             margin-top: var(--spacing-xs);
                             margin-left: 26px;
                             font-style: italic;
-                        ">How the "Non-owned/Locked Upgrades" section in a gear slot popup shows an upgrade's value when the target is a category (e.g. Fine, Gems).<br/><b>Average of all</b> shows one old&nbsp;⟶&nbsp;new across every drop in the category;<br/><b>Percent change</b> shows that difference as a single +/-%;<br/><b>List per item</b> shows one line per individual drop (e.g. Fine ecto rock, Fine topaz) so you can compare them directly — this makes the blocks taller.</p>
+                        ">How the "Non-owned/Locked Upgrades" section in a gear slot popup shows an upgrade's value when the target is a category (e.g. Fine, Gems).<br/><b>Average of all</b> shows one old&nbsp;⟶&nbsp;new across every drop in the category (skips owned collectibles);<br/><b>Percent change</b> shows that difference as a single +/-%;<br/><b>List per item</b> shows one line per individual drop (e.g. Fine ecto rock, Fine topaz) so you can compare them directly — this makes the blocks taller.</p>
                     </div>
                 </div>
             </div>
@@ -1953,6 +1953,29 @@ class SettingsModal extends Component {
         this._pushLoading = true;
         this._pushInitError = null;
         try {
+            // Explicitly request Notification permission FIRST, before any
+            // pushManager.subscribe(). Chrome/Firefox auto-prompt on subscribe(),
+            // but macOS Safari does NOT — calling subscribe() without a prior
+            // granted permission throws NotAllowedError ("Failed to enable
+            // notifications"). requestPermission() must be the first async op in
+            // the click gesture to stay inside Safari's user-activation window.
+            if (typeof Notification !== 'undefined' && Notification.permission !== 'granted') {
+                let perm;
+                try {
+                    perm = await Notification.requestPermission();
+                } catch (permErr) {
+                    perm = (typeof Notification !== 'undefined') ? Notification.permission : 'denied';
+                }
+                this._pushPermission = perm;
+                if (perm !== 'granted') {
+                    // User denied or dismissed — bail cleanly, no error toast.
+                    this._pushLoading = false;
+                    this.render();
+                    this.attachEvents();
+                    return;
+                }
+            }
+
             // Fetch VAPID public key
             const keyResp = await fetch('/api/push/vapid-public-key');
             const keyData = await keyResp.json();
@@ -1968,9 +1991,13 @@ class SettingsModal extends Component {
             // Get service worker registration
             const reg = await navigator.serviceWorker.ready;
 
-            // Check for existing subscription
+            // Get or create the subscription, then ALWAYS re-POST it. Re-POSTing
+            // an existing subscription is what keeps the server endpoint live:
+            // browsers (esp. Firefox Android) rotate the push endpoint on
+            // browser/OS updates, and POSTing only on first subscribe left the
+            // server pushing to a dead endpoint forever. The server upserts by
+            // endpoint, so re-POST is idempotent.
             let sub = await reg.pushManager.getSubscription();
-
             if (!sub) {
                 // Convert base64url key to Uint8Array
                 const rawKey = this._urlBase64ToUint8Array(this._pushVapidKey);
@@ -1978,19 +2005,19 @@ class SettingsModal extends Component {
                     userVisibleOnly: true,
                     applicationServerKey: rawKey,
                 });
-
-                // POST subscription to server
-                const subJson = sub.toJSON();
-                await fetch('/api/push/subscribe', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        endpoint: subJson.endpoint,
-                        p256dh: subJson.keys.p256dh,
-                        auth: subJson.keys.auth,
-                    }),
-                });
             }
+
+            // POST (register-or-refresh) the current subscription to the server.
+            const subJson = sub.toJSON();
+            await fetch('/api/push/subscribe', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    endpoint: subJson.endpoint,
+                    p256dh: subJson.keys.p256dh,
+                    auth: subJson.keys.auth,
+                }),
+            });
 
             this._pushSubscription = sub;
 
@@ -3509,7 +3536,9 @@ class SettingsModal extends Component {
             // Show inline loading without full re-render
             const $btn = this.$element.find('.push-enable-btn');
             $btn.prop('disabled', true).text('Setting up notifications…');
-            this._pushPermission = 'granted';
+            // Do NOT pre-assume 'granted' — _initPushNotifications() now requests
+            // permission itself (required for Safari) and sets _pushPermission
+            // from the real result.
             await this._initPushNotifications();
         });
 
@@ -4161,7 +4190,104 @@ class SettingsModal extends Component {
     /**
      * Save all optimization settings to backend (always sends full payload)
      */
-    async saveOptimizationSettings() {
+    /**
+     * Build the full optimization-settings POST body from current state.
+     * Shared by the debounced flush and the on-exit beacon.
+     */
+    _optSettingsBody() {
+        return {
+            activity_sorting: this.activitySorting,
+            recipe_sorting: this.recipeSorting,
+            travel_sorting: this.travelSorting,
+            include_consumables: this.includeConsumables,
+            include_fine_consumables: this.includeFineConsumables,
+            use_fine_inputs: this.useFineInputs,
+            consumable_min_owned_enabled: this.consumableMinOwnedEnabled,
+            consumable_min_owned: this.consumableMinOwned,
+            consumable_min_owned_operator: this.consumableMinOwnedOperator,
+            consumable_use_hidden: this.consumableUseHidden,
+            auto_equip_optimized: this.autoEquipOptimized,
+            auto_copy_export: this.autoCopyExport,
+            lock_current_gear_slots: this.lockCurrentGearSlots,
+            include_pets: this.includePets,
+            optimize_all_items: this.optimizeAllItems,
+            use_pet_ability: this.usePetAbility,
+            unlock_all: this.unlockAll,
+            optimize_services: this.optimizeServices,
+            run_local_optimization: this.runLocalOptimization,
+            finish_on_server_on_leave: this.finishOnServerOnLeave,
+            disable_local_opt_warning: this.disableLocalOptWarning,
+            show_non_owned_alternatives: this.showNonOwnedAlternatives,
+            skip_obtained_collectibles: this.skipObtainedCollectibles
+        };
+    }
+
+    /**
+     * Public, DEBOUNCED optimization-settings save. Rapid column-3 toggles and
+     * slider drags each used to POST /api/optimization-settings immediately;
+     * now they are coalesced into ONE POST ~0.7s after the last change. The
+     * POST sends the full settings object, so last-write-wins is correct.
+     * Returns a promise that resolves when the coalesced save actually lands,
+     * so callers that `await saveOptimizationSettings()` still get a real
+     * "saved" signal. Use flushOptimizationSettings() to force an immediate
+     * save (before a compute, or on page exit).
+     */
+    saveOptimizationSettings() {
+        this._installOptSaveFlushHooks();
+        // Fire the change event SYNCHRONOUSLY (not after the debounced POST) so
+        // listeners' time-window re-render suppressions (e.g.
+        // _suppressSimpleRerenderUntil = now + 800ms in optimize-button) still
+        // catch it. The event re-syncs UI from live client state, which the
+        // caller already updated before calling us; only the network POST is
+        // debounced below. Firing it ~700ms later (on the POST) landed past the
+        // 800ms suppression window, causing a spurious full re-render that
+        // refreshed the view and dropped the in-progress edit.
+        try { window.dispatchEvent(new CustomEvent('optimizationSettingsLoaded')); } catch (_) { /* ignore */ }
+        if (!this._optSavePending) this._optSavePending = $.Deferred();
+        if (this._optSaveTimer) clearTimeout(this._optSaveTimer);
+        this._optSaveTimer = setTimeout(() => this.flushOptimizationSettings(), 700);
+        return this._optSavePending.promise();
+    }
+
+    /** Immediately flush a pending optimization-settings save. @param {boolean}
+     * useBeacon - send via navigator.sendBeacon (page-exit, survives unload). */
+    async flushOptimizationSettings(useBeacon = false) {
+        if (this._optSaveTimer) { clearTimeout(this._optSaveTimer); this._optSaveTimer = null; }
+        const pending = this._optSavePending;
+        this._optSavePending = null;
+        if (useBeacon) {
+            let ok = false;
+            try {
+                ok = typeof navigator !== 'undefined' && navigator.sendBeacon
+                    && navigator.sendBeacon('/api/optimization-settings',
+                        new Blob([JSON.stringify(this._optSettingsBody())], { type: 'application/json' }));
+            } catch (_) { /* best effort */ }
+            if (pending) pending.resolve({ beacon: !!ok });
+            return;
+        }
+        try {
+            const r = await this._flushOptimizationSettingsNow();
+            if (pending) pending.resolve(r);
+            return r;
+        } catch (e) {
+            if (pending) pending.reject(e);
+        }
+    }
+
+    /** Install page-exit flush hooks once so a just-changed setting isn't lost
+     * on tab-hide / unload. */
+    _installOptSaveFlushHooks() {
+        if (this._optSaveHooksInstalled || typeof window === 'undefined') return;
+        this._optSaveHooksInstalled = true;
+        const beaconFlush = () => { try { this.flushOptimizationSettings(true); } catch (_) { /* ignore */ } };
+        window.addEventListener('pagehide', beaconFlush);
+        window.addEventListener('beforeunload', beaconFlush);
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'hidden') beaconFlush();
+        });
+    }
+
+    async _flushOptimizationSettingsNow() {
         try {
             // `this.recipeSorting` is the single source of truth for recipe
             // entries — every XY controller (settings-modal Detailed,
@@ -4185,35 +4311,14 @@ class SettingsModal extends Component {
                 url: '/api/optimization-settings',
                 method: 'POST',
                 contentType: 'application/json',
-                data: JSON.stringify({
-                    activity_sorting: this.activitySorting,
-                    recipe_sorting: recipeEntries,
-                    travel_sorting: this.travelSorting,
-                    include_consumables: this.includeConsumables,
-                    include_fine_consumables: this.includeFineConsumables,
-                    use_fine_inputs: this.useFineInputs,
-                    consumable_min_owned_enabled: this.consumableMinOwnedEnabled,
-                    consumable_min_owned: this.consumableMinOwned,
-                    consumable_min_owned_operator: this.consumableMinOwnedOperator,
-                    consumable_use_hidden: this.consumableUseHidden,
-                    auto_equip_optimized: this.autoEquipOptimized,
-                    auto_copy_export: this.autoCopyExport,
-                    lock_current_gear_slots: this.lockCurrentGearSlots,
-                    include_pets: this.includePets,
-                    optimize_all_items: this.optimizeAllItems,
-                    use_pet_ability: this.usePetAbility,
-                    unlock_all: this.unlockAll,
-                    optimize_services: this.optimizeServices,
-                    run_local_optimization: this.runLocalOptimization,
-                    finish_on_server_on_leave: this.finishOnServerOnLeave,
-                    disable_local_opt_warning: this.disableLocalOptWarning,
-                    show_non_owned_alternatives: this.showNonOwnedAlternatives,
-                    skip_obtained_collectibles: this.skipObtainedCollectibles
-                })
+                data: JSON.stringify(this._optSettingsBody())
             });
             console.log('✓ Optimization settings saved', response);
-            // Notify other components that settings changed
-            window.dispatchEvent(new CustomEvent('optimizationSettingsLoaded'));
+            // The optimizationSettingsLoaded event is dispatched SYNCHRONOUSLY
+            // in saveOptimizationSettings() (not here) so it lands within
+            // listeners' re-render suppression windows. Do NOT re-dispatch it on
+            // the debounced POST, or a spurious late re-render wipes edits.
+            return response;
         } catch (error) {
             console.error('Failed to save optimization settings:', error);
             api.showError('Failed to save optimization settings');

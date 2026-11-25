@@ -142,6 +142,7 @@ import { WalkdlePage } from './walkdle-page.js';
 import { NotepadPage } from './notepad-page.js';
 import { BankPage } from './bank/bank-page.js';
 import { TradingPage, startTradingUnreadPolling } from './trading-page.js';
+import { JobBoardPage } from './jobboard-page.js';
 import { initTradingButtonDelegation } from './trading-buttons.js';
 import TravelMap from './travel-map.js';
 import GearsetComparisonSection from './components/gearset-comparison-section.js';
@@ -359,6 +360,11 @@ async function initializeApp() {
                 // delegation, and unread polling are also initialized
                 // unconditionally in initializeApp, so a disabled flag no longer
                 // hides it. This block is retained for the no-op reveal.)
+                // Job Board + Trading are released (no flag) — reveal them BEFORE
+                // the topbar customizer scans, so its left Menu drawer registers
+                // them like every other icon.
+                $('#trading-nav-btn').show();
+                $('#jobboard-nav-btn').show();
                 // Top-bar / side-bar icon customization (FAC-gated). MUST run after the
                 // reveal calls above so it only enumerates icons this session can access.
                 try { initTopbarCustomization(flags); } catch (e) { console.warn('[topbar-customization] init failed:', e); }
@@ -608,6 +614,8 @@ async function initializeApp() {
             }
         } else if (window.location.hash === '#trading') {
             // Trading is RELEASED (no FAC gate) — always open on initial load.
+            handleHashChange();
+        } else if (window.location.hash === '#jobboard') {
             handleHashChange();
         }
 
@@ -1146,7 +1154,9 @@ function renderComponents(itemsData, skillsData) {
     });
 
     // Global top-bar hotkeys
-    // A = Announcements, B = Bug Report, S = Settings, ? or I = Info (About), H = Help, T = Travel, C = Crafting Tree, O = Optimized Goals Report
+    // T = Trading, J = Job Board, ! = Announcements, A = Achievements, R = Bug Report,
+    // B = Bank, S = Settings, M = Sell for Chips, ? or I = Info (About), N = Notepad,
+    // W = Walkdle, H = Help, C = Crafting Tree, O = Optimized Goals Report
     $(document).on('keydown', function (e) {
         const tag = e.target.tagName;
         if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || e.target.isContentEditable) return;
@@ -1154,31 +1164,63 @@ function renderComponents(itemsData, skillsData) {
         if (localStorage.getItem('hotkeysEnabled') === 'false') return;
 
         switch (e.key) {
-            case 'a': case 'A':
+            case 't': case 'T':
+                e.preventDefault();
+                document.getElementById('trading-nav-btn')?.click();
+                break;
+            case 'j': case 'J':
+                e.preventDefault();
+                document.getElementById('jobboard-nav-btn')?.click();
+                break;
+            case '!':
                 e.preventDefault();
                 document.getElementById('announcements-btn')?.click();
                 break;
-            case 'b': case 'B':
+            case 'a': case 'A':
+                if (window._featureFlags?.achievements) {
+                    e.preventDefault();
+                    document.getElementById('achievements-nav-btn')?.click();
+                }
+                break;
+            case 'r': case 'R':
                 e.preventDefault();
                 openBugReportModal();
+                break;
+            case 'b': case 'B':
+                if (window._featureFlags?.bank_layouts) {
+                    e.preventDefault();
+                    document.getElementById('bank-nav-btn')?.click();
+                }
                 break;
             case 's': case 'S':
                 e.preventDefault();
                 document.getElementById('settings-btn')?.click();
                 break;
+            case 'm': case 'M':
+                if (window._featureFlags?.sell_for_chips) {
+                    e.preventDefault();
+                    document.getElementById('sell-for-chips-nav-btn')?.click();
+                }
+                break;
             case '?': case 'i': case 'I':
                 e.preventDefault();
                 showInfoModal('about');
                 break;
+            case 'n': case 'N':
+                if (window._featureFlags?.notepad) {
+                    e.preventDefault();
+                    document.getElementById('notepad-nav-btn')?.click();
+                }
+                break;
+            case 'w': case 'W':
+                if (window._featureFlags?.walkdle) {
+                    e.preventDefault();
+                    document.getElementById('walkdle-nav-btn')?.click();
+                }
+                break;
             case 'h': case 'H':
                 e.preventDefault();
                 showInfoModal('help');
-                break;
-            case 't': case 'T':
-                if (window._featureFlags?.travel) {
-                    e.preventDefault();
-                    document.getElementById('travel-nav-btn')?.click();
-                }
                 break;
             case 'c': case 'C':
                 if (window._featureFlags?.crafting_tree) {
@@ -1190,12 +1232,6 @@ function renderComponents(itemsData, skillsData) {
                 if (window._featureFlags?.stats_report) {
                     e.preventDefault();
                     document.getElementById('stats-report-nav-btn')?.click();
-                }
-                break;
-            case 'm': case 'M':
-                if (window._featureFlags?.sell_for_chips) {
-                    e.preventDefault();
-                    document.getElementById('sell-for-chips-nav-btn')?.click();
                 }
                 break;
         }
@@ -1362,6 +1398,16 @@ function renderComponents(itemsData, skillsData) {
     $('#trading-nav-btn').show();
     try { initTradingButtonDelegation(); } catch (e) { console.warn('[trading] button delegation failed:', e); }
     try { startTradingUnreadPolling(); } catch (e) { console.warn('[trading] unread polling failed:', e); }
+
+    // ========================================
+    // Job Board page (released; anchor page like Trading)
+    // ========================================
+    const jobboardPage = new JobBoardPage('#jobboard-page');
+    window._jobboardPage = jobboardPage;
+    $('#jobboard-nav-btn').on('click', () => {
+        window.location.hash = (window.location.hash === '#jobboard') ? '' : '#jobboard';
+    });
+    $('#jobboard-nav-btn').show();
 
     // TravelMap is initialized lazily on first navigation to avoid loading
     // Leaflet tiles before the user visits the page.
@@ -1608,9 +1654,38 @@ function initializeModals() {
         window._openCraftingTreeGlobal(savedItemId || null);
     });
 
+    // Retry the lazy crafting-tree chunk import before giving up. JS is served
+    // `no-store`, so every open re-downloads the whole module graph (~15 files);
+    // a single dropped fetch — a flaky connection, or an in-flight request cut
+    // by a blue-green container cutover — rejects the whole import and dead-ends
+    // at a red "Failed to open" toast. Retrying recovers from those transient
+    // failures instead of punishing the user.
+    async function _ctImportWithRetry(attempts = 3) {
+        let lastErr;
+        for (let i = 0; i < attempts; i++) {
+            try {
+                return await import('./components/crafting-tree-view.js');
+            } catch (err) {
+                lastErr = err;
+                console.warn(`[crafting-tree] module import failed (attempt ${i + 1}/${attempts})`, err);
+                // Short, growing backoff; a blue-green flip settles within ~2s.
+                await new Promise(r => setTimeout(r, 400 * (i + 1)));
+            }
+        }
+        throw lastErr;
+    }
+
     // Global crafting tree opener — reusable from anywhere
-    window._openCraftingTreeGlobal = function (itemId) {
-        import('./components/crafting-tree-view.js').then(({ default: CraftingTreeView }) => {
+    window._openCraftingTreeGlobal = function (itemId, opts) {
+        // opts (optional): { quality, quantity, useFine } — a one-shot preset
+        // ported from a Fastest Craft row / Job Board item so the tree opens at
+        // that quality, quantity + fine mode.
+        const _preset = (opts && (opts.quality || opts.quantity != null || opts.useFine != null))
+            ? { target_quality: opts.quality || undefined,
+                target_quantity: (opts.quantity != null ? opts.quantity : undefined),
+                use_fine: (opts.useFine != null ? !!opts.useFine : undefined) }
+            : null;
+        _ctImportWithRetry().then(({ default: CraftingTreeView }) => {
             let $container = $('#crafting-tree-container');
             if (!$container.length) {
                 $container = $('<div id="crafting-tree-container" class="crafting-tree-overlay"></div>');
@@ -1625,12 +1700,17 @@ function initializeModals() {
             // Body-scroll (mobile): open at top even if a column was scrolled.
             if (window.innerWidth <= 768) window.scrollTo(0, 0);
             document.body.classList.remove('travel-page-open', 'stats-report-open');
-            // Set hash so page can be reloaded to the same state
+            // Set hash so page can be reloaded to the same state. Use
+            // replaceState so this does NOT fire a hashchange — the hashchange
+            // handler would otherwise re-open the tree with the STALE saved
+            // item id (and no preset), clobbering this explicit open.
             if (window.location.hash !== '#crafting-tree') {
-                window.location.hash = 'crafting-tree';
+                try { history.replaceState(null, '', '#crafting-tree'); }
+                catch (_) { window.location.hash = 'crafting-tree'; }
             }
             window._craftingTreeViewGlobal = new CraftingTreeView($container[0], {
                 itemId: itemId,
+                preset: _preset,
                 onClose: () => {
                     $container.addClass('closing');
                     $('#crafting-tree-nav-btn').removeClass('active');
@@ -1649,8 +1729,11 @@ function initializeModals() {
                 },
             });
         }).catch(err => {
-            console.error('Failed to load CraftingTreeView:', err);
-            if (window.api) window.api.showError('Failed to open Crafting Tree');
+            console.error('Failed to load CraftingTreeView after retries:', err);
+            // Surface the real reason so a recurrence is diagnosable from the
+            // bug report's captured console log (the generic toast hid it before).
+            try { window.__lastCraftingTreeOpenError = (err && (err.stack || err.message)) || String(err); } catch (_) { /* noop */ }
+            if (window.api) window.api.showError('Could not open the Crafting Tree — this is usually a dropped download. Check your connection and try again.');
         });
     };
 
@@ -1977,6 +2060,9 @@ function handleHashChange() {
     if (window._tradingPage && window.location.hash !== '#trading') {
         window._tradingPage.close();
     }
+    if (window._jobboardPage && window.location.hash !== '#jobboard') {
+        window._jobboardPage.close();
+    }
     if (window.location.hash === '#travel-config') {
         // Close crafting tree if open
         if (window._craftingTreeViewGlobal) {
@@ -2156,6 +2242,23 @@ function handleHashChange() {
         if (window._tradingPage) {
             window._tradingPage.open();
         }
+    } else if (window.location.hash === '#jobboard') {
+        // Released anchor page. Close the other report overlays, then open.
+        if (window._craftingTreeViewGlobal) {
+            const $container = $('#crafting-tree-container');
+            $container.hide().removeClass('closing');
+            $('#crafting-tree-nav-btn').removeClass('active');
+            document.body.classList.remove('crafting-tree-open');
+            window._craftingTreeViewGlobal.destroy();
+            window._craftingTreeViewGlobal = null;
+        }
+        if (window._statsReportPage) { closeStatsReportPage(); }
+        if (window._sellForChipsPage) { window._sellForChipsPage.close(); }
+        if (window._achievementsPage) { window._achievementsPage.close(); }
+        if (window._upgradesTrackerPage) { window._upgradesTrackerPage.close(); }
+        if (window._tradingPage) { window._tradingPage.close(); }
+        if (document.body.classList.contains('travel-page-open')) { showMainColumns(); }
+        if (window._jobboardPage) { window._jobboardPage.open(); }
     } else if (window.location.hash === '#walkdle') {
         // Guard: redirect if feature not enabled
         if (!window._featureFlags?.walkdle) {

@@ -76,7 +76,7 @@ class Pet:
                         'name': 'Navigate Desert',
                         'icon': 'navigate_desert',
                         'effect': 'Allows you to navigate and interact in Desert environments.',
-                        'charges': 1,
+                        'passive': True,
                     },
                 ],
             ),
@@ -91,7 +91,7 @@ class Pet:
                         'name': 'Navigate Desert',
                         'icon': 'navigate_desert',
                         'effect': 'Allows you to navigate and interact in Desert environments.',
-                        'charges': 1,
+                        'passive': True,
                     },
                 ],
             ),
@@ -106,7 +106,7 @@ class Pet:
                         'name': 'Navigate Desert',
                         'icon': 'navigate_desert',
                         'effect': 'Allows you to navigate and interact in Desert environments.',
-                        'charges': 1,
+                        'passive': True,
                     },
                     {
                         'name': 'I Miss The Sun',
@@ -164,7 +164,7 @@ class Pet:
                         'icon': 'pecking_order',
                         'effect': 'Completes 5 Foraging actions instantly.',
                         'requirements': 'While doing Foraging.',
-                        'cooldown': '4,000 stepsWhile doing Foraging.',
+                        'cooldown': '4,000 steps While doing Foraging.',
                         'charges': 5,
                         'instant_actions': True,
                         'instant_actions_skill': 'foraging',
@@ -219,8 +219,8 @@ class Pet:
                         'name': 'Torpedo Away',
                         'icon': 'torpedo_away',
                         'effect': 'Completes 10 Underwater Traveling actions instantly.',
-                        'requirements': 'While traveling.While in Underwater location.',
-                        'cooldown': '5,000 stepsWhile in Underwater location.',
+                        'requirements': 'While traveling. While in Underwater location.',
+                        'cooldown': '5,000 steps While in Underwater location.',
                         'charges': 5,
                     },
                 ],
@@ -383,8 +383,9 @@ class Pet:
                     {
                         'name': "That's A Wrap",
                         'icon': 'mummy_ability',
-                        'effect': "Your Mummy occasionally takes some of its excess linens that have been sprawling off of its body and hands you them as a gift. +7% Find linens",
+                        'effect': "Your Mummy occasionally takes some of its excess linens that have been sprawling off of its body and hands you them as a gift.",
                         'passive': True,
+                        'passive_stats': {'global': {'global': {'find_linens': 7.0}}},
                     },
                 ],
             ),
@@ -480,6 +481,8 @@ class Pet:
                         'effect': 'Gives a buff to Find collectibles.',
                         'icon': 'party_mode',
                         'charges': 100,
+                        'duration': 1000,
+                        'duration_unit': 'steps',
                         'ability_stats': {'global': {'global': {'find_collectibles': 20.0}}},
                     },
                 ],
@@ -629,7 +632,7 @@ class Pet:
                         'icon': 'shell_forge',
                         'effect': 'Completes 5 Smelting actions instantly.',
                         'requirements': 'While doing Smelting recipes.',
-                        'cooldown': '4,000 stepsNot doing Agility.',
+                        'cooldown': '4,000 steps Not doing Agility.',
                         'charges': 10,
                         'instant_actions': True,
                         'instant_actions_skill': 'smelting',
@@ -687,6 +690,8 @@ class Pet:
                         'effect': 'Gives a large buff toward your Carpentry Double action.',
                         'icon': 'mantis_karate_chop',
                         'charges': 25,
+                        'duration': 1000,
+                        'duration_unit': 'steps',
                         'ability_stats': {'carpentry': {'global': {'double_action': 50.0}}},
                         'cooldown': '3,000 steps',
                     },
@@ -754,6 +759,8 @@ class Pet:
     LIVING_FLAME = PetLevels(
         name='Living Flame',
         egg_name='Living flame egg',
+        rare_name='Mellow Flame',
+        rare_export_name='mellow_flame',
         species='living_flame',
         levels={
             1: PetInfo(
@@ -808,6 +815,61 @@ class Pet:
     LIVING_FLAME._levels[2]._stats = {'cooking': {'global': {'work_efficiency': 4.0, 'chest_finding': 5.0, 'bonus_xp_percent': 1.0}}}
     LIVING_FLAME._levels[3]._stats = {'cooking': {'global': {'work_efficiency': 6.0, 'chest_finding': 7.0, 'bonus_xp_percent': 3.0, 'inventory_space': 1.0}}}
     LIVING_FLAME._levels[4]._stats = {'cooking': {'global': {'work_efficiency': 9.0, 'chest_finding': 9.0, 'bonus_xp_percent': 5.0, 'bonus_xp_add': 3.0, 'inventory_space': 3.0}}}
+
+    CLOCKWORK_BIRD = PetLevels(
+        name='Clockwork Bird',
+        egg_name='Clockwork bird egg',
+        rare_name='Clownwork Bird',
+        rare_export_name='clownwork_bird',
+        species='clockwork_bird',
+        levels={
+            1: PetInfo(
+                name='Clockwork Bird',
+                level=1,
+                egg_name='Clockwork bird egg',
+                xp_required=35000,
+                requirement_to_gain_xp='While doing Crafting.',
+            ),
+            2: PetInfo(
+                name='Clockwork Bird',
+                level=2,
+                egg_name='Clockwork bird egg',
+                xp_required=85000,
+                requirement_to_gain_xp='While doing Crafting.',
+            ),
+            3: PetInfo(
+                name='Clockwork Bird',
+                level=3,
+                egg_name='Clockwork bird egg',
+                xp_required=150000,
+                requirement_to_gain_xp='While doing Crafting.',
+            ),
+            4: PetInfo(
+                name='Clockwork Bird',
+                level=4,
+                egg_name='Clockwork bird egg',
+                xp_required=250000,
+                requirement_to_gain_xp='While doing Crafting.',
+                abilities=[
+                    {
+                        'name': 'Like Clockwork',
+                        'effect': 'Gives you some buffs toward Crafting. Effect lasts for: 20 actions. +5% Work efficiency While doing Crafting. +5% Double action While doing Crafting. -5% Steps required While doing Crafting.',
+                        'cooldown': 'This ability is charged by using items. One full charge requires 30. 1 gained from Wood scrap 1 gained from Metal scrap',
+                        'charges': 10,
+                        'duration': 20,
+                        'duration_unit': 'actions',
+                        'ability_stats': {'crafting': {'global': {'work_efficiency': 5.0, 'double_action': 5.0, 'steps_percent': -5.0}}},
+                        'icon': 'like_clockwork',
+                    },
+                ],
+            ),
+        }
+    )
+
+    CLOCKWORK_BIRD._levels[1]._stats = {'crafting': {'global': {'work_efficiency': 2.0, 'bonus_xp_percent': 1.0}}}
+    CLOCKWORK_BIRD._levels[2]._stats = {'crafting': {'global': {'work_efficiency': 4.0, 'bonus_xp_percent': 3.0, 'inventory_space': 1.0}}}
+    CLOCKWORK_BIRD._levels[3]._stats = {'crafting': {'global': {'work_efficiency': 6.0, 'bonus_xp_percent': 4.0, 'inventory_space': 2.0, 'chest_finding': 4.0}}}
+    CLOCKWORK_BIRD._levels[4]._stats = {'crafting': {'global': {'work_efficiency': 10.0, 'bonus_xp_percent': 6.0, 'inventory_space': 3.0, 'chest_finding': 8.0, 'bonus_xp_add': 3.0}}}
 
 class Egg:
     """Enum-like class for all eggs."""
@@ -898,6 +960,12 @@ class Egg:
         xp_to_hatch=35000,
     )
 
+    CLOCKWORK_BIRD_EGG = EggInfo(
+        name='Clockwork bird egg',
+        pet_name='Clockwork Bird',
+        xp_to_hatch=35000,
+    )
+
 PETS_BY_NAME = {
     'Camel': Pet.CAMEL,
     'Chicken': Pet.CHICKEN,
@@ -913,6 +981,7 @@ PETS_BY_NAME = {
     'Sawmantis': Pet.SAWMANTIS,
     'Termite': Pet.TERMITE,
     'Living Flame': Pet.LIVING_FLAME,
+    'Clockwork Bird': Pet.CLOCKWORK_BIRD,
 }
 
 # Lookup by rare export name (e.g. "precious_tortoise" -> Pet.TORTOISE)
@@ -930,6 +999,8 @@ PETS_BY_RARE_EXPORT_NAME = {
     'terminal_mite': Pet.TERMITE,
     'regal_tiger': Pet.TIGER,
     'precious_tortoise': Pet.TORTOISE,
+    'mellow_flame': Pet.LIVING_FLAME,
+    'clownwork_bird': Pet.CLOCKWORK_BIRD,
 }
 
 # Convenience: Get all pet levels as flat list
@@ -952,6 +1023,7 @@ EGGS_BY_NAME = {
     'Sawmantis egg': Egg.SAWMANTIS_EGG,
     'Termite egg': Egg.TERMITE_EGG,
     'Living flame egg': Egg.LIVING_FLAME_EGG,
+    'Clockwork bird egg': Egg.CLOCKWORK_BIRD_EGG,
 }
 
 

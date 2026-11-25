@@ -1212,10 +1212,6 @@ def emit_materials(out_path: Optional[Path] = None) -> Path:
     lines.append('from typing import List, Optional, Tuple, Any, Dict')
     lines.append('from util.stats_mixin import StatsMixin')
     lines.append('')
-    lines.append('# Scoring asks once per drop for every gearset; the answer depends only on the name.')
-    lines.append('_HAS_FINE_BY_NAME = {}')
-    lines.append('')
-    lines.append('')
     lines.append('class MaterialInstance(StatsMixin):')
     lines.append('    """Base class for material instances. Optionally has stats (e.g., arrows with WE)."""')
     lines.append('    def __init__(self, name: str, keywords: List[str], value: int, '
@@ -1248,14 +1244,9 @@ def emit_materials(out_path: Optional[Path] = None) -> Path:
     lines.append('')
     lines.append('    def has_fine_material(self) -> bool:')
     lines.append('        """Check if this material has a fine counterpart."""')
-    lines.append('        try:')
-    lines.append('            return _HAS_FINE_BY_NAME[self.name]')
-    lines.append('        except KeyError:')
-    lines.append('            pass')
     lines.append('        enum_name = self.name.upper().replace(" ", "_").replace("(", "").replace(")", "").replace("-", "_").replace("\'", "")')
     lines.append('        fine_enum_name = enum_name + "_FINE"')
-    lines.append('        found = _HAS_FINE_BY_NAME[self.name] = hasattr(Material, fine_enum_name)')
-    lines.append('        return found')
+    lines.append('        return hasattr(Material, fine_enum_name)')
     lines.append('')
     lines.append('')
     lines.append('class Material:')
@@ -2870,6 +2861,7 @@ class CraftedItem:
 _PET_RARE_METADATA: Dict[str, Tuple[str, str]] = {
     'camel':    ('Two-Hump Camel',      'two_hump_camel'),
     'chicken':  ('Lovestruck Chicken',  'lovestruck_chicken'),
+    'clockwork_bird': ('Clownwork Bird', 'clownwork_bird'),
     'dolphin':  ('Trick Dolphin',       'trick_dolphin'),
     'gecko':    ('Garnet Gecko',        'garnet_gecko'),
     'golden_frog': ('Silver Frog',      'silver_frog'),
@@ -2933,7 +2925,7 @@ _PET_ABILITY_OVERRIDE: Dict[str, Dict[str, Any]] = {
     'navigate_desert': {
         'name': 'Navigate Desert',
         'effect': 'Allows you to navigate and interact in Desert environments.',
-        'charges': 1,
+        'passive': True,
     },
     'i_miss_the_sun': {
         'name': 'I Miss The Sun',
@@ -2945,7 +2937,7 @@ _PET_ABILITY_OVERRIDE: Dict[str, Dict[str, Any]] = {
         'name': 'Pecking Order',
         'effect': 'Completes 5 Foraging actions instantly.',
         'requirements': 'While doing Foraging.',
-        'cooldown': '4,000 stepsWhile doing Foraging.',
+        'cooldown': '4,000 steps While doing Foraging.',
         'charges': 5,
         'instant_actions': True,
         'instant_actions_skill': 'foraging',
@@ -2954,8 +2946,8 @@ _PET_ABILITY_OVERRIDE: Dict[str, Dict[str, Any]] = {
     'torpedo_away': {
         'name': 'Torpedo Away',
         'effect': 'Completes 10 Underwater Traveling actions instantly.',
-        'requirements': 'While traveling.While in Underwater location.',
-        'cooldown': '5,000 stepsWhile in Underwater location.',
+        'requirements': 'While traveling. While in Underwater location.',
+        'cooldown': '5,000 steps While in Underwater location.',
         'charges': 5,
     },
     'clever_climber': {
@@ -2967,7 +2959,7 @@ _PET_ABILITY_OVERRIDE: Dict[str, Dict[str, Any]] = {
     'thats_a_wrap': {
         'name': "That's A Wrap",
         'effect': 'Gives some linens.',
-        'cooldown': '3,000 stepsWhile doing Tailoring.',
+        'cooldown': '3,000 steps While doing Tailoring.',
         'charges': 10,
     },
     'present_rain': {
@@ -3000,7 +2992,7 @@ _PET_ABILITY_OVERRIDE: Dict[str, Dict[str, Any]] = {
         'name': 'Shell Forge',
         'effect': 'Completes 5 Smelting actions instantly.',
         'requirements': 'While doing Smelting recipes.',
-        'cooldown': '4,000 stepsNot doing Agility.',
+        'cooldown': '4,000 steps Not doing Agility.',
         'charges': 10,
         'instant_actions': True,
         'instant_actions_skill': 'smelting',
@@ -3045,6 +3037,34 @@ _PET_ABILITY_OVERRIDE: Dict[str, Dict[str, Any]] = {
             'to_skill': 'carpentry',
             'xp_effort_modifier': 0.5,
             'scopes': ['activityLoot'],
+        },
+    },
+    # Clockwork Bird's Like Clockwork. Item-charged active crafting buff (like
+    # The Hunt Is On): charged by Wood scrap + Metal scrap, grants a 20-action
+    # Crafting buff. The API `desc` is an unfilled template
+    # ("Helps buff {count} Crafting.") and the item-charge cadence can't be
+    # reconstructed from the API shape, so pin the effect/cooldown text and
+    # ability_stats here so a re-scrape regenerates the wiring.
+    'like_clockwork': {
+        'name': 'Like Clockwork',
+        'effect': ('Gives you some buffs toward Crafting. Effect lasts for: 20 '
+                   'actions. +5% Work efficiency While doing Crafting. +5% '
+                   'Double action While doing Crafting. -5% Steps required '
+                   'While doing Crafting.'),
+        'cooldown': ('This ability is charged by using items. One full charge '
+                     'requires 30. 1 gained from Wood scrap 1 gained from '
+                     'Metal scrap'),
+        'charges': 10,
+        'duration': 20,
+        'duration_unit': 'actions',
+        'ability_stats': {
+            'crafting': {
+                'global': {
+                    'work_efficiency': 5.0,
+                    'double_action': 5.0,
+                    'steps_percent': -5.0,
+                },
+            },
         },
     },
 }
@@ -3229,19 +3249,29 @@ def _build_ability_dict(aid: Optional[str],
         info['icon'] = os.path.splitext(os.path.basename(icon))[0]
     eff_attrs: List[Dict[str, Any]] = []
     duration: Optional[int] = None
+    duration_unit: Optional[str] = None
     for block in ability.get('data') or []:
         for action in block.get('actions') or []:
             if action.get('type') == 'effect':
                 eff_attrs.extend(action.get('attributes') or [])
-                dur = (action.get('duration') or {}).get('actions')
-                if dur is not None:
-                    duration = int(dur)
+                # The API publishes an effect duration keyed by its unit — some
+                # abilities measure it in 'actions' (Tiger's The Hunt Is On),
+                # others in 'steps' (Pixie's Party Mode, Sawmantis's
+                # Reciprocating Saw). Read whichever the ability uses and keep
+                # the unit so the UI can render "Effect lasts for: N steps".
+                dur = action.get('duration') or {}
+                for unit in ('steps', 'actions'):
+                    val = dur.get(unit)
+                    if val is not None and int(val) > (duration or 0):
+                        duration = int(val)
+                        duration_unit = unit
     cd = ability.get('cooldown') or {}
     charges = cd.get('charges')
     if charges is not None:
         info['charges'] = charges
     if duration is not None:
         info['duration'] = duration
+        info['duration_unit'] = duration_unit or 'actions'
     if eff_attrs:
         ability_stats = _extract_attribute_stats(eff_attrs, 'global')
         if ability_stats:
@@ -5896,35 +5926,22 @@ def emit_item_finding(out_path: Optional[Path] = None) -> Path:
     lines.append('    def __init__(self, name: str, drops: List[DropEntry]):')
     lines.append('        self.name = name')
     lines.append('        self.drops = drops  # List of DropEntry with relative chances')
-    lines.append('        self._expanded = {}')
     lines.append('')
     lines.append('    def expand_with_chance(self, base_chance: float) -> List[DropEntry]:')
     lines.append('        """Expand this category to actual drops with adjusted chances.')
     lines.append('')
     lines.append('        actual_chance = base_chance * (drop.chance_percent / 100.0)')
-    lines.append('')
-    lines.append('        Expansions are reused for the same base_chance, so the DropEntry')
-    lines.append('        objects are shared between calls and must not be modified.')
     lines.append('        """')
-    lines.append('        # Zero isn\'t cached: 0.0 and -0.0 compare equal but give differently')
-    lines.append('        # signed chances.')
-    lines.append('        key = (type(base_chance), base_chance)')
-    lines.append('        expanded = self._expanded.get(key) if base_chance else None')
-    lines.append('        if expanded is None:')
-    lines.append('            expanded = []')
-    lines.append('            for drop in self.drops:')
-    lines.append('                actual_chance = base_chance * (drop.chance_percent / 100.0)')
-    lines.append('                expanded.append(DropEntry(')
-    lines.append('                    item_name=drop.item_name,')
-    lines.append('                    item_ref=drop.item_ref,')
-    lines.append('                    quantity=drop.quantity,')
-    lines.append('                    chance_percent=actual_chance')
-    lines.append('                ))')
-    lines.append('            if base_chance:')
-    lines.append('                if len(self._expanded) >= 1024:')
-    lines.append('                    self._expanded.clear()')
-    lines.append('                self._expanded[key] = expanded')
-    lines.append('        return list(expanded)')
+    lines.append('        expanded = []')
+    lines.append('        for drop in self.drops:')
+    lines.append('            actual_chance = base_chance * (drop.chance_percent / 100.0)')
+    lines.append('            expanded.append(DropEntry(')
+    lines.append('                item_name=drop.item_name,')
+    lines.append('                item_ref=drop.item_ref,')
+    lines.append('                quantity=drop.quantity,')
+    lines.append('                chance_percent=actual_chance')
+    lines.append('            ))')
+    lines.append('        return expanded')
     lines.append('')
     lines.append('    def __repr__(self):')
     lines.append('        return f"CategoryInstance({self.name}, {len(self.drops)} items)"')

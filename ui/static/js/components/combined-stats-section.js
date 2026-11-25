@@ -375,10 +375,16 @@ class CombinedStatsSection extends CollapsibleSection {
         // Invalidate slot content cache — activity context changed
         this._slotContentCache = { 1: null, 2: null };
 
-        // Clear input items and fine inputs when switching activities
+        // Clear input items and fine inputs when switching activities.
+        // Reset the in-memory flag only — do NOT persist false to the store
+        // here. setActivity() (the Column 2 comparison mirror) takes no
+        // fineness argument, so it can only ever write false; a later
+        // _saveColumn3Selection() then persists that false and silently drops
+        // the hunting fine-input bonus on the next load. The persistent flag is
+        // owned by the Fine Inputs checkbox and the input-item picker, which set
+        // it to match the chosen arrow. See bug e0ff0ddf.
         this._inputItems = {};
         this._useFineInputs = false;
-        store.state.column3.useFineInputs = false;
 
         // Fetch activity OR recipe to determine which type this is
         let isActivity = false;

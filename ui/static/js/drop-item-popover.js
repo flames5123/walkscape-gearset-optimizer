@@ -409,6 +409,9 @@ function buildPopoverHtml(item, quality = null, opts = null) {
             <div class="drop-popover-actions">
                 <a href="${wikiUrl}" target="_blank" rel="noopener noreferrer" class="wiki-link">Wiki</a>
                 <button class="btn-source-dropdown drop-popover-sources-btn" title="Show sources for this item">Sources <span class="source-arrow">▼</span></button>
+                ${(item.type === 'material' || item.type === 'consumable')
+                    ? `<button class="btn-find-best-source drop-popover-find-source-btn" title="Run the optimized goals report for just this item to find its best activity source" data-item-name="${String(item.name || '').replace(/"/g, '&quot;')}">Find source</button>`
+                    : ''}
                 ${tradeHtml}
             </div>
             ${valuePillHtml}
@@ -664,6 +667,24 @@ export async function showContainerPopover(anchor, containerName, pinned = false
     const wikiLink = popover.querySelector('.wiki-link');
     if (wikiLink) {
         wikiLink.addEventListener('click', (e) => e.stopPropagation());
+    }
+
+    // 2026-10-27 (jwbail): "Find Best Source" — open the optimized goals report
+    // scoped to ONLY this material and start it running. Dismiss the popover
+    // first so it doesn't float over the report overlay.
+    const findSourceBtn = popover.querySelector('.btn-find-best-source');
+    if (findSourceBtn) {
+        findSourceBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const name = findSourceBtn.getAttribute('data-item-name') || (item && item.name) || '';
+            dismissDropPopover();
+            activeDropPopover = null;
+            if (name && window._statsReportPage
+                && typeof window._statsReportPage.runForTargetItem === 'function') {
+                window._statsReportPage.runForTargetItem(name);
+            }
+        });
     }
 
     // Wire collapsible section headers — click toggles body visibility with
@@ -987,6 +1008,26 @@ export async function showDropPopover(anchor, itemName, pinned = false, quality 
     const wikiLink = popover.querySelector('.wiki-link');
     if (wikiLink) {
         wikiLink.addEventListener('click', (e) => e.stopPropagation());
+    }
+
+    // 2026-10-29 (jwbail): "Find source" — this is the main item popup path
+    // (showDropPopover, used by slot/drop clicks). The button HTML is rendered
+    // by the shared detail renderer, but this wiring path previously omitted
+    // the click handler, so the button did nothing from a slot popup (worked
+    // only from the owned-items list / the container path). Wire it here too.
+    const findSourceBtn = popover.querySelector('.btn-find-best-source');
+    if (findSourceBtn) {
+        findSourceBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const name = findSourceBtn.getAttribute('data-item-name') || (item && item.name) || '';
+            dismissDropPopover();
+            activeDropPopover = null;
+            if (name && window._statsReportPage
+                && typeof window._statsReportPage.runForTargetItem === 'function') {
+                window._statsReportPage.runForTargetItem(name);
+            }
+        });
     }
 
     // Hover on popover itself cancels dismiss timer
@@ -1535,6 +1576,13 @@ function isTouchDevice() {
 // ============================================================================
 // SOURCES LOADING (mirrors item-row.js _loadAndRenderSources)
 // ============================================================================
+
+// Reusable: render the Sources slide-down for an item into an arbitrary
+// container (used by the Job Board item menu). Mirrors the popover's Sources
+// section — same /api data, same grouping and markup.
+export async function renderItemSources(item, container, lookupOverride = null) {
+    return loadAndRenderSources(item, container, lookupOverride);
+}
 
 async function loadAndRenderSources(item, container, lookupOverride = null) {
     container.innerHTML = '<div class="source-loading">Loading sources...</div>';

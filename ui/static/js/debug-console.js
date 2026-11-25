@@ -10,6 +10,14 @@
 
 let debugLog = [];
 
+// Hard caps so the in-memory debug buffer can never grow unbounded. A heavy
+// session (lots of optimizer DEBUG output) previously grew this to tens of MB,
+// which both leaked browser memory and produced a 56MB bug-report body that
+// stalled submission for ~90s. Keep only the most recent entries, and clamp
+// any single message so one giant JSON.stringify can't blow the budget.
+const MAX_DEBUG_ENTRIES = 5000;
+const MAX_DEBUG_MSG_CHARS = 10000;
+
 // Keep references to original console methods
 const originalConsoleLog = console.log.bind(console);
 const originalConsoleWarn = console.warn.bind(console);
@@ -19,16 +27,25 @@ const originalConsoleError = console.error.bind(console);
  * Capture a console call into the debug log.
  */
 function captureEntry(level, args) {
-    const message = Array.from(args).map(a => {
+    let message = Array.from(args).map(a => {
         if (typeof a === 'string') return a;
         try { return JSON.stringify(a); } catch { return String(a); }
     }).join(' ');
+
+    if (message.length > MAX_DEBUG_MSG_CHARS) {
+        message = message.slice(0, MAX_DEBUG_MSG_CHARS) + `…[truncated ${message.length - MAX_DEBUG_MSG_CHARS} chars]`;
+    }
 
     debugLog.push({
         timestamp: new Date().toISOString(),
         level,
         message
     });
+
+    // Drop oldest entries once over the cap (rolling window).
+    if (debugLog.length > MAX_DEBUG_ENTRIES) {
+        debugLog.splice(0, debugLog.length - MAX_DEBUG_ENTRIES);
+    }
 }
 
 // Install console overrides immediately so all output is captured from page load

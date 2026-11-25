@@ -116,6 +116,13 @@ class ExactCraftStepsOptimizer(ExactGearsetOptimizer):
         # a proof-of-optimality certificate for ~5x speed; still returns the
         # best-first incumbent (near-always the true optimum). Tunable per call.
         self.NODE_BUDGET = 400_000
+        # Slot-order heuristic (fc-preopt Step 3, measured). Branching the big
+        # tool dimension FIRST makes each B&B node ~2x cheaper on a large owned-
+        # gear pool (bamboo toolbox on a 601-item inventory: 169s -> 75s), with
+        # the SAME optimum (ordering is a pure heuristic; _run_slot_order_ab
+        # asserts every strategy returns the identical result). Craft-only; the
+        # leaf/coins/xp optimizers keep the default "constrained".
+        self.SLOT_ORDER_STRATEGY = "tools_first"
         self._oq = max(1e-9, float(output_qty))
         self._oq_plus_if = max(1e-9, float(output_qty) + float(if_bonus))
         self._mat_per_output0 = float(m0) / self._oq          # M0/output_qty (>=0)
@@ -125,6 +132,14 @@ class ExactCraftStepsOptimizer(ExactGearsetOptimizer):
         self._use_fine = bool(use_fine)
         self._has_equipment_input = bool(has_equipment_input)
         self._apply_quality = bool(apply_quality)
+        # Per-solve memo for _qp. quality_prob_for is a pure function whose only
+        # per-solve-varying input is qo_axis (a sum of discrete integer gear QO
+        # bonuses, so only a few dozen distinct values), yet the B&B evaluates it
+        # millions of times. Caching on qo_axis is exact (identical output) and
+        # scoped to this optimizer instance (one per solve), so it never leaks
+        # across recipes/qualities. Equivalence-gated by
+        # tests/test_fastest_craft_frontier_cache_equivalence.py.
+        self._qp_cache = {}
         # Axis model: base step axes + double_rewards / no_materials_consumed.
         # The quality_outcome ('qo') axis is included ONLY for quality-target
         # nodes (root equipment). For material nodes quality_prob==1, so 'qo'
@@ -150,9 +165,14 @@ class ExactCraftStepsOptimizer(ExactGearsetOptimizer):
     def _qp(self, qo_axis):
         if not self._apply_quality:
             return 1.0
-        return quality_prob_for(self._recipe_level, float(qo_axis) + self._level_bonus_qo,
-                                self._target_quality, use_fine=self._use_fine,
-                                has_equipment_input=self._has_equipment_input)
+        cached = self._qp_cache.get(qo_axis)
+        if cached is not None:
+            return cached
+        val = quality_prob_for(self._recipe_level, float(qo_axis) + self._level_bonus_qo,
+                               self._target_quality, use_fine=self._use_fine,
+                               has_equipment_input=self._has_equipment_input)
+        self._qp_cache[qo_axis] = val
+        return val
 
     # ── numerator = (1+DR) * quality_prob(QO) ─────────────────────────────
     def numerator(self, X0, s):
@@ -175,13 +195,32 @@ class ExactCraftStepsOptimizer(ExactGearsetOptimizer):
         nmc_hi = min(0.99, max(0.0, s.get("nmc", 0.0) + R.get("nmc", 0.0)))
         return base_lb / self._oq_plus_if + (1.0 - nmc_hi) * self._mat_per_output0
 
+    def _saturation_caps(self, kappa, base_axis):
+        """Craft objective saturating MAX axes for the tool-frontier headroom
+        (fc-preopt Step 2 B). In addition to W (base class), the craft objective
+        HARD-clamps double_rewards and no-materials-consumed:
+            numerator = (1 + min(1.0,  max(0, DR))) * qp(QO)
+            steps     = ... + (1 - min(0.99, max(0, NMC))) * M0/oq
+        so DR past 1.0 and NMC past 0.99 can never change the objective -> safe
+        to cap in frontier dominance. NMC is omitted when there are no downstream
+        materials (M0 == 0), where the axis is already inert. QO is intentionally
+        NOT capped: qp plateaus only at QO far above any realistic gear value, so
+        a cap would collapse ~nothing while risking exactness, and qp never hits
+        exactly 1.0 (Normal weight floors at 4)."""
+        caps = {self.CAP_AXIS: float(kappa)}
+        caps["dr"] = 1.0
+        if self._mat_per_output0 > 0.0:
+            caps["nmc"] = 0.99
+        return caps
+
 
 def exact_craft_steps_optimize(recipe, character, *, skill, location,
                                output_qty, if_bonus, m0, recipe_level,
                                level_bonus_qo, target_quality, use_fine,
                                has_equipment_input, apply_quality,
                                pets=None, consumables=None, node_budget=None,
-                               service=None, base_stats_extra=None):
+                               service=None, base_stats_extra=None, fast=False,
+                               tool_frontier_cache=None):
     """Return {slot: Item|None} for a recipe node (the exact steps-to-output
     gearset), or None on failure. The caller computes the authoritative
     total_steps_per_output by re-running the tree's own calculate_node_metrics
@@ -207,6 +246,10 @@ def exact_craft_steps_optimize(recipe, character, *, skill, location,
         apply_quality=apply_quality)
     if node_budget:
         opt.NODE_BUDGET = int(node_budget)
+    # Fast (greedy-seed) mode: return the B&B's first complete best-first leaf
+    # (the greedy per-slot gearset) instead of running the full search. ~10x+
+    # faster on a large owned-gear pool, suboptimal. Off by default.
+    opt.GREEDY_SEED_ONLY = bool(fast)
     adapter = RecipeAdapter(recipe, skill, location, service=service)
     # Fold the service's stat bonuses (work_efficiency, steps_add, …) into the
     # engine baseline so the gearset is scored against the chosen service —
@@ -231,5 +274,34 @@ def exact_craft_steps_optimize(recipe, character, *, skill, location,
             except (TypeError, ValueError):
                 continue
         base_stats = merged
-    return opt.optimize(adapter, character, skill=skill, location=location,
-                        base_stats=base_stats, pets=pets, consumables=consumables)
+    import time as _time
+    _t0 = _time.perf_counter()
+    result = opt.optimize(adapter, character, skill=skill, location=location,
+                          base_stats=base_stats, pets=pets, consumables=consumables,
+                          tool_frontier_cache=tool_frontier_cache)
+    _dt_ms = (_time.perf_counter() - _t0) * 1000.0
+    # Per-solve diagnostic (fc-preopt). ONE concise line per gear B&B solve —
+    # low volume (~16/item), greppable as [FC-BNB], and captured by the
+    # bug-report debug log like the engine's [EXACT]/[MITM-BAIL] prints. Shows
+    # where a slow/degenerate solve comes from: the owned-gear pool size, how
+    # far the exact prune/frontier shrinks the tool pool, the B&B node count vs
+    # its budget (budget_hit=True is the node-budget BAIL that produces a
+    # degenerate 0/None cell), and the wall time.
+    try:
+        _owned_gear = sum(1 for _it, _q in character.items.items()
+                          if _q and getattr(_it, "slot", None) is not None)
+    except Exception:
+        _owned_gear = -1
+    _loc = getattr(location, "name", None) or getattr(location, "id", None) or location
+    print(f"[FC-BNB] recipe={adapter.name!r} skill={skill} loc={_loc} "
+          f"q={target_quality} fine={bool(use_fine)} | owned_gear={_owned_gear} "
+          f"tool_in={getattr(opt, '_last_tool_pool_in', -1)} "
+          f"tool_pruned={getattr(opt, '_last_tool_pool_pruned', -1)} "
+          f"tool_frontier={getattr(opt, '_last_tool_frontier', -1)} "
+          f"tool_slots={getattr(opt, '_last_n_tools', -1)} | "
+          f"nodes={getattr(opt, '_last_opt_nodes', -1)} budget={opt.NODE_BUDGET} "
+          f"budget_hit={bool(getattr(opt, 'last_run_budget_exhausted', False))} "
+          f"greedy_seed={bool(getattr(opt, 'last_run_greedy_seed', False))} | "
+          f"qp_distinct={len(getattr(opt, '_qp_cache', {}))} | t={_dt_ms:.0f}ms | "
+          f"result={'None' if result is None else 'gearset'}")
+    return result

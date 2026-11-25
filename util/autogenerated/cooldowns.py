@@ -73,6 +73,34 @@ COOLDOWNS = {
         'actions': None,
         'requirements': []
     },
+    'cooldown-likeClockwork': {
+        'id': 'cooldown-likeClockwork',
+        'inputsNeeded': 30,
+        'charges': 10,
+        'requirements': [
+            {
+                'type': 'abilityAvailable',
+                'name': '',
+                'opposite': False,
+                'requirement': {
+                    'ability': 'like_clockwork',
+                    'scanEquippedItems': False
+                }
+            }
+        ],
+        'inputs': [
+            {
+                'type': 'item',
+                'item': 'wood_scrap',
+                'value': 1
+            },
+            {
+                'type': 'item',
+                'item': 'metal_scrap',
+                'value': 1
+            }
+        ]
+    },
     'cooldown-luckyDay': {
         'id': 'cooldown-luckyDay',
         'inputsNeeded': 10,

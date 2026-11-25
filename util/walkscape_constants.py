@@ -292,6 +292,12 @@ class Sorting(Enum):
     # "travel_steps_per_target::<target>" so multiple targets can coexist,
     # mirroring STEPS_PER_REWARD_ROLL on the activity optimizer.
     TRAVEL_STEPS_PER_TARGET = ("-travel_steps_per_target", "travel_steps_per_target", "Steps/Target Item", [SortingType.TRAVEL], True)
+    # "Balanced" one-click target for the column-3 ad-hoc activity optimizer.
+    # Maximize a geometric-mean blend of every droppable reward sub-metric,
+    # each normalized to its own best-achievable (see optimize_activity_gearsets
+    # ._compute_well_rounded_blend). A self-contained objective — no per-entry
+    # target. FAC-gated client-side on the 'well_rounded' feature flag.
+    WELL_ROUNDED = ("+well_rounded", "well_rounded", "Balanced", [SortingType.ACTIVITY])
 
     @property
     def is_reverse(self):
@@ -1019,6 +1025,13 @@ def xy_activity_entry_to_sorting_entry(entry: dict) -> Optional['SortingEntry']:
     x = entry.get('x')
     y = entry.get('y')
     pair = (x, y)
+
+    # 'well_rounded' (Balanced) is a self-contained objective, not an X/Y
+    # ratio — it has no denominator and ignores the Y axis. Resolve it
+    # directly so the UI can pair it with any placeholder Y without
+    # affecting scoring, and carry the entry's weight so it still stacks.
+    if x == 'well_rounded' or y == 'well_rounded':
+        return SortingEntry(sort=Sorting.WELL_ROUNDED, target=None, weight=weight_int)
 
     sorting_name = _resolve_xy_pair(x, y, _XY_ACTIVITY_TO_LEGACY_SORTING_NAMES)
     if not sorting_name:

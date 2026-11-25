@@ -4,7 +4,29 @@ Quality Outcome calculation for crafting.
 Based on: https://wiki.walkscape.app/wiki/Quality_Outcome_(Mechanics)
 """
 
+from functools import lru_cache
+
+
 def calculate_quality_weights(recipe_level: int, quality_outcome: float, use_fine: bool = False, has_equipment_input: bool = False):
+    """QP-table cache (fc-preopt Step 1). calculate_quality_weights is a pure
+    function of (recipe_level, quality_outcome, use_fine, has_equipment_input),
+    but the Fastest Craft B&B calls it millions of times across the 6 qualities
+    x 2 variants x many services of a run — the same distribution recomputed
+    repeatedly. The heavy band math is memoized once per distinct 4-tuple; this
+    wrapper returns a fresh shallow copy of the cached result's sub-dicts so any
+    caller that mutates `weights`/`percentages` can never corrupt the shared
+    cache entry. Exact: identical values, equivalence-gated."""
+    r = _calculate_quality_weights_cached(
+        int(recipe_level), float(quality_outcome), bool(use_fine), bool(has_equipment_input))
+    return {
+        'weights': dict(r['weights']),
+        'percentages': dict(r['percentages']),
+        'total_weight': r['total_weight'],
+    }
+
+
+@lru_cache(maxsize=None)
+def _calculate_quality_weights_cached(recipe_level: int, quality_outcome: float, use_fine: bool = False, has_equipment_input: bool = False):
     """
     Calculate quality weights based on recipe level and quality outcome bonus.
     

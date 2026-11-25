@@ -51,6 +51,7 @@ export class AchievementsPage {
         this._el = document.querySelector(selector);
         this._data = null;              // /api/achievements payload
         this._progress = { checked: {}, revealed: {} };
+        this._imported = {};            // /api/achievements/progress .imported (char-export v2)
         this._shops = [];               // /api/shops (for the Peddle checklist)
         this._openChecklists = new Set();
         this._search = '';
@@ -160,6 +161,7 @@ export class AchievementsPage {
             this._data = aRes || { order: [], groups: {} };
             const prog = (pRes && pRes.progress) || {};
             this._progress = { checked: prog.checked || {}, revealed: prog.revealed || {} };
+            this._imported = (pRes && pRes.imported) || {};
             this._shops = (sRes && sRes.shops) || [];
             this._buildItemIndexes((iRes && iRes.categories) || {});
         } catch (err) {
@@ -472,7 +474,11 @@ export class AchievementsPage {
         if (!ch || !name) return false;
         const norm = (x) => String(x || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
         const want = norm(name);
-        for (const list of [ch.owned_items, ch.raw_export_names]) {
+        // Scan collectibles too: items like "Essence of the Swamp" are stored
+        // only under ch.collectibles (e.g. "essence_of_the_swamp"), never in
+        // owned_items/raw_export_names, so an "item_has" achievement would stay
+        // locked (and un-toggleable, being auto-tracked) without this.
+        for (const list of [ch.owned_items, ch.raw_export_names, ch.collectibles]) {
             if (Array.isArray(list) && list.some(it => norm(it) === want)) return true;
         }
         return false;
@@ -606,6 +612,10 @@ export class AchievementsPage {
         return { done: !!val, auto: false, mirror: null };
     }
     _achComplete(a) {
+        // Authoritative: the game export (char-export v2) marks this achievement
+        // finished — trust it over the per-requirement heuristic.
+        const _imp = this._imported && this._imported[a.id];
+        if (_imp && _imp.finished) return true;
         const n = (a.parsed || []).length;
         if (!n) return false;
         for (let i = 0; i < n; i++) if (!this._reqSatisfied(a, i).done) return false;

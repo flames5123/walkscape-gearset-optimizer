@@ -23,7 +23,7 @@
 // goals-report worker-recycle fix was deployed + served no-store, yet Firefox
 // kept executing the OLD worker, so the OOM persisted). Bump WORKER_BUILD
 // whenever optimize-local-worker.js changes to force a fresh fetch.
-const WORKER_BUILD = 'target-items-11';
+const WORKER_BUILD = 'fc-gather-pull-1';
 const WORKER_URL = "/static/js/optimize-local-worker.js?b=" + WORKER_BUILD;
 const _workers = {}; // task -> Worker (one persistent instance each)
 
@@ -457,6 +457,34 @@ function _getStatsWorkers(n) {
   return _srPool.slice(0, n);
 }
 
+// Boot a single worker to the point its Pyodide runtime + bundle are loaded,
+// resolving on the worker's 'ready' (or a 'warmup' result). Cold boots fetch
+// the force-cache bundle zip; when N cold workers fetch it SIMULTANEOUSLY the
+// browser aborts the duplicate in-flight cache writes and the losers throw
+// "The operation was aborted." (observed: FC-only runs fanned out to 3 cold
+// workers, 2 died instantly, their shard's items were silently never solved).
+// The normal-report path never hits this because planStatsAssignment boots
+// workers[0] alone first. Prewarming serializes the first cold boot so the
+// bundle is cached before the rest fetch it. Resolves (never rejects) so a
+// warmup failure degrades to the fan-out attempting anyway.
+function _prewarmWorker(worker, label) {
+  return new Promise((resolve) => {
+    const subId = 'warmup_' + (label || '0') + '_' + Math.random().toString(36).slice(2, 8);
+    let settled = false;
+    const done = () => { if (settled) return; settled = true; clearTimeout(wd); worker.removeEventListener('message', onMessage); resolve(); };
+    const wd = setTimeout(done, 120000); // generous: cold Pyodide boot + bundle
+    function onMessage(ev) {
+      const m = ev.data || {};
+      if (m.type === 'log') return;
+      if (m.type === 'ready') { done(); return; }
+      if (m.id && m.id === subId) done();
+    }
+    worker.addEventListener('message', onMessage);
+    worker.onerror = () => done();
+    try { worker.postMessage({ id: subId, task: 'warmup' }); } catch (_) { done(); }
+  });
+}
+
 /**
  * Terminate ALL in-flight local-compute Pyodide workers (task singletons +
  * crafting-tree-optimize pool + stats-report shard pool) and clear the pools.
@@ -533,7 +561,14 @@ export function runStatsReportLocal(payload, onProgress) {
   // Partition the run's categories into groups sharing a worker cap; same-cap
   // categories run together in one pass. Higher-parallelism (light) groups run
   // first; the throttled heavy group runs LAST, alone, for max memory headroom.
-  const _allCats = (payload && payload.run_params && payload.run_params.categories) || [];
+  const _allCatsRaw = (payload && payload.run_params && payload.run_params.categories) || [];
+  // fastest_craft is NOT a sharded job category — it has no per-scope jobs in
+  // _sr_build (building 0 jobs made its pass finish in 0.0s and POST
+  // /local-complete before the real compute ran). It runs as a dedicated FC
+  // PHASE after the regular passes (mirroring the server's monolithic
+  // run_fastest_craft_category), inside THIS shared path, before finalize.
+  const _hasFC = _allCatsRaw.indexOf('fastest_craft') !== -1;
+  const _allCats = _allCatsRaw.filter((c) => c !== 'fastest_craft');
   const _capOf = (c) => Math.max(1, Math.min(SR_CATEGORY_WORKER_CAP[c] || defaultWorkers, defaultWorkers));
   const _chunkOf = (c) => SR_CATEGORY_RECYCLE_CHUNK[c] || SR_RECYCLE_CHUNK;
   const _groupMap = new Map();
@@ -739,6 +774,87 @@ export function runStatsReportLocal(payload, onProgress) {
     });
   });
 
+  // FC PHASE (fc-preopt Step 5): shard Steps per Recipe across the SAME worker
+  // pool the normal reports use (~half the cores). FC items are independent —
+  // each worker runs run_fastest_craft with its (shard_index, shard_count) and
+  // solves its round-robin slice of the item list; the union is identical to a
+  // serial run (verified byte-identical). Each shard streams its own per-cell
+  // progress and incremental persists; we merge items at the end. ~N× faster
+  // wall on a multi-item run. Long watchdog (30 min) per shard.
+  const runFcShard = (worker, k, N, fcPayload, onAnyProgress, onTiGenerated) => new Promise((resolve) => {
+    const subId = baseId + '_fc' + k;
+    let settled = false;
+    const finish = (v) => { if (settled) return; settled = true; clearTimeout(wd); worker.removeEventListener('message', onMessage); resolve(v); };
+    const wd = setTimeout(() => { console.error(tag, 'fc shard ' + k + ' watchdog timeout (30m)'); finish(null); }, 1800000);
+    function onMessage(ev) {
+      const m = ev.data || {};
+      if (m.type === 'log') { if (m.stream === 'stderr') console.error(tag, m.line); else console.log(tag, m.line); return; }
+      if (m.type === 'ready') return;
+      if (m.id && m.id !== subId) return;
+      if (m.type === 'progress') { try { onAnyProgress && onAnyProgress(k, m.done, m.total); } catch (_) { /* ignore */ } return; }
+      if (m.type === 'fc-item') {
+        try {
+          const parsed = JSON.parse(m.item || '{}');
+          const _it = parsed && parsed.item;
+          if (_it) {
+            _postJsonWithRetry('/api/fastest-craft/local-result', {
+              session_uuid: fcPayload.session_uuid, items: [_it],
+              gather_scope_keys: parsed.gather_scope_keys || [],
+            }).then(async (r) => {
+                try { const j = await r.json(); if (onTiGenerated) onTiGenerated((j && j.generated_target_items) || 0); } catch (_) { /* ignore body */ }
+              })
+              .catch((e) => console.error(tag, 'fc-item incremental POST failed:', e));
+          }
+        } catch (e) { console.error(tag, 'fc-item parse failed:', e); }
+        return;
+      }
+      if (m.type === 'result') { finish(m.result || null); }
+      else if (m.type === 'error') { console.error(tag, 'fc shard ' + k + ' error:', m.error); finish(null); }
+    }
+    worker.addEventListener('message', onMessage);
+    worker.onerror = (e) => { console.error(tag, 'fc shard ' + k + ' worker crashed:', (e && (e.message || e.filename)) || 'unknown'); finish(null); };
+    worker.postMessage({ id: subId, task: 'fastest-craft',
+      payload: Object.assign({}, fcPayload, { shard_index: k, shard_count: N }) });
+  });
+
+  const runFcPhase = async (fcPayload, onFcProgress, onTiGenerated) => {
+    const N = _statsWorkerCount();          // same sizing/caps as the normal reports
+    const fcWorkers = _getStatsWorkers(N);
+    const shardDone = new Array(N).fill(0);
+    const shardTotal = new Array(N).fill(0);
+    const onAnyProgress = (k, d, t) => {
+      shardDone[k] = d; shardTotal[k] = t;
+      try {
+        onFcProgress && onFcProgress(
+          shardDone.reduce((a, b) => a + b, 0),
+          shardTotal.reduce((a, b) => a + b, 0));
+      } catch (_) { /* ignore */ }
+    };
+    // Prewarm BEFORE fan-out so cold workers don't race on the force-cache
+    // bundle fetch (see _prewarmWorker). Boot worker 0 alone first to prime the
+    // HTTP cache, then warm the rest concurrently off that cache.
+    if (fcWorkers.length) {
+      await _prewarmWorker(fcWorkers[0], '0');
+      if (fcWorkers.length > 1) {
+        await Promise.all(fcWorkers.slice(1).map((w, i) => _prewarmWorker(w, String(i + 1))));
+      }
+    }
+    console.log(tag, 'fastest-craft: sharding across ' + N + ' worker(s)');
+    const results = await Promise.all(
+      fcWorkers.map((w, k) => runFcShard(w, k, N, fcPayload, onAnyProgress, onTiGenerated)));
+    const items = [];
+    const gatherKeys = new Set();
+    let count = 0;
+    for (const r of results) {
+      if (r && Array.isArray(r.items)) items.push(...r.items);
+      if (r && typeof r.count === 'number') count += r.count;
+      if (r && Array.isArray(r.gather_scope_keys)) {
+        for (const g of r.gather_scope_keys) gatherKeys.add(g);
+      }
+    }
+    return { items: items, count: count, gather_scope_keys: Array.from(gatherKeys) };
+  };
+
   // Run each category group as its own sharded pass (sequentially), threading
   // completed idents forward so later passes skip finished scopes. Only the
   // throttled (heavy) group runs at reduced parallelism. Finalize EXACTLY ONCE.
@@ -781,6 +897,91 @@ export function runStatsReportLocal(payload, onProgress) {
       doneBase += passAttempts;        // roll into the cumulative progress base
       const passCompleted = results.reduce((a, r) => a.concat(r.completed || []), []);
       if (passCompleted.length) completedAll = completedAll.concat(passCompleted);
+    }
+    // FC PHASE (fastest_craft): runs AFTER the regular sharded passes, inside
+    // this shared path, BEFORE finalize. Progress is cumulative — FC's cells
+    // extend the regular denominator so the bar climbs through FC instead of
+    // sitting at 0/N. Results are POSTed to the server for DB persistence
+    // (fastest_craft_results). Only then is the run finalized.
+    if (_hasFC) {
+      const rp = payload.run_params || {};
+      const sess = payload.session || {};
+      const _regDone = doneBase;        // regular jobs attempted
+      const _regTotal = globalTotal;    // regular job denominator
+      const _sessUuid = rp.session_uuid || sess.uuid || '';
+      const _selIds = rp.fastest_craft_categories || [];
+      // Start-time cross-run reuse plan (Phase 6): decide FRESH (reuse stored)
+      // vs TODO (solve = stale/missing) + the honest, non-growing denominator
+      // (fc_todo_cells + target_items_missing) server-side — Pyodide can't, it
+      // has no DB and the stale detector isn't bundled. On failure, fall back to
+      // solving everything (no only_refs), preserving pre-Phase-6 behavior.
+      let _plan = null;
+      try {
+        const _pr = await _postJsonWithRetry('/api/fastest-craft/plan', { categories: _selIds });
+        if (_pr && _pr.ok) _plan = await _pr.json();
+      } catch (e) { console.error(tag, 'fastest_craft /plan failed, solving all:', e); }
+      const _tiMissing = (_plan && _plan.target_items_missing) || 0;
+      const _fcTotPlanned = _plan ? (_plan.fc_todo_cells || 0) : null;
+      const fcPayload = {
+        session_uuid: _sessUuid,
+        selected_ids: _selIds,
+        session_data: sess.character_config || {},
+        ui_config: sess.ui_config || {},
+      };
+      // Solve ONLY the todo cells when the plan succeeded; fresh cells are
+      // already in storage and shown by the final /results refresh.
+      if (_plan && Array.isArray(_plan.todo_refs)) fcPayload.only_refs = _plan.todo_refs;
+      // fc-preopt A: fetch the native target-items gather-steps map so FC pins
+      // its gather leaves to the SAME number the Fastest Target Items report
+      // shows (the two gather formulas otherwise diverge). Best-effort — on
+      // failure FC falls back to its own gather solve, unchanged.
+      try {
+        const _gr = await fetch('/api/fastest-craft/gather-reuse').then(r => (r.ok ? r.json() : null));
+        if (_gr && _gr.ok && _gr.gather_reuse && Object.keys(_gr.gather_reuse).length) {
+          fcPayload.gather_reuse = _gr.gather_reuse;
+        }
+      } catch (e) { console.error(tag, 'fastest_craft gather-reuse fetch failed (using own solve):', e); }
+      console.log(tag, 'fastest_craft phase: ' + (_plan
+        ? ('plan todo=' + (_plan.todo_refs || []).length + ' fresh=' + (_plan.fresh_refs || []).length
+           + ' denom=' + _plan.denominator + ' (fc=' + (_plan.fc_todo_cells || 0) + ' + ti=' + _tiMissing + ')')
+        : 'no plan — solving all (chips=' + (_selIds.length || 'all') + ')'));
+      // Honest cumulative bar: regular + FC-todo cells + target-items-missing.
+      // _tiDone climbs from the generation POST responses (clamped to the
+      // budget), then snaps to full once generation completes.
+      let _fcDone = 0, _fcTot = _fcTotPlanned || 0, _tiDone = 0;
+      const _emitFc = () => {
+        try { if (onProgress) onProgress(_regDone + _fcDone + _tiDone, _regTotal + _fcTot + _tiMissing); } catch (_) { /* ignore */ }
+      };
+      let _fcResult = null;
+      try {
+        _fcResult = await runFcPhase(fcPayload,
+          (fcDone, fcTotal) => { _fcDone = fcDone || 0; if (_fcTotPlanned === null) _fcTot = fcTotal || 0; _emitFc(); },
+          (generated) => { _tiDone = Math.min(_tiDone + (generated || 0), _tiMissing); _emitFc(); });
+      } catch (e) {
+        console.error(tag, 'fastest_craft phase threw:', e);
+      }
+      const _fcItems = (_fcResult && _fcResult.items) || [];
+      // Drive end-of-run generation from the plan's static ALL-routes candidate
+      // set when available, so every reused target item is copy-forwarded into
+      // this run and displayed; fall back to the solve's evaluated gather keys.
+      const _planCands = (_plan && Array.isArray(_plan.candidate_keys)) ? _plan.candidate_keys : null;
+      const _fcGatherKeys = _planCands || (_fcResult && _fcResult.gather_scope_keys) || [];
+      if (_fcItems.length || _planCands) {
+        try {
+          const _r = await _postJsonWithRetry('/api/fastest-craft/local-result',
+            { session_uuid: _sessUuid, items: _fcItems, gather_scope_keys: _fcGatherKeys });
+          try { await _r.json(); } catch (_) { /* ignore body */ }
+          console.log(tag, 'fastest_craft phase: persisted ' + _fcItems.length + ' item(s)');
+        } catch (e) {
+          console.error(tag, 'fastest-craft local-result POST failed:', e);
+        }
+      } else {
+        console.log(tag, 'fastest_craft phase: no items produced');
+      }
+      // Snap the TI portion to full once generation is done (copy-forwards and
+      // leaf-memo vs static-candidate differences make the running tally
+      // approximate; the plan's target_items_missing is the budget).
+      _tiDone = _tiMissing; _emitFc();
     }
     // Relay the collected browser-side diagnostics to the server so they land
     // in server_logs / bug reports (one POST for the whole run).

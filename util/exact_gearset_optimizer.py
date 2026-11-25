@@ -81,6 +81,17 @@ class ExactGearsetOptimizer:
     # instead of wedging the worker until the 120s watchdog. Deterministic.
     NODE_BUDGET = 5_000_000
 
+    # Fast (greedy-seed) mode. When True, the B&B stops the instant it reaches
+    # its FIRST complete feasible leaf and returns that gearset. Because the
+    # descent is best-first (each slot's items are sorted by marginal score and
+    # the empty pick is explored last), that first leaf IS the greedy per-slot
+    # pick — the same seed a warm-started exact run would start from. It skips
+    # the millions of bound-prune nodes that make a large-inventory solve take
+    # tens of seconds, trading proof-optimality for ~immediate return. Off by
+    # default; only the "Fast (greedy)" toggle flips it, so the exact path is
+    # byte-identical when off (equivalence-gated).
+    GREEDY_SEED_ONLY = False
+
     # Dinkelbach fractional-programming mode (experimental). When USE_DINKELBACH
     # is True, the ratio score = num/steps is maximized via a sequence of
     # linearized subproblems max(num - lambda*steps); the outer loop raises
@@ -154,6 +165,16 @@ class ExactGearsetOptimizer:
         Called once in _run after the activity params are resolved, before the
         search. Default: no-op (XP needs nothing per-activity)."""
         pass
+
+    def _saturation_caps(self, kappa, base_axis):
+        """{axis: objective upper-cap C_a} for the MAX axes that UPPER-SATURATE,
+        used to compute the per-solve tool-frontier headroom (fc-preopt Step 2).
+        Base objective: only the CAP_AXIS (work efficiency), saturating at kappa.
+        Subclasses whose objective clamps other axes (e.g. craft steps: DR at
+        1.0, NMC at 0.99, QO at its qp=1 threshold) OVERRIDE this to add them.
+        `base_axis` is the resolved fixed base vector (service+level+collectibles
+        +input) in case a subclass needs it to derive a cap (e.g. QO_sat)."""
+        return {self.CAP_AXIS: float(kappa)}
 
     def numerator(self, X0, s):
         """Value per action for the accumulated stat vector s (X0 = base)."""
@@ -412,7 +433,7 @@ class ExactGearsetOptimizer:
                 RKW[i][k] = RKW[i + 1][k] + max([o.keywords.count(k) for o in pool], default=0)
 
         best = {"r": float("-inf"), "tb": float("-inf"), "nfill": float("-inf"), "load": None, "s": None}
-        _nodes = [0]; _aborted = [False]
+        _nodes = [0]; _aborted = [False]; _seed_stop = [False]
         cap_axis = self.CAP_AXIS
 
         # Ring-pair permutation symmetry breaking. _pair_rA/_pair_rB are the
@@ -442,7 +463,7 @@ class ExactGearsetOptimizer:
                     - lambda_val * self.steps_lower_bound(S0, kappa, WE_level, s, Ri))
 
         def rec(idx, filled, s, tally, used, ban, chosen, tb):
-            if _aborted[0]:
+            if _aborted[0] or _seed_stop[0]:
                 return
             _nodes[0] += 1
             if _nodes[0] > self.NODE_BUDGET:
@@ -478,6 +499,11 @@ class ExactGearsetOptimizer:
                 if (r, tb, nfill) > (best["r"], best["tb"], best["nfill"]):
                     best["r"] = r; best["tb"] = tb; best["nfill"] = nfill
                     best["load"] = list(chosen); best["s"] = dict(s)
+                # Fast (greedy-seed) mode: the best-first descent just produced a
+                # complete feasible gearset — its greedy per-slot pick. Stop here
+                # and return it instead of exploring the rest of the tree.
+                if self.GREEDY_SEED_ONLY and best["load"] is not None:
+                    _seed_stop[0] = True
                 return
             if filled & (1 << idx):
                 rec(idx + 1, filled, s, tally, used, ban, chosen, tb); return
@@ -532,6 +558,7 @@ class ExactGearsetOptimizer:
         s0 = {a: float(base_stats.get(a, 0.)) for a in AXES}
         rec(0, 0, s0, {k: 0 for k in reqs}, {}, frozenset(), [], 0.0)
         self.last_run_budget_exhausted = bool(_aborted[0])
+        self.last_run_greedy_seed = bool(_seed_stop[0])
         self._last_opt_nodes = _nodes[0]
         if _aborted[0]:
             print(f"[EXACT] node budget {self.NODE_BUDGET} exhausted -> "
@@ -965,10 +992,12 @@ class ExactGearsetOptimizer:
 
     # ── public entry ─────────────────────────────────────────────────────────
     def optimize(self, activity, character, skill=None, location=None, base_stats=None,
-                 pets=None, consumables=None, input_item=None, frontier_cache=None):
+                 pets=None, consumables=None, input_item=None, frontier_cache=None,
+                 tool_frontier_cache=None):
         """Return {slot: Item|None} for controlled slots, or None to fall back."""
         self.last_run_budget_exhausted = False
         self._frontier_cache = frontier_cache
+        self._tool_frontier_cache = tool_frontier_cache
         try:
             return self._run(activity, character, skill, location, base_stats or {},
                              pets, consumables, input_item)
@@ -1128,23 +1157,25 @@ class ExactGearsetOptimizer:
         ring = make(by_slot.get("ring", []))
         slots["ring1"] = list(ring); slots["ring2"] = list(ring)
 
-        def pool_frontier(items, K):
+        def pool_frontier(items, K, headroom=None):
             _PMAXA = self.MAX_AXES; _PMINA = self.MIN_AXES; _PRK = tuple(reqs)
             _PLEN = len(_PMAXA) + len(_PMINA) + len(_PRK)
-            # Cap the CAP_AXIS (work_efficiency) at the max useful gear-side value
-            # for dominance comparison. Any tool-bundle W past (kappa - WE_level)
-            # is useless (other W sources are non-negative, so eff is already at
-            # kappa). Without this, a high-W bundle wrongly dominates a
-            # cap-equivalent bundle with better secondary stats. Activities keep
-            # the default 10-step floor and rarely hit this (tools have low WE vs
-            # activity caps), but crafting recipes (low kappa, high innate WE)
-            # frequently trigger it. (Thread 2026-07-27 residual fix.)
-            _w_cap = max(kappa - WE_level, 0.0)
-            _cap_idx = _PMAXA.index(self.CAP_AXIS) if self.CAP_AXIS in _PMAXA else -1
+            # Saturation-headroom caps (fc-preopt Step 2). Each MAX axis `a` that
+            # upper-saturates in the objective is capped in the dominance tuple at
+            # its per-solve headroom H_a = C_a - F_a - L_a (see
+            # util.saturation_headroom): C_a the objective cap, F_a the fixed
+            # (base+service+level) contribution, L_a a lower bound on the remaining
+            # non-tool slots. Exact per-completion (equivalence-gated). This
+            # GENERALIZES the old `_w_cap = kappa - WE_level`, which ignored
+            # service/base W and the remaining-slot drag and was therefore too
+            # tight under cursed stations (a latent exactness bug). `headroom` is a
+            # {axis: H} dict computed in optimize() once base + all non-tool slot
+            # pools + set-metas are known; absent -> no cap (raw frontier).
+            _HV = headroom or {}
 
             def _pdt(v, kw):
-                t = tuple(min(v[a], _w_cap) if (i == _cap_idx) else v[a]
-                          for i, a in enumerate(_PMAXA))
+                t = tuple(min(v[a], _HV[a]) if a in _HV else v[a]
+                          for a in _PMAXA)
                 return (t
                         + tuple(-v[a] for a in _PMINA)
                         + tuple(kw[k] for k in _PRK))
@@ -1238,6 +1269,7 @@ class ExactGearsetOptimizer:
                     for _sn in _gs["set_pieces"].keys():
                         _set_names.add(str(_sn).lower())
         _tool_its = make(by_slot.get("tools", []))
+        self._last_tool_pool_in = len(_tool_its)   # diag (fc-preopt [FC-BNB])
         if getattr(self, "_TOOL_CAND_PRUNE", True):
             _n0 = len(_tool_its)
             _tool_its = self._prune_tool_candidates(
@@ -1257,7 +1289,12 @@ class ExactGearsetOptimizer:
             _T = len(_tool_its)
             self.last_estimate_weight = _math.comb(_T, min(int(n_tools), _T)) if _T > 0 else 1
             return None
-        slots["tools"] = pool_frontier(_tool_its, n_tools)
+        # Tool FRONTIER build deferred (fc-preopt Step 2): it now runs after
+        # base + all non-tool slot pools + set-metas are known, so the
+        # saturation-headroom caps H_a = C_a - F_a - L_a can be computed and
+        # applied in pool_frontier's dominance tuple. See the build below.
+        self._last_tool_pool_pruned = len(_tool_its)
+        self._last_n_tools = int(n_tools)
         for sl in self.SINGLE:
             slots[sl] = self._prune(slots[sl], reqs)
         # NOTE: pets/consumables are NOT quality-variant gear — pets have no
@@ -1333,6 +1370,78 @@ class ExactGearsetOptimizer:
                         mid = f"{sname}|{r}|" + "/".join(combo)
                         refs_meta[mid] = [(combo[j], chosen[j]) for j in range(len(combo))]
                         metas.append(_Meta(mid, list(combo), tot, [], [_item_id(x) for x in chosen], meta_tb))
+
+        # ── tool frontier build with saturation-headroom caps (fc-preopt Step 2)
+        # Now that base (incl service + level + collectibles + input), every
+        # non-tool slot pool (SINGLE pruned, ring pair, pet, consumable) and the
+        # set-metas are all known, compute the per-axis headroom H_a and build
+        # the tool frontier capped at it. Exact per-completion (util.
+        # saturation_headroom + tests/test_headroom_transform_exact.py).
+        #
+        # C_a (objective cap): W upper-saturates at kappa; subclasses add others
+        # (DR=1.0, NMC=0.99, QO=sat) via _saturation_caps. F_a (fixed): base[a]
+        # plus WE_level for the W axis. L_a (remaining-slot lower bound): the sum
+        # over every non-tool slot of its cheapest candidate on axis a INCLUDING
+        # the empty choice (0), plus every set-meta's min(0, contribution) — all
+        # terms <= 0 so L_a is a true lower bound (conservative; extra negative
+        # terms only relax the cap, never over-clip). W keeps max(.,0) so the cap
+        # never goes below the old kappa-WE_level ceiling on normal stations.
+        _sat_caps = self._saturation_caps(kappa, base)
+        _nontool_slot_lists = [slots[sl] for sl in self.SINGLE] + \
+            [slots.get("ring1", []), slots.get("ring2", []),
+             slots.get("pet", []), slots.get("consumable", [])]
+        _HV = {}
+        for _ax, _cap in _sat_caps.items():
+            if _cap is None:
+                continue
+            _Fa = base.get(_ax, 0.0) + (float(WE_level) if _ax == self.CAP_AXIS else 0.0)
+            _La = 0.0
+            for _lst in _nontool_slot_lists:
+                _lo = 0.0
+                for _it in _lst:
+                    _val = _it.stats.get(_ax, 0.0)
+                    if _val < _lo:
+                        _lo = _val
+                _La += _lo
+            for _m in metas:
+                _mv = _m.stats.get(_ax, 0.0)
+                if _mv < 0.0:
+                    _La += _mv
+            _Ha = _cap - _Fa - _La
+            if _ax == self.CAP_AXIS:
+                _Ha = max(_Ha, 0.0)
+            _HV[_ax] = _Ha
+        # Frontier hoist (fc-preopt Step 4b): the capped tool frontier is a pure
+        # function of the pruned tool pool (via skill/location), n_tools, reqs,
+        # the axis model (MAX/MIN_AXES), and the headroom _HV (which folds in
+        # kappa/WE_level/base/service + remaining-slot drag). Cache + reuse it
+        # across an item's quality/variant cells instead of rebuilding (~132s/run
+        # for a toolbox). CRUCIAL: pool_frontier has a SIDE EFFECT — it populates
+        # refs_pool[bundle_id] (the map used to reconstruct the gearset). So the
+        # cache stores BOTH the frontier list AND its refs_pool entries, and a hit
+        # restores both; otherwise reconstruction sees empty tool slots and the
+        # objective silently changes (the bug the earlier hoist attempts hit).
+        _tfc = getattr(self, "_tool_frontier_cache", None)
+        _tfkey = None
+        _cached = None
+        if _tfc is not None:
+            _tfkey = (skill, str(location), int(n_tools),
+                      tuple(sorted((it.id, it.qty) for it in _tool_its)),
+                      frozenset(reqs.items()),
+                      tuple(self.MAX_AXES), tuple(self.MIN_AXES),
+                      tuple(sorted((a, round(float(h), 6)) for a, h in _HV.items())))
+            _cached = _tfc.get(_tfkey)
+        if _cached is not None:
+            _cf, _crefs = _cached
+            slots["tools"] = list(_cf)
+            refs_pool.update(_crefs)
+        else:
+            slots["tools"] = pool_frontier(_tool_its, n_tools, headroom=_HV)
+            if _tfkey is not None:
+                _tfc[_tfkey] = (list(slots["tools"]),
+                                {it.id: refs_pool[it.id]
+                                 for it in slots["tools"] if it.id in refs_pool})
+        self._last_tool_frontier = len(slots["tools"])
 
         # ── plateau-dump gating (target activity only) ────────────────────
         self._cur_activity_name = str(getattr(activity, "name", "") or "").lower()

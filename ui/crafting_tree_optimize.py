@@ -583,7 +583,11 @@ def optimize_crafting_tree(
                 node_locked_slots = node.get("locked_slots") or {}
                 def _hashable_lock_value(v):
                     if isinstance(v, dict):
-                        return (v.get("itemId"), v.get("quality"), v.get("level"))
+                        # useAbility is part of the key so toggling a PINNED
+                        # pet's "Use ability" (per-node frog-ability toggle)
+                        # busts the cache and recomputes the node instead of
+                        # reusing the pre-toggle gearset.
+                        return (v.get("itemId"), v.get("quality"), v.get("level"), v.get("useAbility"))
                     return v
                 _locked_key = tuple(sorted(
                     (slot, _hashable_lock_value(info))
@@ -608,6 +612,12 @@ def optimize_crafting_tree(
                     global_settings.get("optimize_pets",
                         ui_config.get("include_pets", False))
                 )
+                # "Use pet abilities" global setting (default True): when on, the
+                # per-node optimizer merges each candidate pet's active ability
+                # stats (e.g. Lucky Day +20 QO) onto the pet — like the main
+                # optimizer. Passed through to request_data below and part of the
+                # cache key so toggling it recomputes nodes. (frog-ability #5)
+                _use_pet_ability_for_cache = bool(global_settings.get("use_pet_ability", True))
                 # Equipped pet's per-pet "Use ability" pin (e.g. the Golden
                 # Frog's Lucky Day = +20 artisan quality_outcome). Passed through
                 # to the per-node optimizer below (request_data["equipped_pet"])
@@ -625,7 +635,7 @@ def optimize_crafting_tree(
                     and _equipped_pet_cfg.get("itemId")
                     else ''
                 )
-                cache_key = (node_source_type, node_recipe_id or node_activity_id, node_location or '', node_service_id or '', _locked_key, _include_pets_for_cache, _include_consumables_for_cache, node_chest_target or '', _use_ability_pet_key)
+                cache_key = (node_source_type, node_recipe_id or node_activity_id, node_location or '', node_service_id or '', _locked_key, _include_pets_for_cache, _include_consumables_for_cache, node_chest_target or '', _use_ability_pet_key, _use_pet_ability_for_cache)
                 if cache_key in _optimization_cache:
                     cached = _optimization_cache[cache_key]
                     node["gear_config"]["optimized_export"] = cached.get("gearset_export")
@@ -762,6 +772,12 @@ def optimize_crafting_tree(
                     # effect on tree optimization.
                     "include_consumables": _include_consumables_for_cache,
                     "include_pets": _include_pets_for_cache,
+                    # "Use pet abilities" global setting (default True): the
+                    # optimizer merges each candidate pet's active ability stats
+                    # onto the pet when on. optimize_worker reads this via
+                    # request.get("use_pet_ability", True); passing it lets the
+                    # tree-settings checkbox turn it off. (frog-ability #5)
+                    "use_pet_ability": _use_pet_ability_for_cache,
                     # Equipped pet + its per-pet "Use ability" flag. The recipe
                     # branch (optimize_worker) pins this pet with its ability
                     # stats merged when useAbility is set, so an artisan quality

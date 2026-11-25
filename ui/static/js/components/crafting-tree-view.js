@@ -22,6 +22,18 @@ import { formatFixed } from '../utils/number-format.js';
 // Bump this when the tree node format or source data changes to invalidate saved state
 const TREE_DATA_VERSION = 9;
 
+// Target quality uses CRAFTED tier names (Normal/Good/Great/Excellent/Perfect/
+// Eternal). Item RARITY uses common/uncommon/rare/epic/legendary/ethereal. When
+// an equipment item's rarity token leaks into target_quality (opened from the
+// Job Board, or the server's equipment default), map it to the crafted name so
+// the dropdown AND the optimizer agree (user: "it's not epic for crafted, it's
+// excellent"). Crafted words pass through unchanged.
+const _RARITY_TO_QUALITY = { common: 'Normal', uncommon: 'Good', rare: 'Great', epic: 'Excellent', legendary: 'Perfect', ethereal: 'Eternal' };
+function _normalizeTargetQuality(q) {
+    if (!q) return q;
+    return _RARITY_TO_QUALITY[String(q).toLowerCase()] || q;
+}
+
 class CraftingTreeView extends Component {
     constructor(element, props = {}) {
         super(element, props);
@@ -32,6 +44,17 @@ class CraftingTreeView extends Component {
             target_quality: 'Perfect', buffer_percentage: 0.05,
             spoiler_protection: true,
         };
+        // One-shot preset (e.g. ported from a Fastest Craft row): applied once in
+        // loadTree so the tree opens at that quality + fine mode (5.8).
+        this._preset = (props && props.preset) || null;
+        if (this._preset) {
+            this.globalSettings = { ...this.globalSettings };
+            if (this._preset.target_quality) this.globalSettings.target_quality = this._preset.target_quality;
+            if (this._preset.target_quantity) this.globalSettings.target_quantity = this._preset.target_quantity;
+            if (this._preset.use_fine !== undefined) this.globalSettings.use_fine = !!this._preset.use_fine;
+            if (this._preset.use_owned_quantities !== undefined) this.globalSettings.use_owned_quantities = !!this._preset.use_owned_quantities;
+        }
+        this.globalSettings.target_quality = _normalizeTargetQuality(this.globalSettings.target_quality);
         this.summary = null;
         this.optimizationStatus = null;
         this.childComponents = [];
@@ -501,6 +524,66 @@ class CraftingTreeView extends Component {
     }
 
     async loadTree(itemId) {
+        // FC "Crafting tree" button deep-link: the Steps-per-Recipe row stashes
+        // the FULL exact-solved tree (nodes + global_settings + summary) here so
+        // we render the SAME gearsets/locations/services the FC row computed,
+        // instead of re-optimizing from scratch (which produced a different
+        // gearset) — and WITHOUT persisting a saved tree on every click.
+        // Consume once.
+        const _fcPending = window._fcPendingTreeData;
+        if (_fcPending && _fcPending.tree_data && Array.isArray(_fcPending.tree_data.nodes)) {
+            window._fcPendingTreeData = null;
+            try {
+                const d = _fcPending.tree_data;
+                this.treeNodes = d.nodes || [];
+                // Capture the user's sticky crafting-tree solver prefs (loaded
+                // from the persisted panel settings in the constructor) BEFORE
+                // the wholesale overwrite below. The server build-tree gs
+                // defaults optimize_pets / optimize_consumables OFF and the FC
+                // preset doesn't carry them, so overwriting globalSettings
+                // wholesale silently reset them — the exact optimizer then
+                // ignored the pets/consumables the user had enabled in the
+                // standalone panel (part-1 bug). Re-apply them on top of the
+                // server gs so an FC-open honours the same pet/consumable
+                // choices a direct panel open would.
+                const _priorGs = this.globalSettings || {};
+                this.globalSettings = d.global_settings || this.globalSettings;
+                if (this.globalSettings !== _priorGs) {
+                    ['optimize_pets', 'optimize_consumables', 'use_pet_ability'].forEach((k) => {
+                        if (_priorGs[k] !== undefined) this.globalSettings[k] = _priorGs[k];
+                    });
+                }
+                // Carry the FC row's one-shot preset (quality / use_fine /
+                // use_owned_quantities) OVER the server-built gs so the opened
+                // tree's "use fine materials" + "use banked materials" boxes
+                // match the FC row that opened it. The server gs already sets
+                // use_fine from the variant, but it omits use_owned_quantities —
+                // without this the banked toggle (and, defensively, fine) did
+                // not reflect the row on the build-tree SUCCESS path (the
+                // constructor applied the preset, but this branch overwrote
+                // globalSettings wholesale). Consume the preset once.
+                if (this._preset) {
+                    if (this._preset.use_fine !== undefined) this.globalSettings.use_fine = !!this._preset.use_fine;
+                    if (this._preset.use_owned_quantities !== undefined) this.globalSettings.use_owned_quantities = !!this._preset.use_owned_quantities;
+                    if (this._preset.target_quality) this.globalSettings.target_quality = _normalizeTargetQuality(this._preset.target_quality);
+                    if (this._preset.target_quantity) this.globalSettings.target_quantity = this._preset.target_quantity;
+                    this._preset = null;
+                }
+                this.summary = d.summary || null;
+                this._currentPresetId = null;
+                window._craftingTreeShowHolisticDetails =
+                    !!(this.globalSettings && this.globalSettings.show_holistic_details);
+                store.update('ui.crafting_tree.target_item_id',
+                    _fcPending.target_item_id || itemId);
+                store.update('ui.crafting_tree.nodes', this.treeNodes);
+                store.update('ui.crafting_tree.global_settings', this.globalSettings);
+                if (this.summary) store.update('ui.crafting_tree.summary', this.summary);
+                this._renderTree();
+                return;
+            } catch (e) {
+                console.warn('[crafting-tree] FC inline tree load failed; falling back', e);
+            }
+        }
         // Notepad deep-link: a saved-tree-link click stashes the requested
         // preset id here. Honor it instead of the plain target-item load so
         // the exact saved node layout is restored. Consume once.
@@ -591,6 +674,7 @@ class CraftingTreeView extends Component {
                 fast_chests: existing.fast_chests !== undefined ? existing.fast_chests : fromServer.fast_chests,
                 exact_tree: existing.exact_tree !== undefined ? existing.exact_tree : fromServer.exact_tree,
             };
+            this.globalSettings.target_quality = _normalizeTargetQuality(this.globalSettings.target_quality);
             console.log('[ct-theme] after merge', {
                 line_colors: this.globalSettings.line_colors,
                 custom_colors_len: (this.globalSettings.custom_colors || []).length,
@@ -598,6 +682,24 @@ class CraftingTreeView extends Component {
             store.update('ui.crafting_tree.target_item_id', itemId);
             store.update('ui.crafting_tree.data_version', TREE_DATA_VERSION);
             store.update('ui.crafting_tree.nodes', this.treeNodes);
+            // One-shot FC preset (5.8): the `...fromServer` spread above
+            // overwrites target_quality with the server default (use_fine is
+            // already preserved by the explicit merge guard). Re-apply the
+            // ported quality (+ fine) AFTER the merge, persist, render, and
+            // re-solve so the tree actually OPENS at the FC row's quality/variant
+            // instead of snapping back to the server default. Consume it so it
+            // only affects this open.
+            if (this._preset) {
+                if (this._preset.target_quality) this.globalSettings.target_quality = _normalizeTargetQuality(this._preset.target_quality);
+                if (this._preset.target_quantity) this.globalSettings.target_quantity = this._preset.target_quantity;
+                if (this._preset.use_fine !== undefined) this.globalSettings.use_fine = !!this._preset.use_fine;
+                this._preset = null;
+                store.update('ui.crafting_tree.global_settings', this.globalSettings);
+                this._renderTree();
+                this._calculateOnly(true, true).catch(err =>
+                    console.warn('FC preset recalc failed (non-fatal):', err));
+                return;
+            }
             store.update('ui.crafting_tree.global_settings', this.globalSettings);
             this._renderTree();
         } catch (err) {

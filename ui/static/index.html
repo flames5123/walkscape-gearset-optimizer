@@ -27,6 +27,11 @@
 
     <link rel="manifest" href="/static/manifest.json?v=3">
 
+    <!-- Maintenance poller: DB-free status check that bounces an already-loaded
+         tab to the 503 maintenance page when maintenance starts (or a scheduled
+         window elapses), without ever calling the app/DB. Loaded early. -->
+    <script src="/static/js/maintenance-poller.js"></script>
+
     <!-- jQuery 3.7.1 from official CDN -->
     <script src="https://code.jquery.com/jquery-3.7.1.min.js"
         integrity="sha256-/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=" crossorigin="anonymous"></script>
@@ -50,6 +55,392 @@
 </head>
 
 <body>
+    <!-- ============================================================
+         Quality / rarity icon outline filters (refactor:quality-outlines).
+         One SVG <filter> per rarity+size replaces the old 4x drop-shadow()
+         stacks. The outline color is driven from CSS (#outline-* feFlood {
+         flood-color: var(--rarity-*-border) } in styles.css) so it stays
+         theme-reactive. SourceAlpha is offset in 4 cardinal directions,
+         merged, flooded with the rarity color, masked to that silhouette
+         (feComposite operator="in"), then drawn under the original graphic.
+         Hidden host; filters are referenced via filter: url(#outline-<token>-<size>).
+         ============================================================ -->
+    <svg id="quality-outline-defs" aria-hidden="true" width="0" height="0"
+         style="position:absolute;width:0;height:0;overflow:hidden;pointer-events:none">
+        <defs>
+            <!-- 1px outlines (item-icon, gear-slot slot-icon) -->
+            <filter id="outline-common-1" x="-100%" y="-100%" width="300%" height="300%" color-interpolation-filters="sRGB">
+                <feOffset in="SourceAlpha" dx="1" dy="0" result="o0"/>
+                <feOffset in="SourceAlpha" dx="-1" dy="0" result="o1"/>
+                <feOffset in="SourceAlpha" dx="0" dy="1" result="o2"/>
+                <feOffset in="SourceAlpha" dx="0" dy="-1" result="o3"/>
+                <feMerge result="neighbours">
+                    <feMergeNode in="o0"/><feMergeNode in="o1"/><feMergeNode in="o2"/><feMergeNode in="o3"/>
+                </feMerge>
+                <feFlood result="outlineColor"/>
+                <feComposite in="outlineColor" in2="neighbours" operator="in" result="outline"/>
+                <feMerge>
+                    <feMergeNode in="outline"/><feMergeNode in="SourceGraphic"/>
+                </feMerge>
+            </filter>
+            <filter id="outline-uncommon-1" x="-100%" y="-100%" width="300%" height="300%" color-interpolation-filters="sRGB">
+                <feOffset in="SourceAlpha" dx="1" dy="0" result="o0"/>
+                <feOffset in="SourceAlpha" dx="-1" dy="0" result="o1"/>
+                <feOffset in="SourceAlpha" dx="0" dy="1" result="o2"/>
+                <feOffset in="SourceAlpha" dx="0" dy="-1" result="o3"/>
+                <feMerge result="neighbours">
+                    <feMergeNode in="o0"/><feMergeNode in="o1"/><feMergeNode in="o2"/><feMergeNode in="o3"/>
+                </feMerge>
+                <feFlood result="outlineColor"/>
+                <feComposite in="outlineColor" in2="neighbours" operator="in" result="outline"/>
+                <feMerge>
+                    <feMergeNode in="outline"/><feMergeNode in="SourceGraphic"/>
+                </feMerge>
+            </filter>
+            <filter id="outline-rare-1" x="-100%" y="-100%" width="300%" height="300%" color-interpolation-filters="sRGB">
+                <feOffset in="SourceAlpha" dx="1" dy="0" result="o0"/>
+                <feOffset in="SourceAlpha" dx="-1" dy="0" result="o1"/>
+                <feOffset in="SourceAlpha" dx="0" dy="1" result="o2"/>
+                <feOffset in="SourceAlpha" dx="0" dy="-1" result="o3"/>
+                <feMerge result="neighbours">
+                    <feMergeNode in="o0"/><feMergeNode in="o1"/><feMergeNode in="o2"/><feMergeNode in="o3"/>
+                </feMerge>
+                <feFlood result="outlineColor"/>
+                <feComposite in="outlineColor" in2="neighbours" operator="in" result="outline"/>
+                <feMerge>
+                    <feMergeNode in="outline"/><feMergeNode in="SourceGraphic"/>
+                </feMerge>
+            </filter>
+            <filter id="outline-epic-1" x="-100%" y="-100%" width="300%" height="300%" color-interpolation-filters="sRGB">
+                <feOffset in="SourceAlpha" dx="1" dy="0" result="o0"/>
+                <feOffset in="SourceAlpha" dx="-1" dy="0" result="o1"/>
+                <feOffset in="SourceAlpha" dx="0" dy="1" result="o2"/>
+                <feOffset in="SourceAlpha" dx="0" dy="-1" result="o3"/>
+                <feMerge result="neighbours">
+                    <feMergeNode in="o0"/><feMergeNode in="o1"/><feMergeNode in="o2"/><feMergeNode in="o3"/>
+                </feMerge>
+                <feFlood result="outlineColor"/>
+                <feComposite in="outlineColor" in2="neighbours" operator="in" result="outline"/>
+                <feMerge>
+                    <feMergeNode in="outline"/><feMergeNode in="SourceGraphic"/>
+                </feMerge>
+            </filter>
+            <filter id="outline-legendary-1" x="-100%" y="-100%" width="300%" height="300%" color-interpolation-filters="sRGB">
+                <feOffset in="SourceAlpha" dx="1" dy="0" result="o0"/>
+                <feOffset in="SourceAlpha" dx="-1" dy="0" result="o1"/>
+                <feOffset in="SourceAlpha" dx="0" dy="1" result="o2"/>
+                <feOffset in="SourceAlpha" dx="0" dy="-1" result="o3"/>
+                <feMerge result="neighbours">
+                    <feMergeNode in="o0"/><feMergeNode in="o1"/><feMergeNode in="o2"/><feMergeNode in="o3"/>
+                </feMerge>
+                <feFlood result="outlineColor"/>
+                <feComposite in="outlineColor" in2="neighbours" operator="in" result="outline"/>
+                <feMerge>
+                    <feMergeNode in="outline"/><feMergeNode in="SourceGraphic"/>
+                </feMerge>
+            </filter>
+            <filter id="outline-ethereal-1" x="-100%" y="-100%" width="300%" height="300%" color-interpolation-filters="sRGB">
+                <feOffset in="SourceAlpha" dx="1" dy="0" result="o0"/>
+                <feOffset in="SourceAlpha" dx="-1" dy="0" result="o1"/>
+                <feOffset in="SourceAlpha" dx="0" dy="1" result="o2"/>
+                <feOffset in="SourceAlpha" dx="0" dy="-1" result="o3"/>
+                <feMerge result="neighbours">
+                    <feMergeNode in="o0"/><feMergeNode in="o1"/><feMergeNode in="o2"/><feMergeNode in="o3"/>
+                </feMerge>
+                <feFlood result="outlineColor"/>
+                <feComposite in="outlineColor" in2="neighbours" operator="in" result="outline"/>
+                <feMerge>
+                    <feMergeNode in="outline"/><feMergeNode in="SourceGraphic"/>
+                </feMerge>
+            </filter>
+            <filter id="outline-fine-1" x="-100%" y="-100%" width="300%" height="300%" color-interpolation-filters="sRGB">
+                <feOffset in="SourceAlpha" dx="1" dy="0" result="o0"/>
+                <feOffset in="SourceAlpha" dx="-1" dy="0" result="o1"/>
+                <feOffset in="SourceAlpha" dx="0" dy="1" result="o2"/>
+                <feOffset in="SourceAlpha" dx="0" dy="-1" result="o3"/>
+                <feMerge result="neighbours">
+                    <feMergeNode in="o0"/><feMergeNode in="o1"/><feMergeNode in="o2"/><feMergeNode in="o3"/>
+                </feMerge>
+                <feFlood result="outlineColor"/>
+                <feComposite in="outlineColor" in2="neighbours" operator="in" result="outline"/>
+                <feMerge>
+                    <feMergeNode in="outline"/><feMergeNode in="SourceGraphic"/>
+                </feMerge>
+            </filter>
+            <!-- 2px outlines: for icons rendered at 2x sprite scale (e.g.
+                 gear-slot .slot-icon = 64px over a 32-unit sprite). One
+                 sprite-pixel = 2 CSS px there, so the offset must be 2 to step
+                 one full pixel at a time (crisp stair-steps, not a thin ramp). -->
+            <filter id="outline-common-2" x="-100%" y="-100%" width="300%" height="300%" color-interpolation-filters="sRGB">
+                <feOffset in="SourceAlpha" dx="2" dy="0" result="o0"/>
+                <feOffset in="SourceAlpha" dx="-2" dy="0" result="o1"/>
+                <feOffset in="SourceAlpha" dx="0" dy="2" result="o2"/>
+                <feOffset in="SourceAlpha" dx="0" dy="-2" result="o3"/>
+                <feMerge result="neighbours">
+                    <feMergeNode in="o0"/><feMergeNode in="o1"/><feMergeNode in="o2"/><feMergeNode in="o3"/>
+                </feMerge>
+                <feFlood result="outlineColor"/>
+                <feComposite in="outlineColor" in2="neighbours" operator="in" result="outline"/>
+                <feMerge>
+                    <feMergeNode in="outline"/><feMergeNode in="SourceGraphic"/>
+                </feMerge>
+            </filter>
+            <filter id="outline-uncommon-2" x="-100%" y="-100%" width="300%" height="300%" color-interpolation-filters="sRGB">
+                <feOffset in="SourceAlpha" dx="2" dy="0" result="o0"/>
+                <feOffset in="SourceAlpha" dx="-2" dy="0" result="o1"/>
+                <feOffset in="SourceAlpha" dx="0" dy="2" result="o2"/>
+                <feOffset in="SourceAlpha" dx="0" dy="-2" result="o3"/>
+                <feMerge result="neighbours">
+                    <feMergeNode in="o0"/><feMergeNode in="o1"/><feMergeNode in="o2"/><feMergeNode in="o3"/>
+                </feMerge>
+                <feFlood result="outlineColor"/>
+                <feComposite in="outlineColor" in2="neighbours" operator="in" result="outline"/>
+                <feMerge>
+                    <feMergeNode in="outline"/><feMergeNode in="SourceGraphic"/>
+                </feMerge>
+            </filter>
+            <filter id="outline-rare-2" x="-100%" y="-100%" width="300%" height="300%" color-interpolation-filters="sRGB">
+                <feOffset in="SourceAlpha" dx="2" dy="0" result="o0"/>
+                <feOffset in="SourceAlpha" dx="-2" dy="0" result="o1"/>
+                <feOffset in="SourceAlpha" dx="0" dy="2" result="o2"/>
+                <feOffset in="SourceAlpha" dx="0" dy="-2" result="o3"/>
+                <feMerge result="neighbours">
+                    <feMergeNode in="o0"/><feMergeNode in="o1"/><feMergeNode in="o2"/><feMergeNode in="o3"/>
+                </feMerge>
+                <feFlood result="outlineColor"/>
+                <feComposite in="outlineColor" in2="neighbours" operator="in" result="outline"/>
+                <feMerge>
+                    <feMergeNode in="outline"/><feMergeNode in="SourceGraphic"/>
+                </feMerge>
+            </filter>
+            <filter id="outline-epic-2" x="-100%" y="-100%" width="300%" height="300%" color-interpolation-filters="sRGB">
+                <feOffset in="SourceAlpha" dx="2" dy="0" result="o0"/>
+                <feOffset in="SourceAlpha" dx="-2" dy="0" result="o1"/>
+                <feOffset in="SourceAlpha" dx="0" dy="2" result="o2"/>
+                <feOffset in="SourceAlpha" dx="0" dy="-2" result="o3"/>
+                <feMerge result="neighbours">
+                    <feMergeNode in="o0"/><feMergeNode in="o1"/><feMergeNode in="o2"/><feMergeNode in="o3"/>
+                </feMerge>
+                <feFlood result="outlineColor"/>
+                <feComposite in="outlineColor" in2="neighbours" operator="in" result="outline"/>
+                <feMerge>
+                    <feMergeNode in="outline"/><feMergeNode in="SourceGraphic"/>
+                </feMerge>
+            </filter>
+            <filter id="outline-legendary-2" x="-100%" y="-100%" width="300%" height="300%" color-interpolation-filters="sRGB">
+                <feOffset in="SourceAlpha" dx="2" dy="0" result="o0"/>
+                <feOffset in="SourceAlpha" dx="-2" dy="0" result="o1"/>
+                <feOffset in="SourceAlpha" dx="0" dy="2" result="o2"/>
+                <feOffset in="SourceAlpha" dx="0" dy="-2" result="o3"/>
+                <feMerge result="neighbours">
+                    <feMergeNode in="o0"/><feMergeNode in="o1"/><feMergeNode in="o2"/><feMergeNode in="o3"/>
+                </feMerge>
+                <feFlood result="outlineColor"/>
+                <feComposite in="outlineColor" in2="neighbours" operator="in" result="outline"/>
+                <feMerge>
+                    <feMergeNode in="outline"/><feMergeNode in="SourceGraphic"/>
+                </feMerge>
+            </filter>
+            <filter id="outline-ethereal-2" x="-100%" y="-100%" width="300%" height="300%" color-interpolation-filters="sRGB">
+                <feOffset in="SourceAlpha" dx="2" dy="0" result="o0"/>
+                <feOffset in="SourceAlpha" dx="-2" dy="0" result="o1"/>
+                <feOffset in="SourceAlpha" dx="0" dy="2" result="o2"/>
+                <feOffset in="SourceAlpha" dx="0" dy="-2" result="o3"/>
+                <feMerge result="neighbours">
+                    <feMergeNode in="o0"/><feMergeNode in="o1"/><feMergeNode in="o2"/><feMergeNode in="o3"/>
+                </feMerge>
+                <feFlood result="outlineColor"/>
+                <feComposite in="outlineColor" in2="neighbours" operator="in" result="outline"/>
+                <feMerge>
+                    <feMergeNode in="outline"/><feMergeNode in="SourceGraphic"/>
+                </feMerge>
+            </filter>
+            <filter id="outline-fine-2" x="-100%" y="-100%" width="300%" height="300%" color-interpolation-filters="sRGB">
+                <feOffset in="SourceAlpha" dx="2" dy="0" result="o0"/>
+                <feOffset in="SourceAlpha" dx="-2" dy="0" result="o1"/>
+                <feOffset in="SourceAlpha" dx="0" dy="2" result="o2"/>
+                <feOffset in="SourceAlpha" dx="0" dy="-2" result="o3"/>
+                <feMerge result="neighbours">
+                    <feMergeNode in="o0"/><feMergeNode in="o1"/><feMergeNode in="o2"/><feMergeNode in="o3"/>
+                </feMerge>
+                <feFlood result="outlineColor"/>
+                <feComposite in="outlineColor" in2="neighbours" operator="in" result="outline"/>
+                <feMerge>
+                    <feMergeNode in="outline"/><feMergeNode in="SourceGraphic"/>
+                </feMerge>
+            </filter>
+            <!-- 12 skill-colored 2px outlines (skill-row .skill-icon) -->
+            <filter id="outline-skill-fishing-2" x="-100%" y="-100%" width="300%" height="300%" color-interpolation-filters="sRGB">
+                <feOffset in="SourceAlpha" dx="2" dy="0" result="o0"/>
+                <feOffset in="SourceAlpha" dx="-2" dy="0" result="o1"/>
+                <feOffset in="SourceAlpha" dx="0" dy="2" result="o2"/>
+                <feOffset in="SourceAlpha" dx="0" dy="-2" result="o3"/>
+                <feMerge result="neighbours">
+                    <feMergeNode in="o0"/><feMergeNode in="o1"/><feMergeNode in="o2"/><feMergeNode in="o3"/>
+                </feMerge>
+                <feFlood result="outlineColor"/>
+                <feComposite in="outlineColor" in2="neighbours" operator="in" result="outline"/>
+                <feMerge>
+                    <feMergeNode in="outline"/><feMergeNode in="SourceGraphic"/>
+                </feMerge>
+            </filter>
+            <filter id="outline-skill-foraging-2" x="-100%" y="-100%" width="300%" height="300%" color-interpolation-filters="sRGB">
+                <feOffset in="SourceAlpha" dx="2" dy="0" result="o0"/>
+                <feOffset in="SourceAlpha" dx="-2" dy="0" result="o1"/>
+                <feOffset in="SourceAlpha" dx="0" dy="2" result="o2"/>
+                <feOffset in="SourceAlpha" dx="0" dy="-2" result="o3"/>
+                <feMerge result="neighbours">
+                    <feMergeNode in="o0"/><feMergeNode in="o1"/><feMergeNode in="o2"/><feMergeNode in="o3"/>
+                </feMerge>
+                <feFlood result="outlineColor"/>
+                <feComposite in="outlineColor" in2="neighbours" operator="in" result="outline"/>
+                <feMerge>
+                    <feMergeNode in="outline"/><feMergeNode in="SourceGraphic"/>
+                </feMerge>
+            </filter>
+            <filter id="outline-skill-mining-2" x="-100%" y="-100%" width="300%" height="300%" color-interpolation-filters="sRGB">
+                <feOffset in="SourceAlpha" dx="2" dy="0" result="o0"/>
+                <feOffset in="SourceAlpha" dx="-2" dy="0" result="o1"/>
+                <feOffset in="SourceAlpha" dx="0" dy="2" result="o2"/>
+                <feOffset in="SourceAlpha" dx="0" dy="-2" result="o3"/>
+                <feMerge result="neighbours">
+                    <feMergeNode in="o0"/><feMergeNode in="o1"/><feMergeNode in="o2"/><feMergeNode in="o3"/>
+                </feMerge>
+                <feFlood result="outlineColor"/>
+                <feComposite in="outlineColor" in2="neighbours" operator="in" result="outline"/>
+                <feMerge>
+                    <feMergeNode in="outline"/><feMergeNode in="SourceGraphic"/>
+                </feMerge>
+            </filter>
+            <filter id="outline-skill-woodcutting-2" x="-100%" y="-100%" width="300%" height="300%" color-interpolation-filters="sRGB">
+                <feOffset in="SourceAlpha" dx="2" dy="0" result="o0"/>
+                <feOffset in="SourceAlpha" dx="-2" dy="0" result="o1"/>
+                <feOffset in="SourceAlpha" dx="0" dy="2" result="o2"/>
+                <feOffset in="SourceAlpha" dx="0" dy="-2" result="o3"/>
+                <feMerge result="neighbours">
+                    <feMergeNode in="o0"/><feMergeNode in="o1"/><feMergeNode in="o2"/><feMergeNode in="o3"/>
+                </feMerge>
+                <feFlood result="outlineColor"/>
+                <feComposite in="outlineColor" in2="neighbours" operator="in" result="outline"/>
+                <feMerge>
+                    <feMergeNode in="outline"/><feMergeNode in="SourceGraphic"/>
+                </feMerge>
+            </filter>
+            <filter id="outline-skill-carpentry-2" x="-100%" y="-100%" width="300%" height="300%" color-interpolation-filters="sRGB">
+                <feOffset in="SourceAlpha" dx="2" dy="0" result="o0"/>
+                <feOffset in="SourceAlpha" dx="-2" dy="0" result="o1"/>
+                <feOffset in="SourceAlpha" dx="0" dy="2" result="o2"/>
+                <feOffset in="SourceAlpha" dx="0" dy="-2" result="o3"/>
+                <feMerge result="neighbours">
+                    <feMergeNode in="o0"/><feMergeNode in="o1"/><feMergeNode in="o2"/><feMergeNode in="o3"/>
+                </feMerge>
+                <feFlood result="outlineColor"/>
+                <feComposite in="outlineColor" in2="neighbours" operator="in" result="outline"/>
+                <feMerge>
+                    <feMergeNode in="outline"/><feMergeNode in="SourceGraphic"/>
+                </feMerge>
+            </filter>
+            <filter id="outline-skill-cooking-2" x="-100%" y="-100%" width="300%" height="300%" color-interpolation-filters="sRGB">
+                <feOffset in="SourceAlpha" dx="2" dy="0" result="o0"/>
+                <feOffset in="SourceAlpha" dx="-2" dy="0" result="o1"/>
+                <feOffset in="SourceAlpha" dx="0" dy="2" result="o2"/>
+                <feOffset in="SourceAlpha" dx="0" dy="-2" result="o3"/>
+                <feMerge result="neighbours">
+                    <feMergeNode in="o0"/><feMergeNode in="o1"/><feMergeNode in="o2"/><feMergeNode in="o3"/>
+                </feMerge>
+                <feFlood result="outlineColor"/>
+                <feComposite in="outlineColor" in2="neighbours" operator="in" result="outline"/>
+                <feMerge>
+                    <feMergeNode in="outline"/><feMergeNode in="SourceGraphic"/>
+                </feMerge>
+            </filter>
+            <filter id="outline-skill-crafting-2" x="-100%" y="-100%" width="300%" height="300%" color-interpolation-filters="sRGB">
+                <feOffset in="SourceAlpha" dx="2" dy="0" result="o0"/>
+                <feOffset in="SourceAlpha" dx="-2" dy="0" result="o1"/>
+                <feOffset in="SourceAlpha" dx="0" dy="2" result="o2"/>
+                <feOffset in="SourceAlpha" dx="0" dy="-2" result="o3"/>
+                <feMerge result="neighbours">
+                    <feMergeNode in="o0"/><feMergeNode in="o1"/><feMergeNode in="o2"/><feMergeNode in="o3"/>
+                </feMerge>
+                <feFlood result="outlineColor"/>
+                <feComposite in="outlineColor" in2="neighbours" operator="in" result="outline"/>
+                <feMerge>
+                    <feMergeNode in="outline"/><feMergeNode in="SourceGraphic"/>
+                </feMerge>
+            </filter>
+            <filter id="outline-skill-smithing-2" x="-100%" y="-100%" width="300%" height="300%" color-interpolation-filters="sRGB">
+                <feOffset in="SourceAlpha" dx="2" dy="0" result="o0"/>
+                <feOffset in="SourceAlpha" dx="-2" dy="0" result="o1"/>
+                <feOffset in="SourceAlpha" dx="0" dy="2" result="o2"/>
+                <feOffset in="SourceAlpha" dx="0" dy="-2" result="o3"/>
+                <feMerge result="neighbours">
+                    <feMergeNode in="o0"/><feMergeNode in="o1"/><feMergeNode in="o2"/><feMergeNode in="o3"/>
+                </feMerge>
+                <feFlood result="outlineColor"/>
+                <feComposite in="outlineColor" in2="neighbours" operator="in" result="outline"/>
+                <feMerge>
+                    <feMergeNode in="outline"/><feMergeNode in="SourceGraphic"/>
+                </feMerge>
+            </filter>
+            <filter id="outline-skill-trinketry-2" x="-100%" y="-100%" width="300%" height="300%" color-interpolation-filters="sRGB">
+                <feOffset in="SourceAlpha" dx="2" dy="0" result="o0"/>
+                <feOffset in="SourceAlpha" dx="-2" dy="0" result="o1"/>
+                <feOffset in="SourceAlpha" dx="0" dy="2" result="o2"/>
+                <feOffset in="SourceAlpha" dx="0" dy="-2" result="o3"/>
+                <feMerge result="neighbours">
+                    <feMergeNode in="o0"/><feMergeNode in="o1"/><feMergeNode in="o2"/><feMergeNode in="o3"/>
+                </feMerge>
+                <feFlood result="outlineColor"/>
+                <feComposite in="outlineColor" in2="neighbours" operator="in" result="outline"/>
+                <feMerge>
+                    <feMergeNode in="outline"/><feMergeNode in="SourceGraphic"/>
+                </feMerge>
+            </filter>
+            <filter id="outline-skill-agility-2" x="-100%" y="-100%" width="300%" height="300%" color-interpolation-filters="sRGB">
+                <feOffset in="SourceAlpha" dx="2" dy="0" result="o0"/>
+                <feOffset in="SourceAlpha" dx="-2" dy="0" result="o1"/>
+                <feOffset in="SourceAlpha" dx="0" dy="2" result="o2"/>
+                <feOffset in="SourceAlpha" dx="0" dy="-2" result="o3"/>
+                <feMerge result="neighbours">
+                    <feMergeNode in="o0"/><feMergeNode in="o1"/><feMergeNode in="o2"/><feMergeNode in="o3"/>
+                </feMerge>
+                <feFlood result="outlineColor"/>
+                <feComposite in="outlineColor" in2="neighbours" operator="in" result="outline"/>
+                <feMerge>
+                    <feMergeNode in="outline"/><feMergeNode in="SourceGraphic"/>
+                </feMerge>
+            </filter>
+            <filter id="outline-skill-hunting-2" x="-100%" y="-100%" width="300%" height="300%" color-interpolation-filters="sRGB">
+                <feOffset in="SourceAlpha" dx="2" dy="0" result="o0"/>
+                <feOffset in="SourceAlpha" dx="-2" dy="0" result="o1"/>
+                <feOffset in="SourceAlpha" dx="0" dy="2" result="o2"/>
+                <feOffset in="SourceAlpha" dx="0" dy="-2" result="o3"/>
+                <feMerge result="neighbours">
+                    <feMergeNode in="o0"/><feMergeNode in="o1"/><feMergeNode in="o2"/><feMergeNode in="o3"/>
+                </feMerge>
+                <feFlood result="outlineColor"/>
+                <feComposite in="outlineColor" in2="neighbours" operator="in" result="outline"/>
+                <feMerge>
+                    <feMergeNode in="outline"/><feMergeNode in="SourceGraphic"/>
+                </feMerge>
+            </filter>
+            <filter id="outline-skill-tailoring-2" x="-100%" y="-100%" width="300%" height="300%" color-interpolation-filters="sRGB">
+                <feOffset in="SourceAlpha" dx="2" dy="0" result="o0"/>
+                <feOffset in="SourceAlpha" dx="-2" dy="0" result="o1"/>
+                <feOffset in="SourceAlpha" dx="0" dy="2" result="o2"/>
+                <feOffset in="SourceAlpha" dx="0" dy="-2" result="o3"/>
+                <feMerge result="neighbours">
+                    <feMergeNode in="o0"/><feMergeNode in="o1"/><feMergeNode in="o2"/><feMergeNode in="o3"/>
+                </feMerge>
+                <feFlood result="outlineColor"/>
+                <feComposite in="outlineColor" in2="neighbours" operator="in" result="outline"/>
+                <feMerge>
+                    <feMergeNode in="outline"/><feMergeNode in="SourceGraphic"/>
+                </feMerge>
+            </filter>
+        </defs>
+    </svg>
+
     <!-- Header Bar -->
     <header class="header-bar">
         <div class="header-content">
@@ -105,6 +496,12 @@
                 <button class="bank-nav-btn" id="bank-nav-btn" aria-label="Bank Layouts" title="Bank Layouts"
                     style="display:none">
                     <img src="/assets/icons/ui/bank_icon.svg" alt="Bank Layouts" width="32" height="32">
+                </button>
+                <!-- Job Board nav icon — opens the #jobboard anchor page. Released
+                     (always shown); no display:none so the topbar Menu registers it. -->
+                <button class="jobboard-nav-btn" id="jobboard-nav-btn" aria-label="Job Board" title="Job Board"
+                    style="position:relative;">
+                    <img src="/assets/icons/ui/job_boards_icon.svg" alt="Job Board" width="32" height="32">
                 </button>
                 <!-- Walkdle daily-puzzle nav icon (green square) — shown only when walkdle feature flag is enabled -->
                 <button class="walkdle-nav-btn" id="walkdle-nav-btn" aria-label="Walkdle" title="Walkdle — daily puzzle"
@@ -301,6 +698,8 @@
 
     <!-- Trading marketplace overlay (self-contained, inline-styled by trading-page.js). -->
     <div id="trading-page"></div>
+    <!-- Job Board overlay (self-contained, inline-styled by jobboard-page.js). -->
+    <div id="jobboard-page" style="display: none;"></div>
 
     <!-- Bank Layout Simulator overlay (self-contained, inline-styled by
          bank/bank-page.js). -->
@@ -323,6 +722,13 @@
                     <div class="about-section about-version">
                         <p id="about-version-info">Loading version info...</p>
                     </div>
+                    <div class="about-section about-support">
+                        <h3>Support</h3>
+                        <p>All server hosting is free, and I'm only donating my free time out of passion for this
+                            project. If you'd like to buy me a drink, you can support me on Ko-fi:</p>
+                        <p><a class="kofi-link" href="https://ko-fi.com/flames5123" target="_blank"
+                                rel="noopener noreferrer">Buy me a drink on Ko-fi</a></p>
+                    </div>
                     <div class="about-section">
                         <h3>Known Issues</h3>
                         <ul class="about-list">
@@ -333,14 +739,17 @@
                     <div class="about-section">
                         <h3>Planned/TODO Features</h3>
                         <ul class="about-list">
-                            <li>Activity &amp; recipe favorites</li>
-                            <li>Service auto-selection based on character unlocks</li>
+                            <li>Enhanced route planning and configuration</li>
                         </ul>
                     </div>
                     <div class="about-section about-credits">
                         <p><strong>Developed by</strong> Flames5123</p>
                         <p><strong>Special thanks to</strong> Arky, fala, Bonez, and Kozz's tools, which all inspired
                             this project.</p>
+                        <p><strong>Open source contributors:</strong> <a href="https://github.com/jblake1991"
+                                target="_blank" rel="noopener noreferrer">jblake1991</a> and <a
+                                href="https://github.com/harkin" target="_blank" rel="noopener noreferrer">harkin</a>.
+                            Thank you for contributing code on GitHub!</p>
                         <p>All copyright for icons, colors, and designs belong to Not A Cult. Thank you for creating an
                             amazingly fun and engaging game!</p>
                         <p>Thank you for helping test the tool! Thanks to all my IRL friends and partners for helping
@@ -478,7 +887,37 @@
     <!-- Service Worker Registration (for PWA installability) -->
     <script>
         if ('serviceWorker' in navigator) {
-            navigator.serviceWorker.register('/sw.js').catch(() => { });
+            navigator.serviceWorker.register('/sw.js').then(async (reg) => {
+                // On-load push self-heal: browsers (esp. Firefox Android) rotate
+                // the push endpoint on browser/OS updates. Ensure the server
+                // always holds the CURRENT endpoint without the user reopening
+                // Settings — re-POST the live subscription, or re-create it if
+                // permission is granted but the local sub was lost. Idempotent
+                // (the server upserts by endpoint).
+                try {
+                    if (!('Notification' in window) || Notification.permission !== 'granted') return;
+                    if (!reg || !reg.pushManager) return;
+                    let sub = await reg.pushManager.getSubscription();
+                    if (!sub) {
+                        const kr = await fetch('/api/push/vapid-public-key');
+                        const kd = await kr.json();
+                        if (!kd || !kd.public_key) return;
+                        const b64 = (kd.public_key + '='.repeat((4 - kd.public_key.length % 4) % 4))
+                            .replace(/-/g, '+').replace(/_/g, '/');
+                        const raw = atob(b64);
+                        const key = new Uint8Array(raw.length);
+                        for (let i = 0; i < raw.length; i++) key[i] = raw.charCodeAt(i);
+                        sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
+                    }
+                    const j = sub.toJSON();
+                    if (!j || !j.endpoint || !j.keys) return;
+                    await fetch('/api/push/subscribe', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ endpoint: j.endpoint, p256dh: j.keys.p256dh, auth: j.keys.auth }),
+                    });
+                } catch (e) { /* best effort */ }
+            }).catch(() => { });
         }
     </script>
 

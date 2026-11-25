@@ -95,7 +95,11 @@ async function captureScreenshot(element) {
         const canvas = await Promise.race([
             window.html2canvas(element, {
                 backgroundColor: '#1a1a1a',
-                scale: window.devicePixelRatio || 2,
+                // Clamp to 1x. Retina (devicePixelRatio 2) produced 4x-area PNGs
+                // that bloated the bug-report JSON body to tens of MB, which
+                // stalled the upload (esp. macOS Safari) so the report never
+                // landed. 1x is plenty for a diagnostic screenshot.
+                scale: 1,
                 logging: false,
                 useCORS: true,
                 allowTaint: true,
@@ -109,7 +113,10 @@ async function captureScreenshot(element) {
 
         const elapsed = Math.round(performance.now() - startTime);
         console.log(`[BugReport] captureScreenshot success: ${elementId} (${elapsed}ms)`);
-        return canvas.toDataURL('image/png');
+        // JPEG @ 0.6 instead of lossless PNG — typically 10-20x smaller, which
+        // is what actually lets the bug-report POST complete on slow/Safari
+        // uploads. Screenshots are for human triage, so lossy is fine.
+        return canvas.toDataURL('image/jpeg', 0.6);
     } catch (error) {
         const elapsed = Math.round(performance.now() - startTime);
         console.warn(`[BugReport] captureScreenshot failed: ${elementId} after ${elapsed}ms — ${error.message}`);
@@ -282,20 +289,45 @@ async function submitBugReport(description, includeScreenshots = true) {
         // Always include JS console log in bug reports
         const debugLog = getDebugLog();
         if (debugLog && debugLog.length > 0) {
-            const formatted = debugLog.map(e =>
+            let formatted = debugLog.map(e =>
                 `${e.timestamp} [${e.level.toUpperCase()}] ${e.message}`
             ).join('\n');
+            // Hard cap the debug log at ~1MB (keep the most recent tail). An
+            // uncapped buffer on a heavy session produced a 56MB body that
+            // stalled the POST for ~90s and made the report look like it never
+            // submitted. The tail is what matters for diagnosis.
+            const MAX_DEBUG_LOG_CHARS = 1_000_000;
+            if (formatted.length > MAX_DEBUG_LOG_CHARS) {
+                const dropped = formatted.length - MAX_DEBUG_LOG_CHARS;
+                formatted = `[debug log truncated — dropped ${dropped} older chars]\n`
+                    + formatted.slice(-MAX_DEBUG_LOG_CHARS);
+            }
             requestBody.debug_log = formatted;
-            console.log(`Including debug log (${debugLog.length} entries)`);
+            console.log(`Including debug log (${debugLog.length} entries, ${formatted.length} chars)`);
         }
 
-        const response = await fetch('/api/bug-reports', {
+        // 60s client-side timeout so a stalled upload can never leave the modal
+        // frozen on "Submitting report..." forever (the original bug). Degrade
+        // gracefully on browsers without AbortSignal.timeout.
+        let timeoutSignal;
+        try {
+            timeoutSignal = (typeof AbortSignal !== 'undefined' && AbortSignal.timeout)
+                ? AbortSignal.timeout(60000)
+                : undefined;
+        } catch (_) {
+            timeoutSignal = undefined;
+        }
+
+        const fetchOpts = {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
             },
             body: JSON.stringify(requestBody)
-        });
+        };
+        if (timeoutSignal) fetchOpts.signal = timeoutSignal;
+
+        const response = await fetch('/api/bug-reports', fetchOpts);
 
         console.log('Response status:', response.status);
 
@@ -324,7 +356,11 @@ async function submitBugReport(description, includeScreenshots = true) {
 
     } catch (error) {
         console.error('Bug report submission failed:', error);
-        showStatus(`Failed to submit report: ${error.message}`, 'error');
+        const isTimeout = error && (error.name === 'TimeoutError' || error.name === 'AbortError');
+        const msg = isTimeout
+            ? 'the request timed out. Try again, or uncheck "Include screenshots of this site" to send a smaller report.'
+            : error.message;
+        showStatus(`Failed to submit report: ${msg}`, 'error');
 
         // Re-enable submit button
         submitBtn.disabled = false;
@@ -419,9 +455,10 @@ async function handleEnableNotificationsClick() {
 
     try {
         // Prefer the existing settings-modal init path so prefs/subscription
-        // flow stays consistent with the Personalization tab.
+        // flow stays consistent with the Personalization tab. That path now
+        // calls Notification.requestPermission() itself (required for Safari,
+        // which does not auto-prompt on pushManager.subscribe()).
         if (window.settingsModal && typeof window.settingsModal._initPushNotifications === 'function') {
-            window.settingsModal._pushPermission = 'granted';
             await window.settingsModal._initPushNotifications();
         } else {
             // Fallback: request permission directly, then subscribe.

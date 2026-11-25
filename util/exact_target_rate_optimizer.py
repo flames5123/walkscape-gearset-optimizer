@@ -392,7 +392,7 @@ class ExactFineRateOptimizer(ExactTargetRateOptimizer):
 
 def exact_fine_rate_optimize(activity, character, target_items, skill=None,
                              location=None, base_stats=None, pets=None,
-                             consumables=None, input_item=None):
+                             consumables=None, input_item=None, fast=False):
     """Return {slot: Item|None} maximizing a FINE item's rate/step, or None.
 
     MITM enabled: the _combine_best override models the (1+k_fmf*F) fine factor
@@ -407,6 +407,7 @@ def exact_fine_rate_optimize(activity, character, target_items, skill=None,
     opt.DEDUP_RING_ORDER = _DEDUP_RING_ORDER
     opt.SLOT_ORDER_STRATEGY = _SLOT_ORDER_STRATEGY
     opt._MITM_VALIDATE = _MITM_VALIDATE
+    opt.GREEDY_SEED_ONLY = bool(fast)
     result = opt.optimize(activity, character, skill=skill, location=location,
                           base_stats=base_stats, pets=pets, consumables=consumables,
                           input_item=input_item)
@@ -475,7 +476,8 @@ def exact_finding_rate_optimize(activity, character, target, skill=None,
 
 def exact_target_rate_optimize(activity, character, target_items, skill=None,
                                location=None, base_stats=None, pets=None,
-                               consumables=None, input_item=None, frontier_cache=None):
+                               consumables=None, input_item=None, frontier_cache=None,
+                               fast=False):
     """Return {slot: Item|None} maximizing (target-item rate)/step, or None to
     fall back. `target_items` = one item name or a list (combined new-items)."""
     opt = ExactTargetRateOptimizer(target_items)
@@ -484,6 +486,7 @@ def exact_target_rate_optimize(activity, character, target_items, skill=None,
     opt.DEDUP_RING_ORDER = _DEDUP_RING_ORDER
     opt.SLOT_ORDER_STRATEGY = _SLOT_ORDER_STRATEGY
     opt._MITM_VALIDATE = _MITM_VALIDATE
+    opt.GREEDY_SEED_ONLY = bool(fast)
     result = opt.optimize(activity, character, skill=skill, location=location,
                           base_stats=base_stats, pets=pets, consumables=consumables,
                           input_item=input_item, frontier_cache=frontier_cache)

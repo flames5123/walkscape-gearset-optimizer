@@ -25,3 +25,6 @@ pywebpush==2.0.0
 
 # Linear programming solver — used by crafting tree holistic optimization
 scipy>=1.11
+
+# Excel (.xlsx) parsing — used by the trading bulk-import file upload
+openpyxl>=3.1

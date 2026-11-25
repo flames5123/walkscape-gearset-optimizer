@@ -11,7 +11,12 @@ import json
 import math
 import os
 import re
+import io
+import csv
+import time
+import tempfile
 import sqlite3
+import threading
 import uuid
 import logging
 import html as html_lib
@@ -168,6 +173,25 @@ class ShortCachedStaticFiles(StaticFiles):
 
 DATABASE_PATH = "sessions.db"
 
+
+def _ts_iso_z(v):
+    """Coerce an api_access_audit.timestamp value to the app's canonical ISO
+    'Z' string, backend-agnostically.
+
+    SQLite stores the column as ISO text, so reads return a str (passed through
+    unchanged). Postgres now stores it as timestamptz, so reads return a
+    tz-aware datetime; render it back to the exact _utc_now() form
+    (YYYY-MM-DDTHH:MM:SS.mmmZ) so emitted values are byte-identical across
+    backends. None passes through.
+    """
+    if v is None or isinstance(v, str):
+        return v
+    try:
+        from datetime import timezone as _tz
+        return v.astimezone(_tz.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+    except Exception:
+        return str(v)
+
 # ============================================================================
 # VAPID PUSH NOTIFICATION CONFIGURATION
 # ============================================================================
@@ -217,10 +241,37 @@ def _connect_db():
     connection benefits from WAL (concurrent readers) and a 5-second
     busy timeout (avoids instant 'database is locked' errors).
     """
+    # Postgres migration: route through the gated adapter so all ~40
+    # _connect_db() endpoints (admin dashboard, bug reports, SQL runner, etc.)
+    # work on PG instead of opening a raw sqlite file. No-op on sqlite (the
+    # default) — the original WAL + busy_timeout path below is unchanged.
+    import ui.db_backend as _dbk
+    if _dbk.is_postgres():
+        return _dbk.connect(DATABASE_PATH)
     conn = sqlite3.connect(DATABASE_PATH, timeout=5)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
     return conn
+
+
+def _current_db_size_bytes():
+    """Current database size in bytes.
+
+    On Postgres use pg_database_size(current_database()) -- the on-disk
+    sessions.db file is stale/irrelevant after the PG cutover. On SQLite fall
+    back to the file size. Used by the admin health page, DB-size trend
+    snapshots, and the dashboard DB-size card.
+    """
+    import ui.db_backend as _dbk
+    if _dbk.is_postgres():
+        conn = _connect_db()
+        try:
+            c = conn.cursor()
+            c.execute("SELECT pg_database_size(current_database())")
+            return int(c.fetchone()[0])
+        finally:
+            conn.close()
+    return os.path.getsize(DATABASE_PATH)
 
 
 # ============================================================================
@@ -357,6 +408,15 @@ class ConfigUpdate(BaseModel):
     """
     path: Union[str, List[str]]
     value: Any
+
+
+class ConfigBatchUpdate(BaseModel):
+    """A coalesced batch of config-path updates (debounced client-side).
+
+    Each entry has the same shape as ConfigUpdate; the batch is applied in one
+    transaction via /api/session/{uuid}/config-batch.
+    """
+    updates: List[ConfigUpdate]
 
 
 class ErrorResponse(BaseModel):
@@ -614,6 +674,44 @@ async def _sheets_sync_loop():
 setup_logging()
 
 
+async def _job_board_scrape_loop():
+    """Background task (owner-only): keep the weekly job boards ingested.
+
+    Jobs refresh Monday 00:00 UTC. The scrape is INSERT-OR-IGNORE idempotent, so
+    a mid-scrape restart or a second (blue/green) instance only ever adds jobs
+    not already stored. Flow:
+      * current week already fully ingested -> sleep to the next Monday boundary
+        (the loop stops retrying, per spec);
+      * not yet / changed -> ingest it; on full success mark the week done +
+        sleep to the next boundary; on failure sleep a short retry interval and
+        try again. Blocking HTTP/DB runs in an executor so the loop isn't stalled.
+    """
+    await asyncio.sleep(25)  # let startup settle
+    RETRY_SECS = 600         # 10 min between retries after a failure
+    GRACE_SECS = 120         # wait past the boundary so the new week is published
+    from ui import job_board_scraper as _jbs
+    while True:
+        delay = RETRY_SECS
+        try:
+            loop = asyncio.get_event_loop()
+            res = await loop.run_in_executor(None, _jbs.scrape_current_week, get_db())
+            status = res.get("status")
+            if status in ("success", "already_done", "unchanged"):
+                delay = _jbs.seconds_until_next_week_boundary() + GRACE_SECS
+                if status != "already_done":
+                    log(f"🧾 Job-board ingest {status}: week {res.get('week_index')} "
+                        f"(+{res.get('jobs_inserted',0)} new / {res.get('jobs_skipped',0)} skipped, "
+                        f"{res.get('boards_seen',0)} boards); next check in {int(delay)}s")
+                    if res.get("unresolved_boards"):
+                        log(f"⚠️  Job-board: unresolved board ids: {res['unresolved_boards']}")
+            else:
+                log(f"⚠️  Job-board ingest failed (week {res.get('week_index')}): {res.get('error')}; "
+                    f"retry in {RETRY_SECS}s")
+        except Exception as e:
+            log(f"⚠️  Job-board scrape loop error: {e}; retry in {RETRY_SECS}s")
+        await asyncio.sleep(delay)
+
+
 @app.on_event("startup")
 async def startup_event():
     """Re-apply log filter after uvicorn initializes (needed with --reload)."""
@@ -646,16 +744,33 @@ async def startup_event():
     ui_dir = Path(__file__).parent
     db_path = str(Path(DATABASE_PATH).resolve())
     migrations_dir = str(ui_dir / "migrations")
-    print(f"🔄 Checking migrations (db={db_path}, migrations={migrations_dir})")
+    # Postgres materializes the full schema via _init_db_postgres (pg_schema.sql);
+    # the SQLite file-migration runner is sqlite-only and MUST be skipped on PG
+    # (otherwise it opens a stray sqlite file and applies sqlite-specific DDL).
+    import ui.db_backend as _dbk
+    if _dbk.is_postgres():
+        print("🔄 Skipping SQLite migration runner (backend=postgres; schema from pg_schema.sql)")
+    else:
+        print(f"🔄 Checking migrations (db={db_path}, migrations={migrations_dir})")
+        try:
+            applied = run_migrations(
+                db_path=db_path,
+                migrations_dir=migrations_dir
+            )
+            if applied:
+                print(f"🔄 Applied {applied} migration(s) on startup")
+        except Exception as e:
+            print(f"⚠️  Migration error on startup (non-fatal): {e}")
+
+    # Eagerly build the process-global ItemCatalog so no user request pays the
+    # CPU-bound build cost on the event loop. Static game data, identical for
+    # every process; builds once here instead of lazily on the first /api/items.
     try:
-        applied = run_migrations(
-            db_path=db_path,
-            migrations_dir=migrations_dir
-        )
-        if applied:
-            print(f"🔄 Applied {applied} migration(s) on startup")
+        from ui.catalog import get_item_catalog
+        get_item_catalog()
+        print("📚 ItemCatalog prewarmed at startup")
     except Exception as e:
-        print(f"⚠️  Migration error on startup (non-fatal): {e}")
+        print(f"⚠️  ItemCatalog prewarm failed (non-fatal, will lazy-build): {e}")
 
     # one-time wipes/backfills). A standby skips all of it until promoted via
     # /api/admin/become-active, which calls _run_owner_startup() then. An absent
@@ -675,6 +790,13 @@ async def _run_owner_startup(db_path):
     (become-active). MUST be idempotent: a standby being promoted while the old
     owner drains may briefly overlap it. Does NOT include the active_optimizations
     wipe (that is cold-boot only; the draining owner still owns its rows)."""
+
+    # Weekly job-board scraper: ingest the running week's boards, then sleep to
+    # the next Monday 00:00 UTC boundary. Idempotent (INSERT OR IGNORE by job id).
+    try:
+        asyncio.create_task(_job_board_scrape_loop())
+    except Exception as e:
+        print(f"⚠️  Could not start job-board scrape loop (non-fatal): {e}")
 
     # ── Stats Report precompute auto-generate / refresh (2026-06-15) ─────
     # The stats-report stale-detection "item_change" signal diffs a per-scope
@@ -1186,17 +1308,27 @@ async def api_audit_middleware(request: Request, call_next):
         user_agent = request.headers.get('user-agent', '')
         # Get real IP (handle proxies)
         ip_address = request.headers.get('x-forwarded-for', request.client.host if request.client else 'unknown')
+        endpoint = request.url.path
+        method = request.method
+        status_code = response.status_code
 
+        # Fire-and-forget the analytics INSERT on a worker thread so a slow or
+        # lock-contended SQLite write never stalls the single event loop. This
+        # ran synchronously on the loop on EVERY /api/* request; under write-lock
+        # contention each request blocked up to the busy-timeout and they stacked
+        # into 80-135s stalls that froze even static assets (prod outage
+        # 2026-10-15). Access logging is best-effort analytics, so we never await
+        # it and tolerate a dropped row on failure.
         _AUDIT_WRITER.submit(
             _write_api_access,
             session_uuid=session_uuid,
-            endpoint=request.url.path,
-            method=request.method,
+            endpoint=endpoint,
+            method=method,
             user_agent=user_agent,
             ip_address=ip_address,
             timestamp=_utc_now(),
             response_time_ms=elapsed_ms,
-            status_code=response.status_code,
+            status_code=status_code,
         )
 
     return response
@@ -1239,6 +1371,12 @@ def _spa_html() -> str:
     html = html.replace(
         'src="/static/js/main.js"',
         f'src="/static/js/main.js?v={DATA_VERSION}"'
+    )
+    # Cache-bust the maintenance poller the same way so a new build always ships
+    # the current poller logic.
+    html = html.replace(
+        'src="/static/js/maintenance-poller.js"',
+        f'src="/static/js/maintenance-poller.js?v={DATA_VERSION}"'
     )
     # Inject DATA_VERSION into styles.css URL as well — iOS Safari caches CSS
     # aggressively, and the hardcoded "?v=4" never changes between deploys.
@@ -1720,8 +1858,8 @@ def _session_usage_stats(session_uuid: str) -> Dict[str, Any]:
         row = cur.fetchone()
         if row:
             stats["total_api_calls"] = row[0] or 0
-            stats["first_seen"] = row[1]
-            stats["last_seen"] = row[2]
+            stats["first_seen"] = _ts_iso_z(row[1])
+            stats["last_seen"] = _ts_iso_z(row[2])
     finally:
         if not db._persistent_conn:
             conn.close()
@@ -1976,6 +2114,22 @@ async def sell_for_chips(request: Request):
 # Whitelist of allowed documents. Only these can be served via the API.
 # Format: { "id": { "label": "Display Name", "path": "relative/path.md" } }
 ALLOWED_DOCS = {
+    "home-portal-spec": {
+        "label": "Home Guest-Access Portal — Spec (NEW, for review)",
+        "path": "home/SPEC.md",
+    },
+    "fc-preopt-design": {
+        "label": "Fastest-Craft Pre-Optimization — Design (NEW, for review)",
+        "path": ".kiro/specs/fc-preopt/design.md",
+    },
+    "fc-exact-speedup-design": {
+        "label": "Fastest-Craft Exact Speedup — Design (headroom caps + correlation bound + MITM)",
+        "path": ".kiro/specs/fc-preopt/exact-speedup-design.md",
+    },
+    "postgres-migration-scope": {
+        "label": "Postgres Migration — Scope",
+        "path": ".kiro/specs/postgres-migration/scope.md",
+    },
     "trading-requirements": {
         "label": "Trading — Requirements",
         "path": ".kiro/specs/trading/requirements.md",
@@ -2679,7 +2833,40 @@ async def import_character(uuid: str, data: ImportData):
             [export_name for export_name in character._gear_raw.values() if export_name]
         )
         
+        # Pet egg items (catalog type 'egg') have no slot, no duration, and are
+        # not materials, so they match none of the branches below and were
+        # silently dropped on import. Build lookup maps so we can detect them
+        # up front and add the canonical egg id (the EGGS key, which is exactly
+        # what catalog._get_eggs() emits and the frontend matches against).
+        try:
+            from util.autogenerated.eggs import EGGS as _EGGS_CATALOG
+            _egg_ids = set(_EGGS_CATALOG.keys())
+            _egg_name_to_id = {
+                (egg.get('name') or egg_id).lower().replace(' ', '_'): egg_id
+                for egg_id, egg in _EGGS_CATALOG.items()
+            }
+        except Exception as _egg_err:
+            log(f"⚠ Failed to load egg catalog for import: {_egg_err}", uuid)
+            _egg_ids = set()
+            _egg_name_to_id = {}
+        
         for export_name in all_export_names:
+            # Pet egg items: strip an optional rarity ('_common' ...) or '_fine'
+            # suffix, then resolve to the canonical egg id. Done before the
+            # suffix logic below so eggs are never routed into the crafted or
+            # material branches (which drop them).
+            _egg_base = export_name.lower()
+            for _egg_sfx in ('_fine', *(f'_{s}' for s in rarity_to_quality)):
+                if _egg_base.endswith(_egg_sfx):
+                    _egg_base = _egg_base[:-len(_egg_sfx)]
+                    break
+            if _egg_base in _egg_ids:
+                owned_items_simplified.add(_egg_base)
+                continue
+            if _egg_base in _egg_name_to_id:
+                owned_items_simplified.add(_egg_name_to_id[_egg_base])
+                continue
+            
             # Check if this is a crafted item with a quality suffix
             base_name = export_name
             found_suffix = None
@@ -2754,6 +2941,10 @@ async def import_character(uuid: str, data: ImportData):
             "collectibles": character._collectibles_raw,
             # Pets from game export — parsed with species, level, xp, stage, abilities
             "pets": character.pets,
+            # Achievements from the game export (char-export v2): raw per-achievement
+            # list of {id, difficulty, progress, finished, claimed, unlocked_at?}.
+            # Surfaced to the achievements page via /api/achievements/progress.
+            "achievements": character.achievements,
             # Store ring qualities only (non-rings don't need this)
             "item_qualities": simplified_qualities,
             "item_quantities": simplified_quantities,
@@ -3000,12 +3191,20 @@ def _recompute_inventory_value(uuid: str):
 
 
 @app.patch("/api/session/{uuid}/config")
-async def update_config(uuid: str, update: ConfigUpdate):
+def update_config(uuid: str, update: ConfigUpdate):
     """
     Update a specific configuration path.
-    
+
     Supports nested paths like "items.TRAVELERS_KIT.has" or "skills.mining".
     Automatically determines whether to update character_config or ui_config.
+
+    NOTE: declared sync `def` (not `async`) on purpose. The body is pure
+    blocking SQLite (get_session + update_config_path + recompute), so FastAPI
+    runs it in its worker threadpool instead of on the single uvicorn event
+    loop. This high-frequency write otherwise serialized behind SQLite's
+    single-writer lock and stalled every other request for up to minutes
+    (prod incident 2026-10-16: PATCH .../config 500 in 210s, /api/trading/*
+    stacking at 30/60/90s). Keep it sync-threadpooled.
     
     Args:
         uuid: Session UUID
@@ -3064,6 +3263,54 @@ async def update_config(uuid: str, update: ConfigUpdate):
             }
         )
 
+
+@app.post("/api/session/{uuid}/config-batch")
+def update_config_batch(uuid: str, batch: ConfigBatchUpdate):
+    """Apply a coalesced batch of config-path updates in ONE transaction.
+
+    Backs the frontend's debounced config saver: a burst of gear/UI toggles is
+    buffered client-side and flushed here as a single request, applied in one
+    session read + <=2 writes instead of 2*N. Sync `def` so FastAPI threadpools
+    it off the event loop (same rationale as update_config). POST (not PATCH) so
+    navigator.sendBeacon can call it on page unload / tab-hide.
+    """
+    if not batch.updates:
+        return {"success": True, "applied": 0}
+    if not get_db().get_session(uuid):
+        raise HTTPException(
+            status_code=404,
+            detail={"error": True, "code": "SESSION_NOT_FOUND",
+                    "message": f"Session {uuid} not found"})
+    try:
+        pairs = [(u.path, u.value) for u in batch.updates]
+        get_db().update_config_paths_batch(uuid, pairs)
+
+        # Run the same cascades as single update_config, once per flush, if any
+        # relevant item field changed across the batch.
+        any_has = False
+        any_item_stale = False
+        for u in batch.updates:
+            parts = u.path if isinstance(u.path, list) else u.path.split('.')
+            if len(parts) >= 2 and parts[0] == 'items' and parts[-1] == 'has':
+                any_has = True
+            if len(parts) >= 3 and parts[0] == 'items' and parts[2] in ('has', 'hide', 'quality'):
+                any_item_stale = True
+        if any_has:
+            _recompute_inventory_value(uuid)
+        if any_item_stale:
+            try:
+                get_db().mark_stats_report_runs_stale(uuid)
+            except Exception:
+                pass  # Non-critical
+
+        return {"success": True, "applied": len(batch.updates)}
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail={"error": True, "code": "DATABASE_ERROR",
+                    "message": "Failed to apply config batch", "details": str(e)})
+
+
 # ============================================================================
 # GEAR SET API ENDPOINTS
 # ============================================================================
@@ -3113,7 +3360,7 @@ def get_gear_sets(uuid: str, response: Response, summary: bool = False, limit: O
     # setting it is safe and future-proofs against subdomain CDN setups.
     response.headers["Access-Control-Expose-Headers"] = "X-Total-Count"
 
-    gear_sets = get_db().get_gear_sets(uuid, limit=limit, offset=offset)
+    gear_sets = get_db().get_gear_sets(uuid, limit=limit, offset=offset, summary=summary)
     if summary:
         return [
             {
@@ -4276,13 +4523,13 @@ async def get_items(request: Request, response: Response):
     Returns:
         Dict with categories and item counts
     """
-    from ui.catalog import ItemCatalog
+    from ui.catalog import get_item_catalog
     
     cached = _maybe_static_304(request, response, "items")
     if cached:
         return cached
     
-    catalog = ItemCatalog()
+    catalog = get_item_catalog()
     
     return {
         "categories": catalog.categories,
@@ -4321,7 +4568,7 @@ async def get_catalog(request: Request, response: Response):
     Returns:
         Dict with items array and collectibles array
     """
-    from ui.catalog import ItemCatalog
+    from ui.catalog import get_item_catalog
     from util.walkscape_constants import Item
     from util.trading_tradable import is_tradable
     try:
@@ -4337,7 +4584,7 @@ async def get_catalog(request: Request, response: Response):
     if cached:
         return cached
     
-    catalog = ItemCatalog()
+    catalog = get_item_catalog()
     
     # Flatten all items from categories into a single list
     all_items = []
@@ -4347,6 +4594,11 @@ async def get_catalog(request: Request, response: Response):
         if isinstance(category_data, dict):
             # Check if this is an item (has 'id' field)
             if 'id' in category_data and 'name' in category_data:
+                # Copy-on-write: this endpoint stamps per-item fields (game_key,
+                # tradable, canBeTraded, subtype, category, sources, …). The
+                # catalog is now a shared cached singleton, so mutate a shallow
+                # copy and append that — never the original shared dict.
+                category_data = dict(category_data)
                 _nm = category_data.get('name') or ''
                 _nid = _nm.lower().replace(' ', '_').replace('(', '').replace(')', '').replace('-', '_').replace("'", '')
                 # Authoritative game export key (birch_logs, letter_from_a._a.) — the
@@ -4665,9 +4917,18 @@ async def achievements_progress_get(request: Request):
     """Return the session's saved achievement progress (manual check-offs +
     reward reveals). Benign 200 with empty progress when the feature is off."""
     session_uuid = request.state.session_uuid
+    # Authoritative per-achievement status from the game export (char-export v2),
+    # derived from the session's stored character_config.achievements. Lets the
+    # achievements page mark imported-finished achievements complete without the
+    # per-requirement heuristic. Empty {} when the character has no v2 import.
+    from util.character_export_util import build_imported_achievement_status
+    _session = get_db().get_session(session_uuid)
+    _cfg = (_session or {}).get("character_config") or {}
+    imported = build_imported_achievement_status(_cfg.get("achievements"))
     return {
         "enabled": True,  # Released to all users
         "progress": get_db().get_achievement_progress(session_uuid),
+        "imported": imported,
     }
 
 
@@ -8319,6 +8580,44 @@ async def reports_page():
 
 
 
+# ---- Admin: Job Board page (weekly scraper health: last ingest + failure logs) ----
+
+
+
+
+
+# ---- Public: Job Board page data (current week, enriched + facets) ----
+
+@app.get("/api/jobboard/data")
+async def jobboard_data(request: Request):
+    """Current-week job boards for the main-site Job Board page: each job
+    enriched with board/location/faction(s)/tier and parsed goals+rewards, plus
+    the facet lists that drive the filter dropdowns. Public (no auth)."""
+    from ui import job_board_service as _jbsvc
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, lambda: _jbsvc.build_jobboard_data(get_db()))
+
+
+@app.get("/api/jobboard/handin")
+async def jobboard_handin(request: Request):
+    """Per-session 'can hand in now' flags for the engine-backed modes
+    (owned_materials / partial_materials / can_obtain), keyed by job id. Needs
+    the session's owned items, crafting recipes, and activity-access gating."""
+    session_uuid = request.state.session_uuid
+    if not session_uuid:
+        return {"handin": {}, "mat_colors": {}}
+    from ui import job_board_handin as _jbh
+    loop = asyncio.get_event_loop()
+    try:
+        result = await loop.run_in_executor(None, lambda: _jbh.compute_handin(get_db(), session_uuid))
+    except Exception as e:
+        print(f"⚠️  jobboard handin compute failed: {e}")
+        result = {}
+    # compute_handin returns {"handin": {...}, "mat_colors": {...}}.
+    return {"handin": (result or {}).get("handin", {}),
+            "mat_colors": (result or {}).get("mat_colors", {})}
+
+
 
 
 
@@ -8482,6 +8781,29 @@ TESTING_INSTANCE_URL = os.getenv(
 
 # --- Feature Flags ---
 
+def _validate_feature_key(feature: str):
+    """Validate a feature-flag key by FORMAT, not against a hardcoded allowlist.
+
+    The admin FAC page (ui/static/js/admin/feature-access-control.js FEATURES
+    list) is the single source of truth for which flags exist — any FAC added
+    there with a button is immediately valid here, with no app.py change. We
+    previously kept a hardcoded tuple that silently drifted out of sync on
+    every new FAC (e.g. 'well_rounded' 400'd right after it was added to the
+    page). We now only reject empty/oversized keys or ones with unexpected
+    characters so a typo can't create a junk feature_flags row.
+    """
+    ok = (
+        isinstance(feature, str)
+        and 1 <= len(feature) <= 64
+        and all(c.islower() or c.isdigit() or c == '_' for c in feature)
+    )
+    if not ok:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid feature key (expected 1-64 chars: lowercase letters, digits, underscores).",
+        )
+
+
 
 
 
@@ -8503,6 +8825,41 @@ TESTING_INSTANCE_URL = os.getenv(
 # ============================================================================
 
 import sqlite3
+
+
+_DASHBOARD_EXECUTOR = None
+
+
+def _get_dashboard_executor():
+    """Lazily-built dedicated thread pool so all dashboard chunks fire at once
+    (big enough that none queue behind the default executor's worker cap)."""
+    global _DASHBOARD_EXECUTOR
+    if _DASHBOARD_EXECUTOR is None:
+        from concurrent.futures import ThreadPoolExecutor
+        _DASHBOARD_EXECUTOR = ThreadPoolExecutor(max_workers=16, thread_name_prefix="admin-dash")
+    return _DASHBOARD_EXECUTOR
+
+
+def _audit_ts_cmp(op: str, modifier: str, col: str = "timestamp") -> str:
+    """SQL fragment comparing an api_access_audit timestamp column to a relative
+    threshold.
+
+    On Postgres the column is timestamptz, so emit native interval math — the
+    SQLite datetime()->to_char shim yields *text*, and PG has no
+    `timestamptz >= text` operator (that mismatch 500s the admin dashboard).
+    On SQLite the column is ISO text, so keep the original datetime() form.
+
+    `op` is '>=' / '>' / '<=' / '<'. `modifier` is a SQLite datetime modifier
+    such as '-7 days' or '-1 day'. `col` is the (optionally alias-qualified)
+    column name, e.g. 'timestamp' or 'a.timestamp'.
+    """
+    import ui.db_backend as _dbk
+    if _dbk.is_postgres():
+        m = modifier.strip()
+        sign = '-' if m.startswith('-') else '+'
+        amt = m.lstrip('+-').strip()
+        return f"{col} {op} (now() {sign} interval '{amt}')"
+    return f"{col} {op} datetime('now', '{modifier}')"
 
 
 
@@ -10927,6 +11284,46 @@ async def stats_report_run(request: Request):
         target_categories = None
     # 2026-08-12 (jwbail): v2 include_fine toggle for target_items.
     include_fine = bool(body.get('include_fine', False))
+    # 2026-10-27 (jwbail): "Find Best Source" single-item scope. When set to an
+    # item leaf slug (normalize_item_id of the display name), build_target_items_jobs
+    # is scoped to ONLY that item on BOTH the server and local (Pyodide) paths,
+    # so the report computes just that one material's best source. A scoped run
+    # ALWAYS forces stale_only=False: the clicked item often already has a fresh
+    # (non-stale) cached row, and a scoped stale-only run would build 0 jobs and
+    # do nothing. Scoping to one item makes a full re-run of it cheap.
+    target_item_slug = body.get('target_item_slug', None)
+    if target_item_slug is not None and (not isinstance(target_item_slug, str) or not target_item_slug.strip()):
+        target_item_slug = None
+    if target_item_slug:
+        target_item_slug = target_item_slug.strip()
+        stale_only = False
+    # 2026-11-14 (jwbail): per-item target selection. When present, the
+    # target-items run is restricted to these leaf slugs (the item toggles in
+    # each category's details panel). None/empty = every item (prior behavior).
+    target_item_slugs = body.get('target_item_slugs', None)
+    if not isinstance(target_item_slugs, list):
+        target_item_slugs = None
+    else:
+        target_item_slugs = [str(s) for s in target_item_slugs if isinstance(s, str) and s.strip()]
+        if not target_item_slugs:
+            target_item_slugs = None
+    target_item_groups = body.get('target_item_groups', None)
+    if not isinstance(target_item_groups, list):
+        target_item_groups = None
+    else:
+        target_item_groups = [str(s) for s in target_item_groups if isinstance(s, str) and s.strip()]
+        if not target_item_groups:
+            target_item_groups = None
+    # Observability (2026-11-20 jwbail): log what the RUN request carried for
+    # per-item target selection, so a bug report shows whether the client sent
+    # the narrowing keys at all (vs a stale api.js that dropped them). Grep
+    # '[titem-run]'.
+    try:
+        log(f"[titem-run] received target_item_slugs="
+            f"{(body.get('target_item_slugs') if isinstance(body.get('target_item_slugs'), list) else body.get('target_item_slugs'))!r} "
+            f"-> parsed slugs={target_item_slugs!r} groups={target_item_groups!r}", session_uuid)
+    except Exception:
+        pass
     # Fastest Craft category: prefixed chip ids to solve ('gear:rings',
     # 'mat:bar', ...; empty = all).
     # FAC-gated — silently dropped from the run when the session lacks the flag.
@@ -11068,7 +11465,8 @@ async def stats_report_run(request: Request):
         if 'target_items' in categories:
             _ti = _srw.build_target_items_jobs('precount', session_uuid, _character,
                                               include_fine=include_fine,
-                                              target_groups=target_categories)
+                                              target_groups=target_categories,
+                                              target_item_slug=target_item_slug)
             _all_jobs.extend(_ti)
         precomputed_total = len(_all_jobs)
     except Exception as e:
@@ -11132,6 +11530,10 @@ async def stats_report_run(request: Request):
             'session_uuid': session_uuid,
             'categories': categories,
             'skills': skills,
+            # Steps per Recipe chip ids — the shared local orchestrator
+            # (runStatsReportLocal) runs fastest_craft as a dedicated phase and
+            # needs the selected chips (empty list = all craftable).
+            'fastest_craft_categories': fastest_craft_categories,
             'include_pets': include_pets,
             'include_consumables': include_consumables,
             'use_pet_ability': use_pet_ability,
@@ -11150,6 +11552,9 @@ async def stats_report_run(request: Request):
             'kinds': kinds,
             'target_categories': target_categories,
             'include_fine': include_fine,
+            'target_item_slug': target_item_slug,
+            'target_item_slugs': target_item_slugs,
+            'target_item_groups': target_item_groups,
             'chests': chests_filter,
             'skills_by_category': skills_by_category,
             'chests_by_category': chests_by_category,
@@ -11305,6 +11710,9 @@ async def stats_report_run(request: Request):
         '--kinds', json.dumps(kinds),
         '--target-categories', json.dumps(target_categories) if target_categories else 'null',
         '--include-fine', 'true' if include_fine else 'false',
+        '--target-item-slug', json.dumps(target_item_slug) if target_item_slug else 'null',
+        '--target-item-slugs', json.dumps(target_item_slugs) if target_item_slugs else 'null',
+        '--target-item-groups', json.dumps(target_item_groups) if target_item_groups else 'null',
         '--fastest-craft-categories', json.dumps(fastest_craft_categories if 'fastest_craft' in categories else []),
         '--chests', json.dumps(chests_filter) if chests_filter else 'null',
         '--skills-by-category', json.dumps(skills_by_category),
@@ -11617,6 +12025,23 @@ async def stats_report_local_complete(request: Request):
         return JSONResponse(status_code=500, content={'success': False, 'error': str(e)})
 
     return {'success': True}
+
+
+@app.get("/api/stats-report/target-items-roster")
+async def stats_report_target_items_roster(request: Request):
+    """Per-category item roster for the target-items selection UI.
+
+    Static game data (derived from activity drop tables), so no session or
+    feature gate is needed. Returns:
+        {'roster': [{'slug','label','kind','items':[{'slug','name'}]}]}
+    The item 'slug' values match the worker's job leaf identity, so the client
+    can send selected leaf slugs back as `target_item_slugs` on a run.
+    """
+    try:
+        from util.stats_report.target_items import get_target_items_roster
+        return {'roster': get_target_items_roster()}
+    except Exception as e:  # pragma: no cover - defensive
+        return {'roster': [], 'error': str(e)}
 
 
 @app.get("/api/stats-report/local-resume-info")
@@ -12047,6 +12472,14 @@ _STALE_CHECK_CACHE: dict = {}          # key -> (stored_at_epoch, response_dict)
 _STALE_CHECK_CACHE_TTL = 300.0          # seconds
 _STALE_CHECK_CACHE_CAP = 2000           # max entries before oldest-evict
 
+# 2026-11-02 (jwbail): single-flight registry for stale-check. Maps an
+# in-flight cache_key -> threading.Event so a burst of identical requests
+# (a goals-report open fires this ~7x) runs the ~9s compute ONCE instead of
+# N times. N concurrent computes = N threads each holding the GIL for 9s,
+# which starves the single async event loop and stalls the whole site.
+_STALE_INFLIGHT: dict = {}             # cache_key -> threading.Event
+_STALE_INFLIGHT_LOCK = threading.Lock()
+
 
 def _stale_results_signature(session_uuid: str, conn) -> str:
     """Cheap signature of the session's stored gearset rows (indexed query).
@@ -12187,10 +12620,61 @@ def stats_report_stale_check(request: Request):
         print(f'[stale-check] cache key/get failed (non-fatal): {_ce}')
         _cache_key = None
 
+    # Single-flight (see _STALE_INFLIGHT above). The first caller for a given
+    # cache_key becomes the leader and computes; concurrent callers with the
+    # same key wait on the leader's Event (blocked thread, NO CPU -> GIL stays
+    # free for the event loop) and then serve the leader's cached result. If
+    # the leader errors or exceeds the wait, a waiter promotes itself. A single
+    # unique request is unaffected. This is what collapses the goals-report
+    # open burst from ~7 concurrent 9s computes down to one.
+    _sf_leader = False
+    _sf_event = None
+    if _cache_key is not None:
+        with _STALE_INFLIGHT_LOCK:
+            _sf_event = _STALE_INFLIGHT.get(_cache_key)
+            if _sf_event is None:
+                _sf_event = threading.Event()
+                _STALE_INFLIGHT[_cache_key] = _sf_event
+                _sf_leader = True
+        if not _sf_leader:
+            _sf_event.wait(timeout=30)
+            _cached2 = _stale_cache_get(_cache_key)
+            if _cached2 is not None:
+                _mark('cache_hit_singleflight')
+                try:
+                    _total = round((_ck[-1][1] - _ck[0][1]) * 1000)
+                    log(f"[stale-check TIMING] SINGLEFLIGHT HIT total={_total}ms "
+                        f"scopes={len(_cached2.get('stale_scopes', []))}", session_uuid)
+                except Exception:
+                    pass
+                return _plain_json(_cached2)
+            # Leader failed or timed out -> promote self to leader and compute.
+            with _STALE_INFLIGHT_LOCK:
+                _sf_event = _STALE_INFLIGHT.get(_cache_key)
+                if _sf_event is None:
+                    _sf_event = threading.Event()
+                    _STALE_INFLIGHT[_cache_key] = _sf_event
+                    _sf_leader = True
+
+    def _sf_release():
+        # Release waiters. MUST be called after the result is cached so they
+        # wake to a cache hit. Idempotent and fail-safe.
+        if _sf_leader and _cache_key is not None:
+            with _STALE_INFLIGHT_LOCK:
+                _STALE_INFLIGHT.pop(_cache_key, None)
+            try:
+                _sf_event.set()
+            except Exception:
+                pass
+
     # Compute stale scopes
-    scopes = detect_stale_scopes(prev_snapshot, curr_snapshot, conn,
-                                 session_uuid=session_uuid,
-                                 char_config=sess.get('character_config') or {})
+    try:
+        scopes = detect_stale_scopes(prev_snapshot, curr_snapshot, conn,
+                                     session_uuid=session_uuid,
+                                     char_config=sess.get('character_config') or {})
+    except Exception:
+        _sf_release()
+        raise
     _mark('detect_stale_scopes')
 
     # target_items has its OWN dedicated read-side stale pass below
@@ -12318,6 +12802,9 @@ def stats_report_stale_check(request: Request):
         _stale_cache_store(_cache_key, _response)
     except Exception as _se:
         print(f'[stale-check] cache store failed (non-fatal): {_se}')
+    # Release single-flight waiters AFTER the result is cached so they wake to
+    # a cache hit instead of recomputing.
+    _sf_release()
     try:
         _durs = {_ck[i][0]: round((_ck[i][1] - _ck[i - 1][1]) * 1000)
                  for i in range(1, len(_ck))}
@@ -13555,6 +14042,7 @@ async def get_feature_flags(request: Request):
         "trading": get_db().has_feature(session_uuid, "trading"),
         "fastest_craft_goals": get_db().has_feature(session_uuid, "fastest_craft_goals"),
         "trading_upgrades_filter": get_db().has_feature(session_uuid, "trading_upgrades_filter"),
+        "well_rounded": True,  # Released to all users (FAC gate removed)
     }
     # Embed the (user-independent, cached) Steps-per-Recipe chip taxonomy for
     # enabled sessions so the "What to optimize" sub-filter renders synchronously
@@ -13635,8 +14123,156 @@ async def fastest_craft_results(request: Request):
             item_refs=list({r["item_ref"] for r in rows}))
     except Exception as _se:  # noqa: BLE001 — stale is advisory; never block results
         log(f"fastest-craft results stale pass failed: {_se!r}", session_uuid)
-    items = _fc.group_results_for_ui(rows, name_cats, stale_refs, groups_by_ref)
+    items = _fc.group_results_for_ui(rows, name_cats, stale_refs, groups_by_ref,
+                                     owned_counts=owned_counts)
+    # Nested recipe material breakdown for the per-row "with owned materials" (i)
+    # popup (per-parent qty + owned, owned-independent so the (i) always shows).
+    # Catalog structure build per item — cap to keep a huge selection cheap.
+    try:
+        _mt_refs = list(items.keys())
+        if len(_mt_refs) <= 120:
+            for _r in _mt_refs:
+                try:
+                    items[_r]['material_usage_tree'] = _fc.material_usage_tree(_r, _sd0)
+                except Exception:
+                    pass
+    except Exception as _mte:  # noqa: BLE001 — best-effort enrichment
+        log(f"fastest-craft material_usage_tree build failed: {_mte!r}", session_uuid)
     return {"items": items, "count": len(rows)}
+
+
+@app.post("/api/fastest-craft/plan")
+async def fastest_craft_plan(request: Request):
+    """Start-time cross-run reuse plan for a Steps-per-Recipe run.
+
+    Decided server-side because the Pyodide solve runs with db=None and the
+    stale detector isn't bundled. Partitions the selected (expanded) FC cells
+    into FRESH (reuse the stored row) vs TODO (solve = STALE or MISSING), counts
+    the target-item jobs still MISSING (presence-based, cross-run — never
+    stale-redone), and returns a fixed, non-growing progress denominator plus
+    the stored rows for the fresh cells so the browser renders them w/o solving.
+
+    Body: {categories: [prefixed chip ids]} (empty/absent = all craftables).
+    """
+    session_uuid = request.state.session_uuid
+    _require_fastest_craft_goals(session_uuid)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    categories = body.get("categories") or []
+    selected = set(categories) if categories else None
+    from ui import fastest_craft as _fc
+    db = get_db()
+    sess = db.get_session(session_uuid) or {}
+    session_data = sess.get("character_config") or {}
+    ui_config = sess.get("ui_config") or {}
+    if isinstance(ui_config, str):
+        try:
+            ui_config = json.loads(ui_config)
+        except Exception:
+            ui_config = {}
+
+    # 1. Exact ordered set run_fastest_craft would solve (seeds + planks).
+    expanded = _fc.expanded_fastest_craft_refs(selected)
+
+    # 2. FC-cell freshness: stored rows + live stale set (FC cells ONLY, per
+    #    the product rule). A missing ref is TODO regardless of the stale pass.
+    rows = db.get_fastest_craft_results(session_uuid)
+    stored_refs = {r["item_ref"] for r in rows}
+    stale_refs: set = set()
+    try:
+        from util.stats_report.state_snapshot import from_char_config as _from_cc
+        _curr = _from_cc(session_data, ui_config)
+        stale_refs = _fc.live_stale_items(
+            db, session_uuid, _curr, char_config=session_data,
+            item_refs=list(stored_refs))
+    except Exception as _se:  # noqa: BLE001 — stale advisory; missing->todo still holds
+        log(f"fastest-craft plan stale pass failed: {_se!r}", session_uuid)
+
+    # 3. Target items: all-route candidate gathers for the selection, minus
+    #    rows already present for the SESSION (cross-run presence; reuse on
+    #    presence, never stale-redone), counted per-activity (base+fine) via the
+    #    SAME job build the generator uses — so denominator == what's generated.
+    target_items_missing = 0
+    candidate_keys = set()
+    try:
+        candidate_keys = _fc.all_route_gather_keys(expanded)
+        present_pairs = set()
+        try:
+            conn = db._get_connection()
+            cur = conn.execute(
+                "SELECT DISTINCT skill_name, chest_name FROM stats_report_gearsets "
+                "WHERE session_uuid = ? AND category = 'target_items'", (session_uuid,))
+            for sk, ch in cur.fetchall():
+                present_pairs.add(((sk or '').lower(), ch or ''))
+            if not getattr(db, "_persistent_conn", None):
+                conn.close()
+        except Exception as _pe:  # noqa: BLE001
+            log(f"fastest-craft plan present-pairs query failed: {_pe!r}", session_uuid)
+        from ui import stats_report_worker as _srw
+        _char = _srw.load_character(session_uuid, os.path.abspath(DATABASE_PATH))
+        _cand_groups = sorted({
+            k.split('::')[1].lower() for k in candidate_keys
+            if len(k.split('::')) >= 3 and k.split('::')[1]})
+        job_pairs = []
+        if _cand_groups:
+            ti_jobs = _srw.build_target_items_jobs(
+                "plan", session_uuid, _char, include_fine=True,
+                target_groups=_cand_groups)
+            job_pairs = [(j.skill_name, j.chest_name) for j in ti_jobs]
+        target_items_missing = _fc.target_items_missing_count(
+            candidate_keys, present_pairs, job_pairs)
+    except Exception as _te:  # noqa: BLE001 — TI count best-effort; FC-cell plan still returns
+        log(f"fastest-craft plan target-items count failed: {_te!r}", session_uuid)
+
+    # 4. Partition + denominator (pure core).
+    plan = _fc.plan_fastest_craft(
+        expanded, stored_refs=stored_refs, stale_refs=stale_refs,
+        target_items_missing=target_items_missing)
+
+    # 5. Stored rows for the FRESH cells so the browser renders them w/o solving.
+    fresh_set = set(plan["fresh_refs"])
+    try:
+        _enum = _fc.enumerate_craftable_items(None)
+        name_cats = {r["output_ref"]: (r["output_name"], r["categories"]) for r in _enum}
+        groups_by_ref = {r["output_ref"]: r.get("group") for r in _enum}
+    except Exception:
+        name_cats, groups_by_ref = {}, {}
+    fresh_rows = [r for r in rows if r["item_ref"] in fresh_set]
+    fresh_results = _fc.group_results_for_ui(fresh_rows, name_cats, set(), groups_by_ref)
+
+    # fc-preopt B: ensure a native target-items row exists for EVERY FC-needed
+    # gather BEFORE the FC phase pulls them. On a COLD session the gathers FC
+    # needs may never have been solved as target items, so the /gather-reuse map
+    # would be empty and FC would fall back to its own (divergent) gather solve.
+    # Solve the MISSING ones now with the native target-items optimizer; the
+    # generator dedups against stored rows, so this is a no-op when they already
+    # exist. The coordinator fetches /gather-reuse immediately AFTER /plan, so by
+    # then every FC gather has a native number to pin to. Best-effort: on failure
+    # FC still falls back to its own gather solve (unchanged).
+    try:
+        from ui import stats_report_worker as _srw_pre
+        _pre_gen = _srw_pre.generate_missing_target_items_rows(
+            session_uuid, os.path.abspath(DATABASE_PATH), candidate_keys)
+        if _pre_gen:
+            log(f"[fc-plan] B: pre-solved {_pre_gen} native target-items gather "
+                f"row(s) before FC pull", session_uuid)
+    except Exception as _be:  # noqa: BLE001
+        log(f"fastest-craft plan B pre-generate failed: {_be!r}", session_uuid)
+
+    return {
+        "todo_refs": plan["todo_refs"],
+        "fresh_refs": plan["fresh_refs"],
+        "fc_todo_cells": plan["fc_todo_cells"],
+        "target_items_missing": plan["target_items_missing"],
+        "denominator": plan["denominator"],
+        "fresh_results": fresh_results,
+        # Full static all-routes gather set — the browser hands this to the
+        # end-of-run /local-result so generation covers (and the display shows)
+        # every candidate target item, copy-forwarding the fresh ones.
+        "candidate_keys": sorted(candidate_keys),
+    }
 
 
 @app.post("/api/fastest-craft/reset")
@@ -13716,6 +14352,8 @@ def _start_fastest_craft_task(session_uuid: str, selected):
             res = _fc.run_fastest_craft(
                 session_uuid, selected, session_data, ui_config,
                 db=get_db(), owned_counts=None, progress=_progress,
+                expand_intermediates=True,
+                gather_reuse=_fc_gather_reuse_map(get_db(), session_uuid),
                 log=lambda *a, **k: None)
             task["count"] = res.get("count", 0)
             task["status"] = "complete"
@@ -13787,7 +14425,34 @@ async def fastest_craft_local_result(request: Request):
             persisted += 1
         except Exception as e:  # noqa: BLE001 — one bad item never fails the batch
             log(f"fastest-craft local-result persist failed {ref}: {e!r}", session_uuid)
-    return {"success": True, "items": persisted, "rows": written}
+    # When a Fastest Craft tree needs a gather material (e.g. wood scrap via
+    # firewood making) that the session has no Fastest Target Items row for yet,
+    # run the real gear-aware target_items job for it and persist a generated
+    # row — so the gather shows up in, and is reusable from, the Target Items
+    # report. Best-effort: never fails the FC persist.
+    generated = 0
+    try:
+        from ui import stats_report_worker as _srw
+        _needed = set(_srw.needed_target_items_keys_from_fc_items(items))
+        # Union the full set of gathers the run EVALUATED (incl. losing route
+        # candidates like the wood-scrap plank route), so we generate a Target
+        # Items row for every material the solve touched, not just chosen trees.
+        _gk = body.get("gather_scope_keys") or []
+        if isinstance(_gk, list):
+            _needed |= {k for k in _gk if isinstance(k, str) and k.startswith("target_items::")}
+        log(f"[fc-gen] local-result: items={len(items)} needed={len(_needed)} "
+            f"sample={sorted(_needed)[:3]}", session_uuid)
+        if _needed:
+            _db_path = os.path.abspath(DATABASE_PATH)
+            generated = _srw.generate_missing_target_items_rows(
+                session_uuid, _db_path, _needed)
+            log(f"[fc-gen] local-result: generated={generated}", session_uuid)
+    except Exception as _ge:  # noqa: BLE001
+        import traceback as _tb
+        log(f"fastest-craft generate target_items rows failed: {_ge!r}\n{_tb.format_exc()}",
+            session_uuid)
+    return {"success": True, "items": persisted, "rows": written,
+            "generated_target_items": generated}
 
 
 @app.get("/api/fastest-craft/run-status")
@@ -13814,7 +14479,8 @@ async def fastest_craft_tree(request: Request):
     if not item_ref:
         raise HTTPException(status_code=400, detail="item_ref required")
     from ui import fastest_craft as _fc
-    sess = get_db().get_session(session_uuid) or {}
+    db = get_db()
+    sess = db.get_session(session_uuid) or {}
     session_data = _enrich_session_data_with_regions(sess.get("character_config") or {})
     ui_config = sess.get("ui_config") or {}
     if isinstance(ui_config, str):
@@ -13822,15 +14488,27 @@ async def fastest_craft_tree(request: Request):
             ui_config = json.loads(ui_config)
         except Exception:
             ui_config = {}
+    # Fast path: assemble from the STORED solve (no re-optimization). Falls back
+    # to the live optimizer only when there's no stored row for this item yet.
+    tree = None
+    reused = False
     try:
-        tree = _fc.build_preview_tree(item_ref, session_data, ui_config,
-                                      quality=quality, variant=variant,
-                                      log=lambda *a, **k: None)
-    except Exception as e:  # noqa: BLE001
-        log(f"fastest-craft preview tree failed {item_ref}: {e!r}", session_uuid)
-        raise HTTPException(status_code=500, detail="preview build failed")
+        tree = _fc.preview_tree_from_stored(session_uuid, item_ref, variant,
+                                            quality, session_data, db)
+        reused = tree is not None
+    except Exception as e:  # noqa: BLE001 — degrade to the live build
+        log(f"fastest-craft preview stored-assembly failed {item_ref}: {e!r}", session_uuid)
+        tree = None
+    if tree is None:
+        try:
+            tree = _fc.build_preview_tree(item_ref, session_data, ui_config,
+                                          quality=quality, variant=variant,
+                                          log=lambda *a, **k: None)
+        except Exception as e:  # noqa: BLE001
+            log(f"fastest-craft preview tree failed {item_ref}: {e!r}", session_uuid)
+            raise HTTPException(status_code=500, detail="preview build failed")
     return {"item_ref": item_ref, "quality": quality, "variant": variant,
-            "tree": tree}
+            "tree": tree, "reused_stored": reused}
 
 
 @app.post("/api/fastest-craft/save-tree")
@@ -13865,6 +14543,84 @@ async def fastest_craft_save_tree(request: Request):
         log(f"fastest-craft save-tree failed {item_ref}: {e!r}", session_uuid)
         raise HTTPException(status_code=500, detail="save failed")
     return {"saved": True, **res}
+
+
+def _fc_gather_reuse_map(db, session_uuid: str) -> dict:
+    """fc-preopt A — the native Fastest-Target-Items gather results as
+    {"<group>::<item_slug>": steps}, so FC pins its gather leaves to the SAME
+    number the target-items report shows instead of re-solving them with the
+    crafting-tree's own (divergent) gather formula. Rows are stored with
+    skill_name=group_slug, chest_name=item_slug, metric_value=steps/item; newest
+    row per key wins. Best-effort: any failure yields {} (FC falls back to its
+    own gather solve, unchanged)."""
+    out: dict = {}
+    try:
+        conn = db._get_connection()
+        cur = conn.execute(
+            "SELECT skill_name, chest_name, metric_value FROM stats_report_gearsets "
+            "WHERE session_uuid = ? AND category = 'target_items' "
+            "ORDER BY created_at ASC", (session_uuid,))
+        for sk, ch, mv in cur.fetchall():
+            if not sk or not ch or mv is None:
+                continue
+            try:
+                v = float(mv)
+            except (TypeError, ValueError):
+                continue
+            if v > 0:
+                out[f"{str(sk).lower()}::{ch}"] = v   # ASC order => newest wins
+        if not db._persistent_conn:
+            conn.close()
+    except Exception as e:  # noqa: BLE001
+        log(f"fastest-craft gather-reuse map build failed: {e!r}", session_uuid)
+    return out
+
+
+@app.get("/api/fastest-craft/gather-reuse")
+async def fastest_craft_gather_reuse(request: Request):
+    """Return the native target-items gather-steps map for this session so the
+    browser FC run can pin its gather leaves to it (fc-preopt A). Shape:
+    {"<group>::<item_slug>": steps}."""
+    session_uuid = request.state.session_uuid
+    _require_fastest_craft_goals(session_uuid)
+    return {"ok": True, "gather_reuse": _fc_gather_reuse_map(get_db(), session_uuid)}
+
+
+@app.post("/api/fastest-craft/build-tree")
+async def fastest_craft_build_tree(request: Request):
+    """Build + exact-optimize the FC crafting tree for one item at a
+    (quality, variant) and return it inline ({tree_data, name, target_item_id})
+    WITHOUT persisting — so the "Crafting tree" button can open the FC-solved
+    tree (gearsets/locations/services intact) transiently, without re-optimizing
+    from scratch or spamming saved_crafting_trees on every click."""
+    session_uuid = request.state.session_uuid
+    _require_fastest_craft_goals(session_uuid)
+    body = await request.json()
+    item_ref = body.get("item_ref") or ""
+    quality = body.get("quality") or "Normal"
+    variant = body.get("variant") or "normal"
+    if not item_ref:
+        raise HTTPException(status_code=400, detail="item_ref required")
+    from ui import fastest_craft as _fc
+    db = get_db()
+    sess = db.get_session(session_uuid) or {}
+    session_data = _enrich_session_data_with_regions(sess.get("character_config") or {})
+    ui_config = sess.get("ui_config") or {}
+    if isinstance(ui_config, str):
+        try:
+            ui_config = json.loads(ui_config)
+        except Exception:
+            ui_config = {}
+    try:
+        built = _fc.build_fastest_craft_tree(item_ref, session_data, ui_config,
+                                             quality=quality, variant=variant,
+                                             gather_reuse=_fc_gather_reuse_map(db, session_uuid),
+                                             db=db, session_uuid=session_uuid,
+                                             log=lambda *a, **k: None)
+    except Exception as e:  # noqa: BLE001
+        log(f"fastest-craft build-tree failed {item_ref}: {e!r}", session_uuid)
+        raise HTTPException(status_code=500, detail="build failed")
+    return {"ok": True, **built}
 
 
 # ============================================================================
@@ -14608,6 +15364,442 @@ async def trading_auto_renew(request: Request):
     return {"renewed": renewed}
 
 
+# ============================================================================
+# TRADING BULK IMPORT (file upload -> map columns -> validate -> commit)
+# Pure validation/parse logic lives in ui/trade_import.py; this layer owns the
+# upload decode, catalog resolution, temp-row caching, and DB writes.
+# ============================================================================
+import ui.trade_import as _ti
+
+_TRADE_IMPORT_DIR = os.path.join(tempfile.gettempdir(), "walkscape-trade-import")
+_TRADE_IMPORT_INDEX = None          # cached catalog resolution index
+_TRADE_IMPORT_FINE_CACHE: Dict[str, bool] = {}
+
+
+def _trade_import_index():
+    """Build (once) a catalog resolution index of TRADABLE items only:
+    ``by_name`` {name_lower: cap} and ``by_key`` {game_key|id: cap} where
+    cap = {slug(game_key), type(canonical), name}. Rebuilt if the catalog grows."""
+    global _TRADE_IMPORT_INDEX
+    from ui.catalog import get_item_catalog
+    from util.trading_tradable import is_tradable
+    try:
+        from util.autogenerated.item_trade_flags import ITEM_TRADE_FLAGS as _TF
+    except Exception:
+        _TF = {}
+    try:
+        from util.autogenerated.item_game_keys import ITEM_GAME_KEYS as _GK
+    except Exception:
+        _GK = {}
+    cat = get_item_catalog()
+    if _TRADE_IMPORT_INDEX is not None and _TRADE_IMPORT_INDEX.get("_sig") == id(cat.categories):
+        return _TRADE_IMPORT_INDEX
+    CANON = {"material": "material", "crafted_item": "crafted", "consumable": "consumable",
+             "egg": "pet_egg", "item": "item", "coins": "coins"}
+
+    def _nid(nm):
+        return nm.lower().replace(" ", "_").replace("(", "").replace(")", "").replace("-", "_").replace("'", "")
+
+    by_name: Dict[str, Dict] = {}
+    by_key: Dict[str, Dict] = {}
+
+    def visit(node):
+        if isinstance(node, dict):
+            if "id" in node and "name" in node and "type" in node:
+                canon = CANON.get(node.get("type"))
+                if canon:
+                    nm = node.get("name") or ""
+                    nid = _nid(nm)
+                    gk = _GK.get(node["id"]) or _GK.get(nid) or _GK.get(nm.lower()) or node["id"]
+                    probe = dict(node)
+                    flags = _TF.get(node["id"]) or _TF.get(nid)
+                    if flags and flags.get("canBeTraded") is not None:
+                        probe["canBeTraded"] = flags.get("canBeTraded")
+                    if is_tradable(probe):
+                        cap = {"slug": gk, "type": canon, "name": nm}
+                        by_name.setdefault(nm.lower(), cap)
+                        by_key.setdefault(gk, cap)
+                        by_key.setdefault(node["id"], cap)
+                return
+            for v in node.values():
+                visit(v)
+        elif isinstance(node, list):
+            for v in node:
+                visit(v)
+
+    visit(cat.categories)
+    _TRADE_IMPORT_INDEX = {"by_name": by_name, "by_key": by_key, "_sig": id(cat.categories)}
+    return _TRADE_IMPORT_INDEX
+
+
+def _trade_import_can_fine(game_key: str) -> bool:
+    """True only if an EXACT ``<game_key>_fine`` export key exists (strict — the
+    generic export resolver falls back to the base, so membership is checked
+    directly against the export-name mapping)."""
+    if game_key in _TRADE_IMPORT_FINE_CACHE:
+        return _TRADE_IMPORT_FINE_CACHE[game_key]
+    ok = False
+    try:
+        from util.autogenerated.export_names import get_export_name_mapping
+        ok = (game_key + "_fine") in get_export_name_mapping()
+    except Exception:
+        ok = False
+    _TRADE_IMPORT_FINE_CACHE[game_key] = ok
+    return ok
+
+
+def _trade_import_resolver():
+    """Return a ``resolve(raw_name) -> cap|None`` closure for validate_import.
+
+    Resolves a plain display name OR a game export key (with an optional quality
+    suffix). Adds ``can_fine`` on demand and ``default_quality`` when the export
+    key encoded one. Non-tradable / unknown names return None (-> bad row)."""
+    idx = _trade_import_index()
+    from util.autogenerated.export_names import get_item_from_export_name
+    _SUFFIX = [("_fine", "fine"), ("_common", "normal"), ("_uncommon", "good"),
+               ("_rare", "great"), ("_epic", "excellent"), ("_legendary", "perfect"),
+               ("_ethereal", "eternal")]
+
+    def _finish(cap, embedded):
+        out = {"slug": cap["slug"], "type": cap["type"], "name": cap["name"]}
+        out["can_fine"] = _trade_import_can_fine(cap["slug"]) if cap["type"] in ("material", "consumable") else False
+        if embedded:
+            out["default_quality"] = embedded
+        return out
+
+    def resolve(raw):
+        s = str(raw or "").strip().lower()
+        if not s:
+            return None
+        # 1) direct display-name or export-key / catalog-id match.
+        cap = idx["by_name"].get(s) or idx["by_key"].get(s)
+        if cap:
+            return _finish(cap, None)
+        # 1b) display-name fine form, e.g. "Adamant bar (Fine)".
+        if "(fine)" in s:
+            cap = idx["by_name"].get(s.replace("(fine)", "").strip())
+            if cap:
+                return _finish(cap, "fine")
+        # 2) export key with a trailing quality/fine suffix — strip it to the
+        #    base key, carry the suffix as the embedded quality.
+        embedded = None
+        base = s
+        for suf, word in _SUFFIX:
+            if s.endswith(suf):
+                base, embedded = s[:-len(suf)], word
+                break
+        if embedded:
+            cap = idx["by_name"].get(base) or idx["by_key"].get(base)
+            if cap:
+                return _finish(cap, embedded)
+        # 3) last resort: let the export resolver map the base to a catalog name.
+        try:
+            obj = get_item_from_export_name(base)
+        except Exception:
+            obj = None
+        if obj is not None and getattr(obj, "name", None):
+            nm = obj.name.lower()
+            cap = idx["by_name"].get(nm) or idx["by_name"].get(nm.replace(" (fine)", ""))
+            if cap:
+                return _finish(cap, embedded)
+        return None
+
+    return resolve
+
+
+def _trade_import_existing_index(session_uuid: str, kind: str) -> Dict:
+    """{(slug, quality_token): {id, qty}} of the caller's current entries."""
+    out: Dict = {}
+    rows = get_db().get_listings(session_uuid) if kind == "listings" else get_db().get_wishlist(session_uuid)
+    for r in rows:
+        it = r.get("item") or {}
+        slug = it.get("slug")
+        if not slug:
+            continue
+        qtok = it.get("quality") or r.get("quality_floor") or ""
+        out.setdefault((slug, qtok), {"id": r.get("id"), "qty": r.get("qty")})
+    return out
+
+
+def _trade_import_token_path(session_uuid: str, token: str) -> str:
+    safe = "".join(ch for ch in str(token) if ch.isalnum())
+    return os.path.join(_TRADE_IMPORT_DIR, f"{session_uuid}__{safe}.json")
+
+
+def _trade_import_cleanup():
+    """Drop cached upload files older than 1 hour (best-effort)."""
+    try:
+        cutoff = time.time() - 3600
+        for fn in os.listdir(_TRADE_IMPORT_DIR):
+            fp = os.path.join(_TRADE_IMPORT_DIR, fn)
+            try:
+                if os.path.getmtime(fp) < cutoff:
+                    os.remove(fp)
+            except OSError:
+                pass
+    except FileNotFoundError:
+        pass
+
+
+def _trade_import_load(session_uuid: str, token: str) -> Dict:
+    fp = _trade_import_token_path(session_uuid, token)
+    try:
+        with open(fp, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        raise HTTPException(status_code=404, detail="Upload expired or not found — please re-upload the file.")
+
+
+def _xlsx_to_rows(raw: bytes) -> List[List[str]]:
+    import openpyxl  # added to ui/requirements.txt
+    wb = openpyxl.load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+    ws = wb.active
+    rows: List[List[str]] = []
+    for r in ws.iter_rows(values_only=True):
+        cells = ["" if c is None else (str(c).rstrip() if not isinstance(c, str) else c) for c in r]
+        rows.append(cells)
+    wb.close()
+    return rows
+
+
+@app.post("/api/trading/import/parse")
+async def trading_import_parse(request: Request):
+    """Decode an uploaded wishlist/listings file, detect its header + delimiter,
+    cache the parsed rows under a token, and return columns + a sample + a
+    suggested column mapping. Body: {kind, filename, content_base64}."""
+    import base64 as _b64
+    import secrets as _secrets
+    session_uuid = request.state.session_uuid
+    _require_trading(session_uuid)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    kind = (body.get("kind") or "").strip()
+    if kind not in ("wishlist", "listings"):
+        raise HTTPException(status_code=400, detail="kind must be 'wishlist' or 'listings'")
+    filename = (body.get("filename") or "").strip().lower()
+    b64 = body.get("content_base64") or ""
+    try:
+        raw = _b64.b64decode(b64, validate=False)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Could not decode the uploaded file")
+    if not raw:
+        raise HTTPException(status_code=400, detail="The uploaded file is empty")
+    if len(raw) > _ti.MAX_FILE_BYTES:
+        raise HTTPException(status_code=400, detail=f"File too large (max {_ti.MAX_FILE_BYTES // (1024*1024)} MB)")
+
+    delimiter = ""
+    ambiguous = False
+    if filename.endswith((".xlsx", ".xlsm")):
+        try:
+            all_rows = _xlsx_to_rows(raw)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Could not read the Excel file: {e}")
+    else:
+        text = raw.decode("utf-8", "replace")
+        delimiter, ambiguous = _ti.sniff_delimiter(text)
+        if body.get("delimiter"):  # user override from an ambiguous sniff
+            delimiter = str(body["delimiter"])[:1] or delimiter
+            ambiguous = False
+        all_rows = _ti.parse_delimited(text, delimiter)
+
+    # Drop fully-empty trailing rows.
+    while all_rows and not any(str(c).strip() for c in all_rows[-1]):
+        all_rows.pop()
+    if not all_rows:
+        raise HTTPException(status_code=400, detail="The file has no rows")
+    columns = [str(c) for c in all_rows[0]]
+    data_rows = all_rows[1:]
+    if len(data_rows) > _ti.MAX_ROWS:
+        raise HTTPException(status_code=400,
+                            detail=f"Too many rows ({len(data_rows):,}); the maximum is {_ti.MAX_ROWS:,}")
+
+    _trade_import_cleanup()
+    os.makedirs(_TRADE_IMPORT_DIR, exist_ok=True)
+    token = _secrets.token_hex(8)
+    with open(_trade_import_token_path(session_uuid, token), "w", encoding="utf-8") as f:
+        json.dump({"kind": kind, "columns": columns, "rows": data_rows}, f)
+
+    return {"token": token, "kind": kind, "columns": columns,
+            "sample": data_rows[:20], "total_rows": len(data_rows),
+            "delimiter": delimiter, "ambiguous": ambiguous,
+            "suggested_mapping": _ti.auto_map_headers(columns)}
+
+
+def _trade_import_report(session_uuid: str, token: str, mapping: Dict, price_mode: str) -> Dict:
+    cached = _trade_import_load(session_uuid, token)
+    kind = cached["kind"]
+    rows = cached["rows"]
+    if mapping.get("item_name") is None:
+        raise HTTPException(status_code=400, detail="You must map the Item Name column")
+    owned = _trading_owned_qualities(session_uuid) if kind == "listings" else None
+    avg = get_db().historical_average_prices() if price_mode == "avg" else None
+    return _ti.validate_import(
+        kind, rows, mapping,
+        resolve_item=_trade_import_resolver(),
+        existing_index=_trade_import_existing_index(session_uuid, kind),
+        owned_index=owned, price_mode=price_mode, avg_prices=avg)
+
+
+@app.post("/api/trading/import/validate")
+async def trading_import_validate(request: Request):
+    """Validate a parsed upload against a column mapping. Body:
+    {token, mapping:{item_name,quality,quantity,price,notes}, price_mode}.
+    Returns the good/bad report (detail lists capped for the preview)."""
+    session_uuid = request.state.session_uuid
+    _require_trading(session_uuid)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    token = (body.get("token") or "").strip()
+    mapping = body.get("mapping") or {}
+    price_mode = (body.get("price_mode") or "").strip()
+    rep = _trade_import_report(session_uuid, token, mapping, price_mode)
+    CAP = 2000
+    return {"kind": rep["kind"], "total": rep["total"], "counts": rep["counts"],
+            "good": rep["good"][:CAP], "bad": rep["bad"][:CAP],
+            "good_truncated": len(rep["good"]) > CAP, "bad_truncated": len(rep["bad"]) > CAP}
+
+
+@app.post("/api/trading/import/commit")
+async def trading_import_commit(request: Request):
+    """Apply a validated import. Body: {token, mapping, price_mode, dup_global,
+    owned_global, dup_overrides:{row:choice}, owned_overrides:{row:choice}}.
+    dup choice: overwrite|new|skip. owned choice (listings): override|skip."""
+    session_uuid = request.state.session_uuid
+    _require_trading(session_uuid)
+    name, _cc = _trading_char(session_uuid)
+    get_db().get_or_create_trader(session_uuid, name)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    token = (body.get("token") or "").strip()
+    mapping = body.get("mapping") or {}
+    price_mode = (body.get("price_mode") or "").strip()
+    dup_global = (body.get("dup_global") or "").strip()
+    owned_global = (body.get("owned_global") or "").strip()
+    dup_over = {str(k): str(v) for k, v in (body.get("dup_overrides") or {}).items()}
+    owned_over = {str(k): str(v) for k, v in (body.get("owned_overrides") or {}).items()}
+
+    rep = _trade_import_report(session_uuid, token, mapping, price_mode)
+    kind = rep["kind"]
+    is_listings = (kind == "listings")
+    if rep["counts"]["duplicates"] > 0 and dup_global not in ("overwrite", "new", "skip"):
+        raise HTTPException(status_code=400, detail="Choose how to handle duplicates")
+    if is_listings and rep["counts"]["owned_issues"] > 0 and owned_global not in ("override", "skip"):
+        raise HTTPException(status_code=400, detail="Choose how to handle items you don't own enough of")
+
+    def _fields(entry):
+        if is_listings:
+            return {"item": entry["item"], "qty": entry["quantity"],
+                    "price_coins": entry["price"], "note": entry["notes"]}
+        return {"item": entry["item"], "qty": entry["quantity"],
+                "max_coins": entry["price"], "note": entry["notes"],
+                "quality_rule": "exact", "quality_floor": entry["item"]["quality"]}
+
+    inserts: List[Dict] = []
+    updates: List[Dict] = []        # [{id, fields}]
+    file_primary: Dict = {}         # key -> index into `inserts`
+    skipped = 0
+
+    for entry in rep["good"]:
+        row = str(entry["row"])
+        # Owned gate (listings only).
+        if is_listings and entry.get("owned", {}) and entry["owned"].get("too_few"):
+            choice = owned_over.get(row) or owned_global
+            if choice == "skip":
+                skipped += 1
+                continue
+        key = (entry["item"]["slug"], entry["item"]["quality"])
+        dup = entry.get("dup")
+        if not dup:
+            file_primary[key] = len(inserts)
+            inserts.append(_fields(entry))
+            continue
+        choice = dup_over.get(row) or dup_global
+        if choice == "skip":
+            skipped += 1
+            continue
+        if choice == "new":
+            inserts.append(_fields(entry))
+            continue
+        # overwrite
+        if dup.get("source") == "existing" and dup.get("existing_id") is not None:
+            updates.append({"id": dup["existing_id"], "fields": _fields(entry)})
+        else:  # file dup -> replace the earlier planned insert for this key
+            pk = file_primary.get(key)
+            if pk is not None:
+                inserts[pk] = _fields(entry)
+            else:
+                inserts.append(_fields(entry))
+
+    imported = 0
+    updated = 0
+    if is_listings:
+        norm = [{"item": i["item"], "qty": i["qty"], "price_coins": i["price_coins"],
+                 "note": i["note"]} for i in inserts]
+        for c in range(0, len(norm), 500):
+            imported += len(get_db().create_listings_batch(session_uuid, norm[c:c + 500]))
+        for u in updates:
+            fl = u["fields"]
+            if get_db().update_listing(session_uuid, u["id"],
+                                       {"qty": fl["qty"], "price_coins": fl["price_coins"],
+                                        "item_quality": fl["item"]["quality"], "note": fl["note"]}):
+                updated += 1
+    else:
+        for i in inserts:
+            get_db().create_wishlist_entry(
+                session_uuid, i["item"], quality_rule=i["quality_rule"],
+                quality_floor=i["quality_floor"], max_coins=i["max_coins"],
+                qty=i["qty"], note=i["note"])
+            imported += 1
+        for u in updates:
+            fl = u["fields"]
+            if get_db().update_wishlist_entry(session_uuid, u["id"],
+                                              {"qty": fl["qty"], "max_coins": fl["max_coins"],
+                                               "quality_floor": fl["item"]["quality"], "note": fl["note"]}):
+                updated += 1
+
+    try:
+        os.remove(_trade_import_token_path(session_uuid, token))
+    except OSError:
+        pass
+    _flush_trade_pushes()
+    return {"imported": imported, "updated": updated, "skipped": skipped}
+
+
+@app.get("/api/trading/import/template")
+async def trading_import_template(request: Request):
+    """Download a starter import template. ?kind=wishlist|listings&fmt=csv|xlsx."""
+    session_uuid = request.state.session_uuid
+    _require_trading(session_uuid)
+    kind = (request.query_params.get("kind") or "wishlist").strip()
+    if kind not in ("wishlist", "listings"):
+        kind = "wishlist"
+    fmt = (request.query_params.get("fmt") or "csv").strip().lower()
+    rows = _ti.template_rows(kind)
+    fname = f"walkscape-{kind}-template.{ 'xlsx' if fmt == 'xlsx' else 'csv' }"
+    if fmt == "xlsx":
+        import openpyxl
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = kind
+        for r in rows:
+            ws.append(r)
+        buf = io.BytesIO()
+        wb.save(buf)
+        return Response(content=buf.getvalue(),
+                        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+    buf = io.StringIO()
+    csv.writer(buf).writerows(rows)
+    return Response(content=buf.getvalue(), media_type="text/csv",
+                    headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+
+
 @app.get("/api/trading/search")
 async def trading_search(request: Request):
     """Cross-user search. v1 filters: q (slug substring), type, side, owned.
@@ -14706,15 +15898,18 @@ async def trading_trader_detail(name: str, request: Request):
 
     # objects — never a local same-named trader (don't conflate two sites).
     if is_remote and site:
-        listings = [l for l in db.remote_objects("listing")
-                    if l.get("trader") == name and l.get("source_site") == site]
-        wishlist = [w for w in db.remote_objects("wishlist")
-                    if w.get("trader") == name and w.get("source_site") == site]
+        # traders that share an in-game name must NOT merge into one profile.
+        tid = (request.query_params.get("tid") or "").strip()
+        def _is_peer(r):
+            return r.get("source_site") == site and (
+                r.get("trader_id") == tid if tid else r.get("trader") == name)
+        listings = [l for l in db.remote_objects("listing") if _is_peer(l)]
+        wishlist = [w for w in db.remote_objects("wishlist") if _is_peer(w)]
         disp = next((r.get("display_name") for r in (listings + wishlist) if r.get("display_name")), name)
         history = [h for h in db.recent_history(200)
                    if name in (h.get("party_a"), h.get("party_b"))][:25]
         return {"in_game_name": name, "display_name": disp, "contact_prefs": [],
-                "trader_id": None, "source_site": site, "remote": True,
+                "trader_id": tid or None, "source_site": site, "remote": True,
                 "listings": listings, "wishlist": wishlist, "history": history}
 
     target = _resolve_local_trader_uuid(db, request.query_params, name)
@@ -14826,14 +16021,17 @@ async def trading_trader_compare(name: str, request: Request):
     shares = False
 
     if is_remote and site:
-        their_listings = [l for l in db.remote_objects("listing")
-                          if l.get("trader") == name and l.get("source_site") == site]
-        their_wishlist = [w for w in db.remote_objects("wishlist")
-                          if w.get("trader") == name and w.get("source_site") == site]
+        # Scope by stable trader_id when supplied (tid); name only as a legacy
+        tid = (qp.get("tid") or "").strip()
+        def _is_peer(r):
+            return r.get("source_site") == site and (
+                r.get("trader_id") == tid if tid else r.get("trader") == name)
+        their_listings = [l for l in db.remote_objects("listing") if _is_peer(l)]
+        their_wishlist = [w for w in db.remote_objects("wishlist") if _is_peer(w)]
         disp = next((r.get("display_name") for r in (their_listings + their_wishlist)
                      if r.get("display_name")), name)
         inv_reason = "remote"   # peers don't federate full inventory
-        target = {"name": name, "display_name": disp, "remote": True, "site": site, "trader_id": None}
+        target = {"name": name, "display_name": disp, "remote": True, "site": site, "trader_id": tid or None}
     else:
         target_uuid = _resolve_local_trader_uuid(db, qp, name)
         if not target_uuid:
@@ -14976,8 +16174,13 @@ def _has_here_pref(contact_prefs) -> bool:
 
 
 @app.get("/api/trading/unread")
-async def trading_unread(request: Request):
-    """Unread count (messages + wishlist match alerts) for the badge. Polled."""
+def trading_unread(request: Request):
+    """Unread count (messages + wishlist match alerts) for the badge. Polled.
+
+    Sync `def` on purpose: pure blocking SQLite, so FastAPI threadpools it off
+    the event loop. This endpoint is polled every few seconds per user, so an
+    on-loop version serialized behind the write lock and froze the whole site
+    (prod incident 2026-10-16)."""
     session_uuid = request.state.session_uuid
     _require_trading(session_uuid)
     return {"unread": get_db().unread_count(session_uuid)}
@@ -14999,9 +16202,12 @@ async def trading_inbox(request: Request):
 
 
 @app.get("/api/trading/match-alerts")
-async def trading_match_alerts(request: Request):
+def trading_match_alerts(request: Request):
     """Unread wishlist/listing match-alert counts + items, for the My Wishlist /
-    My Listings tab badges and the top-of-page 'new match' surfacing."""
+    My Listings tab badges and the top-of-page 'new match' surfacing.
+
+    Sync `def` on purpose: pure blocking SQLite, threadpooled off the event
+    loop (polled frequently; see trading_unread / 2026-10-16 incident)."""
     session_uuid = request.state.session_uuid
     _require_trading(session_uuid)
     return get_db().match_alert_summary(session_uuid)
@@ -15063,7 +16269,12 @@ async def trading_thread_messages(request: Request):
                                     for l in get_db().get_listings(session_uuid)):
             about_mine = True
             about_listing_id = _lid
+    # Counterpart identity (name + stable trader_id) so a thread opened by key
+    # alone (notification deep-link) can learn its recipient and Send works.
+    cp = get_db().get_thread_counterpart(session_uuid, thread_key)
     return {"thread_key": thread_key, "messages": msgs,
+            "counterpart": cp.get("counterpart"),
+            "counterpart_trader_id": cp.get("counterpart_trader_id"),
             "about_object_id": about_oid, "about_item": about_item, "about_detail": about_detail,
             "about_mine": about_mine, "about_listing_id": about_listing_id,
             "first_unread_idx": first_unread_idx}
@@ -16745,6 +17956,115 @@ async def crafting_tree_build(request: Request):
     }
 
     return {"nodes": nodes, "global_settings": default_settings}
+
+
+@app.post("/api/jobboard/material-breakdown")
+async def jobboard_material_breakdown(request: Request):
+    """Netted material breakdown for a crafted Job Board goal item.
+
+    Reuses the crafting tree engine (build_crafting_tree + calculate_tree): its
+    shopping_list is the owned-aware, shared-material-aggregated bill of
+    materials. Returns per-material {name, icon_path, needed, owned}, skipping
+    fully-owned materials. Does NOT account for gear.
+    """
+    import math
+    body = await request.json()
+    item_id = body.get("item_id")
+    quantity = int(body.get("quantity") or 1) or 1
+    quality = body.get("quality") or "Normal"
+    use_fine = bool(body.get("use_fine"))
+    session_uuid = body.get("session_uuid") or getattr(request.state, "session_uuid", None)
+    if not item_id:
+        raise HTTPException(status_code=400, detail="item_id is required")
+
+    session = get_db().get_session(session_uuid) if session_uuid else None
+    session_data = {}
+    if session:
+        session_data = _enrich_session_data_with_regions(session.get("character_config")) or {}
+        session_data = _enrich_ct_session_with_custom_stats(session_data, session) or session_data
+        session_data.setdefault("uuid", session_uuid)
+
+    from ui.crafting_tree import (_load_game_data, get_craftable_items,
+                                  _resolve_item_ref, _get_icon_path_for_ref)
+    from ui.job_board_handin import _build_indexes, _mat_ref
+    game_data = _load_game_data()
+    if item_id not in {it["item_id"] for it in get_craftable_items(game_data)}:
+        raise HTTPException(status_code=404, detail="Item is not craftable")
+
+    # Recipe-tree breakdown: needed = aggregated gross across branches (a shared
+    # material shows the SAME combined total wherever it appears), owned per
+    # material from inventory, icon per material, fully-owned branches pruned.
+    _slug_to_ref, recipes_by_out, _acts, ref_to_slug = _build_indexes(game_data)
+    owned_q = (_owned_qualities_by_item_id(session_uuid) if session_uuid else {}) or {}
+    owned_by_slug = {}
+    for s, toks in owned_q.items():
+        try:
+            owned_by_slug[s] = sum(int(v) for v in toks.values())
+        except Exception:
+            owned_by_slug[s] = 0
+
+    def _owned_ref(r):
+        return int(owned_by_slug.get(ref_to_slug.get(r, ""), 0))
+
+    MAXD = 10
+    gross = {}
+
+    def _acc(r, qty, depth, seen):
+        gross[r] = gross.get(r, 0) + qty
+        recs = recipes_by_out.get(r)
+        if recs and depth < MAXD and r not in seen:
+            rec = recs[0]
+            y = max(1, getattr(rec, "quantity", 1) or 1)
+            crafts = math.ceil(qty / y)
+            # rec.materials: outer list = ALTERNATIVE combos (pick one), inner
+            # list = ALL-required materials in that combo. Use the first combo
+            # and require every material in it (previously took group[0], which
+            # dropped the 2nd+ required materials — e.g. Basic leather / Animal
+            # fur for Journeyman breeches).
+            combos = getattr(rec, "materials", []) or []
+            combo = combos[0] if combos else []
+            for (q, obj) in combo:
+                mref = _mat_ref(obj)
+                if mref:
+                    _acc(mref, q * crafts, depth + 1, seen | {r})
+
+    eff = max(0, quantity - _owned_ref(item_id))
+    _acc(item_id, eff if eff > 0 else quantity, 0, set())
+
+    def _node(r, depth, seen):
+        need = int(math.ceil(gross.get(r, 0)))
+        owned = _owned_ref(r)
+        recs = recipes_by_out.get(r)
+        kids = []
+        # Expand a material's sub-recipe when it's craftable and you don't fully
+        # own it (shows how to make the shortfall); the ROOT always expands.
+        # A fully-owned material is shown as a (green) leaf with its count — we
+        # just don't break it down further.
+        if recs and depth < MAXD and r not in seen and (depth == 0 or owned < need):
+            rec = recs[0]
+            combos = getattr(rec, "materials", []) or []
+            combo = combos[0] if combos else []
+            for (q, obj) in combo:
+                mref = _mat_ref(obj)
+                if mref:
+                    c = _node(mref, depth + 1, seen | {r})
+                    if c:
+                        kids.append(c)
+        # NEVER prune a node — every material is shown with its (owned/needed)
+        # count so the breakdown always lists the counts, even when you own
+        # everything (previously this returned None and the popup fell back to
+        # the misleading "you have all the materials you need").
+        o = _resolve_item_ref(r)
+        return {"name": getattr(o, "name", None) or r,
+                "icon_path": _get_icon_path_for_ref(r, o),
+                "owned": owned, "needed": need, "children": kids}
+
+    root = _node(item_id, 0, set())
+    tree_children = (root or {}).get("children") or []
+
+    obj = _resolve_item_ref(item_id)
+    return {"item_name": getattr(obj, "name", None) or item_id, "tree": tree_children}
+
 
 
 @app.post("/api/crafting-tree/calculate")

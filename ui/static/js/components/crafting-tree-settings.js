@@ -60,7 +60,9 @@ class GlobalSettingsPanel extends Component {
         const settings = store.get('ui.crafting_tree.global_settings') || {};
         const qty = settings.target_quantity || 1;
         const daily = settings.daily_steps || 10000;
-        const quality = settings.target_quality || 'Perfect';
+        const _rarToQual = { common: 'Normal', uncommon: 'Good', rare: 'Great', epic: 'Excellent', legendary: 'Perfect', ethereal: 'Eternal' };
+        const _rawQ = settings.target_quality || 'Perfect';
+        const quality = _rarToQual[String(_rawQ).toLowerCase()] || _rawQ;   // map rarity token → crafted name
         const buffer = ((settings.buffer_percentage ?? 0.05) * 100).toFixed(0);
         const spoiler = settings.spoiler_protection !== false;
         const useFine = settings.use_fine || false;
@@ -101,6 +103,14 @@ class GlobalSettingsPanel extends Component {
         // as top-level toggles next to spoiler protect + fine mats.
         const optimizePets = !!settings.optimize_pets;
         const optimizeConsumables = !!settings.optimize_consumables;
+        // "Use pet abilities": when optimizing pets, apply each pet's active
+        // ability (e.g. the Golden Frog's Lucky Day +20 QO), like the main
+        // optimizer. Defaults from the global usePetAbility setting the first
+        // time (before the user sets a tree-local value), then persists in the
+        // tree's global_settings. (frog-ability #5)
+        const usePetAbility = settings.use_pet_ability !== undefined
+            ? !!settings.use_pet_ability
+            : !!(window.isUsePetAbilityEnabled && window.isUsePetAbilityEnabled());
         // "Run optimization locally" mirrors the GLOBAL setting
         // (window.settingsModal.runLocalOptimization), synced across surfaces —
         // it is NOT part of the crafting-tree settings object. FAC-gated.
@@ -198,6 +208,11 @@ class GlobalSettingsPanel extends Component {
                         Optimize Pets
                     </label>
                     <label class="crafting-tree-settings-label crafting-tree-toggle">
+                        <input type="checkbox" class="ct-use-pet-ability" ${usePetAbility ? 'checked' : ''}>
+                        Use pet abilities
+                        <span class="travel-info-icon" data-info="When optimizing pets, also apply each pet's active ability (e.g. the Golden Frog's Lucky Day = +20 Quality Outcome) to the solve — the same as the main optimizer. Applies to both the default and exact optimizers. Turn off to score pets on their passive stats only." role="button" tabindex="0" aria-label="About use pet abilities" style="font-style:normal;">ⓘ</span>
+                    </label>
+                    <label class="crafting-tree-settings-label crafting-tree-toggle">
                         <input type="checkbox" class="ct-optimize-consumables" ${optimizeConsumables ? 'checked' : ''}>
                         Optimize Consumables${CONSUMABLE_OPTIONS_INFO_ICON_HTML}
                     </label>
@@ -262,7 +277,7 @@ class GlobalSettingsPanel extends Component {
         // Palette row click — handled in settings-modal.js
         // Custom color input change — handled in settings-modal.js
 
-        this.$element.on('change input', '.ct-qty, .ct-daily, .ct-buffer, .ct-spoiler, .ct-fine, .ct-skip-shops, .ct-use-owned, .ct-skip-chests, .ct-fast-chests, .ct-optimize-pets, .ct-optimize-consumables, .ct-exact-tree', function () {
+        this.$element.on('change input', '.ct-qty, .ct-daily, .ct-buffer, .ct-spoiler, .ct-fine, .ct-skip-shops, .ct-use-owned, .ct-skip-chests, .ct-fast-chests, .ct-optimize-pets, .ct-use-pet-ability, .ct-optimize-consumables, .ct-exact-tree', function () {
             self._emitChange();
         });
 
@@ -320,6 +335,7 @@ class GlobalSettingsPanel extends Component {
             // clears the checkbox when Skip Chests is on so this stays false.
             fast_chests: this.$element.find('.ct-fast-chests').is(':checked'),
             optimize_pets: this.$element.find('.ct-optimize-pets').is(':checked'),
+            use_pet_ability: this.$element.find('.ct-use-pet-ability').is(':checked'),
             optimize_consumables: this.$element.find('.ct-optimize-consumables').is(':checked'),
             exact_tree: this.$element.find('.ct-exact-tree').is(':checked'),
             line_colors: existingSettings.line_colors || DEFAULT_PALETTE,

@@ -1303,7 +1303,10 @@ _TI_IFC_TARGET = {
 
 def build_target_items_jobs(run_id: str, session_uuid: str, character,
                             include_fine: bool = False,
-                            target_groups: 'Optional[List[str]]' = None) -> 'List[ReportJob]':
+                            target_groups: 'Optional[List[str]]' = None,
+                            target_item_slug: 'Optional[str]' = None,
+                            target_item_slugs: 'Optional[List[str]]' = None,
+                            target_item_groups: 'Optional[List[str]]' = None) -> 'List[ReportJob]':
     """Build jobs for the v2 keyword-based target-items grouping.
 
     Material + finding items: one job per item leaf (min steps/item across
@@ -1684,6 +1687,63 @@ def build_target_items_jobs(run_id: str, session_uuid: str, character,
     if target_groups:
         _tg_set = set(target_groups)
         jobs = [j for j in jobs if (j.skill_name or '') in _tg_set]
+
+    # ── Filter to a SINGLE target item (Find Best Source) if provided ──────
+    # 2026-10-27 (jwbail): when target_item_slug is set, keep only the jobs
+    # whose item leaf matches — scopes the whole run to one material so the
+    # report computes ONLY that item's best source (fast, not the full grind).
+    # Matches on extras['item_slug'], the stable leaf identity shared by
+    # material / finding / currency jobs (and the global-IF expansion rows).
+    if target_item_slug:
+        jobs = [j for j in jobs
+                if isinstance(getattr(j, 'extras', None), dict)
+                and j.extras.get('item_slug') == target_item_slug]
+
+    # ── Filter to a SET of selected target items if provided ──────────────
+    # 2026-11-14 (jwbail): per-item selection from each category's details
+    # panel. `target_item_groups` lists the category group_slugs the user
+    # NARROWED (a partial item selection). For a job in a governed group, keep
+    # it only if its leaf is in `target_item_slugs`. Jobs in non-governed groups
+    # (single-item currency/finding, or fully-selected categories) always pass —
+    # they are controlled by the target_groups filter above. None = no narrowing.
+    if target_item_slugs and target_item_groups:
+        _tis_set = set(target_item_slugs)
+        _tig_set = set(target_item_groups)
+
+        def _keep_titem(j):
+            ex = getattr(j, 'extras', None)
+            if not isinstance(ex, dict):
+                return True
+            if ex.get('group_slug') in _tig_set:
+                slug = ex.get('item_slug') or ''
+                # Fine variants carry a '<base>_(fine)' leaf slug but the client
+                # selects the base item, so match on the base so a selected
+                # item's fine variant is kept (and a deselected one's dropped).
+                base = slug[:-len('_(fine)')] if slug.endswith('_(fine)') else slug
+                return base in _tis_set
+            return True
+        _ti_before = len(jobs)
+        jobs = [j for j in jobs if _keep_titem(j)]
+        # Observability: prove the narrowing fired and what it kept. If a
+        # governed group didn't shrink, dump a sample of its (group_slug,
+        # item_slug) so a vocabulary mismatch is visible. Grep '[titem-narrow]'.
+        try:
+            _sample = [((j.extras or {}).get('group_slug'), (j.extras or {}).get('item_slug'))
+                       for j in jobs
+                       if isinstance(getattr(j, 'extras', None), dict)
+                       and (j.extras or {}).get('group_slug') in _tig_set][:12]
+            print(f"[titem-narrow] run={run_id} FIRED groups={sorted(_tig_set)} "
+                  f"slugs={sorted(_tis_set)} jobs {_ti_before}->{len(jobs)} "
+                  f"kept_in_governed_sample={_sample}", flush=True)
+        except Exception:
+            pass
+    else:
+        try:
+            print(f"[titem-narrow] run={run_id} SKIPPED (no narrowing) "
+                  f"target_item_slugs={target_item_slugs} "
+                  f"target_item_groups={target_item_groups} jobs={len(jobs)}", flush=True)
+        except Exception:
+            pass
 
     # Attach include-unavailable reasons to each per-activity job whose
     # activity was surfaced only because an unavailable dimension is enabled.
@@ -2936,14 +2996,46 @@ def run_optimizer_for_job(job: ReportJob, character,
                             # rough_topaz @ Antique market assessor regression. The
                             # find-signature stays in the key (harmless, still
                             # distinguishes find profiles); _tr_target is the fix.
-                            _ck = (job.run_id, getattr(activity, 'name', None),
-                                   getattr(_oag, 'SELECTED_LOCATION', None),
-                                   bool(globals().get('_FAST_MODE', False)),
-                                   _tr_target,
-                                   _ti_find_signature(job))
+                            #
+                            # EXCEPTION — plain drops (no finding category): when
+                            # NO item/category find lever applies (only uniform
+                            # levers: generic rate, plus fine_material_finding for
+                            # fine variants), the optimal gearset is
+                            # item-INDEPENDENT (base rate C0 scales the objective
+                            # uniformly, so it never moves the argmax). Every plain
+                            # drop at this (activity, location, mode) then shares
+                            # ONE solve, split only by is_fine (FMF on for fine).
+                            # This is safe precisely because there is no
+                            # find-vs-rate trade-off to shift per item.
+                            if _ti_is_plain(job):
+                                _is_fine = bool((getattr(job, 'extras', None) or {}).get('is_fine'))
+                                _ck = (job.run_id, getattr(activity, 'name', None),
+                                       getattr(_oag, 'SELECTED_LOCATION', None),
+                                       bool(globals().get('_FAST_MODE', False)),
+                                       _is_fine, '__plain__')
+                            else:
+                                _ck = (job.run_id, getattr(activity, 'name', None),
+                                       getattr(_oag, 'SELECTED_LOCATION', None),
+                                       bool(globals().get('_FAST_MODE', False)),
+                                       _tr_target,
+                                       _ti_find_signature(job))
                             _solve_cache = _TI_SOLVE_CACHE
                         _cached = (_solve_cache.get(_ck)
                                    if (_ck is not None and _solve_cache is not None) else None)
+                        # 2026-11-20 (jwbail): shared-solve observability. Logs
+                        # whether each target-item exact solve was REUSED from
+                        # the run cache (shared gearset) or freshly SOLVED, plus
+                        # whether it used the plain-drop shared key. Grep the run
+                        # log for '[titem-solve]' to confirm sharing.
+                        try:
+                            if _ck is not None and _solve_cache is not None:
+                                _ls_leaf = (getattr(job, 'extras', None) or {}).get('item_slug')
+                                _ls_act = getattr(activity, 'name', None)
+                                _ls_plain = isinstance(_ck, tuple) and ('__plain__' in _ck)
+                                print(f"[titem-solve] {'REUSE' if _cached is not None else 'SOLVE'} "
+                                      f"item={_ls_leaf} activity={_ls_act} plain={_ls_plain}", flush=True)
+                        except Exception:
+                            pass
                         if _cached is not None:
                             _ex_gear, _cached_be = _cached
                             try:
@@ -5532,25 +5624,57 @@ def get_ownership_lookup(session_uuid: str, db_path: str) -> Dict[str, set]:
             collectibles.add(_normalize_item_id(c))
 
     pet_species = set()
+
+    def _add_pet_species(raw):
+        """Register an owned pet's species in BOTH its raw export form and
+        its CANONICAL species.
+
+        Rare pet variants export a variant-specific species id — a rare
+        Living Flame exports 'mellow_flame', a rare Camel 'two_hump_camel'
+        — while build_new_items_jobs derives the canonical species from the
+        egg name ('Living flame egg' -> 'living_flame'). Without resolving
+        the rare variant back to its canonical species here, a user who owns
+        the rare pet (or its egg) still sees that pet's egg surface under
+        "Fastest New Item Activities" (bug 38d91dc0: a rare Living Flame
+        owner kept seeing "Living flame egg" as a new item)."""
+        if not raw:
+            return
+        pet_species.add(_normalize_item_id(raw))
+        try:
+            from util.pet_lookup import resolve_pet_levels
+            levels = resolve_pet_levels(raw)
+        except Exception:
+            levels = None
+        canon = getattr(levels, 'species', None) if levels is not None else None
+        if canon:
+            pet_species.add(_normalize_item_id(canon))
+
     for p in (char_config.get('pets') or []):
         if isinstance(p, dict):
-            sp = p.get('species') or ''
-            if sp:
-                pet_species.add(_normalize_item_id(sp))
+            _add_pet_species(p.get('species') or '')
         elif isinstance(p, str):
-            pet_species.add(_normalize_item_id(p))
+            _add_pet_species(p)
     for sp in (char_config.get('available_pets') or []):
         if isinstance(sp, str):
-            pet_species.add(_normalize_item_id(sp))
+            _add_pet_species(sp)
         elif isinstance(sp, dict):
-            sp_name = sp.get('species') or sp.get('name') or ''
-            if sp_name:
-                pet_species.add(_normalize_item_id(sp_name))
+            _add_pet_species(sp.get('species') or sp.get('name') or '')
 
     eggs = set()
     for egg in (char_config.get('available_eggs') or []):
         if isinstance(egg, str):
             eggs.add(_normalize_item_id(egg))
+        elif isinstance(egg, dict):
+            # available_eggs entries are export dicts ({name, species,
+            # level, stage}) — not strings. An unhatched egg the user holds
+            # should suppress that egg from new_items exactly like owning the
+            # hatched pet does, so route its species through the same
+            # canonicalizing path (handles rare variants too). Also capture
+            # any explicit egg name/id form for the name-based match.
+            _add_pet_species(egg.get('species') or '')
+            egg_name = egg.get('egg_name') or egg.get('name') or ''
+            if egg_name:
+                eggs.add(_normalize_item_id(egg_name))
 
     # 2026-05-24: items marked hide=true via column 1 checkbox or the
     # new_items "Hide" button get added to the items set so the new_items
@@ -5978,12 +6102,312 @@ def run_fastest_craft_category(session_uuid: str, db_path: str,
 
         res = run_fastest_craft(session_uuid, selected, session_data, ui_config,
                                 db=db, owned_counts=None, progress=_progress,
+                                expand_intermediates=True,
+                                fast=bool(globals().get('_FAST_MODE', False)),
                                 log=lambda *a, **k: print(*a, flush=True))
         count = int(res.get('count', 0) or 0)
         print(f'[stats_report_worker] fastest_craft complete: {count} items')
+        # Generate missing Fastest Target Items rows for the gathers this run
+        # needed but the session has no row for yet (same as the local path's
+        # /api/fastest-craft/local-result does). Best-effort.
+        try:
+            _needed = set(needed_target_items_keys_from_fc_items(res.get('items') or []))
+            _needed |= set(res.get('gather_scope_keys') or [])  # incl. losing routes
+            if _needed:
+                generate_missing_target_items_rows(session_uuid, db_path, _needed,
+                                                   run_id=run_id)
+        except Exception as _ge:  # noqa: BLE001
+            print(f'[stats_report_worker] gen-ti (server path) failed: {_ge!r}',
+                  file=sys.stderr)
         return count
     except Exception as e:  # noqa: BLE001 — isolated from the rest of the run
         print(f'[stats_report_worker] fastest_craft failed (non-fatal): {e!r}', file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        return 0
+
+
+def needed_target_items_keys_from_fc_items(items) -> set:
+    """Collect the canonical target_items scope-key strings every Fastest Craft
+    item needed (its gather sub-leaves), from the per-(variant,quality) details'
+    `subtree_scope_keys`. These are 'target_items::<group>::<item>::NONE::NONE'
+    strings (see ui.fastest_craft.subtree_scope_keys_for_tree)."""
+    keys = set()
+    for it in (items or []):
+        if not isinstance(it, dict):
+            continue
+        details = it.get('details') or {}
+        if not isinstance(details, dict):
+            continue
+        for by_q in details.values():
+            if not isinstance(by_q, dict):
+                continue
+            for cell in by_q.values():
+                if not isinstance(cell, dict):
+                    continue
+                for k in (cell.get('subtree_scope_keys') or []):
+                    if isinstance(k, str) and k.startswith('target_items::'):
+                        keys.add(k)
+    return keys
+
+
+def generate_missing_target_items_rows(session_uuid: str, db_path: str,
+                                       needed_keys, *, run_id=None,
+                                       include_fine: bool = True,
+                                       max_items: int = 200) -> int:
+    """When a Fastest Craft run needs a gather material that the CURRENT run's
+    Fastest Target Items section does not already show, run the REAL gear-aware
+    target_items job(s) for it and persist them as normal target_items rows
+    (one per activity that drops it, v3) UNDER THE CURRENT RUN — so the gather
+    shows up in, and is reusable from, that run's Fastest Target Items report.
+
+    needed_keys: iterable of canonical 'target_items::<group>::<item>::NONE::NONE'
+    scope-key strings (from needed_target_items_keys_from_fc_items).
+
+    The display reads stats_report_gearsets per run_id, so the rows MUST carry
+    the current run_id (not a synthetic one) or they never appear. Dedup is
+    therefore against THIS RUN's gearset rows (ignoring activity) — a prior
+    run's rows must not suppress adding the gather to the current run. We write
+    the gearset (display) row + the stale-detection row directly, deliberately
+    NOT via execute_job: execute_job is worker-only (it calls
+    update_stats_report_progress and can os._exit the process when the run row
+    is gone — fatal in the web request process this runs in). Never raises;
+    returns the number of rows written. Best-effort.
+    """
+    try:
+        from ui.database import DatabaseManager
+
+        # Parse needed (group, item) pairs from the canonical scope-key strings.
+        needed = set()
+        for k in (needed_keys or []):
+            parts = str(k).split('::')
+            if len(parts) >= 3 and parts[0] == 'target_items' and parts[1] and parts[2]:
+                needed.add((parts[1].lower(), parts[2]))
+        if not needed:
+            return 0
+
+        db = DatabaseManager(db_path)
+        # Resolve the run these rows must attach to (the FC run in progress).
+        if not run_id:
+            _run = db.get_latest_stats_report_run(session_uuid)
+            run_id = (_run or {}).get('id')
+        if not run_id:
+            print('[stats_report_worker] gen-ti: no current run to attach rows to; skipping',
+                  file=sys.stderr)
+            return 0
+
+        # Dedup against what THIS run already SHOWS (gearsets, run-scoped). A
+        # target_items gearset row carries skill_name=group_slug,
+        # chest_name=item_slug. Activity/location ignored so a material present
+        # via any source in this run counts as covered.
+        existing = set()
+        try:
+            conn = db._get_connection()
+            cur = conn.execute(
+                "SELECT DISTINCT skill_name, chest_name FROM stats_report_gearsets "
+                "WHERE run_id = ? AND category = 'target_items'", (run_id,))
+            for sk, ch in cur.fetchall():
+                existing.add(((sk or '').lower(), ch or ''))
+            if not db._persistent_conn:
+                conn.close()
+        except Exception as _qe:  # noqa: BLE001
+            print(f'[stats_report_worker] gen-ti existing-row query failed: {_qe!r}',
+                  file=sys.stderr)
+
+        # Cross-run reuse (Phase 6, product rule: target items are reused on
+        # PRESENCE — never stale-redone). Rows the SESSION already computed in
+        # an EARLIER run are COPIED FORWARD into this run (free, no optimizer) so
+        # they display here and are not re-solved. Only materials absent from
+        # EVERY run get solved below — matching the /plan denominator, which
+        # counts solve jobs for exactly (candidate - cross-run-present).
+        import uuid as _uuid
+        copyfwd: dict = {}   # (group,item) -> {activity_name: full row}
+        copied = 0
+        try:
+            conn = db._get_connection()
+            cur = conn.execute(
+                "SELECT activity_name, skill_name, chest_name, metric_value, "
+                "metric_name, gearset_export, metrics_json "
+                "FROM stats_report_gearsets WHERE session_uuid = ? "
+                "AND category = 'target_items' AND run_id != ? "
+                "ORDER BY created_at DESC", (session_uuid, run_id))
+            for (act, sk, ch, mv, mn, gx, mj) in cur.fetchall():
+                pair = ((sk or '').lower(), ch or '')
+                if pair in existing or pair not in needed:
+                    continue
+                bucket = copyfwd.setdefault(pair, {})
+                akey = act or ''
+                if akey not in bucket:   # newest row per (pair, activity) wins
+                    bucket[akey] = {'activity_name': act, 'skill_name': sk,
+                                    'chest_name': ch, 'metric_value': mv,
+                                    'metric_name': mn, 'gearset_export': gx,
+                                    'metrics_json': mj}
+            if not db._persistent_conn:
+                conn.close()
+        except Exception as _ce:  # noqa: BLE001 — copy-forward is best-effort
+            print(f'[stats_report_worker] gen-ti cross-run query failed: {_ce!r}',
+                  file=sys.stderr)
+        for pair, bucket in copyfwd.items():
+            for row in bucket.values():
+                try:
+                    # fc-preopt: tag copied FC-gather rows so the display shows
+                    # them regardless of the user's per-item selection.
+                    _cmj = row.get('metrics_json')
+                    try:
+                        import json as _json
+                        _cmj = _json.loads(_cmj) if isinstance(_cmj, str) else (_cmj or {})
+                        if not isinstance(_cmj, dict):
+                            _cmj = {}
+                        _cmj['fc_gather'] = True
+                        _cmj = _json.dumps(_cmj)
+                    except Exception:
+                        _cmj = row.get('metrics_json')
+                    db.create_stats_report_gearset(
+                        result_id=str(_uuid.uuid4()), run_id=run_id,
+                        session_uuid=session_uuid, category='target_items',
+                        activity_name=row['activity_name'], skill_name=row['skill_name'],
+                        chest_name=row['chest_name'], metric_value=row['metric_value'],
+                        metric_name=row['metric_name'], gearset_export=row['gearset_export'],
+                        metrics_json=_cmj, job_status='complete')
+                    copied += 1
+                except Exception as _cfe:  # noqa: BLE001
+                    print(f'[stats_report_worker] gen-ti copy-forward failed '
+                          f'{pair}: {_cfe!r}', file=sys.stderr)
+
+        present = set(existing) | set(copyfwd.keys())
+        missing = {(g, i) for (g, i) in needed if (g, i) not in present}
+        print(f'[stats_report_worker] gen-ti ENTER needed={len(needed)} '
+              f'run_id={run_id} existing={len(existing)} copied_fwd={copied} '
+              f'missing={len(missing)}', flush=True)
+        if not missing:
+            return copied
+        if len(missing) > max_items:  # defensive bound; FC selections are small
+            missing = set(sorted(missing)[:max_items])
+
+        character = load_character(session_uuid, db_path)
+        # Build pet/consumable pools EXACTLY as run_worker does, from the
+        # session's ui_config — so a gather solved here honors the same
+        # "optimize pets/consumables" gates and the Consumable Options filter
+        # (Include Fine, "ignore consumables I own < N of", use-hidden) the
+        # standalone Fastest Target Items run applied. Without this the FC-
+        # triggered generation used the UNFILTERED owned-consumable pool and
+        # picked a consumable the user had filtered out (e.g. a shark they own
+        # only 9 of under a <20 threshold), producing a different, invalid
+        # gearset + step count than the standalone target-items run.
+        _sess = db.get_session(session_uuid) or {}
+        _uic = _sess.get('ui_config') or {}
+        if isinstance(_uic, str):
+            try:
+                import json as _json
+                _uic = _json.loads(_uic)
+            except Exception:
+                _uic = {}
+        _inc_cons = bool(_uic.get('include_consumables',
+                                  _uic.get('activity_include_consumables', False)
+                                  or _uic.get('recipe_include_consumables', False)))
+        _inc_pets = bool(_uic.get('include_pets', False))
+        _use_pet_ability = bool(_uic.get('use_pet_ability', True))
+        _inc_fine_cons = _uic.get('include_fine_consumables', True) is not False
+        _cmo_en = _uic.get('consumable_min_owned_enabled', False) is True
+        try:
+            _cmo = int(_uic.get('consumable_min_owned', 5))
+        except (TypeError, ValueError):
+            _cmo = 5
+        _cmo_op = str(_uic.get('consumable_min_owned_operator', 'lt') or 'lt').lower()
+        if _cmo_op not in ('lt', 'lte'):
+            _cmo_op = 'lt'
+        globals()['_USE_HIDDEN_CONSUMABLES'] = bool(_uic.get('consumable_use_hidden', False))
+        pet_items_pool = (_build_pet_items(session_uuid, db_path, _use_pet_ability)
+                          if _inc_pets else [])
+        consumable_items_pool = _collect_owned_consumables(
+            character,
+            include_fine=_inc_fine_cons,
+            min_owned_enabled=_cmo_en,
+            min_owned=_cmo,
+            min_owned_op=_cmo_op,
+        ) if _inc_cons else []
+        try:
+            hidden_items = _build_hidden_items(session_uuid, db_path)
+        except Exception:
+            hidden_items = set()
+
+        needed_groups = sorted({g for (g, _i) in missing})
+        ti_jobs = build_target_items_jobs(
+            run_id, session_uuid, character,
+            include_fine=include_fine, target_groups=needed_groups)
+
+        written = 0
+        for job in ti_jobs:
+            key = _target_items_scope_key(job)  # ('target_items', group, item, act, 'NONE')
+            if (key[1], key[2]) not in missing:
+                continue
+            try:
+                job.run_id = run_id  # attach to the current run (defensive)
+                # Mirror execute_job's target_items result construction (gear-
+                # aware optimizer for item/currency; passthrough if no activity).
+                _ti_extras = dict(job.extras) if job.extras else {}
+                if job.activity is None:
+                    result = {
+                        'metric_value': job.precomputed_metric,
+                        'metric_name': job.precomputed_metric_name or 'Steps/item',
+                        'gearset_export': None, 'metrics_json': _ti_extras,
+                    }
+                else:
+                    _opt = run_optimizer_for_job(
+                        job, character, pet_items_pool=pet_items_pool,
+                        consumable_items_pool=consumable_items_pool,
+                        hidden_items=hidden_items)
+                    _omj = _opt.get('metrics_json')
+                    _omj = {**_ti_extras, **_omj} if isinstance(_omj, dict) else _ti_extras
+                    _om = _opt.get('metric_value')
+                    _ofinal = (_om if (_om is not None and _om > 0 and _om != float('inf'))
+                               else job.precomputed_metric)
+                    result = {
+                        'metric_value': _ofinal,
+                        'metric_name': _opt.get('metric_name') or job.precomputed_metric_name or 'Steps/item',
+                        'gearset_export': _opt.get('gearset_export'),
+                        'metrics_json': _omj,
+                    }
+                # fc-preopt: tag FC-generated gather rows so the goals-report
+                # target-items display shows them even when not in the user's
+                # per-item selection (they are needed by a craftable, not a
+                # deselected roster item). Both the passthrough and gear-aware
+                # branches get the flag.
+                try:
+                    _rmj = result.get('metrics_json')
+                    if isinstance(_rmj, str):
+                        import json as _json
+                        _rmj = _json.loads(_rmj or '{}')
+                    if not isinstance(_rmj, dict):
+                        _rmj = {}
+                    _rmj['fc_gather'] = True
+                    result['metrics_json'] = _rmj
+                except Exception:
+                    pass
+                db.create_stats_report_gearset(
+                    result_id=job.job_id, run_id=run_id, session_uuid=session_uuid,
+                    category='target_items',
+                    activity_name=job.activity.name if job.activity else None,
+                    skill_name=job.skill_name, chest_name=job.chest_name,
+                    metric_value=result['metric_value'], metric_name=result['metric_name'],
+                    gearset_export=result.get('gearset_export'),
+                    metrics_json=result.get('metrics_json'), job_status='complete')
+                # Dual-write the stale-detection row (best-effort, like the worker).
+                try:
+                    _write_stats_report_result_row(db, job, character, result)
+                except Exception as _se:  # noqa: BLE001
+                    print(f'[stats_report_worker] gen-ti stale-row write failed: {_se!r}',
+                          file=sys.stderr)
+                written += 1
+            except Exception as _je:  # noqa: BLE001 — one bad job never fails the batch
+                print(f'[stats_report_worker] gen-ti job failed {key}: {_je!r}',
+                      file=sys.stderr)
+        if written:
+            print(f'[stats_report_worker] generated {written} target_items row(s) for '
+                  f'{len(missing)} missing material(s) in run {run_id}', flush=True)
+        return written + copied
+    except Exception as e:  # noqa: BLE001 — best-effort; never fail the FC persist
+        print(f'[stats_report_worker] generate_missing_target_items_rows failed '
+              f'(non-fatal): {e!r}', file=sys.stderr)
         traceback.print_exc(file=sys.stderr)
         return 0
 
@@ -6007,7 +6431,10 @@ def run_worker(session_uuid: str, run_id: str, db_path: str,
                consumable_min_owned_operator: str = 'lt',
                consumable_use_hidden: bool = False,
                include_unavailable: Optional[dict] = None,
-               fastest_craft_categories: Optional[List[str]] = None):
+               fastest_craft_categories: Optional[List[str]] = None,
+               target_item_slug: Optional[str] = None,
+               target_item_slugs: Optional[List[str]] = None,
+               target_item_groups: Optional[List[str]] = None):
     """Main worker logic — builds jobs, runs them concurrently, completes run.
 
     stale_only: when True, filter the built jobs to only those flagged stale
@@ -6227,7 +6654,10 @@ def run_worker(session_uuid: str, run_id: str, db_path: str,
     if 'target_items' in categories:
         ti_jobs = build_target_items_jobs(run_id, session_uuid, character,
                                          include_fine=include_fine,
-                                         target_groups=target_categories)
+                                         target_groups=target_categories,
+                                         target_item_slug=target_item_slug,
+                                         target_item_slugs=target_item_slugs,
+                                         target_item_groups=target_item_groups)
         # target_groups filter is now applied inside build_target_items_jobs
         all_jobs.extend(ti_jobs)
         print(f'[stats_report_worker] Built {len(ti_jobs)} target_items jobs')
@@ -6463,6 +6893,19 @@ def main():
                         help='When true, target_items includes fine item variants as separate '
                              'leaves and adds fine sell value to currency groups. '
                              '2026-08-12 (jwbail, v2 keyword grouping).')
+    parser.add_argument('--target-item-slug', default='null',
+                        help='When set to an item leaf slug (normalize_item_id of the display '
+                             'name, e.g. "oak_logs"), scopes the target_items run to ONLY that '
+                             'item — the "Find Best Source" single-item run. "null"/empty = all '
+                             'items. 2026-10-27 (jwbail).')
+    parser.add_argument('--target-item-slugs', default='null',
+                        help='JSON array of selected target-item leaf slugs (the per-category '
+                             'item toggles). When set, the target_items run is restricted to '
+                             'these leaves. "null"/"[]" = every item. 2026-11-14 (jwbail).')
+    parser.add_argument('--target-item-groups', default='null',
+                        help='JSON array of group_slugs the user NARROWED (partial item '
+                             'selection). The per-item filter only governs these groups. '
+                             '"null"/"[]" = no narrowing. 2026-11-14 (jwbail).')
     parser.add_argument('--fastest-craft-categories', default='null',
                         help='JSON array of prefixed Fastest Craft chip ids (e.g. '
                              '["tools:pickaxes", "mat:bar"]) for the fastest_craft category. '
@@ -6561,6 +7004,30 @@ def main():
         except Exception:
             target_categories = None
         include_fine = args.include_fine.lower() in ('true', '1', 'yes')
+        try:
+            target_item_slug = json.loads(args.target_item_slug)
+            if not isinstance(target_item_slug, str) or not target_item_slug:
+                target_item_slug = None
+        except Exception:
+            # Accept a bare (non-JSON) slug string too.
+            target_item_slug = args.target_item_slug if (
+                args.target_item_slug and args.target_item_slug != 'null') else None
+        try:
+            target_item_slugs = json.loads(args.target_item_slugs)
+            if not isinstance(target_item_slugs, list) or not target_item_slugs:
+                target_item_slugs = None
+            else:
+                target_item_slugs = [str(s) for s in target_item_slugs if s]
+        except Exception:
+            target_item_slugs = None
+        try:
+            target_item_groups = json.loads(args.target_item_groups)
+            if not isinstance(target_item_groups, list) or not target_item_groups:
+                target_item_groups = None
+            else:
+                target_item_groups = [str(s) for s in target_item_groups if s]
+        except Exception:
+            target_item_groups = None
         try:
             fastest_craft_categories = json.loads(args.fastest_craft_categories)
             if not isinstance(fastest_craft_categories, list):
@@ -6669,6 +7136,9 @@ def main():
             consumable_use_hidden=consumable_use_hidden,
             include_unavailable=include_unavailable,
             fastest_craft_categories=fastest_craft_categories,
+            target_item_slug=target_item_slug,
+            target_item_slugs=target_item_slugs,
+            target_item_groups=target_item_groups,
         )
     except Exception as e:
         print(f'[stats_report_worker] Fatal error: {e}', file=sys.stderr)
@@ -7164,6 +7634,34 @@ def _ti_find_signature(job):
             _leaf = None
         return ('__unique__', _leaf or getattr(job, 'chest_name', None)
                 or getattr(job, 'job_id', None) or id(job))
+
+
+def _ti_is_plain(job):
+    """True iff a target_items job has NO item/category finding lever.
+
+    A "plain" drop is boosted only by UNIFORM levers — the activity's generic
+    rate, and (for fine variants) fine_material_finding, both of which scale
+    every item at the activity equally. Its optimal gearset is therefore
+    item-INDEPENDENT, so plain drops can share ONE exact solve (split only by
+    is_fine). Any item with a finding category (gem / ore / sea-shell / AGT /
+    ...) is NOT plain: its find-vs-rate trade-off shifts with the base drop
+    rate, so it keeps a per-item solve (the topaz-vs-jade regression).
+
+    Decided purely from the find-signature's IFC set (item ItemFindingCategory
+    membership ∪ target-ref finding stats). Empty set -> plain. Correctness
+    bias: on the error/unique signature form, or any error, return False so the
+    scope never shares a solve.
+    """
+    try:
+        sig = _ti_find_signature(job)
+        # Normal form: (group_slug, is_fine, frozenset(ifcs)). Error form is the
+        # 2-tuple ('__unique__', ...) -> treat as NOT plain.
+        if not (isinstance(sig, tuple) and len(sig) == 3):
+            return False
+        ifcs = sig[2]
+        return isinstance(ifcs, (set, frozenset)) and len(ifcs) == 0
+    except Exception:
+        return False
 
 
 def _target_items_scope_key(job):

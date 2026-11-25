@@ -17,6 +17,40 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
+def _nice_from_env(raw, default=15):
+    """Clamp a requested niceness into the valid 0..19 range.
+
+    0 disables the renice (returns 0). Non-integer / missing values fall back
+    to `default`. Mirrors ui/stats_report_worker.py and ui/exact_tree_worker.py.
+    """
+    try:
+        return max(0, min(19, int(raw)))
+    except (TypeError, ValueError):
+        return max(0, min(19, int(default)))
+
+
+def _apply_renice():
+    """Best-effort self-renice so a heavy travel branch-and-bound solve yields
+    CPU to the web process under contention.
+
+    The travel solver runs in this separate process (freeing the GIL), but at
+    normal priority it still competed equally with uvicorn on the small Oracle
+    VM -- a single large multi-region solve pinned ~1-2 cores and slowed every
+    request (prod CPU-starvation incident 2026-10-15, key
+    simple:salsfirth:vastalume at 195% CPU). Reniced it mirrors the established
+    exact-tree / stats-report workers. Tunable via TRAVEL_OPTIMIZE_WORKER_NICE
+    (0..19, default 15); 0 disables. Never aborts the run over a failed renice.
+    """
+    try:
+        nice_target = _nice_from_env(os.environ.get("TRAVEL_OPTIMIZE_WORKER_NICE", "15"))
+        if nice_target:
+            os.nice(nice_target)
+            print(f"[travel_optimize_worker] reniced to +{nice_target} "
+                  f"(background CPU throttle)", flush=True)
+    except Exception as nice_err:  # noqa: BLE001
+        print(f"[travel_optimize_worker] renice skipped ({nice_err!r})", flush=True)
+
+
 def main():
     if len(sys.argv) < 2:
         print(json.dumps({'success': False, 'error': 'No input file specified'}))
@@ -27,6 +61,10 @@ def main():
     # Redirect print statements to stderr so only JSON goes to stdout
     old_stdout = sys.stdout
     sys.stdout = sys.stderr
+
+    # Yield CPU to the web process under contention (prints land on stderr,
+    # keeping stdout clean for the final result JSON).
+    _apply_renice()
 
     try:
         with open(input_file, 'r') as f:

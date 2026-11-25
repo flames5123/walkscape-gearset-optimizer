@@ -1718,6 +1718,19 @@ class Item:
         requirements=[{'type': 'skill', 'skill': 'Trinketry', 'level': 50}]
     )
 
+    DOUBLE_TROUBLE_MITTENS = ItemInstance(
+        name='Double trouble mittens',
+        uuid='item-double_trouble_mittens-from-api',
+        stats={'fishing': {'global': {'work_efficiency': 6.0, 'fine_material_finding': 17.0}}},
+        slot='hands',
+        keywords=['Fishing'],
+        value=25,
+        rarity='rare',
+        location_reqs=[],
+        gated_stats={},
+        requirements=[{'type': 'skill', 'skill': 'Fishing', 'level': 25}]
+    )
+
     DRAGONFLY_CATCHING_NET = ItemInstance(
         name='Dragonfly catching net',
         uuid='582117c1-3b52-49d5-a022-664083661e28',
@@ -1843,6 +1856,19 @@ class Item:
         quality_stats={'Normal': {'gathering': {'global': {'work_efficiency': 18.0}}}, 'Good': {'gathering': {'global': {'work_efficiency': 22.0, 'double_rewards': 2.0}}}, 'Great': {'gathering': {'global': {'work_efficiency': 25.0, 'double_rewards': 3.0, 'bonus_xp_percent': 1.0}}}, 'Excellent': {'gathering': {'global': {'work_efficiency': 28.0, 'double_rewards': 4.0, 'bonus_xp_percent': 2.0, 'double_action': 1.0}}}, 'Perfect': {'gathering': {'global': {'work_efficiency': 31.0, 'double_rewards': 5.0, 'bonus_xp_percent': 3.0, 'double_action': 2.0, 'chest_finding': 15.0}}}, 'Eternal': {'gathering': {'global': {'work_efficiency': 34.0, 'double_rewards': 6.0, 'bonus_xp_percent': 4.0, 'double_action': 3.0, 'chest_finding': 18.0, 'fine_material_finding': 10.0}}}},
         quality_values={'Normal': 30, 'Good': 58, 'Great': 91, 'Excellent': 126, 'Perfect': 188, 'Eternal': 414},
         requirements=[{'type': 'category_level_percent', 'category': 'gathering', 'percent': 55}]
+    )
+
+    ENGRAVED_LEASH = ItemInstance(
+        name='Engraved leash',
+        uuid='item-engraved_leash-from-api',
+        stats={'agility': {'global': {'work_efficiency': 5.0, 'fine_material_finding': 20.0}}, 'foraging': {'global': {'work_efficiency': 10.0, 'fine_material_finding': 20.0}}},
+        slot='tools',
+        keywords=['Agility', 'Foraging'],
+        value=32,
+        rarity='rare',
+        location_reqs=[],
+        gated_stats={},
+        requirements=[{'type': 'skill', 'skill': 'Agility', 'level': 25}, {'type': 'skill', 'skill': 'Foraging', 'level': 25}]
     )
 
     EXERCISE_HEADBAND = ItemInstance(

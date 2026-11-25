@@ -25,6 +25,11 @@ class Character:
         self.game_version = data.get('game_version', 'Unknown')
         self.steps = data.get('steps', 0)
         self.achievement_points = data.get('achievement_points', 0)
+        # Per-achievement progress array (char-export v2): list of
+        # {id, difficulty, progress, finished, claimed, unlocked_at?}. Older
+        # exports omit it. Stored raw and persisted into character_config so
+        # the achievements page can reflect authoritative finished/claimed.
+        self.achievements = data.get('achievements', [])
         self.coins = data.get('coins', 0)
         # Currencies the player holds (chips, tokens, etc.). Shape is the
         # in-game export's { "<Currency name>": qty } map, e.g.
@@ -202,6 +207,13 @@ class Character:
             level = pet_entry.get('level', 0)
             xp = pet_entry.get('xp', 0)
             stage = pet_entry.get('stage', 'egg')
+            # Cosmetic / variant fields (char-export v2). `looks` is either a
+            # keyword ('normal'/'light'/'dark') or a UUID look id; `variation`
+            # is an int; `rare` is an explicit bool the game now exports.
+            # Older exports omit all three.
+            looks = pet_entry.get('looks')
+            variation = pet_entry.get('variation')
+            explicit_rare = pet_entry.get('rare')
             
             # Look up abilities from our pet data using species
             abilities = []
@@ -232,14 +244,19 @@ class Character:
                     # multi-word pets like "Pet Rock" -> "pet rock".
                     species = pet_levels.species
 
-            # Detect rare variant:
-            # - If the pet's name matches the rare display name (e.g. "Regal Tiger"), OR
-            # - If the species field in the export was a rare export name (e.g. "regal_tiger" for an egg)
-            is_rare = found_via_rare_name
-            if not is_rare and pet_levels and pet_levels.rare_name:
-                name_lower = name.lower()
-                if name_lower == pet_levels.rare_name.lower():
-                    is_rare = True
+            # Detect rare variant. Char-export v2 ships an explicit `rare`
+            # bool — prefer it when present. Fall back to the name/export-name
+            # heuristic for older exports that lack the field.
+            if explicit_rare is not None:
+                is_rare = bool(explicit_rare)
+            else:
+                # - name matches the rare display name (e.g. "Regal Tiger"), OR
+                # - species field was a rare export name (e.g. "regal_tiger" egg)
+                is_rare = found_via_rare_name
+                if not is_rare and pet_levels and pet_levels.rare_name:
+                    name_lower = name.lower()
+                    if name_lower == pet_levels.rare_name.lower():
+                        is_rare = True
             
             if pet_levels:
                 pet_info = pet_levels.get_level(level)
@@ -254,6 +271,9 @@ class Character:
                 'stage': stage,
                 'abilities': abilities,
                 'variant': 'rare' if is_rare else 'normal',
+                'rare': is_rare,
+                'looks': looks,
+                'variation': variation,
             }
         
         result = []
@@ -427,3 +447,31 @@ class Character:
     
     def __repr__(self):
         return f"Character({self.name}, {self.steps:,} steps, {self.achievement_points} AP)"
+
+
+def build_imported_achievement_status(achievements) -> Dict[str, Dict]:
+    """Map a char-export v2 ``achievements`` array to a per-id status map.
+
+    Input: list of ``{id, difficulty, progress, finished, claimed, unlocked_at?}``
+    (the raw export array, as stored in ``character_config['achievements']``).
+    Output: ``{achievement_id: {finished, claimed, progress, unlocked_at}}``.
+
+    Entries without an ``id`` are skipped. ``finished``/``claimed`` are coerced
+    to bool; ``progress``/``unlocked_at`` are passed through (``None`` when
+    absent). Safe on ``None``/non-list input (returns ``{}``) so the progress
+    endpoint can call it on any character_config.
+    """
+    out: Dict[str, Dict] = {}
+    for a in (achievements or []):
+        if not isinstance(a, dict):
+            continue
+        aid = a.get('id')
+        if not aid:
+            continue
+        out[aid] = {
+            'finished': bool(a.get('finished')),
+            'claimed': bool(a.get('claimed')),
+            'progress': a.get('progress'),
+            'unlocked_at': a.get('unlocked_at'),
+        }
+    return out

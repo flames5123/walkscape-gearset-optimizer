@@ -11,6 +11,8 @@
 import Component from './base.js';
 import store from '../state.js';
 import { getPetIconPath } from '../utils/pet-utils.js';
+import { wireInfoIcons } from '../info-popover.js';
+import { buildAbilityPopoverHtml } from '../utils/ability-popover.js';
 
 import { formatFixed } from '../utils/number-format.js';
 
@@ -643,15 +645,13 @@ class TreeNodeCard extends Component {
     }
 
     /**
-     * Resolve the EQUIPPED pet (column-2 currentGear) if, at its current
-     * level, it has an active ability that carries stats. The crafting-tree
-     * optimizer applies the pet ability from ui_config.currentGear.pet (fix
-     * 0973370e), so the equipped pet is the one whose "Use ability" flag the
-     * whole tree honors. Prefers the pet's inline `levels`; falls back to the
-     * pet catalog when the serialized pet lacks them. Returns the pet or null.
+     * Resolve the active ability-with-stats for an ARBITRARY pet dict (the
+     * node's displayed pet OR the equipped column-2 pet). Prefers the pet's
+     * inline `levels`; falls back to the pet catalog
+     * (window.optimizeButton._petCatalog) by id/name at the pet's level.
+     * Returns { pet, ability } or null when the pet has no ability-with-stats.
      */
-    _treeEquippedAbilityPet() {
-        const pet = store.state?.gearsets?.current?.pet;
+    _resolvePetAbility(pet) {
         if (!pet || !pet.level) return null;
         let levelData = (pet.levels && pet.levels[String(pet.level)]) || null;
         if (!levelData || !levelData.abilities) {
@@ -664,35 +664,98 @@ class TreeNodeCard extends Component {
             levelData = (petEntry && petEntry.levels && petEntry.levels[String(pet.level)]) || levelData;
         }
         const abilities = (levelData && levelData.abilities) || [];
-        const hasStats = abilities.some(a => a && a.ability_stats && Object.keys(a.ability_stats).length > 0);
-        return hasStats ? pet : null;
+        const ability = abilities.find(a => a && a.ability_stats && Object.keys(a.ability_stats).length > 0);
+        return ability ? { pet, ability } : null;
+    }
+
+    /**
+     * Resolve the EQUIPPED pet (column-2 currentGear) and its active
+     * ability-with-stats. Thin wrapper over _resolvePetAbility. The crafting-tree
+     * optimizer applies the pet ability from ui_config.currentGear.pet (fix
+     * 0973370e), so the equipped pet is the one whose "Use ability" flag the
+     * whole tree honors when the node's pet is the equipped (unpinned) pet.
+     */
+    _treeEquippedAbilityPet() {
+        return this._resolvePetAbility(store.state?.gearsets?.current?.pet);
+    }
+
+    /**
+     * Compact ability popover for the inline (i) icon — delegates to the shared
+     * builder (ui/static/js/utils/ability-popover.js) so it renders the EXACT
+     * same format as the column-2 gear-grid popover.
+     */
+    _buildTreeAbilityPopoverHtml(ability) {
+        return buildAbilityPopoverHtml(ability);
     }
 
     /**
      * Render the inline "Use <pet>'s ability" checkbox for the crafting-tree
-     * node gear preview. Empty string when the equipped pet has no
-     * ability-with-stats. Mirrors the column-2 per-pet checkbox — it is the
-     * SAME equipped-pet flag, surfaced here so the user can toggle it without
-     * leaving the tree. Applies on the next Optimize.
+     * node gear preview. The toggle references THIS node's displayed pet
+     * (`nodePet`), not the column-2 equipped pet, and decides what it controls:
+     *
+     *  - 'pinned': the node PINS this pet (lock badge; `nodeLockedPet` matches).
+     *    The toggle controls node.locked_slots.pet.useAbility and re-optimizes
+     *    THIS node. The backend now honors a locked pet's useAbility on both
+     *    tree paths, so a frog pinned on one node applies its own Lucky Day
+     *    there — independent of the equipped pet.
+     *  - 'equipped': the node's pet IS the (unpinned) equipped column-2 pet.
+     *    The toggle mirrors the column-2 per-pet flag (store.updateGearSlot),
+     *    the prior behavior.
+     *  - otherwise (optimizer-picked, unpinned pet that isn't the equipped one):
+     *    there is nowhere to persist a per-node flag, and the global "Use pet
+     *    abilities" setting already governs optimizer-picked pets — hide it.
+     *
+     * Returns '' when the node's pet has no ability-with-stats or no mode
+     * applies. Surfaced inline (end of the tools row, after the consumable)
+     * with a (i) info icon; the whole label is a click target. Stashes the
+     * resolved mode on this._treeAbilityToggleMode for the change handler.
      */
-    _renderTreePetAbilityToggle() {
-        const pet = this._treeEquippedAbilityPet();
-        if (!pet) return '';
-        const checked = (window.getEffectivePetUseAbility
-            ? window.getEffectivePetUseAbility(pet)
-            : (pet.useAbility || (window.isUsePetAbilityEnabled && window.isUsePetAbilityEnabled()))) ? ' checked' : '';
+    _renderTreePetAbilityToggle(nodePet, nodeLockedPet) {
+        this._treeAbilityPopoverHtml = null;
+        this._treeAbilityToggleMode = null;
+        const resolved = this._resolvePetAbility(nodePet);
+        if (!resolved) return '';
+        const { pet, ability } = resolved;
+        const petKey = (p) => String(
+            (p && (p.itemId || p.petId || p.id || p.name)) || ''
+        ).toLowerCase();
+        const nodeKey = petKey(nodePet);
+        if (!nodeKey) return '';
+        const equippedPet = store.state?.gearsets?.current?.pet;
+        let mode = null;
+        let checked = false;
+        if (nodeLockedPet && typeof nodeLockedPet === 'object' && petKey(nodeLockedPet) === nodeKey) {
+            // The node pins this pet — the toggle owns its per-node useAbility.
+            mode = 'pinned';
+            checked = !!nodeLockedPet.useAbility;
+        } else if (equippedPet && petKey(equippedPet) === nodeKey) {
+            // Unpinned pet that equals the equipped column-2 pet — mirror the
+            // column-2 per-pet flag (prior behavior).
+            mode = 'equipped';
+            checked = (window.getEffectivePetUseAbility
+                ? window.getEffectivePetUseAbility(equippedPet)
+                : (equippedPet.useAbility || (window.isUsePetAbilityEnabled && window.isUsePetAbilityEnabled())));
+        } else {
+            return '';
+        }
+        this._treeAbilityToggleMode = mode;
+        this._treeAbilityPopoverHtml = this._buildTreeAbilityPopoverHtml(ability);
+        const checkedAttr = checked ? ' checked' : '';
         const petName = String(pet.name || 'pet').replace(/[&<>"']/g, c => (
             { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
         ));
-        return `
-            <div class="tree-pet-ability-toggle">
-                <label class="tree-pet-ability-label">
-                    <input type="checkbox" class="tree-pet-ability-checkbox"${checked}>
-                    <span class="tree-pet-ability-text">Use ${petName}'s ability</span>
-                </label>
-                <span class="tree-pet-ability-hint">applies on Optimize</span>
-            </div>
-        `;
+        // Inline-flex so it sits at the end of the tools row rather than on its
+        // own line. The <label> wraps the checkbox AND the words so clicking any
+        // word toggles the box (native label behavior). The (i) icon is a
+        // sibling (outside the label) so clicking it opens the popover instead
+        // of toggling.
+        return `<span class="tree-pet-ability-toggle">
+            <label class="tree-pet-ability-label">
+                <input type="checkbox" class="tree-pet-ability-checkbox"${checkedAttr}>
+                <span class="tree-pet-ability-text">Use ${petName}'s ability</span>
+            </label>
+            <span class="travel-info-icon tree-pet-ability-info-icon" role="button" tabindex="0" aria-label="Ability info">ⓘ</span>
+        </span>`;
     }
 
     _renderGearPreview(exportString, node) {
@@ -1025,8 +1088,7 @@ class TreeNodeCard extends Component {
 
         return `
             <div class="travel-gear-preview-row">${gearHtml}</div>
-            <div class="travel-gear-preview-row tools-row">${toolHtml}${extraHtml}${inputHtml}</div>
-            ${this._renderTreePetAbilityToggle()}
+            <div class="travel-gear-preview-row tools-row">${toolHtml}${extraHtml}${inputHtml}${this._renderTreePetAbilityToggle(slots.pet, lockedSlots.pet)}</div>
         `;
     }
 
@@ -1975,19 +2037,50 @@ class TreeNodeCard extends Component {
         if (!node) return;
 
         // Inline "Use <pet>'s ability" toggle in the crafting-tree node gear
-        // preview. It flips the EQUIPPED pet's useAbility — the single flag the
-        // crafting-tree optimizer reads from ui_config.currentGear.pet (fix
-        // 0973370e) — so it mirrors the column-2 per-pet checkbox rather than
-        // inventing per-node ability state. The change takes effect on the next
-        // Optimize (the hint text says so). store.updateGearSlot persists +
-        // notifies exactly like the column-2 handler.
+        // preview. It references THIS node's displayed pet and controls either
+        // the node's PINNED pet (locked_slots.pet.useAbility — per-node) or,
+        // when the node's pet is the unpinned equipped column-2 pet, that
+        // equipped pet's flag (ui_config.currentGear.pet, fix 0973370e). The
+        // resolved mode is stashed on this._treeAbilityToggleMode by the
+        // renderer. Applies IMMEDIATELY: after flipping the flag we re-optimize
+        // this node so its QO / steps / materials recompute and re-render.
         this.$element.on('change', '.tree-pet-ability-checkbox', (e) => {
             const isChecked = !!e.target.checked;
-            const pet = store.state?.gearsets?.current?.pet;
-            if (pet) {
-                store.updateGearSlot('pet', { ...pet, useAbility: isChecked });
+            const mode = this._treeAbilityToggleMode;
+            if (mode === 'pinned') {
+                // Per-node pinned pet: write useAbility onto THIS node's locked
+                // pet so the backend (both tree paths) merges its ability stats
+                // (e.g. a Golden Frog pinned here -> Lucky Day +20 QO),
+                // independent of the equipped column-2 pet. Then re-optimize
+                // this node so QO / steps / materials recompute.
+                const lp = node && node.locked_slots && node.locked_slots.pet;
+                if (lp && typeof lp === 'object') {
+                    lp.useAbility = isChecked;
+                }
+            } else if (mode === 'equipped') {
+                // Unpinned pet that equals the equipped column-2 pet — mirror
+                // the column-2 per-pet flag (same persistence the column-2
+                // checkbox uses) so the two stay in sync.
+                const pet = store.state?.gearsets?.current?.pet;
+                if (pet) {
+                    store.updateGearSlot('pet', { ...pet, useAbility: isChecked });
+                }
+            }
+            if (node && this.props.onOptimize) {
+                this.props.onOptimize(node.node_id);
             }
         });
+
+        // Wire the inline ability (i) info icon to its popover (same mechanism
+        // as the column-2 gear grid). _renderTreePetAbilityToggle stashed the
+        // popover HTML on this._treeAbilityPopoverHtml during render.
+        if (this._treeAbilityPopoverHtml) {
+            const infoIcon = this.$element.find('.tree-pet-ability-info-icon')[0];
+            if (infoIcon) {
+                infoIcon.dataset.infoHtml = this._treeAbilityPopoverHtml;
+                wireInfoIcons(this.$element[0]);
+            }
+        }
 
         // Custom dropdown toggle (source and material)
         this.$element.on('click', '.tree-dropdown-button', function (e) {

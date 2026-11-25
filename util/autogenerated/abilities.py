@@ -362,6 +362,154 @@ ABILITIES = {
         ],
         'icon': 'assets/icons/abilities/i_miss_the_sun.png'
     },
+    'like_clockwork': {
+        'id': 'like_clockwork',
+        'name': 'Like Clockwork',
+        'type': 'active',
+        'desc': 'Helps buff {count} <skill skill="crafting"/>.',
+        'requirements': [],
+        'cooldown': {
+            'id': 'cooldown-likeClockwork',
+            'inputsNeeded': 30,
+            'charges': 10,
+            'requirements': [
+                {
+                    'type': 'abilityAvailable',
+                    'name': '',
+                    'opposite': False,
+                    'requirement': {
+                        'ability': 'like_clockwork',
+                        'scanEquippedItems': False
+                    }
+                }
+            ],
+            'inputs': [
+                {
+                    'type': 'item',
+                    'item': 'wood_scrap',
+                    'value': 1
+                },
+                {
+                    'type': 'item',
+                    'item': 'metal_scrap',
+                    'value': 1
+                }
+            ]
+        },
+        'data': [
+            {
+                'dataType': 'normal',
+                'actions': [
+                    {
+                        'type': 'effect',
+                        'runtimeType': 'effect',
+                        'attributes': [
+                            {
+                                'id': 'caf5a175-7569-4f40-b251-697c9eba3823',
+                                'customIcon': None,
+                                'customTextLocalizationKey': '',
+                                'customText': '',
+                                'textLocalizationKey': '',
+                                'text': '',
+                                'statText': 'Work efficiency',
+                                'skillText': 'Crafting',
+                                'tables': [],
+                                'requirements': [
+                                    {
+                                        'type': 'mainSkill',
+                                        'name': '',
+                                        'opposite': False,
+                                        'requirement': {
+                                            'skill': 'crafting'
+                                        }
+                                    }
+                                ],
+                                'stats': [
+                                    {
+                                        'stat': 'work_efficiency',
+                                        'name': 'Work efficiency',
+                                        'type': 'workEfficiency',
+                                        'isPercent': True,
+                                        'value': 0.05,
+                                        'isNegative': False,
+                                        'isMultiplicative': True
+                                    }
+                                ]
+                            },
+                            {
+                                'id': 'f3577cae-979b-43af-be27-c490d28a0102',
+                                'customIcon': None,
+                                'customTextLocalizationKey': '',
+                                'customText': '',
+                                'textLocalizationKey': '',
+                                'text': '',
+                                'statText': 'Double action',
+                                'skillText': 'Crafting',
+                                'tables': [],
+                                'requirements': [
+                                    {
+                                        'type': 'mainSkill',
+                                        'name': '',
+                                        'opposite': False,
+                                        'requirement': {
+                                            'skill': 'crafting'
+                                        }
+                                    }
+                                ],
+                                'stats': [
+                                    {
+                                        'stat': 'double_action',
+                                        'name': 'Double action',
+                                        'type': 'doubleAction',
+                                        'isPercent': True,
+                                        'value': 0.05,
+                                        'isNegative': False,
+                                        'isMultiplicative': True
+                                    }
+                                ]
+                            },
+                            {
+                                'id': '4aafc3f4-9944-440c-aff1-808f4e227ab7',
+                                'customIcon': None,
+                                'customTextLocalizationKey': '',
+                                'customText': '',
+                                'textLocalizationKey': '',
+                                'text': '',
+                                'statText': 'Steps required',
+                                'skillText': 'Crafting',
+                                'tables': [],
+                                'requirements': [
+                                    {
+                                        'type': 'mainSkill',
+                                        'name': '',
+                                        'opposite': False,
+                                        'requirement': {
+                                            'skill': 'crafting'
+                                        }
+                                    }
+                                ],
+                                'stats': [
+                                    {
+                                        'stat': 'steps_required',
+                                        'name': 'Steps required',
+                                        'type': 'stepsRequired',
+                                        'isPercent': True,
+                                        'value': -0.05,
+                                        'isNegative': False,
+                                        'isMultiplicative': True
+                                    }
+                                ]
+                            }
+                        ],
+                        'duration': {
+                            'actions': 20
+                        }
+                    }
+                ]
+            }
+        ],
+        'icon': 'assets/icons/abilities/like_clockwork.png'
+    },
     'lucky_day': {
         'id': 'lucky_day',
         'name': 'Lucky Day',

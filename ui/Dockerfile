@@ -15,6 +15,13 @@ RUN apt-get update && apt-get install -y \
 COPY ui/requirements.txt /app/ui/requirements.txt
 RUN pip install --no-cache-dir -r ui/requirements.txt
 
+# Postgres backend deps (psycopg) -- lazy-imported and never used while
+# WALKSCAPE_DB_BACKEND=sqlite (the default), so this is zero behavior change for
+# the SQLite containers. Baked in so a Postgres cutover only needs an env flip
+# and a container recreate -- no image rebuild at cutover time.
+COPY requirements-postgres.txt /app/requirements-postgres.txt
+RUN pip install --no-cache-dir -r requirements-postgres.txt
+
 # Copy the entire project (needed for util imports)
 COPY . /app/
 

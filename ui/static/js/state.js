@@ -300,6 +300,22 @@ class StateStore {
      * @param {string} path - Path that changed
      * @param {*} value - New value
      */
+    _persistConfig(path, value) {
+        // Route through the debounced batch saver so writes coalesce into one
+        // POST /config-batch; fall back to a direct PATCH only if the api
+        // client isn't ready. Returns the save promise.
+        const uuid = this.state.session.uuid;
+        if (window.api && typeof window.api.updateConfig === 'function') {
+            return window.api.updateConfig(uuid, path, value);
+        }
+        return $.ajax({
+            url: `/api/session/${uuid}/config`,
+            method: 'PATCH',
+            contentType: 'application/json',
+            data: JSON.stringify({ path, value })
+        });
+    }
+
     _syncToBackend(path, value) {
         // Don't sync if session not loaded yet
         if (!this.state.session.loaded || !this.state.session.uuid) {
@@ -337,19 +353,32 @@ class StateStore {
             console.log('Syncing to backend:', { path, value, uuid: this.state.session.uuid });
             delete this._syncPendingValues[syncKey];
 
-            $.ajax({
-                url: `/api/session/${this.state.session.uuid}/config`,
-                method: 'PATCH',
-                contentType: 'application/json',
-                data: JSON.stringify({ path, value }),
-                success: (response) => {
-                    console.log('Sync successful:', path, value, response);
-                },
-                error: (xhr, status, error) => {
-                    console.error('Failed to sync state to backend:', path, error);
-                    console.error('Response:', xhr.responseText);
-                }
-            });
+            // Route through the debounced batch saver so multiple gear/UI
+            // changes coalesce into ONE POST /config-batch instead of a PATCH
+            // per path. api.updateConfig buffers (last-write-wins per path) and
+            // flushes a single batch; fall back to a direct PATCH only if the
+            // api client isn't available yet.
+            const uuid = this.state.session.uuid;
+            if (window.api && typeof window.api.updateConfig === 'function') {
+                window.api.updateConfig(uuid, path, value).then(
+                    (response) => { console.log('Sync successful (batched):', path, value, response); },
+                    (xhr, status, error) => { console.error('Failed to sync state to backend (batched):', path, error); }
+                );
+            } else {
+                $.ajax({
+                    url: `/api/session/${uuid}/config`,
+                    method: 'PATCH',
+                    contentType: 'application/json',
+                    data: JSON.stringify({ path, value }),
+                    success: (response) => {
+                        console.log('Sync successful:', path, value, response);
+                    },
+                    error: (xhr, status, error) => {
+                        console.error('Failed to sync state to backend:', path, error);
+                        console.error('Response:', xhr.responseText);
+                    }
+                });
+            }
         }, 500);
     }
 
@@ -1346,14 +1375,10 @@ class StateStore {
         }
         this._favoritesSaveTimeout = setTimeout(() => {
             const favorites = normalizeFavorites(this.state.ui?.favorites);
-            $.ajax({
-                url: `/api/session/${this.state.session.uuid}/config`,
-                method: 'PATCH',
-                contentType: 'application/json',
-                data: JSON.stringify({ path: 'ui.favorites', value: favorites }),
-                success: () => console.log('Favorites auto-saved'),
-                error: (xhr, status, error) => console.error('Failed to auto-save favorites:', error)
-            });
+            this._persistConfig('ui.favorites', favorites).then(
+                () => console.log('Favorites auto-saved'),
+                (xhr, status, error) => console.error('Failed to auto-save favorites:', error)
+            );
         }, 500);
     }
 
@@ -1376,21 +1401,10 @@ class StateStore {
 
             console.log('Auto-saving column3 selection:', column3Data);
 
-            $.ajax({
-                url: `/api/session/${this.state.session.uuid}/config`,
-                method: 'PATCH',
-                contentType: 'application/json',
-                data: JSON.stringify({
-                    path: 'ui.column3Selection',
-                    value: column3Data
-                }),
-                success: (response) => {
-                    console.log('Column3 selection auto-saved successfully');
-                },
-                error: (xhr, status, error) => {
-                    console.error('Failed to auto-save column3 selection:', error);
-                }
-            });
+            this._persistConfig('ui.column3Selection', column3Data).then(
+                () => { console.log('Column3 selection auto-saved successfully'); },
+                (xhr, status, error) => { console.error('Failed to auto-save column3 selection:', error); }
+            );
         }, 500);
     }
 
@@ -1434,21 +1448,10 @@ class StateStore {
 
             console.log('Auto-saving current gear:', gearToSave);
 
-            $.ajax({
-                url: `/api/session/${this.state.session.uuid}/config`,
-                method: 'PATCH',
-                contentType: 'application/json',
-                data: JSON.stringify({
-                    path: 'ui.currentGear',
-                    value: gearToSave
-                }),
-                success: (response) => {
-                    console.log('Current gear auto-saved successfully');
-                },
-                error: (xhr, status, error) => {
-                    console.error('Failed to auto-save current gear:', error);
-                }
-            });
+            this._persistConfig('ui.currentGear', gearToSave).then(
+                () => { console.log('Current gear auto-saved successfully'); },
+                (xhr, status, error) => { console.error('Failed to auto-save current gear:', error); }
+            );
         }, 500);
     }
 
@@ -1469,17 +1472,10 @@ class StateStore {
 
         this._gearset2SaveTimeout = setTimeout(() => {
             console.log('[Comparison] _saveGearset2: PATCH firing now');
-            $.ajax({
-                url: `/api/session/${this.state.session.uuid}/config`,
-                method: 'PATCH',
-                contentType: 'application/json',
-                data: JSON.stringify({
-                    path: 'ui.gearset2',
-                    value: this.state.gearsets.gearset2
-                }),
-                success: () => console.log('[Comparison] _saveGearset2: PATCH success'),
-                error: (xhr) => console.error('[Comparison] _saveGearset2: PATCH failed', xhr.responseText),
-            });
+            this._persistConfig('ui.gearset2', this.state.gearsets.gearset2).then(
+                () => console.log('[Comparison] _saveGearset2: save success'),
+                (xhr) => console.error('[Comparison] _saveGearset2: save failed', xhr && xhr.responseText)
+            );
         }, 500);
     }
 
@@ -1489,7 +1485,17 @@ class StateStore {
      * Call before optimization to ensure backend has latest state.
      */
     async flushPendingSaves() {
+        const useBatch = !!(window.api && typeof window.api.flushConfig === 'function');
         const promises = [];
+        // Enqueue the latest pending value for each saver. With the batch saver
+        // these buffer into api; the final api.flushConfig() sends them (plus
+        // anything the per-saver timers already handed to api) in one awaited
+        // batch, so the backend has the latest state before an optimize. Without
+        // api, _persistConfig returns direct PATCH promises we Promise.all.
+        const enqueue = (path, value) => {
+            const r = this._persistConfig(path, value);
+            if (!useBatch && r) promises.push(r);
+        };
 
         // Flush all debounced _syncToBackend calls
         if (this._syncTimeouts && this._syncPendingValues) {
@@ -1497,12 +1503,7 @@ class StateStore {
                 clearTimeout(timeoutId);
                 const pending = this._syncPendingValues[key];
                 if (pending !== undefined && pending.value !== undefined) {
-                    promises.push($.ajax({
-                        url: `/api/session/${this.state.session.uuid}/config`,
-                        method: 'PATCH',
-                        contentType: 'application/json',
-                        data: JSON.stringify({ path: pending.path, value: pending.value })
-                    }));
+                    enqueue(pending.path, pending.value);
                 }
             }
             this._syncTimeouts = {};
@@ -1512,38 +1513,28 @@ class StateStore {
         if (this._currentGearSaveTimeout) {
             clearTimeout(this._currentGearSaveTimeout);
             this._currentGearSaveTimeout = null;
-            promises.push($.ajax({
-                url: `/api/session/${this.state.session.uuid}/config`,
-                method: 'PATCH',
-                contentType: 'application/json',
-                data: JSON.stringify({ path: 'ui.currentGear', value: this.state.gearsets.current })
-            }));
+            enqueue('ui.currentGear', this.state.gearsets.current);
         }
 
         if (this._gearset2SaveTimeout) {
             clearTimeout(this._gearset2SaveTimeout);
             this._gearset2SaveTimeout = null;
-            promises.push($.ajax({
-                url: `/api/session/${this.state.session.uuid}/config`,
-                method: 'PATCH',
-                contentType: 'application/json',
-                data: JSON.stringify({ path: 'ui.gearset2', value: this.state.gearsets.gearset2 })
-            }));
+            enqueue('ui.gearset2', this.state.gearsets.gearset2);
         }
 
         if (this._column3SaveTimeout) {
             clearTimeout(this._column3SaveTimeout);
             this._column3SaveTimeout = null;
-            const column3Data = this._buildColumn3Data();
-            promises.push($.ajax({
-                url: `/api/session/${this.state.session.uuid}/config`,
-                method: 'PATCH',
-                contentType: 'application/json',
-                data: JSON.stringify({ path: 'ui.column3Selection', value: column3Data })
-            }));
+            enqueue('ui.column3Selection', this._buildColumn3Data());
         }
 
-        if (promises.length > 0) {
+        if (useBatch) {
+            // Sends everything buffered (enqueued above + any earlier per-saver
+            // timer hand-offs) in one batch and resolves when persisted.
+            console.log('[Store] Flushing batched config before optimization');
+            await window.api.flushConfig();
+            console.log('[Store] All pending saves flushed');
+        } else if (promises.length > 0) {
             console.log(`[Store] Flushing ${promises.length} pending saves before optimization`);
             await Promise.all(promises);
             console.log('[Store] All pending saves flushed');
@@ -1565,12 +1556,7 @@ class StateStore {
         if (this._currentGearSaveTimeout) {
             clearTimeout(this._currentGearSaveTimeout);
             this._currentGearSaveTimeout = null;
-            $.ajax({
-                url: `/api/session/${this.state.session.uuid}/config`,
-                method: 'PATCH',
-                contentType: 'application/json',
-                data: JSON.stringify({ path: 'ui.currentGear', value: this.state.gearsets.current })
-            });
+            this._persistConfig('ui.currentGear', this.state.gearsets.current);
         }
 
         // In comparison mode with slot 2 active, save gearset2

@@ -50,6 +50,7 @@ UI_FILES = (
     "ui/crafting_tree_exact_driver.py",  # client-side EXACT B&B solver — Steps per Recipe (Fastest Craft) runs this in Pyodide; pure compute, no DB (all DB imports are function-local).
     "ui/fastest_craft.py",  # client-side Steps per Recipe (Fastest Craft) orchestrator — run_fastest_craft(db=None, with_details=True) computes in the browser; persistence/banked/stale (the only DB-bound layer) is POSTed back to /api/fastest-craft/local-result for the server to apply.
     "ui/catalog.py",  # fastest_craft._classify_output -> consumable_skill_tabs, and taxonomy; needed by the client-side FC compute.
+    "ui/fastest_craft_service_frontier.py",  # Phase 1 service-frontier (opt-in via global_settings['fc_service_frontier']); imported by the exact driver's recipe solve.
 )
 
 # Non-.py data files the optimizers read at RUNTIME (via open()). These live

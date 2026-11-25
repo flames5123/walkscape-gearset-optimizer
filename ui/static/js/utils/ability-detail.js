@@ -14,12 +14,14 @@
  * @param {string} metaClass CSS class each line should use (varies per view)
  * @returns {string} HTML (possibly empty)
  */
+import { formatInt } from './number-format.js';
+
 export function abilityExtraLines(ability, metaClass = 'pet-ability-meta') {
     if (!ability) return '';
     let html = '';
     if (ability.duration) {
         const unit = ability.duration_unit || 'actions';
-        html += `<div class="${metaClass}">Effect lasts for: ${ability.duration} ${unit}</div>`;
+        html += `<div class="${metaClass}">Effect lasts for: ${formatInt(ability.duration)} ${unit}</div>`;
     }
     if (ability.fine_recipe_outcome) {
         html += `<div class="${metaClass}">+${ability.fine_recipe_outcome}% Fine recipe outcome (While doing Cooking)</div>`;

@@ -9,7 +9,7 @@ Two-phase algorithm:
            check against current maximal set, add if not dominated.
 """
 
-from typing import Dict, Optional, Set
+from typing import Dict, Optional, Set, Tuple
 
 from .bitmap_ops import (
     bitmap_and_is_nonzero,
@@ -188,6 +188,52 @@ def _get_id_to_item_map(db) -> Dict[int, tuple]:
     return out
 
 
+_DOMINATORS_SLICE_CACHE: Dict[Tuple[str, str, str], Dict[int, bytes]] = {}
+
+
+def _get_dominators_slice(db, skill: str, location: str,
+                         quality_mode: str) -> Dict[int, bytes]:
+    """Process-cached ``{item_id: dominators_bitmap}`` for one
+    ``(skill, location, quality_mode)`` scope slice.
+
+    ``item_static_dominators`` is STATIC reference data -- it is regenerated
+    only by the ``build_dominators`` precompute (build/deploy time), never per
+    character or per request -- so the whole table (171 slices, ~50k rows,
+    18 MB) is safe to hold for the life of the process. Same process-lifetime
+    cache pattern as ``_ID_TO_ITEM_CACHE`` above (and ``_CATALOG_CACHE``); the
+    container restarts on every deploy, which is the only time the table
+    changes, so no explicit invalidation is needed.
+
+    This replaces Phase 1's per-owned-item ``SELECT`` (one query per owned item
+    per scope -> hundreds of thousands of round-trips per stale-check). On
+    SQLite those were in-process microsecond reads; after the 2026-10-23
+    SQLite->PostgreSQL cutover each became a cross-process socket round-trip,
+    blowing ``/api/stats-report/stale-check`` from ~5s to 50-195s and starving
+    the single-process uvicorn event loop (GIL held during the CPU/DB loop) ->
+    1,252 ``No response returned`` disconnects -> site-wide Cloudflare 524s
+    (jwbail 2026-10-23). Each slice is now ONE index-backed query
+    (``idx_dominators_scope``) on first touch, then pure in-memory for the rest
+    of the process life.
+
+    The bitmap bytes are materialized to owned ``bytes`` objects so they stay
+    valid after the cursor is reused/closed (psycopg may hand back
+    buffer-backed memoryviews).
+    """
+    key = (skill, location, quality_mode)
+    cached = _DOMINATORS_SLICE_CACHE.get(key)
+    if cached is not None:
+        return cached
+    cursor = db.cursor()
+    cursor.execute(
+        "SELECT item_id, dominators_bitmap FROM item_static_dominators "
+        "WHERE skill = ? AND location = ? AND quality_mode = ?",
+        (skill, location, quality_mode),
+    )
+    slice_map = {r[0]: bytes(r[1]) for r in cursor.fetchall()}
+    _DOMINATORS_SLICE_CACHE[key] = slice_map
+    return slice_map
+
+
 def compute_effective_owned_bitmap(
     state: CharacterStateSnapshot,
     skill: str,
@@ -227,8 +273,6 @@ def compute_effective_owned_bitmap(
     owned_unlocked = _build_owned_unlocked_bitmap(state, db)
     maximal = empty_bitmap(max_id)
 
-    cursor = db.cursor()
-
     # Reverse map: id -> (slug, quality, item_obj). Process-cached and
     # character-independent (see _get_id_to_item_map). For CraftedItems the
     # resolved object is the per-quality instance (NORMAL..ETERNAL) so the
@@ -241,16 +285,17 @@ def compute_effective_owned_bitmap(
     id_to_item = _get_id_to_item_map(db)
 
     # ── Phase 1: precomputed dominators ─────────────────────────────
+    # Load this scope's dominator slice ONCE (process-cached, see
+    # _get_dominators_slice). This replaces a per-owned-item SELECT -- the N+1
+    # that melted stale-check after the SQLite->PostgreSQL cutover. A missing
+    # item_id in the slice is exactly equivalent to the old fetchone() == None
+    # ("no dominators row for this item in this scope").
+    dom_slice = _get_dominators_slice(db, skill, location, quality_mode)
     for item_id in iter_set_bits(bytes(owned_unlocked)):
         if item_id in runtime_eval_ids:
             continue
-        cursor.execute(
-            "SELECT dominators_bitmap FROM item_static_dominators "
-            "WHERE item_id = ? AND skill = ? AND location = ? AND quality_mode = ?",
-            (item_id, skill, location, quality_mode),
-        )
-        row = cursor.fetchone()
-        if row is None:
+        dominators_bitmap = dom_slice.get(item_id)
+        if dominators_bitmap is None:
             # No dominators row means no item dominates this one in this scope
             # (or item doesn't participate in this scope). Include it if it
             # has any effective stats here.
@@ -260,7 +305,6 @@ def compute_effective_owned_bitmap(
                 if eff:
                     set_bit(maximal, item_id)
             continue
-        dominators_bitmap = row[0]
         if not bitmap_and_is_nonzero(dominators_bitmap, bytes(owned_unlocked)):
             set_bit(maximal, item_id)
 

@@ -209,6 +209,7 @@ const PTR_DISABLED_HASHES = new Set([
     '#notepad',        // full-screen editor, drag/scroll inside
     '#bank',           // Bank Layout Simulator — grid DnD + slide sections (bug 2026-08-02)
     '#crafting-tree',  // Crafting tree full-screen page (bug 2026-08-02)
+    '#jobboard',       // Job Board full-screen overlay — own scroll + dropdowns
 ]);
 
 /**

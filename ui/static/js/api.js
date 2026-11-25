@@ -5,7 +5,7 @@
  * and toast notifications.
  */
 
-import { runLocalCompute, isLocalComputeEnabled, runStatsReportLocal, runCraftingTreeOptimizeLocal, runCraftingTreeOptimizeLocalParallel, runFastestCraftLocal } from './local-compute.js';
+import { runLocalCompute, isLocalComputeEnabled, runStatsReportLocal, runCraftingTreeOptimizeLocal, runCraftingTreeOptimizeLocalParallel } from './local-compute.js';
 
 class ApiClient {
     constructor() {
@@ -58,20 +58,82 @@ class ApiClient {
     }
 
     /**
-     * PATCH update config
-     * @param {string} uuid - Session UUID
-     * @param {string} path - Config path (e.g., "skills.mining")
-     * @param {*} value - New value
-     * @returns {Promise} jQuery promise
+     * PATCH update config — DEBOUNCED + COALESCED.
+     *
+     * Rapid gear/UI toggles are buffered (last-write-wins per path) and flushed
+     * as ONE batch request to /api/session/{uuid}/config-batch after a short
+     * idle, instead of one PATCH per change. A burst of N changes becomes 1-2
+     * SQLite writes, cutting write-lock pressure (prod incident 2026-10-16).
+     *
+     * Correctness: the returned promise resolves when the batch is actually
+     * saved, so `await api.updateConfig(...)` still means "persisted". Callers
+     * that run a server-side compute must call flushConfig() first (done at the
+     * compute kicks), and pending changes are flushed on page exit via beacon.
+     *
+     * @returns {Promise} resolves after the coalesced batch is persisted
      */
     updateConfig(uuid, path, value) {
-        return $.ajax({
-            url: `${this.baseUrl}/session/${uuid}/config`,
-            method: 'PATCH',
-            contentType: 'application/json',
-            data: JSON.stringify({ path, value })
-        }).fail((xhr, status, error) => {
-            this.handleError(xhr, 'Failed to update configuration');
+        if (!this._cfgBuf) {
+            this._cfgBuf = { uuid: null, paths: new Map(), timer: null, pending: null };
+            this._cfgDebounceMs = 1000;
+        }
+        this._installConfigFlushHooks();
+        const buf = this._cfgBuf;
+        // Session switch mid-buffer: flush the old session's pending first.
+        if (buf.uuid && buf.uuid !== uuid && buf.paths.size) {
+            this.flushConfig();
+        }
+        buf.uuid = uuid;
+        // Key by JSON so list- and string-form paths dedupe; last write wins.
+        buf.paths.set(JSON.stringify(path), { path, value });
+        if (!buf.pending) buf.pending = $.Deferred();
+        if (buf.timer) clearTimeout(buf.timer);
+        buf.timer = setTimeout(() => this.flushConfig(), this._cfgDebounceMs);
+        return buf.pending.promise();
+    }
+
+    /**
+     * Flush any buffered config changes immediately as one batch request.
+     * Call before any server-side read of the config (compute kicks) and on
+     * page exit. @param {boolean} useBeacon - use navigator.sendBeacon (unload).
+     * @returns {Promise}
+     */
+    flushConfig(useBeacon = false) {
+        const buf = this._cfgBuf;
+        if (!buf || !buf.uuid || buf.paths.size === 0) {
+            return $.Deferred().resolve({ success: true, applied: 0 }).promise();
+        }
+        if (buf.timer) { clearTimeout(buf.timer); buf.timer = null; }
+        const uuid = buf.uuid;
+        const updates = Array.from(buf.paths.values()).map(e => ({ path: e.path, value: e.value }));
+        const pending = buf.pending;
+        // Reset the buffer BEFORE sending so changes during the flush begin a
+        // fresh batch rather than being lost.
+        buf.paths = new Map();
+        buf.pending = null;
+        const url = `${this.baseUrl}/session/${uuid}/config-batch`;
+        const body = JSON.stringify({ updates });
+        if (useBeacon && typeof navigator !== 'undefined' && navigator.sendBeacon) {
+            try { navigator.sendBeacon(url, new Blob([body], { type: 'application/json' })); } catch (_) { /* best effort */ }
+            if (pending) pending.resolve({ success: true, applied: updates.length, beacon: true });
+            return $.Deferred().resolve({ success: true, applied: updates.length, beacon: true }).promise();
+        }
+        const req = $.ajax({ url, method: 'POST', contentType: 'application/json', data: body })
+            .fail((xhr, status, error) => this.handleError(xhr, 'Failed to save configuration'));
+        if (pending) req.then(r => pending.resolve(r), (xhr, s, e) => pending.reject(xhr, s, e));
+        return req;
+    }
+
+    /** Install page-exit flush hooks once: flush pending config on tab-hide /
+     * unload via sendBeacon so a change made just before leaving isn't lost. */
+    _installConfigFlushHooks() {
+        if (this._cfgHooksInstalled || typeof window === 'undefined') return;
+        this._cfgHooksInstalled = true;
+        const beaconFlush = () => { try { this.flushConfig(true); } catch (_) { /* ignore */ } };
+        window.addEventListener('pagehide', beaconFlush);
+        window.addEventListener('beforeunload', beaconFlush);
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'hidden') beaconFlush();
         });
     }
 
@@ -702,7 +764,10 @@ class ApiClient {
         }).fail((xhr) => this.handleError(xhr, 'Failed to change material group'));
     }
 
-    optimizeCraftingTree(nodes, globalSettings, sessionUuid, nodeIds = null, depthOptimize = false) {
+    async optimizeCraftingTree(nodes, globalSettings, sessionUuid, nodeIds = null, depthOptimize = false) {
+        // flush-before-compute: ensure debounced config changes are persisted
+        // before the server/local optimizer reads this session's config.
+        await this.flushConfig();
         // When the local_optimization FAC + toggle are on, run the optimize in
         // the browser (Pyodide) via a run_local handshake; the heavy per-node
         // optimization runs locally. Falls back to the server on any failure.
@@ -942,7 +1007,10 @@ class ApiClient {
      * @param {object} [opts] - Optional flags: { include_pets, include_consumables }
      * @returns {Promise} { success, run_id, total_jobs }
      */
-    startStatsReportRun(uuid, categories, skills, notify, opts) {
+    async startStatsReportRun(uuid, categories, skills, notify, opts) {
+        // flush-before-compute: persist any debounced config changes before the
+        // stats-report run reads this session's config server/local-side.
+        await this.flushConfig();
         const body = {
             categories,
             skills,
@@ -985,6 +1053,22 @@ class ApiClient {
             // includes fine variants as separate leaves and adds fine sell value
             // to currency groups.
             include_fine: !!(opts && opts.include_fine),
+            // 2026-10-27 (jwbail): "Find Best Source" single-item scope. When a
+            // non-empty item leaf slug (normalize_item_id of the display name)
+            // is passed, the server + local (Pyodide) build_target_items_jobs is
+            // scoped to ONLY that item so the report computes just that one
+            // material's best source. null/missing = all items (normal run).
+            target_item_slug: (opts && typeof opts.target_item_slug === 'string' && opts.target_item_slug)
+                ? opts.target_item_slug : null,
+            // 2026-11-14 (jwbail): per-item target selection. When a category is
+            // PARTIALLY selected, the client sends the governed group slugs
+            // (target_item_groups) + the selected leaf slugs (target_item_slugs)
+            // so build_target_items_jobs narrows that group to just those items
+            // (incl. their fine variants). null/missing = no narrowing.
+            target_item_slugs: (opts && Array.isArray(opts.target_item_slugs) && opts.target_item_slugs.length)
+                ? opts.target_item_slugs : null,
+            target_item_groups: (opts && Array.isArray(opts.target_item_groups) && opts.target_item_groups.length)
+                ? opts.target_item_groups : null,
             // Fastest Craft: crafted pill categories to solve (empty = all).
             fastest_craft_categories: (opts && Array.isArray(opts.fastest_craft_categories))
                 ? opts.fastest_craft_categories : [],
@@ -1059,54 +1143,28 @@ class ApiClient {
         }
 
         // Fire-and-forget the local run(s). The regular goals-report worker
-        // POSTs each scope to /stats-report/local-scope; Steps per Recipe
-        // (fastest_craft) computes on-device and POSTs its details to
-        // /api/fastest-craft/local-result. Both run CONCURRENTLY in Pyodide,
-        // each with its own (done,total); we sum them into ONE progress bar so
-        // an FC-only run never shows the regular pass's 0/0, and a mixed run
-        // advances across both. statsReportLocalRunFinished fires once BOTH
-        // settle, so the page's final reconcile picks up the persisted FC rows.
+        // POSTs each scope to /stats-report/local-scope. runStatsReportLocal
+        // now owns the ENTIRE run including Steps per Recipe (fastest_craft):
+        // the regular categories run as sharded passes, then FC runs as a
+        // dedicated phase (POSTing to /api/fastest-craft/local-result), and the
+        // single /local-complete fires only after BOTH finish. This replaced the
+        // old split where FC ran as a separate runFastestCraftLocal concurrently
+        // — that let the 0-job regular pass finalize the run before FC started.
         // `completed` carries the NON-stale scopes the server already filtered
         // out (stale_only parity); the worker's _sr_build drops these.
-        const _fcChips = Array.isArray(body.fastest_craft_categories) ? body.fastest_craft_categories : [];
-        const _hasFC = Array.isArray(body.categories)
-            && body.categories.indexOf('fastest_craft') !== -1 && _fcChips.length > 0;
-        let _regDone = 0, _regTotal = 0, _fcDone = 0, _fcTotal = 0;
-        const _emitCombined = () => {
-            try {
-                window.dispatchEvent(new CustomEvent('statsReportLocalProgress',
-                    { detail: { done: _regDone + _fcDone, total: _regTotal + _fcTotal } }));
-            } catch (e) { /* ignore */ }
-        };
-
-        const _regularP = runStatsReportLocal(
+        runStatsReportLocal(
             { run_params: resp.run_params, session: resp.session, completed: resp.completed || [], jobCountHint: resp.total_jobs },
-            (done, total) => { _regDone = done; _regTotal = total; _emitCombined(); }
+            (done, total) => {
+                try {
+                    window.dispatchEvent(new CustomEvent('statsReportLocalProgress', { detail: { done, total } }));
+                } catch (e) { /* ignore */ }
+            }
         ).catch((e) => {
             console.error('[local-goals] run failed:', e);
             if (this.showError) this.showError('Local goals report failed: ' + (e && e.message ? e.message : e));
-        });
-
-        let _fcP = Promise.resolve();
-        if (_hasFC) {
-            const _sess = resp.session || {};
-            _fcP = runFastestCraftLocal(
-                {
-                    session_uuid: _sess.session_uuid || _sess.uuid || '',
-                    selected_ids: _fcChips,
-                    session_data: _sess.character_config || {},
-                    ui_config: _sess.ui_config || {},
-                },
-                (done, total) => { _fcDone = done; _fcTotal = total; _emitCombined(); }
-            ).catch((e) => {
-                console.error('[local-fc] run failed:', e);
-                if (this.showError) this.showError('Local Steps per Recipe failed: ' + (e && e.message ? e.message : e));
-            });
-        }
-
-        Promise.all([_regularP, _fcP]).finally(() => {
-            // Both the regular goals worker and FC have drained their POSTs
-            // (incl. FC's /local-result persist). The page resumes polling and
+        }).finally(() => {
+            // The run (regular passes + FC phase) has drained all POSTs incl.
+            // FC's /local-result persist. The page resumes polling and
             // reconciles, so the complete report — including the now-persisted
             // FC rows — paints without a manual reload.
             try { window.dispatchEvent(new CustomEvent('statsReportLocalRunFinished')); } catch (_) { /* ignore */ }

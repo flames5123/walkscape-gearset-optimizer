@@ -15,7 +15,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 
 
 def _utc_now() -> str:
@@ -65,7 +65,15 @@ class DatabaseManager:
         """
         self.db_path = db_path
         self._persistent_conn = None
-        
+
+        # GATED: Postgres backend (WALKSCAPE_DB_BACKEND=postgres) applies the
+        # generated pg_schema.sql and uses the pool; no sqlite DDL. Default
+        # (sqlite) path below is unchanged.
+        from ui import db_backend
+        if db_backend.is_postgres():
+            self._init_db_postgres()
+            return
+
         # For in-memory databases, keep connection open
         # Use check_same_thread=False for async/multi-threaded environments
         if db_path == ":memory:":
@@ -73,12 +81,116 @@ class DatabaseManager:
             self._init_db_with_conn(self._persistent_conn)
         else:
             self._init_db()
+
+    # Process-global: the PG schema is shared state, so applying it once per
+    # process is sufficient. Workers construct DatabaseManager many times; without
+    # this guard each construction would re-run all ~143 CREATE IF NOT EXISTS
+    # statements over the pool (pure overhead + pool churn).
+    _pg_schema_applied = False
+
+    def _init_db_postgres(self):
+        """Apply the generated Postgres schema (idempotent; CREATE ... IF NOT
+        EXISTS) ONCE per process. Only invoked when WALKSCAPE_DB_BACKEND=postgres."""
+        if DatabaseManager._pg_schema_applied:
+            return
+        import os
+        from ui import db_backend
+        schema_path = os.path.join(os.path.dirname(__file__), "pg_schema.sql")
+        with open(schema_path, "r", encoding="utf-8") as f:
+            raw = f.read()
+        # Drop comment-only lines, then split into statements on ';'.
+        body = "\n".join(ln for ln in raw.splitlines() if not ln.strip().startswith("--"))
+        stmts = [s.strip() for s in body.split(";") if s.strip()]
+        conn = db_backend.connect(self.db_path)
+        try:
+            cur = conn.cursor()
+            for stmt in stmts:
+                cur.execute(stmt)
+            conn.commit()
+            # Incremental column adds for EXISTING PG tables. pg_schema.sql is
+            # pure `CREATE TABLE IF NOT EXISTS` (a no-op once the table exists),
+            # so a column added after the table was first created never lands on
+            # a live DB from the CREATE alone. Run idempotent ADD COLUMN IF NOT
+            # EXISTS here (survives pg_schema regeneration, unlike an appended
+            # ALTER in the .sql). Each is a no-op once the column exists.
+            for _alter in (
+                'ALTER TABLE "fastest_craft_results" '
+                'ADD COLUMN IF NOT EXISTS "node_services_json" text',
+            ):
+                try:
+                    cur.execute(_alter)
+                except Exception as _ae:  # noqa: BLE001 — never block init
+                    print(f"⚠️ PG column migration skipped ({_alter}): {_ae}")
+            conn.commit()
+            # Advance every IDENTITY `id` sequence to MAX(id). The SQLite->PG
+            # migration bulk-loads rows preserving their original ids but does
+            # NOT advance the backing identity sequence, so nextval() keeps
+            # handing out low ids that already exist -> duplicate-PK, INSERT
+            # fails (symptom: "can't add more than N items to the wishlist";
+            # wishlist_entries seq was stuck at 104 vs max(id) 474). Idempotent:
+            # a no-op for already-synced sequences, so it is safe to run on
+            # every process init.
+            self._reseed_identity_sequences(cur)
+            conn.commit()
+        finally:
+            conn.close()
+        DatabaseManager._pg_schema_applied = True
+        print(f"🐘 PG schema applied once for process {os.getpid()} ({len(stmts)} statements)")
+
+    @staticmethod
+    def _reseed_identity_sequences(cur):
+        """Advance each public IDENTITY `id`/`_pg_rowid` sequence to the HIGH-WATER
+        of (table MAX(col), the sequence's own last_value). It only ever ADVANCES
+        — it never lowers a sequence below its current last_value, so an id that
+        has already been handed out in this database can never be reissued, even
+        after the rows at the top of the id range are hard-deleted or wiped.
+
+        A plain setval-to-MAX(id) reseed (the previous behaviour) reused ids after
+        hard-deletes: because a federated object_id is `flames:W<id>` / `flames:L<id>`,
+        a reused id collided with an un-tombstoned ghost still held by a peer
+        (WSDB), whose (object_id, version) dedup then silently skipped the new
+        owner's row — the id-reuse incident on 2026-10-29 (Fungus Pig's
+        teak_logs/tarsilium_ore wishlists landed on W489/W490/W491, reused from
+        Harambe's/Belkarama's migrated-and-hard-deleted rows). Advancing-only
+        closes that hole while still fixing a sequence stuck BEHIND max(id) — the
+        original migration symptom ("can't add more than N items to the
+        wishlist", seq stuck at 104 vs max(id) 474). No-op when already at the
+        high-water. Never raises into init — a reseed failure must not block
+        startup."""
+        try:
+            cur.execute(
+                "SELECT table_name, column_name FROM information_schema.columns "
+                "WHERE table_schema='public' AND is_identity='YES' "
+                "AND column_name IN ('id','_pg_rowid')"
+            )
+            cols = [(r[0], r[1]) for r in cur.fetchall()]
+            for tbl, col in cols:
+                # Identifiers come from the catalog (trusted), not user input.
+                # GREATEST(MAX(col), the sequence's own last_value) guarantees we
+                # only ever move the sequence FORWARD — never below an id this DB
+                # has already issued. pg_sequence_last_value() is NULL until the
+                # sequence is first called, hence the COALESCE and the is_called
+                # guard below.
+                cur.execute(
+                    f'SELECT setval('
+                    f'  pg_get_serial_sequence(\'"{tbl}"\', \'{col}\'),'
+                    f'  GREATEST('
+                    f'    (SELECT COALESCE(MAX("{col}"), 0) FROM "{tbl}"),'
+                    f'    COALESCE(pg_sequence_last_value('
+                    f'      pg_get_serial_sequence(\'"{tbl}"\', \'{col}\')), 0),'
+                    f'    1),'
+                    f'  ((SELECT COUNT(*) FROM "{tbl}") > 0'
+                    f'   OR pg_sequence_last_value('
+                    f'      pg_get_serial_sequence(\'"{tbl}"\', \'{col}\')) IS NOT NULL))'
+                )
+        except Exception as e:  # pragma: no cover - defensive, never block init
+            print(f"⚠️  identity-sequence reseed skipped: {e}")
     
     def _init_db(self):
         """Create sessions table if not exists (for file-based databases)."""
-        conn = sqlite3.connect(self.db_path, timeout=5)
+        conn = sqlite3.connect(self.db_path, timeout=30)
         conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA busy_timeout=30000")
         self._init_db_with_conn(conn)
         conn.close()
     
@@ -131,8 +243,69 @@ class DatabaseManager:
                 subtree_scope_keys_json TEXT,
                 base_dominance_bitmap TEXT,
                 base_scope_json TEXT,
+                node_services_json TEXT,
                 last_computed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (session_uuid, item_ref, variant, quality)
+            )
+        """)
+
+        # Weekly job-board scraper (ui/job_board_scraper.py). See the migration
+        # ui/migrations/*_create_job_board_tables.sql for the authoritative DDL;
+        # created inline too so in-memory / test DBs always have it.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS job_board_jobs (
+                id INTEGER PRIMARY KEY,
+                week_index INTEGER NOT NULL,
+                board_id TEXT NOT NULL,
+                board_slug TEXT,
+                board_name TEXT,
+                slot INTEGER,
+                difficulty_id TEXT,
+                special_id TEXT,
+                bonus INTEGER DEFAULT 0,
+                required_level INTEGER,
+                expires_at TEXT,
+                goals_json TEXT,
+                rewards_json TEXT,
+                first_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_job_board_jobs_week ON job_board_jobs(week_index)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_job_board_jobs_board ON job_board_jobs(board_id)")
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS job_board_ingests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                week_index INTEGER,
+                status TEXT NOT NULL DEFAULT 'running',
+                started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                finished_at TIMESTAMP,
+                jobs_seen INTEGER DEFAULT 0,
+                jobs_inserted INTEGER DEFAULT 0,
+                jobs_skipped INTEGER DEFAULT 0,
+                boards_seen INTEGER DEFAULT 0,
+                result_status TEXT,
+                error TEXT,
+                traceback TEXT
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_job_board_ingests_started ON job_board_ingests(started_at DESC)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_job_board_ingests_status ON job_board_ingests(status, started_at DESC)")
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS job_board_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS job_board_items (
+                id TEXT PRIMARY KEY,
+                slug TEXT,
+                name TEXT,
+                type TEXT,
+                quality TEXT,
+                keywords_json TEXT,
+                is_chest INTEGER DEFAULT 0,
+                fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
 
@@ -575,6 +748,10 @@ class DatabaseManager:
             # the bitmap (no false-positive badge storm).
             "ALTER TABLE fastest_craft_results ADD COLUMN base_dominance_bitmap TEXT",
             "ALTER TABLE fastest_craft_results ADD COLUMN base_scope_json TEXT",
+            # Per-node resolved service + location ({ref: {service_id, location_id}})
+            # so the "Crafting tree" button can re-apply the FC solve's chosen
+            # crafting service/location on each node and skip re-resolving it.
+            "ALTER TABLE fastest_craft_results ADD COLUMN node_services_json TEXT",
         ):
             try:
                 cursor.execute(_alter)
@@ -710,16 +887,32 @@ class DatabaseManager:
     
     def _get_connection(self):
         """Get database connection (reuse for in-memory, create new for file-based).
-        
-        Uses WAL journal mode and a 5-second busy timeout to reduce
-        'database is locked' errors under concurrent access.
+
+        Uses WAL journal mode and a 30-second busy timeout to reduce
+        'database is locked' errors under concurrent access. The longer timeout
+        is safe because per-request writes are offloaded off the event loop
+        (api_audit_middleware fire-and-forget, federation sync via threads), so a
+        waiting writer blocks only its worker thread, never the loop.
         """
         if self._persistent_conn:
             return self._persistent_conn
-        conn = sqlite3.connect(self.db_path, timeout=5)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
-        return conn
+        from ui import db_backend
+        return db_backend.connect(self.db_path, timeout=30)
+
+    def _release_connection(self, conn):
+        """Return a connection to the pool (Postgres) / close it (file sqlite).
+
+        No-op for the persistent in-memory sqlite connection. Safe to call on
+        any code path and more than once (``_ParamConn.close`` is idempotent).
+        Pair every ``self._get_connection()`` with this in a ``finally`` so an
+        exception can never leak a pooled PG connection — a leaked connection
+        keeps its transaction open, holds row locks, and on the single-worker
+        prod box wedges the whole site (incident 2026-11-20)."""
+        if conn is not None and not self._persistent_conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
     # XP table for skill level calculation (matches walkscape_constants.py)
     _LEVEL_XP = [
@@ -995,11 +1188,56 @@ class DatabaseManager:
         else:
             self.update_character_config(session_uuid, config)
 
+    def update_config_paths_batch(self, session_uuid: Any, updates: list) -> bool:
+        """Apply many config-path updates in ONE session read + at most two
+        writes (ui_config and/or character_config), instead of a read+write per
+        path. `updates` is a list of (path, value) pairs; for a repeated path
+        the last entry wins. Returns True if the session existed and was written.
+
+        Backs the debounced batch-save endpoint: the frontend coalesces a burst
+        of gear/UI toggles and flushes them as a single request, so a rapid
+        series of N changes costs one or two SQLite writes rather than 2*N,
+        cutting write-lock pressure. Routing mirrors update_config_path exactly.
+        """
+        session = self.get_session(session_uuid)
+        if not session:
+            return False
+        ui = session['ui_config'] if session['ui_config'] is not None else {}
+        char = session['character_config'] if session['character_config'] is not None else {}
+        ui_dirty = False
+        char_dirty = False
+        for path, value in updates:
+            parts = list(path) if isinstance(path, list) else path.split('.')
+            if not parts:
+                continue
+            # Same target/segment routing as update_config_path.
+            if parts[0] == 'ui':
+                target = ui; seg = parts[1:]; ui_dirty = True
+            elif len(parts) >= 3 and parts[0] == 'items' and parts[2] == 'hide':
+                target = ui; seg = parts; ui_dirty = True
+            elif parts[0] in ('quality_overrides', 'custom_stats'):
+                target = ui; seg = parts; ui_dirty = True
+            else:
+                target = char; seg = parts; char_dirty = True
+            if not seg:
+                continue
+            current = target
+            for part in seg[:-1]:
+                if part not in current or not isinstance(current.get(part), dict):
+                    current[part] = {}
+                current = current[part]
+            current[seg[-1]] = value
+        if ui_dirty:
+            self.update_ui_config(session_uuid, ui)
+        if char_dirty:
+            self.update_character_config(session_uuid, char)
+        return True
+
     # ========================================================================
     # GEAR SET CRUD METHODS
     # ========================================================================
 
-    def get_gear_sets(self, session_uuid: str, limit: Optional[int] = None, offset: int = 0) -> list:
+    def get_gear_sets(self, session_uuid: str, limit: Optional[int] = None, offset: int = 0, summary: bool = False) -> list:
         """Get gear sets for a session.
 
         Args:
@@ -1015,43 +1253,67 @@ class DatabaseManager:
         conn = self._get_connection()
         cursor = conn.cursor()
 
-        if limit is not None and limit > 0:
-            cursor.execute("""
-                SELECT id, session_uuid, name, slots_json, export_string, is_optimized, created_at, updated_at, suggest_dismissed
-                FROM gear_sets
-                WHERE session_uuid = ?
-                ORDER BY updated_at DESC
-                LIMIT ? OFFSET ?
-            """, (session_uuid, limit, offset))
+        # 2026-11-02 (jwbail): summary mode skips slots_json/export_string at
+        # the SQL layer AND skips the per-row json.loads + _sanitize_for_json.
+        # The gear-set dropdown, saved-gearset picker and upgrades-tracker popup
+        # all call with summary=true; for accounts with hundreds of saved
+        # gearsets the json parse of every slots_json blob was multi-second CPU
+        # on the request thread -- and with one GIL that starved the async event
+        # loop and stalled the whole site (8:11am PDT 2026-10-31 incident). The
+        # list callers never read slots_json; full data is lazy-loaded per
+        # gearset via get_gear_set(). The non-summary path is byte-for-byte
+        # unchanged.
+        if summary:
+            cols = "id, session_uuid, name, is_optimized, created_at, updated_at, suggest_dismissed"
         else:
-            cursor.execute("""
-                SELECT id, session_uuid, name, slots_json, export_string, is_optimized, created_at, updated_at, suggest_dismissed
-                FROM gear_sets
-                WHERE session_uuid = ?
-                ORDER BY updated_at DESC
-            """, (session_uuid,))
-        
+            cols = "id, session_uuid, name, slots_json, export_string, is_optimized, created_at, updated_at, suggest_dismissed"
+
+        if limit is not None and limit > 0:
+            cursor.execute(
+                f"SELECT {cols} FROM gear_sets WHERE session_uuid = ? "
+                "ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+                (session_uuid, limit, offset),
+            )
+        else:
+            cursor.execute(
+                f"SELECT {cols} FROM gear_sets WHERE session_uuid = ? "
+                "ORDER BY updated_at DESC",
+                (session_uuid,),
+            )
+
         rows = cursor.fetchall()
-        
+
         # Only close if not persistent connection
         if not self._persistent_conn:
             conn.close()
-        
+
         gear_sets = []
-        for row in rows:
-            slots = json.loads(row[3]) if row[3] else {}
-            gear_sets.append({
-                'id': row[0],
-                'session_uuid': row[1],
-                'name': row[2],
-                'slots_json': _sanitize_for_json(slots),
-                'export_string': row[4],
-                'is_optimized': bool(row[5]),
-                'created_at': row[6],
-                'updated_at': row[7],
-                'suggest_dismissed': bool(row[8]) if len(row) > 8 else False
-            })
-        
+        if summary:
+            for row in rows:
+                gear_sets.append({
+                    'id': row[0],
+                    'session_uuid': row[1],
+                    'name': row[2],
+                    'is_optimized': bool(row[3]),
+                    'created_at': row[4],
+                    'updated_at': row[5],
+                    'suggest_dismissed': bool(row[6]) if len(row) > 6 else False,
+                })
+        else:
+            for row in rows:
+                slots = json.loads(row[3]) if row[3] else {}
+                gear_sets.append({
+                    'id': row[0],
+                    'session_uuid': row[1],
+                    'name': row[2],
+                    'slots_json': _sanitize_for_json(slots),
+                    'export_string': row[4],
+                    'is_optimized': bool(row[5]),
+                    'created_at': row[6],
+                    'updated_at': row[7],
+                    'suggest_dismissed': bool(row[8]) if len(row) > 8 else False
+                })
+
         return gear_sets
 
     def count_gear_sets(self, session_uuid: str) -> int:
@@ -1477,51 +1739,53 @@ class DatabaseManager:
     def start_optimization(self, session_uuid: str, opt_type: str, opt_id: str, pid: int = None):
         """Mark an optimization as active for a session."""
         conn = self._get_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT OR REPLACE INTO active_optimizations (session_uuid, opt_type, opt_id, pid, started_at)
-            VALUES (?, ?, ?, ?, ?)
-        """, (session_uuid, opt_type, opt_id, pid, _utc_now()))
-        conn.commit()
-        if not self._persistent_conn:
-            conn.close()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT OR REPLACE INTO active_optimizations (session_uuid, opt_type, opt_id, pid, started_at)
+                VALUES (?, ?, ?, ?, ?)
+            """, (session_uuid, opt_type, opt_id, pid, _utc_now()))
+            conn.commit()
+        finally:
+            self._release_connection(conn)
 
     def finish_optimization(self, session_uuid: str, exit_code: int = 0):
         """Remove the active optimization record and log to history."""
         conn = self._get_connection()
-        cursor = conn.cursor()
-        # Read current record before deleting so we can compute duration
-        cursor.execute(
-            "SELECT opt_type, opt_id, started_at FROM active_optimizations WHERE session_uuid = ?",
-            (session_uuid,)
-        )
-        row = cursor.fetchone()
-        if row:
-            opt_type, opt_id, started_at = row
-            duration_ms = None
-            if started_at:
+        try:
+            cursor = conn.cursor()
+            # Read current record before deleting so we can compute duration
+            cursor.execute(
+                "SELECT opt_type, opt_id, started_at FROM active_optimizations WHERE session_uuid = ?",
+                (session_uuid,)
+            )
+            row = cursor.fetchone()
+            if row:
+                opt_type, opt_id, started_at = row
+                duration_ms = None
+                if started_at:
+                    try:
+                        from datetime import datetime, timezone
+                        if isinstance(started_at, str):
+                            started = datetime.fromisoformat(started_at.replace('Z', '+00:00'))
+                        else:
+                            started = started_at
+                        if started.tzinfo is None:
+                            started = started.replace(tzinfo=timezone.utc)
+                        duration_ms = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
+                    except Exception:
+                        pass
                 try:
-                    from datetime import datetime, timezone
-                    if isinstance(started_at, str):
-                        started = datetime.fromisoformat(started_at.replace('Z', '+00:00'))
-                    else:
-                        started = started_at
-                    if started.tzinfo is None:
-                        started = started.replace(tzinfo=timezone.utc)
-                    duration_ms = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
+                    cursor.execute("""
+                        INSERT INTO optimization_history (session_uuid, opt_type, opt_id, duration_ms, exit_code)
+                        VALUES (?, ?, ?, ?, ?)
+                    """, (session_uuid, opt_type, opt_id, duration_ms, exit_code))
                 except Exception:
-                    pass
-            try:
-                cursor.execute("""
-                    INSERT INTO optimization_history (session_uuid, opt_type, opt_id, duration_ms, exit_code)
-                    VALUES (?, ?, ?, ?, ?)
-                """, (session_uuid, opt_type, opt_id, duration_ms, exit_code))
-            except Exception:
-                pass  # Don't fail if history table doesn't exist yet
-        cursor.execute("DELETE FROM active_optimizations WHERE session_uuid = ?", (session_uuid,))
-        conn.commit()
-        if not self._persistent_conn:
-            conn.close()
+                    pass  # Don't fail if history table doesn't exist yet
+            cursor.execute("DELETE FROM active_optimizations WHERE session_uuid = ?", (session_uuid,))
+            conn.commit()
+        finally:
+            self._release_connection(conn)
 
     def has_optimized_gearset_since(self, session_uuid: str, since_iso: str) -> bool:
         """Check whether an optimized gearset has been saved (or updated) for
@@ -1549,20 +1813,21 @@ class DatabaseManager:
         if not since_iso:
             return False
         conn = self._get_connection()
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            SELECT 1 FROM gear_sets
-            WHERE session_uuid = ?
-              AND is_optimized = 1
-              AND (created_at >= ? OR updated_at >= ?)
-            LIMIT 1
-            """,
-            (session_uuid, since_iso, since_iso),
-        )
-        row = cursor.fetchone()
-        if not self._persistent_conn:
-            conn.close()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT 1 FROM gear_sets
+                WHERE session_uuid = ?
+                  AND is_optimized = 1
+                  AND (created_at >= ? OR updated_at >= ?)
+                LIMIT 1
+                """,
+                (session_uuid, since_iso, since_iso),
+            )
+            row = cursor.fetchone()
+        finally:
+            self._release_connection(conn)
         return row is not None
 
     def get_active_optimization_started_at(self, session_uuid: str) -> Optional[str]:
@@ -1575,14 +1840,15 @@ class DatabaseManager:
         gearsets from prior optimizations are excluded from the check.
         """
         conn = self._get_connection()
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT started_at FROM active_optimizations WHERE session_uuid = ?",
-            (session_uuid,),
-        )
-        row = cursor.fetchone()
-        if not self._persistent_conn:
-            conn.close()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT started_at FROM active_optimizations WHERE session_uuid = ?",
+                (session_uuid,),
+            )
+            row = cursor.fetchone()
+        finally:
+            self._release_connection(conn)
         if not row:
             return None
         return row[0] if row[0] else None
@@ -1593,77 +1859,73 @@ class DatabaseManager:
         Also cleans up stale entries where the process is no longer running.
         """
         conn = self._get_connection()
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT pid, started_at FROM active_optimizations WHERE session_uuid = ?",
-            (session_uuid,)
-        )
-        row = cursor.fetchone()
-        if not row:
-            if not self._persistent_conn:
-                conn.close()
-            return False
-
-        pid, started_at = row
-
-        # Check if the process is still alive
-        if pid:
-            import os
-            import signal
-            try:
-                os.kill(pid, 0)  # Signal 0 = check existence, don't kill
-            except OSError:
-                # Process is dead — clean up stale record
-                cursor.execute("DELETE FROM active_optimizations WHERE session_uuid = ?", (session_uuid,))
-                conn.commit()
-                if not self._persistent_conn:
-                    conn.close()
-                return False
-
-        # Also clean up if started more than 3 minutes ago (safety net)
-        from datetime import datetime, timezone
         try:
-            if isinstance(started_at, str):
-                started = datetime.fromisoformat(started_at.replace('Z', '+00:00'))
-            else:
-                started = started_at
-            if started.tzinfo is None:
-                started = started.replace(tzinfo=timezone.utc)
-            age = (datetime.now(timezone.utc) - started).total_seconds()
-            if age > 180:  # 3 minutes
-                cursor.execute("DELETE FROM active_optimizations WHERE session_uuid = ?", (session_uuid,))
-                conn.commit()
-                if not self._persistent_conn:
-                    conn.close()
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT pid, started_at FROM active_optimizations WHERE session_uuid = ?",
+                (session_uuid,)
+            )
+            row = cursor.fetchone()
+            if not row:
                 return False
-        except Exception:
-            pass  # If we can't parse the timestamp, assume it's still running
 
-        if not self._persistent_conn:
-            conn.close()
-        return True
+            pid, started_at = row
+
+            # Check if the process is still alive
+            if pid:
+                import os
+                import signal
+                try:
+                    os.kill(pid, 0)  # Signal 0 = check existence, don't kill
+                except OSError:
+                    # Process is dead — clean up stale record
+                    cursor.execute("DELETE FROM active_optimizations WHERE session_uuid = ?", (session_uuid,))
+                    conn.commit()
+                    return False
+
+            # Also clean up if started more than 3 minutes ago (safety net)
+            from datetime import datetime, timezone
+            try:
+                if isinstance(started_at, str):
+                    started = datetime.fromisoformat(started_at.replace('Z', '+00:00'))
+                else:
+                    started = started_at
+                if started.tzinfo is None:
+                    started = started.replace(tzinfo=timezone.utc)
+                age = (datetime.now(timezone.utc) - started).total_seconds()
+                if age > 180:  # 3 minutes
+                    cursor.execute("DELETE FROM active_optimizations WHERE session_uuid = ?", (session_uuid,))
+                    conn.commit()
+                    return False
+            except Exception:
+                pass  # If we can't parse the timestamp, assume it's still running
+
+            return True
+        finally:
+            self._release_connection(conn)
 
     def cleanup_stale_optimizations(self):
         """Remove all stale optimization records (dead processes or too old)."""
         conn = self._get_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT session_uuid, pid FROM active_optimizations")
-        rows = cursor.fetchall()
-        for session_uuid, pid in rows:
-            if pid:
-                import os
-                try:
-                    os.kill(pid, 0)
-                except OSError:
-                    cursor.execute("DELETE FROM active_optimizations WHERE session_uuid = ?", (session_uuid,))
-        # Also clean up anything older than 3 minutes
-        cursor.execute("""
-            DELETE FROM active_optimizations 
-            WHERE started_at < datetime('now', '-3 minutes')
-        """)
-        conn.commit()
-        if not self._persistent_conn:
-            conn.close()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT session_uuid, pid FROM active_optimizations")
+            rows = cursor.fetchall()
+            for session_uuid, pid in rows:
+                if pid:
+                    import os
+                    try:
+                        os.kill(pid, 0)
+                    except OSError:
+                        cursor.execute("DELETE FROM active_optimizations WHERE session_uuid = ?", (session_uuid,))
+            # Also clean up anything older than 3 minutes
+            cursor.execute("""
+                DELETE FROM active_optimizations 
+                WHERE started_at < datetime('now', '-3 minutes')
+            """)
+            conn.commit()
+        finally:
+            self._release_connection(conn)
 
     # ========================================================================
     # OPTIMIZATION PRESET CRUD METHODS
@@ -3181,15 +3443,22 @@ class DatabaseManager:
             ip_address: IP address (optional)
             response_time_ms: Response time in milliseconds (optional)
             status_code: HTTP status code (optional)
-            timestamp: When the request was handled (defaults to now)
+            timestamp: When the request was handled (defaults to now). The
+                middleware captures this on the event loop and hands it to the
+                background writer, so the row records request time, not the
+                (later) write time.
         """
         conn = self._get_connection()
         cursor = conn.cursor()
 
+        # Dual-write the timestamp into both the legacy text column and the
+        # real timestamptz column (ts) so dashboard queries can filter/group
+        # on ts without a per-row cast. Same value in both.
+        now = timestamp or _utc_now()
         cursor.execute("""
-            INSERT INTO api_access_audit (session_uuid, endpoint, method, user_agent, ip_address, timestamp, response_time_ms, status_code)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (session_uuid, endpoint, method, user_agent, ip_address, timestamp or _utc_now(), response_time_ms, status_code))
+            INSERT INTO api_access_audit (session_uuid, endpoint, method, user_agent, ip_address, timestamp, ts, response_time_ms, status_code)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (session_uuid, endpoint, method, user_agent, ip_address, now, now, response_time_ms, status_code))
 
         conn.commit()
 
@@ -3245,14 +3514,16 @@ class DatabaseManager:
         requests_by_endpoint = {row[0]: row[1] for row in cursor.fetchall()}
         
         # Requests by day
-        cursor.execute("""
-            SELECT DATE(timestamp) as day, COUNT(*) as count
+        from ui import db_backend as _dbk
+        _day_expr = _dbk.ts_day("timestamp")
+        cursor.execute(f"""
+            SELECT {_day_expr} as day, COUNT(*) as count
             FROM api_access_audit
             WHERE timestamp >= ?
             GROUP BY day
             ORDER BY day DESC
         """, (cutoff_str,))
-        requests_by_day = {row[0]: row[1] for row in cursor.fetchall()}
+        requests_by_day = {str(row[0]): row[1] for row in cursor.fetchall()}
         
         # Top sessions
         cursor.execute("""
@@ -3969,6 +4240,7 @@ class DatabaseManager:
         cur.execute(
             "SELECT id, trader_uuid, quality_rule, quality_floor, max_coins, item_type "
             "FROM wishlist_entries WHERE item_slug = ? AND notify_match = 1 "
+            "AND (status = 'open' OR status IS NULL) "
             "AND (expires_at IS NULL OR expires_at > ?)", (slug, now))
         rows = cur.fetchall()
         created = 0
@@ -4588,6 +4860,230 @@ class DatabaseManager:
         conn.commit()
         if not self._persistent_conn:
             conn.close()
+
+    # ── Weekly job-board scraper (ui/job_board_scraper.py) ─────────────────
+    def job_board_get_meta(self, key: str) -> Optional[str]:
+        """Read a job_board_meta kv value (None if unset)."""
+        conn = self._get_connection(); cur = conn.cursor()
+        try:
+            cur.execute("SELECT value FROM job_board_meta WHERE key = ?", (key,))
+            row = cur.fetchone()
+        except Exception:
+            row = None
+        if not self._persistent_conn:
+            conn.close()
+        return (row[0] if row else None)
+
+    def job_board_set_meta(self, key: str, value: str) -> None:
+        """Set a job_board_meta kv value (upsert)."""
+        conn = self._get_connection(); cur = conn.cursor()
+        cur.execute("INSERT OR REPLACE INTO job_board_meta (key, value) VALUES (?, ?)", (key, str(value)))
+        conn.commit()
+        if not self._persistent_conn:
+            conn.close()
+
+    def job_board_week_succeeded(self, week_index: int) -> bool:
+        """True once the given week has been fully ingested (scheduler guard)."""
+        val = self.job_board_get_meta("last_success_week")
+        try:
+            return val is not None and int(val) == int(week_index)
+        except (TypeError, ValueError):
+            return False
+
+    def job_board_mark_week_succeeded(self, week_index: int) -> None:
+        """Record the week as fully ingested so the scheduler stops retrying."""
+        self.job_board_set_meta("last_success_week", str(int(week_index)))
+        self.job_board_set_meta("last_success_at", _utc_now())
+
+    def job_board_start_ingest(self, week_index: int) -> int:
+        """Open an ingest run row (status 'running'); return its id."""
+        conn = self._get_connection(); cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO job_board_ingests (week_index, status, started_at) VALUES (?, 'running', ?)",
+            (int(week_index), _utc_now()),
+        )
+        conn.commit()
+        ingest_id = cur.lastrowid
+        if not self._persistent_conn:
+            conn.close()
+        return int(ingest_id)
+
+    def job_board_finish_ingest(self, ingest_id: int, status: str, summary: Dict[str, Any],
+                                traceback_text: Optional[str] = None) -> None:
+        """Close an ingest run row with final status + per-run counts/error.
+
+        `status` is the row status ('success' | 'failure'); summary['status']
+        is the finer result ('success' | 'already_done' | 'unchanged' |
+        'failure') stored in result_status.
+        """
+        conn = self._get_connection(); cur = conn.cursor()
+        cur.execute(
+            "UPDATE job_board_ingests SET status = ?, finished_at = ?, jobs_seen = ?, "
+            "jobs_inserted = ?, jobs_skipped = ?, boards_seen = ?, result_status = ?, "
+            "error = ?, traceback = ? WHERE id = ?",
+            (status, _utc_now(), int(summary.get("jobs_seen", 0)),
+             int(summary.get("jobs_inserted", 0)), int(summary.get("jobs_skipped", 0)),
+             int(summary.get("boards_seen", 0)), summary.get("status"),
+             summary.get("error"), traceback_text, int(ingest_id)),
+        )
+        conn.commit()
+        if not self._persistent_conn:
+            conn.close()
+
+    def job_board_upsert_jobs(self, rows: List[Dict[str, Any]]) -> Tuple[int, int]:
+        """INSERT OR IGNORE each job row by its stable id. Returns
+        (inserted, skipped). Idempotent — existing ids are skipped."""
+        conn = self._get_connection(); cur = conn.cursor()
+        inserted = 0
+        for r in rows:
+            cur.execute(
+                "INSERT OR IGNORE INTO job_board_jobs "
+                "(id, week_index, board_id, board_slug, board_name, slot, difficulty_id, "
+                "special_id, bonus, required_level, expires_at, goals_json, rewards_json, first_seen_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (r["id"], r["week_index"], r["board_id"], r.get("board_slug"), r.get("board_name"),
+                 r.get("slot"), r.get("difficulty_id"), r.get("special_id"), r.get("bonus", 0),
+                 r.get("required_level"), r.get("expires_at"), r.get("goals_json"),
+                 r.get("rewards_json"), _utc_now()),
+            )
+            if cur.rowcount and cur.rowcount > 0:
+                inserted += 1
+        conn.commit()
+        if not self._persistent_conn:
+            conn.close()
+        return inserted, len(rows) - inserted
+
+    def job_board_admin_status(self, recent: int = 50, failures: int = 20) -> Dict[str, Any]:
+        """Admin "Job Board" page payload: last ingest, recent ingests, recent
+        failures, per-week counts, board summary, and scheduler state."""
+        conn = self._get_connection(); cur = conn.cursor()
+
+        def _rows(sql, params=()):
+            cur.execute(sql, params)
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+        last_success_week = self.job_board_get_meta("last_success_week")
+        last_success_at = self.job_board_get_meta("last_success_at")
+
+        ingests = _rows(
+            "SELECT id, week_index, status, result_status, started_at, finished_at, "
+            "jobs_seen, jobs_inserted, jobs_skipped, boards_seen, error "
+            "FROM job_board_ingests ORDER BY id DESC LIMIT ?",
+            (int(recent),),
+        )
+        fails = _rows(
+            "SELECT id, week_index, started_at, finished_at, error, traceback "
+            "FROM job_board_ingests WHERE status = 'failure' ORDER BY id DESC LIMIT ?",
+            (int(failures),),
+        )
+        last_ingest = ingests[0] if ingests else None
+        last_success = None
+        for ing in ingests:
+            if ing.get("status") == "success":
+                last_success = ing
+                break
+        if last_success is None:
+            ls = _rows("SELECT id, week_index, status, result_status, started_at, finished_at, "
+                       "jobs_seen, jobs_inserted, jobs_skipped, boards_seen, error "
+                       "FROM job_board_ingests WHERE status = 'success' ORDER BY id DESC LIMIT 1")
+            last_success = ls[0] if ls else None
+
+        weeks = _rows(
+            "SELECT week_index, COUNT(*) AS jobs FROM job_board_jobs "
+            "GROUP BY week_index ORDER BY week_index DESC LIMIT 20"
+        )
+        total_jobs = _rows("SELECT COUNT(*) AS c FROM job_board_jobs")[0]["c"]
+
+        boards = []
+        if weeks:
+            latest_week = weeks[0]["week_index"]
+            boards = _rows(
+                "SELECT board_id, board_name, COUNT(*) AS jobs FROM job_board_jobs "
+                "WHERE week_index = ? GROUP BY board_id, board_name ORDER BY board_name",
+                (latest_week,),
+            )
+
+        if not self._persistent_conn:
+            conn.close()
+        return {
+            "last_success_week": int(last_success_week) if last_success_week is not None else None,
+            "last_success_at": last_success_at,
+            "total_jobs": total_jobs,
+            "last_ingest": last_ingest,
+            "last_success": last_success,
+            "ingests": ingests,
+            "failures": fails,
+            "weeks": weeks,
+            "boards": boards,
+        }
+
+    def job_board_jobs_for_latest_week(self) -> List[Dict[str, Any]]:
+        """All stored jobs for the latest week_index (the running week). Returns
+        a list of dict rows for ui/job_board_service.py to enrich."""
+        conn = self._get_connection(); cur = conn.cursor()
+        cur.execute("SELECT MAX(week_index) FROM job_board_jobs")
+        row = cur.fetchone()
+        latest = row[0] if row else None
+        if latest is None:
+            if not self._persistent_conn:
+                conn.close()
+            return []
+        cur.execute(
+            "SELECT id, week_index, board_id, board_slug, board_name, slot, difficulty_id, "
+            "special_id, bonus, required_level, expires_at, goals_json, rewards_json "
+            "FROM job_board_jobs WHERE week_index = ? ORDER BY board_name, slot",
+            (latest,),
+        )
+        cols = [d[0] for d in cur.description]
+        out = [dict(zip(cols, r)) for r in cur.fetchall()]
+        if not self._persistent_conn:
+            conn.close()
+        return out
+
+    def job_board_known_item_ids(self) -> set:
+        """Item ids already resolved + cached in job_board_items."""
+        conn = self._get_connection(); cur = conn.cursor()
+        cur.execute("SELECT id FROM job_board_items")
+        out = {r[0] for r in cur.fetchall()}
+        if not self._persistent_conn:
+            conn.close()
+        return out
+
+    def job_board_upsert_items(self, items: List[Dict[str, Any]]) -> int:
+        """Upsert resolved item rows. items: [{id, slug, name, type, quality,
+        keywords_json, is_chest}]. Returns count written."""
+        conn = self._get_connection(); cur = conn.cursor()
+        n = 0
+        for it in items:
+            cur.execute(
+                "INSERT OR REPLACE INTO job_board_items "
+                "(id, slug, name, type, quality, keywords_json, is_chest, fetched_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (it.get("id"), it.get("slug"), it.get("name"), it.get("type"),
+                 it.get("quality"), it.get("keywords_json"), 1 if it.get("is_chest") else 0, _utc_now()),
+            )
+            n += 1
+        conn.commit()
+        if not self._persistent_conn:
+            conn.close()
+        return n
+
+    def job_board_item_map(self) -> Dict[str, Dict[str, Any]]:
+        """id -> {slug, name, type, quality, keywords, is_chest} for enrichment."""
+        conn = self._get_connection(); cur = conn.cursor()
+        cur.execute("SELECT id, slug, name, type, quality, keywords_json, is_chest FROM job_board_items")
+        out = {}
+        for r in cur.fetchall():
+            try:
+                kw = json.loads(r[5]) if r[5] else []
+            except Exception:
+                kw = []
+            out[r[0]] = {"slug": r[1], "name": r[2], "type": r[3], "quality": r[4],
+                         "keywords": kw, "is_chest": bool(r[6])}
+        if not self._persistent_conn:
+            conn.close()
+        return out
 
     def get_listings(self, session_uuid: str) -> List[Dict[str, Any]]:
         conn = self._get_connection(); cur = conn.cursor()
@@ -5308,7 +5804,8 @@ class DatabaseManager:
                      origin_site: Optional[str] = None,
                      fed_object_id: Optional[str] = None,
                      txn_id: Optional[int] = None,
-                     created_at: Optional[float] = None) -> Dict[str, Any]:
+                     created_at: Optional[float] = None,
+                     cur=None) -> Dict[str, Any]:
         """Insert a message. Local sends pass only the first args; inbound
         federated messages pass origin_site/fed_object_id (+ pre-resolved
         to_uuid) so they land in the recipient's inbox and dedupe by peer id."""
@@ -5317,7 +5814,13 @@ class DatabaseManager:
         # Default a local sender's trader_id from their uuid when not supplied.
         if from_trader_id is None and from_uuid:
             from_trader_id = f"{self._TRADING_ORIGIN}:{from_uuid}"
-        conn = self._get_connection(); cur = conn.cursor()
+        # it so the INSERT runs inside the caller's already-open transaction.
+        # Opening a SECOND connection here while the batch holds the single sqlite
+        # writer lock self-deadlocks and times out at busy_timeout as
+        # self-locked here). Durability then defers to the batch's own commit.
+        _own_conn = cur is None
+        if _own_conn:
+            conn = self._get_connection(); cur = conn.cursor()
         now = created_at or time.time()
         txn = txn_id if txn_id is not None else self._txn_id(cur)
         cur.execute("INSERT INTO trade_messages (origin_site, thread_key, from_name, to_name, "
@@ -5326,9 +5829,11 @@ class DatabaseManager:
                     (origin_site or self._TRADING_ORIGIN, thread_key, from_name, to_name,
                      from_uuid, to_uuid, to_trader_id, from_trader_id, about_object_id, body,
                      fed_object_id, txn, now))
-        mid = cur.lastrowid; conn.commit()
-        if not self._persistent_conn:
-            conn.close()
+        mid = cur.lastrowid
+        if _own_conn:
+            conn.commit()
+            if not self._persistent_conn:
+                conn.close()
         return {"id": mid, "thread_key": thread_key, "txn_id": txn}
 
     def mark_messages_read(self, session_uuid: str) -> int:
@@ -5412,6 +5917,35 @@ class DatabaseManager:
         for th in out:
             if th.get("about_object_id"):
                 th["about_item"] = self.object_item(th["about_object_id"])
+        return out
+
+    def get_thread_counterpart(self, session_uuid: str, thread_key: str) -> Dict[str, Any]:
+        """Counterpart identity ({counterpart, counterpart_trader_id}) for one
+        thread from the caller's perspective, derived from the site-keyed uuid
+        (NOT the display name), mirroring list_threads. Lets a thread opened by
+        key alone (e.g. a message-notification deep-link) learn who it is
+        addressed to so Send has a recipient. Routing stays on the stable
+        trader_id — never a name lookup. Returns {} if the caller has no message
+        in the thread (brand-new/empty thread)."""
+        conn = self._get_connection(); cur = conn.cursor()
+        cur.execute(
+            "SELECT from_name, to_name, from_uuid, from_trader_id, to_trader_id "
+            "FROM trade_messages WHERE thread_key = ? AND (from_uuid = ? OR to_uuid = ?) "
+            "ORDER BY created_at DESC LIMIT 1",
+            (thread_key, session_uuid, session_uuid))
+        row = cur.fetchone()
+        if not self._persistent_conn:
+            conn.close()
+        if not row:
+            return {}
+        fname, tname, fuuid, from_tid, to_tid = row
+        if fuuid == session_uuid:
+            counterpart, counterpart_trader_id = tname, to_tid
+        else:
+            counterpart, counterpart_trader_id = fname, from_tid
+        out: Dict[str, Any] = {"counterpart": counterpart}
+        if counterpart_trader_id:
+            out["counterpart_trader_id"] = counterpart_trader_id
         return out
 
     def get_thread_messages(self, session_uuid: str, in_game_name: str,
@@ -5767,7 +6301,8 @@ class DatabaseManager:
                                     with_banked_steps=None, root_self_steps=None,
                                     child_quantities=None, material_offsets=None,
                                     needed_owned_counts=None, subtree_scope_keys=None,
-                                    base_dominance_bitmap=None, base_scope=None):
+                                    base_dominance_bitmap=None, base_scope=None,
+                                    node_services=None):
         """Insert/replace one (session, item, variant, quality) Fastest Craft row.
         JSON fields are serialized here; callers pass plain dicts/lists."""
         import json as _json
@@ -5778,13 +6313,15 @@ class DatabaseManager:
                  total_steps_per_craft, with_banked_steps, root_self_steps,
                  child_quantities_json, material_offsets_json,
                  needed_owned_counts_json, subtree_scope_keys_json,
-                 base_dominance_bitmap, base_scope_json, last_computed_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?, CURRENT_TIMESTAMP)
+                 base_dominance_bitmap, base_scope_json, node_services_json,
+                 last_computed_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, CURRENT_TIMESTAMP)
         """, (session_uuid, item_ref, variant, quality, base_gearset_export,
               total_steps, with_banked_steps, root_self_steps,
               _json.dumps(child_quantities or {}), _json.dumps(material_offsets or {}),
               _json.dumps(needed_owned_counts or {}), _json.dumps(subtree_scope_keys or []),
-              base_dominance_bitmap, _json.dumps(base_scope) if base_scope is not None else None))
+              base_dominance_bitmap, _json.dumps(base_scope) if base_scope is not None else None,
+              _json.dumps(node_services or {})))
         conn.commit()
         if not self._persistent_conn:
             conn.close()
@@ -5802,7 +6339,7 @@ class DatabaseManager:
                 "total_steps_per_craft,with_banked_steps,root_self_steps,"
                 "child_quantities_json,material_offsets_json,needed_owned_counts_json,"
                 "subtree_scope_keys_json,base_dominance_bitmap,base_scope_json,"
-                "last_computed_at FROM fastest_craft_results "
+                "node_services_json,last_computed_at FROM fastest_craft_results "
                 f"WHERE session_uuid=? AND item_ref IN ({qs})",
                 (session_uuid, *item_refs))
         else:
@@ -5811,13 +6348,13 @@ class DatabaseManager:
                 "total_steps_per_craft,with_banked_steps,root_self_steps,"
                 "child_quantities_json,material_offsets_json,needed_owned_counts_json,"
                 "subtree_scope_keys_json,base_dominance_bitmap,base_scope_json,"
-                "last_computed_at FROM fastest_craft_results "
+                "node_services_json,last_computed_at FROM fastest_craft_results "
                 "WHERE session_uuid=?", (session_uuid,))
         cols = ("session_uuid", "item_ref", "variant", "quality", "base_gearset_export",
                 "total_steps_per_craft", "with_banked_steps", "root_self_steps",
                 "child_quantities", "material_offsets", "needed_owned_counts",
                 "subtree_scope_keys", "base_dominance_bitmap", "base_scope",
-                "last_computed_at")
+                "node_services", "last_computed_at")
 
         def _loads(v, default):
             try:
@@ -5832,6 +6369,7 @@ class DatabaseManager:
             d["needed_owned_counts"] = _loads(d["needed_owned_counts"], {})
             d["subtree_scope_keys"] = _loads(d["subtree_scope_keys"], [])
             d["base_scope"] = _loads(d["base_scope"], None)
+            d["node_services"] = _loads(d["node_services"], {})
             rows.append(d)
         if not self._persistent_conn:
             conn.close()

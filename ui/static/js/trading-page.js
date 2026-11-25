@@ -12,6 +12,7 @@
 const $ = (typeof window !== 'undefined' && window.$) ? window.$ : null;
 import { wireInfoIcons } from './info-popover.js';
 import { wireDropAnchor } from './drop-item-popover.js';
+import { openTradeImport } from './trading-import.js';
 import { attachTabScrollIndicators } from './utils/tab-scroll-indicators.js';
 import { ownedBlockHtml } from './utils/owned-quality-breakdown.js';
 
@@ -91,6 +92,7 @@ function toast(msg) {
         setTimeout(() => el.remove(), 250);
     }, 2200);
 }
+if (typeof window !== 'undefined') window.toast = window.toast || toast;
 
 // Small copy-icon button (overlapping-squares glyph) that copies `text` to the
 // clipboard with a toast. Used next to a trader's in-game name so it can be
@@ -346,6 +348,7 @@ function createDropdown({ placeholder = 'Any', options = [], multi = false, sele
         el: wrap,
         getValues: () => Array.from(sel),
         getValue: () => Array.from(sel)[0] || '',
+        setValue: (v) => { sel.clear(); if (v != null && v !== '') sel.add(v); updateSummary(); if (open) renderList(); },
         setOptions: (newOpts) => { opts = newOpts.slice(); for (const v of Array.from(sel)) if (!opts.find((o) => o.value === v)) sel.delete(v); updateSummary(); if (open) renderList(); },
     };
 }
@@ -577,6 +580,7 @@ async function loadCatalogEntries() {
         window._tradingValueByKey[key] = (typeof it.value === 'number') ? it.value : null;
         window._tradingTypeByKey[key] = (it.type === 'item') ? (it.subtype || 'loot') : (CANON[it.type] || it.type);
         const kw = Array.isArray(it.keywords) ? it.keywords.join(' ') : '';
+        const kwList = Array.isArray(it.keywords) ? it.keywords.map((k) => String(k).toLowerCase()) : [];
         const statKeys = (it.stats && typeof it.stats === 'object') ? Object.keys(it.stats).join(' ') : '';
         const haystack = `${it.name} ${kw} ${statKeys}`.toLowerCase();
         const baseVal = typeof it.value === 'number' ? it.value : 0;
@@ -592,7 +596,7 @@ async function loadCatalogEntries() {
             return {
                 name: it.name, slug: key, key, id: key, type, icon, quality: token || '',
                 slot: it.slot || null,
-                category, sources,
+                category, sources, keywords: kwList,
                 rarity: rarityForToken(token, key),
                 label: q ? `${it.name} (${q})` : it.name,
                 owned: ownedCountFor(key, token || ''), coin: coinFor(token || ''), haystack,
@@ -732,6 +736,17 @@ function createItemPicker(onPick, opts = {}) {
         { value: 'owned_asc', label: 'Owned (low→high)' },
     ], onChange: () => { if (open) render(); } });
     let entries = [];
+    let _pendingSelect = null;
+    // Programmatically pick an entry by slug (+ optional quality token). Used by
+    // deep-links (e.g. the Job Board item menu "Create listing"/"Add to wishlist").
+    const _selectBySlug = (slug, quality) => {
+        if (!slug || !entries.length) return false;
+        const q = String(quality == null ? '' : quality).toLowerCase();
+        let m = entries.find((x) => x.slug === slug && String(x.quality || '').toLowerCase() === q);
+        if (!m) m = entries.find((x) => x.slug === slug);
+        if (!m) return false;
+        input.value = m.label; onPick(m); return true;
+    };
     let open = false, filtered = [], shown = 0;
     const CHUNK = 40;
     let _hideTimer = null;
@@ -789,13 +804,14 @@ function createItemPicker(onPick, opts = {}) {
     input.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') { e.preventDefault(); closePanel(); if (opts.onEnter) opts.onEnter(input.value); }
     });
-    loadCatalogEntries().then((e) => { entries = e; if (open) render(); });
+    loadCatalogEntries().then((e) => { entries = e; if (_pendingSelect) { if (_selectBySlug(_pendingSelect.slug, _pendingSelect.quality)) _pendingSelect = null; } if (open) render(); });
     // Search contexts (Browse / list search bars) already have their own result
     // Type dropdown, so hide the picker's internal one to avoid two Type filters.
     const wrap = opts.hideTypeFilter
         ? rowOf(field('Item', box), field('Sort', sortDD.el))
         : rowOf(field('Item', box), field('Type filter', typeFilter.el), field('Source', sourceFilter.el), field('Sort', sortDD.el));
-    return { el: wrap, input, clear: () => { input.value = ''; } };
+    return { el: wrap, input, clear: () => { input.value = ''; },
+        select: (slug, quality) => { if (!_selectBySlug(slug, quality)) _pendingSelect = { slug, quality }; } };
 }
 
 export class TradingPage {
@@ -843,6 +859,13 @@ export class TradingPage {
             this._settingsDirty = false;
             this._switchTab('settings');
         } else {
+            this._switchTab(this.activeTab);
+        }
+        // Deep-link from the Job Board item menu: open the New-listing / New-wishlist
+        // form prefilled. _renderListings / _renderWishlist consume the global.
+        if (window._tradingPendingCompose) {
+            const _k = window._tradingPendingCompose.kind;
+            this.activeTab = (_k === 'wishlist') ? 'wishlist' : 'listings';
             this._switchTab(this.activeTab);
         }
         // Deep link from a message notification → open that thread directly.
@@ -1258,6 +1281,15 @@ export class TradingPage {
             // knows the empty view is transient, not a lost conversation.
             if (e && e.serverUnavailable) toast(SERVER_UNAVAILABLE_MSG);
             data = { messages: [] };
+        }
+        // Thread opened by key alone (e.g. a message-notification deep-link) has
+        // no counterpart yet — backfill it from the loaded thread so Send has a
+        // recipient instead of the misleading "server unavailable" bail. Mutate
+        // t in place so the re-render thunk and poller keep the recipient. Routes
+        // by stable trader_id when present; the name is display-only.
+        if (!t.counterpart && data && data.counterpart) {
+            t.counterpart = data.counterpart;
+            if (data.counterpart_trader_id) t.counterpart_trader_id = data.counterpart_trader_id;
         }
         c.innerHTML = '';
         refreshTradingUnread(); // reading the thread marked it read server-side
@@ -2057,6 +2089,9 @@ export class TradingPage {
         // cssText — that wiped display:flex and stacked the filters vertically).
         controls.style.margin = 'var(--spacing-md,16px) 0';
         c.appendChild(controls);
+        // Collapsible job-board filter panel sits right after the Show-expired
+        // control (which lives in the controls row above).
+        c.appendChild(this._jobFilterPanel(() => this._runSearch()));
         this._browseEmpty = document.createElement('div'); this._browseEmpty.style.cssText = 'color:var(--text-secondary);margin-top:10px;';
         this._browseTable = this._makeTradeTable('browse', {
             onMessage: (to, tid, about, row) => this.startConversation(to, about || null, tid || null, row),
@@ -2082,6 +2117,10 @@ export class TradingPage {
                 this._searchItemSlug = pslug;
                 picked.innerHTML = `<strong>${esc(prettyName(pslug))}</strong> <button type="button" data-clear-item class="btn btn-secondary" style="font-size:11px;padding:1px 6px;margin-left:6px;">clear</button>`;
                 picked.querySelector('[data-clear-item]').onclick = () => { this._searchItemSlug = null; picked.innerHTML = ''; this._runSearch(); };
+            }
+            if (pending && typeof pending === 'object') {
+                if (pending.side && this._searchSide && this._searchSide.setValue) this._searchSide.setValue(pending.side);
+                this._pendingMinQty = (pending.minQty && pending.minQty > 0) ? pending.minQty : null;
             }
         }
         this._runSearch();
@@ -2138,6 +2177,11 @@ export class TradingPage {
                     }
                     return true;
                 });
+            }
+            // Min-quantity filter from a Job Board deep-link ("qty >= N").
+            if (this._pendingMinQty) {
+                const mq = this._pendingMinQty;
+                rows = rows.filter((r) => (r.qty != null ? r.qty : 1) >= mq);
             }
             // Specific picked item wins; otherwise apply free-text + quality.
             if (this._searchItemSlug) {
@@ -2316,7 +2360,10 @@ export class TradingPage {
         const fMinOwned = textInput('2', { type: 'number', width: '70px', value: '2' });
         fMinOwned.min = '2';
         fMinOwned.addEventListener('input', () => renderList());
-        const filtersRow = rowOf(field('Quality / rarity', fRarity.el), field('Source', fSource.el), field('Type', fType.el), field('Min owned', fMinOwned));
+        // Keyword text search: matches the item's keywords (substring, case-insensitive).
+        const fKeyword = textInput('Search keyword…', { width: '150px' });
+        fKeyword.addEventListener('input', () => renderList());
+        const filtersRow = rowOf(field('Quality / rarity', fRarity.el), field('Source', fSource.el), field('Type', fType.el), field('Min owned', fMinOwned), field('Keyword', fKeyword));
         filtersRow.style.marginBottom = '6px';
         m.panel.appendChild(filtersRow);
 
@@ -2392,11 +2439,13 @@ export class TradingPage {
             const ss = new Set(fSource.getValues());
             const ts = new Set(fType.getValues());
             const minOwned = Math.max(2, parseInt(fMinOwned.value, 10) || 2);
+            const kwq = (fKeyword.value || '').trim().toLowerCase();
             _filtered = candidates.filter((e) =>
                 (e.owned || 0) >= minOwned
                 && (!rs.size || rs.has(e.rarity))
                 && (!ss.size || (e.sources || []).some((s) => ss.has(s)))
-                && (!ts.size || ts.has(e.category || e.type)));
+                && (!ts.size || ts.has(e.category || e.type))
+                && (!kwq || (e.keywords || []).some((k) => k.includes(kwq))));
             checked = new Set(_filtered.map(ridOf)); // default: all checked per filter
             listBox.innerHTML = _filtered.map((e) => {
                 const ic = (window._tradingIconBySlug && window._tradingIconBySlug[e.slug]) || '';
@@ -2959,8 +3008,200 @@ export class TradingPage {
         return cols;
     }
 
+    // ── Job Board filters (filter/badge trading rows by this week's jobs) ──────
+    _jobQRank(tok) {
+        return { '': 1, none: 1, common: 1, fine: 1, uncommon: 2, rare: 3, epic: 4, legendary: 5, ethereal: 6 }[String(tok || '').toLowerCase()] || 1;
+    }
+    _jobOwnedCount(slug, quality, tag) {
+        const bucket = this._jbOwned && this._jbOwned[slug];
+        if (!slug || !bucket) return 0;
+        if (String(tag || '').toLowerCase() === 'fine') return bucket['fine'] || 0;
+        const need = this._jobQRank(quality); let n = 0;
+        for (const t in bucket) if (this._jobQRank(t) >= need) n += (bucket[t] || 0);
+        return n;
+    }
+    _jobGoalSatisfiable(g) {
+        const slug = g.item && g.item.slug; if (!slug) return false;
+        const opts = [{ q: g.item.quality, n: g.quantity, tag: g.item.tag }];
+        (g.alternatives || []).forEach((a) => { if (a) opts.push({ q: a.quality, n: a.quantity, tag: a.tag }); });
+        return opts.some((o) => o.n != null && this._jobOwnedCount(slug, o.q, o.tag) >= o.n);
+    }
+    _jobStatusOf(id) { return (this._jbStatus && this._jbStatus[id]) || 'uncompleted'; }
+
+    _loadJobFilters() {
+        let st = null, open = false;
+        try {
+            const raw = JSON.parse(localStorage.getItem('tradingJobFilters') || 'null');
+            if (raw && raw.state) { st = raw.state; open = !!raw.open; }
+        } catch (_) { /* ignore */ }
+        this._jobFilterState = (st && typeof st === 'object')
+            ? { factions: st.factions || [], locations: st.locations || [], tiers: st.tiers || [],
+                rewards: st.rewards || [], status: st.status || [], handin: st.handin || [] }
+            : { factions: [], locations: [], tiers: [], rewards: [], status: [], handin: [] };
+        if (this._jobFilterOpen === undefined) this._jobFilterOpen = open;
+        return this._jobFilterState;
+    }
+
+    _saveJobFilters() {
+        try { localStorage.setItem('tradingJobFilters', JSON.stringify({ state: this._jobFilterState, open: !!this._jobFilterOpen })); } catch (_) { /* ignore */ }
+    }
+
+    _ensureJobData() {
+        if (this._jobDataPromise) return this._jobDataPromise;
+        try { this._jbStatus = JSON.parse(localStorage.getItem('jobboard.status') || 'null') || {}; } catch (_) { this._jbStatus = {}; }
+        this._jobDataPromise = Promise.all([
+            fetch('/api/jobboard/data').then((r) => (r.ok ? r.json() : null)).catch(() => null),
+            fetch('/api/jobboard/handin').then((r) => (r.ok ? r.json() : null)).catch(() => null),
+            fetch('/api/owned-by-quality').then((r) => (r.ok ? r.json() : null)).catch(() => null),
+        ]).then(([data, handin, owned]) => {
+            this._jbData = data || { jobs: [], facets: {} };
+            this._jbHandin = (handin && handin.handin) || {};
+            this._jbOwned = (owned && owned.owned) || {};
+            this._recomputeJobFilter();
+        }).catch(() => { this._jbData = { jobs: [], facets: {} }; this._recomputeJobFilter(); });
+        return this._jobDataPromise;
+    }
+
+    _jobMatches(job, st) {
+        if (st.factions.length && !(job.factions || []).some((f) => st.factions.includes(f.slug))) return false;
+        if (st.locations.length && !st.locations.includes(job.board_id)) return false;
+        if (st.tiers.length && !st.tiers.includes(job.tier && job.tier.key)) return false;
+        if (st.rewards.length) {
+            const keys = [];
+            (job.rewards || []).forEach((r) => {
+                if (r.kind === 'faction_reputation' && r.faction) keys.push(`rep:${r.faction.slug}`);
+                else if (r.kind === 'item' && r.item) keys.push(`item:${r.item.slug || r.item.id}`);
+                else if (r.kind === 'coins') keys.push('coins');
+                else if (r.kind === 'skill_experience') keys.push(`xp:${r.skill}`);
+            });
+            if (!keys.some((k) => st.rewards.includes(k))) return false;
+        }
+        if (st.status.length && !st.status.includes(this._jobStatusOf(job.id))) return false;
+        if (st.handin.length) {
+            const h = this._jbHandin[job.id] || {};
+            const ok = st.handin.some((m) => {
+                if (m === 'owned') return (job.goals || []).length && job.goals.every((g) => this._jobGoalSatisfiable(g));
+                if (m === 'not_owned') return (job.goals || []).some((g) => !this._jobGoalSatisfiable(g));
+                if (m === 'no_owned_materials') return h.has_crafts && !h.partial_materials;
+                return false;
+            });
+            if (!ok) return false;
+        }
+        return true;
+    }
+
+    _recomputeJobFilter() {
+        const st = this._jobFilterState || this._loadJobFilters();
+        const jobs = (this._jbData && this._jbData.jobs) || [];
+        const badge = new Set();
+        const jobsBySlug = {};
+        jobs.forEach((j) => {
+            if (this._jobStatusOf(j.id) === 'completed') return;
+            const nm = j.location || j.board_name || `Job ${j.id}`;
+            const add = (slug) => {
+                if (!slug) return;
+                badge.add(slug);
+                (jobsBySlug[slug] = jobsBySlug[slug] || new Set()).add(nm);
+            };
+            (j.goals || []).forEach((g) => {
+                if (g.item) add(g.item.slug);
+                (g.alternatives || []).forEach((a) => { if (a) add(a.slug); });
+            });
+        });
+        const active = !!(st.factions.length || st.locations.length || st.tiers.length || st.rewards.length || st.status.length || st.handin.length);
+        const allow = new Set();
+        if (active) {
+            jobs.forEach((j) => {
+                if (!this._jobMatches(j, st)) return;
+                (j.goals || []).forEach((g) => {
+                    if (g.item && g.item.slug) allow.add(g.item.slug);
+                    (g.alternatives || []).forEach((a) => { if (a && a.slug) allow.add(a.slug); });
+                });
+            });
+        }
+        this._jobFilter = { active, allow, badge, jobsBySlug };
+    }
+
+    // Collapsible "Job board filters" panel. onApply re-renders the current tab
+    // so the row filter + badges refresh. Reused on Browse / Wishlist / Listings.
+    _jobFilterPanel(onApply) {
+        const st = this._jobFilterState || this._loadJobFilters();
+        const wrap = document.createElement('div');
+        wrap.style.cssText = 'margin:0 0 10px;';
+        // "Job board filters" toggle styled like the job-board "More filters":
+        // text button + rotating caret + jQuery slide animation.
+        const toggle = document.createElement('button');
+        toggle.type = 'button';
+        const tcaret = '<span data-jcaret style="display:inline-block;transition:transform .15s;transform:rotate(-90deg);">▼</span>';
+        toggle.innerHTML = `${tcaret} Job board filters`;
+        toggle.style.cssText = 'background:none;border:none;color:var(--text-secondary);cursor:pointer;font-size:.9em;display:flex;align-items:center;gap:6px;padding:2px 0;';
+        const body = document.createElement('div');
+        body.style.cssText = 'display:none;flex-direction:column;gap:10px;margin-top:6px;';
+        let open = !!this._jobFilterOpen;
+        const setCaret = () => { const c = toggle.querySelector('[data-jcaret]'); if (c) c.style.transform = open ? 'rotate(0deg)' : 'rotate(-90deg)'; };
+        setCaret();
+        if (open) body.style.display = 'flex';
+        toggle.onclick = () => {
+            open = !open; this._jobFilterOpen = open; this._saveJobFilters(); setCaret();
+            if (window.$) {
+                if (open) { body.style.display = 'flex'; window.$(body).hide().slideDown(180).css('display', 'flex'); }
+                else { window.$(body).slideUp(180); }
+            } else { body.style.display = open ? 'flex' : 'none'; }
+        };
+        wrap.append(toggle, body);
+        body.textContent = 'Loading this week\u2019s jobs\u2026';
+        this._ensureJobData().then(() => {
+            body.textContent = '';
+            const facets = (this._jbData && this._jbData.facets) || {};
+            const mk = (label, options, key) => {
+                const dd = createDropdown({ placeholder: label, multi: true, options, selected: st[key].slice(),
+                    onChange: () => { st[key] = dd.getValues(); this._recomputeJobFilter(); this._saveJobFilters(); if (onApply) onApply(); } });
+                return field(label, dd.el);
+            };
+            const row1 = rowOf(
+                mk('Faction', (facets.factions || []).map((f) => ({ value: f.slug, label: f.name })), 'factions'),
+                mk('Location', (facets.locations || []).map((l) => ({ value: l.board_id, label: l.location })), 'locations'),
+                mk('Tier', (facets.tiers || []).map((t) => ({ value: t.key, label: t.label })), 'tiers'),
+                mk('Rewards', (facets.rewards || []).map((r) => ({ value: r.key, label: r.label })), 'rewards'),
+                mk('Status', [
+                    { value: 'planned', label: 'Planned' },
+                    { value: 'completed', label: 'Completed' },
+                    { value: 'uncompleted', label: 'Uncompleted' },
+                ], 'status'),
+                mk('Hand-in', [
+                    { value: 'owned', label: 'Owned' },
+                    { value: 'not_owned', label: 'Not owned' },
+                    { value: 'no_owned_materials', label: 'No owned materials' },
+                ], 'handin'),
+            );
+            const clearRow = document.createElement('div');
+            clearRow.style.cssText = 'display:flex;';
+            const clearBtn = btn('Clear all', 'secondary');
+            clearBtn.style.marginLeft = 'auto';
+            clearBtn.onclick = () => {
+                this._jobFilterState = { factions: [], locations: [], tiers: [], rewards: [], status: [], handin: [] };
+                this._recomputeJobFilter();
+                this._saveJobFilters();
+                this._switchTab(this.activeTab);   // rebuild tab + panel with cleared controls
+            };
+            clearRow.appendChild(clearBtn);
+            body.append(row1, clearRow);
+            if (!this._jobBadgesPainted) { this._jobBadgesPainted = true; if (onApply) onApply(); }
+        });
+        return wrap;
+    }
+
     _tradeRowTr(r, mode, idx, opts = {}) {
         const it = r.item || {};
+        const _jobBadge = !!(this._jobFilter && this._jobFilter.badge && this._jobFilter.badge.has(it.slug));
+        let _jobTitle = 'This week\u2019s job item \u2014 not completed';
+        if (_jobBadge && this._jobFilter.jobsBySlug && this._jobFilter.jobsBySlug[it.slug]) {
+            const names = Array.from(this._jobFilter.jobsBySlug[it.slug]);
+            if (names.length) _jobTitle = `This week\u2019s job item \u2014 ${names.join(', ')}`;
+        }
+        const _jobBadgeHtml = _jobBadge
+            ? `<span role="button" tabindex="0" title="${esc(_jobTitle)} — tap to open in the Job Board" onclick="event.stopPropagation(); window._gotoJobBoardItem && window._gotoJobBoardItem('${esc(it.slug || '')}')" style="cursor:pointer;display:inline-flex;vertical-align:middle;margin-right:4px;"><img src="/assets/icons/ui/job_boards_icon.svg" width="16" height="16" style="image-rendering:pixelated;display:block;" alt="Open in Job Board" onerror="this.parentElement.style.display='none'"></span>`
+            : '';
         const isWishlist = this._isWishlistRow(r, mode);
         const qToken = isWishlist ? r.quality_floor : it.quality;
         const qDisp = qualityDisplay(it.type, qToken, it.slug);
@@ -3031,7 +3272,7 @@ export class TradingPage {
         return `<tr data-idx="${idx}" style="${trStyle}">`
             + `<td data-col="item" style="${first}"><div style="display:flex;align-items:center;gap:8px;min-width:0;">`
             + `<img src="${esc(icon)}" width="32" height="32" class="trade-item-icon" data-icon-slug="${esc(it.slug || '')}" data-icon-token="${esc(qToken || '')}" style="image-rendering:pixelated;flex-shrink:0;cursor:pointer;filter:${this._iconOutline(rar)};" onerror="this.style.visibility='hidden'">`
-            + `<div style="min-width:0;"><strong class="trade-item-name" data-name-slug="${esc(it.slug || '')}" style="cursor:pointer;text-decoration:underline dotted;text-underline-offset:2px;">${esc(prettyName(it.slug))}</strong></div></div>${noteHtml}</td>`
+            + `<div style="min-width:0;">${_jobBadgeHtml}<strong class="trade-item-name" data-name-slug="${esc(it.slug || '')}" style="cursor:pointer;text-decoration:underline dotted;text-underline-offset:2px;">${esc(prettyName(it.slug))}</strong></div></div>${noteHtml}</td>`
             + `<td data-col="quality" style="${cell}">${qualityCell}</td>`
             + `<td data-col="type" style="${cell}color:var(--text-secondary);">${(() => {
                 const cat = (window._tradingCategoryBySlug && window._tradingCategoryBySlug[it.slug]) || it.type || '';
@@ -3132,7 +3373,13 @@ export class TradingPage {
             }
             this._tableRows = sorted;
             tableRows = sorted;
-            tbody.innerHTML = sorted.map((r, i) => this._tradeRowTr(r, mode, i, opts)).join('');
+            let visible = sorted;
+            if (this._jobFilter && this._jobFilter.active) {
+                visible = sorted.filter((r) => { const s = r.item && r.item.slug; return s && this._jobFilter.allow.has(s); });
+                this._tableRows = visible;
+                tableRows = visible;
+            }
+            tbody.innerHTML = visible.map((r, i) => this._tradeRowTr(r, mode, i, opts)).join('');
             // Wire each item icon to the shared drop-item popover.
             tbody.querySelectorAll('.trade-item-icon').forEach((ic) => {
                 const slug = ic.getAttribute('data-icon-slug');
@@ -3316,7 +3563,10 @@ export class TradingPage {
         delAllBtn.className = 'btn btn-trade-danger';
         const renewAllBtn = btn('Renew all', 'secondary');
         renewAllBtn.className = 'btn btn-trade-blue';
-        actionBar.append(createToggle, bulkBtn, renewAllBtn, delAllBtn);
+        const importBtn = btn('⬆ Import from file', 'secondary');
+        importBtn.className = 'btn btn-trade-blue';
+        importBtn.onclick = () => openTradeImport(this, 'listings');
+        actionBar.append(createToggle, bulkBtn, importBtn, renewAllBtn, delAllBtn);
         c.appendChild(actionBar);
         const bulkMsg = document.createElement('div'); bulkMsg.style.cssText = 'margin:0 0 8px;color:var(--text-secondary);font-size:0.85em;';
         c.appendChild(bulkMsg);
@@ -3381,12 +3631,22 @@ export class TradingPage {
         createToggle.onclick = () => { if (_formOpen) closeForm(); else openForm(); };
         closeX.onclick = closeForm;
 
+        // Deep-link: open prefilled from the Job Board item menu ("Create listing").
+        const _pcL = window._tradingPendingCompose;
+        if (_pcL && _pcL.kind === 'listing') {
+            window._tradingPendingCompose = null;
+            openForm();
+            if (_pcL.slug) picker.select(_pcL.slug, _pcL.quality);
+            if (_pcL.qty) { qty.value = String(_pcL.qty); updateTotal(); }
+        }
+
         const searchBar = this._listSearchBar(() => refresh());
         searchBar.el.style.marginTop = '10px';
         c.appendChild(searchBar.el);
         const showExpired = checkbox('Show expired');
         showExpired.style.margin = '10px 0 4px';
         c.appendChild(showExpired);
+        c.appendChild(this._jobFilterPanel(() => this._switchTab(this.activeTab)));
         const emptyMsg = document.createElement('div'); emptyMsg.style.cssText = 'color:var(--text-secondary);';
         const tbl = this._makeTradeTable('listing', {
             onRow: (l) => this._navigate('forward', () => this._openListingDetail(l)),
@@ -3964,8 +4224,10 @@ export class TradingPage {
         c.innerHTML = '<div style="color:var(--text-secondary);">Loading…</div>';
         let data = null;
         const url = `/api/trading/traders/${encodeURIComponent(name || '')}`
-            + (remote && site ? `?site=${encodeURIComponent(site)}&remote=1`
-               : (traderId ? `?tid=${encodeURIComponent(traderId)}` : ''));
+            + (remote && site
+                ? `?site=${encodeURIComponent(site)}&remote=1`
+                  + (traderId ? `&tid=${encodeURIComponent(traderId)}` : '')
+                : (traderId ? `?tid=${encodeURIComponent(traderId)}` : ''));
         try { data = await api('GET', url); }
         catch (e) { /* 404 / remote-only trader → fall through to empty state */ }
         c.innerHTML = '';
@@ -4039,8 +4301,10 @@ export class TradingPage {
         c.innerHTML = '<div style="color:var(--text-secondary);">Comparing…</div>';
         let data = null;
         const url = `/api/trading/traders/${encodeURIComponent(name || '')}/compare`
-            + (remote && site ? `?site=${encodeURIComponent(site)}&remote=1`
-               : (traderId ? `?tid=${encodeURIComponent(traderId)}` : ''));
+            + (remote && site
+                ? `?site=${encodeURIComponent(site)}&remote=1`
+                  + (traderId ? `&tid=${encodeURIComponent(traderId)}` : '')
+                : (traderId ? `?tid=${encodeURIComponent(traderId)}` : ''));
         try { data = await api('GET', url); } catch (e) { /* fall through to error state */ }
         c.innerHTML = '';
         const back = btn('← Back'); back.onclick = () => this._goBack();
@@ -4488,9 +4752,12 @@ export class TradingPage {
         wDelAllBtn.className = 'btn btn-trade-danger';
         const wRenewAllBtn = btn('Renew all', 'secondary');
         wRenewAllBtn.className = 'btn btn-trade-blue';
+        const wImportBtn = btn('⬆ Import from file', 'secondary');
+        wImportBtn.className = 'btn btn-trade-blue';
+        wImportBtn.onclick = () => openTradeImport(this, 'wishlist');
         const createBar = document.createElement('div');
         createBar.style.cssText = 'margin-bottom:10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;';
-        createBar.append(createToggle, wRenewAllBtn, wDelAllBtn);
+        createBar.append(createToggle, wImportBtn, wRenewAllBtn, wDelAllBtn);
         c.appendChild(createBar);
 
         const form = document.createElement('div');
@@ -4523,11 +4790,20 @@ export class TradingPage {
         const closeForm = () => { _formOpen = false; createToggle.disabled = false; slideHide(slideWrap, () => { slideWrap.style.display = 'none'; }); };
         createToggle.onclick = () => { if (_formOpen) closeForm(); else openForm(); };
         closeX.onclick = closeForm;
+        // Deep-link: open prefilled from the Job Board item menu ("Add to wishlist").
+        const _pcW = window._tradingPendingCompose;
+        if (_pcW && _pcW.kind === 'wishlist') {
+            window._tradingPendingCompose = null;
+            openForm();
+            if (_pcW.slug) picker.select(_pcW.slug, _pcW.quality);
+            if (_pcW.qty) { wqty.value = String(_pcW.qty); updTotal(); }
+        }
         const searchBar = this._listSearchBar(() => refresh());
         searchBar.el.style.marginTop = '10px';
         c.appendChild(searchBar.el);
         const showExpired = checkbox('Show expired'); showExpired.style.margin = '10px 0 4px';
         c.appendChild(showExpired);
+        c.appendChild(this._jobFilterPanel(() => this._switchTab(this.activeTab)));
         const emptyMsg = document.createElement('div'); emptyMsg.style.cssText = 'color:var(--text-secondary);';
         const tbl = this._makeTradeTable('wishlist', {
             onRenew: async (id) => { try { await api('POST', `/api/trading/wishlist/${id}/renew`, {}); toast('Renewed'); refresh(); } catch (e) { alert('Renew failed: ' + e.message); } },
