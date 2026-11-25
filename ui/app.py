@@ -6,6 +6,7 @@ Provides REST API endpoints for session management, character import,
 and configuration updates. Serves static files for the frontend.
 """
 
+import functools
 import json
 import math
 import os
@@ -14,11 +15,13 @@ import sqlite3
 import uuid
 import logging
 import html as html_lib
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Any, List, Optional, Tuple, Union
 
 from fastapi import FastAPI, HTTPException, Request, Response, Cookie, BackgroundTasks
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, PlainTextResponse
+from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -287,6 +290,44 @@ def _maybe_static_304(request: Request, response: Response, etag_prefix: str, ma
     response.headers["ETag"] = etag
     response.headers["Cache-Control"] = f"public, max-age={max_age}, must-revalidate"
     return None
+
+
+def _plain_json(content, response: Optional[Response] = None) -> JSONResponse:
+    """Skip FastAPI's jsonable_encoder, which returns plain dicts, lists,
+    strings, numbers, booleans and None unchanged but walks large payloads
+    slowly. Only for content made of those types."""
+    out = JSONResponse(content=content)
+    if response is not None:
+        out.headers.raw.extend(response.headers.raw)
+    return out
+
+
+_STATIC_RESPONSES: Dict[str, tuple] = {}
+
+
+def _static_payload(endpoint):
+    """Serialise a `_maybe_static_304` endpoint's payload once per process.
+
+    Only for endpoints whose payload depends on nothing but DATA_VERSION,
+    which is fixed for the life of the process: no session, query or
+    request state. Later requests get the stored bytes and headers, and a
+    matching If-None-Match gets the same 304 the endpoint would send.
+    """
+    @functools.wraps(endpoint)
+    async def wrapper(request: Request, response: Response):
+        stored = _STATIC_RESPONSES.get(endpoint.__name__)
+        if stored is None:
+            result = await endpoint(request, response)
+            if isinstance(result, Response):
+                return result
+            body = JSONResponse(content=jsonable_encoder(result)).body
+            headers = {"ETag": response.headers["etag"], "Cache-Control": response.headers["cache-control"]}
+            _STATIC_RESPONSES[endpoint.__name__] = stored = (body, headers)
+        body, headers = stored
+        if request.headers.get("if-none-match") == headers["ETag"]:
+            return Response(status_code=304, headers=headers)
+        return Response(content=body, media_type="application/json", headers=headers)
+    return wrapper
 
 # ============================================================================
 # PYDANTIC MODELS
@@ -1146,22 +1187,32 @@ async def api_audit_middleware(request: Request, call_next):
         # Get real IP (handle proxies)
         ip_address = request.headers.get('x-forwarded-for', request.client.host if request.client else 'unknown')
 
-        try:
-            db = get_db()
-            db.log_api_access(
-                session_uuid=session_uuid,
-                endpoint=request.url.path,
-                method=request.method,
-                user_agent=user_agent,
-                ip_address=ip_address,
-                response_time_ms=elapsed_ms,
-                status_code=response.status_code
-            )
-        except Exception as e:
-            # Don't fail requests if logging fails
-            log(f"Failed to log API access: {e}", session_uuid)
+        _AUDIT_WRITER.submit(
+            _write_api_access,
+            session_uuid=session_uuid,
+            endpoint=request.url.path,
+            method=request.method,
+            user_agent=user_agent,
+            ip_address=ip_address,
+            timestamp=_utc_now(),
+            response_time_ms=elapsed_ms,
+            status_code=response.status_code,
+        )
 
     return response
+
+
+# Audit rows are written on one background thread, in request order, so the
+# INSERT and its commit don't hold up the event loop.
+_AUDIT_WRITER = ThreadPoolExecutor(max_workers=1, thread_name_prefix="api-audit")
+
+
+def _write_api_access(**row):
+    try:
+        get_db().log_api_access(**row)
+    except Exception as e:
+        # Don't fail requests if logging fails
+        log(f"Failed to log API access: {e}", row["session_uuid"])
 
 
 # ============================================================================
@@ -4209,6 +4260,7 @@ async def get_xp_calibration_gearset(request: Request):
 # ============================================================================
 
 @app.get("/api/items")
+@_static_payload
 async def get_items(request: Request, response: Response):
     """
     Get full item catalog with categories.
@@ -4258,6 +4310,7 @@ def _load_internal_item_ids():
 
 
 @app.get("/api/catalog")
+@_static_payload
 async def get_catalog(request: Request, response: Response):
     """
     Get flat item catalog for gear selection popup.
@@ -4474,6 +4527,7 @@ async def get_catalog(request: Request, response: Response):
     }
 
 @app.get("/api/skills")
+@_static_payload
 async def get_skills(request: Request, response: Response):
     """
     Get skill definitions with categories.
@@ -4690,7 +4744,16 @@ async def get_activities(request: Request, response: Response):
     # Collect all activities
     activities_by_skill = {}
     all_activities = []
-    
+
+    session_skills = None
+    if hasattr(request, 'state') and hasattr(request.state, 'session_uuid'):
+        try:
+            session = get_db().get_session(request.state.session_uuid)
+            if session and session.get('character_config'):
+                session_skills = session['character_config'].get('skills', {})
+        except:
+            pass
+
     for attr_name in dir(Activity):
         if attr_name.startswith('_'):
             continue
@@ -4815,13 +4878,9 @@ async def get_activities(request: Request, response: Response):
         
         # Get character skill level for level-based drops
         character_skill_level = 1
-        if hasattr(request, 'state') and hasattr(request.state, 'session_uuid'):
+        if session_skills is not None:
             try:
-                session = get_db().get_session(request.state.session_uuid)
-                if session and session.get('character_config'):
-                    char_config = session['character_config']
-                    skill_name = skill.lower()
-                    character_skill_level = char_config.get('skills', {}).get(skill_name, 1)
+                character_skill_level = session_skills.get(skill.lower(), 1)
             except:
                 pass
         
@@ -5110,11 +5169,11 @@ async def get_activities(request: Request, response: Response):
     sorted_skills = sorted(activities_by_skill.keys())
     sorted_by_skill = {skill: activities_by_skill[skill] for skill in sorted_skills}
     
-    return {
+    return _plain_json({
         'activities': all_activities,
         'by_skill': sorted_by_skill,
         'count': len(all_activities)
-    }
+    }, response)
 
 
 # ============================================================================
@@ -5132,6 +5191,7 @@ REGION_CONFIG = {
 
 
 @app.get("/api/locations")
+@_static_payload
 async def get_locations(request: Request, response: Response):
     """
     Get all locations grouped by region for location dropdowns.
@@ -6192,6 +6252,7 @@ async def comparison_stats(request: Request):
 
 
 @app.get("/api/recipes")
+@_static_payload
 async def get_recipes(request: Request, response: Response):
     """
     Get all recipes organized by skill.
@@ -6499,6 +6560,7 @@ async def get_recipes(request: Request, response: Response):
 
 
 @app.get("/api/item-sources")
+@_static_payload
 async def get_item_sources(request: Request, response: Response):
     """
     Build a reverse lookup: item/material name → list of sources.
@@ -6959,6 +7021,7 @@ async def get_container_details(container_name: str, response: Response):
 
 
 @app.get("/api/services")
+@_static_payload
 async def get_services(request: Request, response: Response):
     """
     Get all services with unlock requirements.
@@ -7498,6 +7561,7 @@ async def get_custom_stats():
 
 
 @app.get("/api/item-finding-categories")
+@_static_payload
 async def get_item_finding_categories(request: Request, response: Response):
     """
     Get item finding category information for display.
@@ -12118,7 +12182,7 @@ def stats_report_stale_check(request: Request):
                     f"scopes={len(_cached.get('stale_scopes', []))}", session_uuid)
             except Exception:
                 pass
-            return _cached
+            return _plain_json(_cached)
     except Exception as _ce:
         print(f'[stale-check] cache key/get failed (non-fatal): {_ce}')
         _cache_key = None
@@ -12263,7 +12327,7 @@ def stats_report_stale_check(request: Request):
     except Exception:
         pass
 
-    return _response
+    return _plain_json(_response)
 
 
 @app.post("/api/stats-report/state-changed")

@@ -3169,7 +3169,8 @@ class DatabaseManager:
 
     def log_api_access(self, session_uuid: str, endpoint: str, method: str,
                        user_agent: Optional[str] = None, ip_address: Optional[str] = None,
-                       response_time_ms: Optional[float] = None, status_code: Optional[int] = None):
+                       response_time_ms: Optional[float] = None, status_code: Optional[int] = None,
+                       timestamp: Optional[str] = None):
         """Log an API access event.
 
         Args:
@@ -3180,6 +3181,7 @@ class DatabaseManager:
             ip_address: IP address (optional)
             response_time_ms: Response time in milliseconds (optional)
             status_code: HTTP status code (optional)
+            timestamp: When the request was handled (defaults to now)
         """
         conn = self._get_connection()
         cursor = conn.cursor()
@@ -3187,7 +3189,7 @@ class DatabaseManager:
         cursor.execute("""
             INSERT INTO api_access_audit (session_uuid, endpoint, method, user_agent, ip_address, timestamp, response_time_ms, status_code)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (session_uuid, endpoint, method, user_agent, ip_address, _utc_now(), response_time_ms, status_code))
+        """, (session_uuid, endpoint, method, user_agent, ip_address, timestamp or _utc_now(), response_time_ms, status_code))
 
         conn.commit()
 
